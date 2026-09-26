@@ -16,8 +16,9 @@ An SMS-first scheduling assistant for a small home-cleaning business. Clients re
 - Owner approval required before new appointments are confirmed.
 - Configurable pending-request hold, defaulting to 24 hours.
 - Booking horizon of 14 days.
-- Business hours default to 8:00 a.m.–5:00 p.m.; operating days and timezone remain to be configured.
-- Client-specific visit duration with an owner override per appointment.
+- Business hours default to 8:00 a.m.–5:00 p.m.; bookable weekdays, holiday dates, and exact timezone remain to be confirmed.
+- Configurable small/medium/large visit defaults of 1/2/3 hours, currently capped at 3 hours, with an owner override per appointment.
+- Configurable 15-minute start-time increments and one crew for the pilot.
 - Configurable travel buffer, defaulting to 30 minutes.
 - SMS-first owner and client workflows, with a minimal owner calendar/admin view.
 - Free client cancellations; cancelled time becomes available for future requests.

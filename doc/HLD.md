@@ -180,7 +180,7 @@ For an appointment candidate:
 6. Return only valid candidate start times.
 7. On request creation and approval, repeat validation inside a transaction to handle races.
 
-Use the single-crew DynamoDB calendar-revision transaction described in [ARCHITECTURE.md](ARCHITECTURE.md#5-data-architecture-and-conflict-correctness). The maximum duration and buffer must be configured before booking writes; they bound the lookback query. Exact buffer semantics remain an owner decision in issue #1. All calendar mutations, including edits, expiry, and reschedule swaps, follow the same transaction discipline.
+Use the single-crew DynamoDB calendar-revision transaction described in [ARCHITECTURE.md](ARCHITECTURE.md#5-data-architecture-and-conflict-correctness). The owner confirmed one crew, configurable 1/2/3-hour category defaults, a current 3-hour maximum, and 15-minute start increments. The maximum duration and buffer must be configured before booking writes; they bound the lookback query. Exact buffer semantics remain to be clarified in issue #1. All calendar mutations, including edits, expiry, and reschedule swaps, follow the same transaction discipline.
 
 All timestamps should be stored in UTC and rendered in the configured business timezone. Daylight-saving transitions, local working hours, and date-only client phrases require explicit timezone-aware parsing and tests.
 
@@ -279,14 +279,14 @@ Operational essentials:
 
 ## 13. Decisions needed before implementation
 
-1. Business timezone and operating days/holidays.
-2. Home-size categories and default duration mapping.
-3. Exact buffer semantics and whether the buffer is between visits only.
+1. Confirm whether “PST” means the `America/Los_Angeles` timezone with daylight saving or fixed UTC−08:00; specify normal operating weekdays and the holiday calendar. Daily hours are confirmed as 8:00 a.m.–5:00 p.m., with holidays closed.
+2. Small/medium/large defaults of 1/2/3 hours, a current maximum of 3 hours, and 15-minute increments are confirmed and configurable.
+3. Confirm that the 30-minute travel buffer applies between visits only, with none before the first or after the last.
 4. Reschedule rule: retain the original confirmed appointment until the replacement is approved; atomically swap them on approval (owner confirmed in issue #3).
 5. How owner creates unavailable time in the preferred MVP workflow.
 6. Business jurisdiction, SMS provider/number, consent, opt-out, and data-retention requirements.
 7. Whether entry codes are excluded entirely or need a separate protected workflow.
-8. Single crew/resource confirmation and any staff-capacity constraints.
+8. One crew/resource is confirmed for the pilot; revisit only if staff capacity changes.
 
 ## 14. Effort framing
 
