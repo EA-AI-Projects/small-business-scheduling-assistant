@@ -51,6 +51,8 @@ An AI-assisted SMS interface that identifies intent, gathers required details, e
 ### 6.1 Scheduling and availability
 
 - Configure business operating hours; MVP default is 8:00 a.m. to 5:00 p.m.
+- Use configurable 15-minute start-time increments for the pilot.
+- Holidays are unbookable; the exact holiday calendar and normal operating weekdays remain to be confirmed.
 - Configure booking horizon; MVP default is 14 days ahead.
 - Configure travel/buffer time between visits; MVP default is 30 minutes.
 - Support owner-created unavailable blocks and owner-created appointments.
@@ -62,7 +64,7 @@ An AI-assisted SMS interface that identifies intent, gathers required details, e
 ### 6.2 Client profile and visit duration
 
 - Maintain a client profile with contact number, name, service address, and estimated visit duration.
-- Support configurable home-size categories (e.g. small, large, extra-large) with owner-configured default durations. Exact categories and duration mapping are setup decisions.
+- Use configurable small, medium, and large home-size categories with pilot default durations of 1, 2, and 3 hours respectively. The current maximum visit is 3 hours; these values must remain editable by the owner.
 - Permit an owner to override duration for an individual appointment, including after approval.
 - Store the chosen duration on the appointment; later profile changes must not silently change existing appointments.
 - Notify the client when an approved appointment’s duration or resulting schedule details are changed.
@@ -161,10 +163,10 @@ No numerical improvement target is set until the baseline and pilot cohort are k
 
 ## 10. Assumptions and open questions
 
-- The business operates a single bookable crew/resource initially. If multiple crews or staff need independent calendars, availability modeling changes.
-- Business timezone, exact working days, holidays, and exceptions must be configured; only daily hours are currently known.
-- The meaning of the 30-minute buffer (between every pair of visits, including first/last visit boundaries) must be confirmed.
-- Home-size categories and their estimated durations need owner input.
+- The owner confirmed one bookable crew/resource for the pilot. Multiple crews or staff would change availability modeling.
+- The owner described the timezone as “PST”; confirm whether this means `America/Los_Angeles` with daylight saving or fixed UTC−08:00. Normal operating weekdays and the holiday calendar remain unanswered. Daily hours are 8:00 a.m.–5:00 p.m.; holidays are closed.
+- The owner said no buffer is needed at the first/last visit boundary; confirm that the existing 30-minute travel buffer applies only between visits.
+- Small/medium/large categories default to 1/2/3 hours, current maximum 3 hours, and 15-minute start increments. These values are configurable.
 - The owner needs a defined method to add unavailable time; the minimal web view is the MVP fallback.
 - The owner confirmed replacement-first rescheduling and rejection of conflicting duration increases in issue #3; the original confirmed appointment remains unchanged in either failure case.
 - SMS provider, number provisioning, consent/opt-out, and jurisdiction-specific compliance are design/deployment decisions.
