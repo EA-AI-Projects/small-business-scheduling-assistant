@@ -25,4 +25,24 @@ An SMS-first scheduling assistant for a small home-cleaning business. Clients re
 
 ## Status
 
-Planning and requirements. See the PRD and HLD for scope, assumptions, open questions, proposed architecture, and phased rollout. No production scheduling service has been implemented yet.
+The backend scaffold exposes a health endpoint and a read-only calendar API backed by a synthetic local adapter. Booking writes remain disabled until the pilot policy in issue #1 and transactional persistence in issues #5–#7 are implemented. No production scheduling service has been deployed.
+
+## Local backend
+
+Python 3.12+ is required locally. From the repository root:
+
+```sh
+python3 -m venv backend/.venv
+backend/.venv/bin/python -m pip install -e './backend[dev]'
+backend/.venv/bin/python -m uvicorn scheduling.api:app --app-dir backend --reload
+```
+
+Then open `http://127.0.0.1:8000/docs` or request `GET /health`. `GET /v1/businesses/pilot/calendar` requires timezone-aware `start_at` and `end_at` query parameters. The in-memory calendar contains no customer data and resets on restart. The read endpoint is a local harness, not an authenticated owner API.
+
+Focused checks:
+
+```sh
+backend/.venv/bin/python -m pytest backend/tests
+backend/.venv/bin/python -m ruff check backend
+backend/.venv/bin/python -m mypy backend/scheduling
+```
