@@ -25,7 +25,7 @@ The scheduling service is the sole writer of appointments, holds, calendar block
 | `cancel` | Client for own appointment, owner | Exact confirmed appointment and version; set `CANCELLED`, release event, advance revision. Cancellation of a pending request uses explicit withdrawal with the same release rules and `CANCELLED` status. If the confirmed appointment has an active replacement request, require clarification/withdrawal of that request first; no orphan replacement may later swap a different appointment. | Client cancellation receipt; owner notice for client cancellation. |
 | `reschedule` | Verified client for self, owner for a client | Alias of `create_hold` with `replaces_appointment_id`; original remains `CONFIRMED` until `approve` succeeds. A failed, declined, or expired replacement never changes it. | Same as `create_hold`, with explicit original time retained text. |
 | `block_time` / `edit_block` | Owner | Validate interval; create, move, or remove an unavailable block using expected version and calendar revision. A conflicting block creation/move fails without altering old state. | Owner receipt; affected clients only if a separately authorized appointment change is committed. |
-| `edit_business_calendar` | Owner | Change operating windows or holiday date exceptions using the expected calendar revision. A newly closed interval that contains a confirmed visit is rejected until the owner moves or cancels that visit explicitly. | Owner receipt; no client notice on rejection. |
+| `edit_business_calendar` | Owner | Change operating windows, holiday date exceptions, or duration/buffer caps using the expected calendar revision. Reject a new closure containing a confirmed visit and a lower cap that would exclude an active visit/hold snapshot; resolve those reservations explicitly first. | Owner receipt; no client notice on rejection. |
 | `create_owner_appointment` / `edit_appointment` | Owner | Owner can create a confirmed appointment or change start/duration using expected version and the same conflict validation. A duration increase or move that conflicts is **rejected while the existing confirmed appointment remains unchanged**. Profile/config edits never silently rewrite existing duration snapshots. | Client change notice after commit, including new time/duration; owner receipt. No change notice on rejection. |
 
 `decision_at` is taken by the scheduling service immediately before its transaction and included in the conditional expiry check. The transaction's conditional status/version checks serialize approval and expiry workers. The service checks the clock again before submitting an approval transaction if preparation took time; callers must not infer approval from an earlier availability read.
@@ -69,11 +69,11 @@ PATCH /v1/appointments/appt-9
 Idempotency-Key: owner-edit-17
 Content-Type: application/json
 
-{"expected_version":4,"duration_minutes":300}
+{"expected_version":4,"duration_minutes":180}
 ```
 
 ```json
-{"error":{"code":"SLOT_CONFLICT","message":"The longer visit conflicts with another reservation."},"current":{"appointment_id":"appt-9","status":"CONFIRMED","duration_minutes":180,"version":4}}
+{"error":{"code":"SLOT_CONFLICT","message":"The longer visit conflicts with another reservation."},"current":{"appointment_id":"appt-9","status":"CONFIRMED","duration_minutes":120,"version":4}}
 ```
 
 Adapters map domain errors consistently: `CLARIFICATION_REQUIRED`/`POLICY_NOT_CONFIGURED` to a question or setup prompt, `SLOT_CONFLICT` to 409 with fresh options, `STALE_VERSION` to 409 with current state, `HOLD_EXPIRED` to 409, `FORBIDDEN` to 403, and `IDEMPOTENCY_KEY_REUSED` to 409. Internal expiry does not use an HTTP route. No API accepts an arbitrary notification destination or a caller-supplied `approved_by`.
