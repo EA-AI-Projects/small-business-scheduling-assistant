@@ -50,9 +50,11 @@ An AI-assisted SMS interface that identifies intent, gathers required details, e
 
 ### 6.1 Scheduling and availability
 
-- Configure business operating hours; MVP default is 8:00 a.m. to 5:00 p.m.
+- Configure business operating hours; pilot baseline is Monday–Friday, 8:00 a.m. to 5:00 p.m. in `America/Los_Angeles` with daylight saving.
+- Use configurable 15-minute start-time increments for the pilot.
+- Observed US federal holidays are unbookable by default. The owner can edit holiday closures and add manual exceptions in the admin view. Use the [US Office of Personnel Management schedule](https://www.opm.gov/policy-data-oversight/pay-leave/federal-holidays/) as the baseline; this is a business closure setting, not a payroll rule.
 - Configure booking horizon; MVP default is 14 days ahead.
-- Configure travel/buffer time between visits; MVP default is 30 minutes.
+- Configure travel/buffer time between visits; pilot baseline is 30 minutes between visits only, with none before the first or after the last visit of a day.
 - Support owner-created unavailable blocks and owner-created appointments.
 - Calculate bookable start times using the required visit duration plus buffer and existing bookings/holds.
 - Do not offer a start time unless the full visit duration fits within working hours and does not overlap another appointment, hold, or unavailable block.
@@ -62,7 +64,7 @@ An AI-assisted SMS interface that identifies intent, gathers required details, e
 ### 6.2 Client profile and visit duration
 
 - Maintain a client profile with contact number, name, service address, and estimated visit duration.
-- Support configurable home-size categories (e.g. small, large, extra-large) with owner-configured default durations. Exact categories and duration mapping are setup decisions.
+- Use configurable small, medium, and large home-size categories with pilot default durations of 1, 2, and 3 hours respectively. The current maximum visit is 3 hours; these values must remain editable by the owner.
 - Permit an owner to override duration for an individual appointment, including after approval.
 - Store the chosen duration on the appointment; later profile changes must not silently change existing appointments.
 - Notify the client when an approved appointment’s duration or resulting schedule details are changed.
@@ -84,7 +86,7 @@ An AI-assisted SMS interface that identifies intent, gathers required details, e
 - Cancellation updates the calendar and releases the appointment’s time for future requests.
 - Notify the owner by SMS when a client cancels.
 - Do not proactively message other clients about newly available time in the MVP.
-- Rescheduling is handled as a new time request tied to the client; avoid losing the original confirmed appointment until the replacement is approved. Exact transition and customer messaging should be confirmed in design.
+- Rescheduling is handled as a new time request tied to the client. Keep the original confirmed appointment until the replacement is approved; a declined or expired replacement leaves it unchanged. Approval swaps them atomically. The owner confirmed this rule in issue #3.
 
 ### 6.5 SMS conversation behavior
 
@@ -110,7 +112,7 @@ Minimal authenticated owner interface:
 - View appointments, pending holds, and unavailable blocks in a calendar/list.
 - Create/edit/cancel appointments and unavailable blocks.
 - Review and act on pending requests.
-- Edit business hours, booking horizon, default buffer, hold duration, client duration categories, and client profiles.
+- Edit operating days/hours, holiday closures and exceptions, booking horizon, default buffer, hold duration, client duration categories, and client profiles.
 - Clearly distinguish pending, confirmed, cancelled, declined, expired, and unavailable time.
 
 ### 6.8 Notes and privacy
@@ -161,19 +163,19 @@ No numerical improvement target is set until the baseline and pilot cohort are k
 
 ## 10. Assumptions and open questions
 
-- The business operates a single bookable crew/resource initially. If multiple crews or staff need independent calendars, availability modeling changes.
-- Business timezone, exact working days, holidays, and exceptions must be configured; only daily hours are currently known.
-- The meaning of the 30-minute buffer (between every pair of visits, including first/last visit boundaries) must be confirmed.
-- Home-size categories and their estimated durations need owner input.
+- The owner confirmed one bookable crew/resource for the pilot. Multiple crews or staff would change availability modeling.
+- The owner confirmed `America/Los_Angeles` with daylight saving, Monday–Friday 8:00 a.m.–5:00 p.m., and observed US federal holiday closures by default. The owner can edit closures and exceptions in the admin view; holiday editing by SMS may be added later if it is reliable and unambiguous.
+- The 30-minute travel buffer applies only between visits, with none before the first or after the last.
+- Small/medium/large categories default to 1/2/3 hours, current maximum 3 hours, and 15-minute start increments. These values are configurable.
 - The owner needs a defined method to add unavailable time; the minimal web view is the MVP fallback.
-- Rescheduling semantics need final confirmation (recommended: replacement request first, retain old appointment until replacement approval).
+- The owner confirmed replacement-first rescheduling and rejection of conflicting duration increases in issue #3; the original confirmed appointment remains unchanged in either failure case.
 - SMS provider, number provisioning, consent/opt-out, and jurisdiction-specific compliance are design/deployment decisions.
 - Whether the wife needs access or notifications is deferred; initial owner communication goes to one phone.
 - Notes involving access codes require a separate security decision; excluded from ordinary AI note-taking.
 
 ## 11. Suggested delivery phases
 
-1. **Discovery/setup:** confirm operating days, timezone, duration mapping, buffer semantics, phone/SMS requirements, and pilot clients.
+1. **Discovery/setup:** record the confirmed scheduling policy, then confirm phone/SMS requirements and pilot clients.
 2. **Scheduling foundation:** calendar, client profiles, availability calculation, holds, appointment lifecycle, and owner admin view.
 3. **SMS MVP:** client conversations, owner notifications/approval, cancellation, and audit trail.
 4. **Pilot and tune:** measure coordination time and errors; refine conversation prompts and operational policies.

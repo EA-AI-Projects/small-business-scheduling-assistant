@@ -149,10 +149,12 @@ The core calendar, appointment state, approval policy, and availability calculat
 Use a small number of tables and access-pattern-first keys. A single table is a reasonable MVP option:
 
 - Business partition key: `PK = BUSINESS#<business_id>`.
-- Calendar records have sort keys beginning `EVENT#<UTC-start>#<event_id>`; query the business partition by a bounded time range and use strongly consistent base-table reads for authoritative availability.
+- Calendar records have sort keys beginning `EVENT#<UTC-start>#<event_id>`; query the business partition by a bounded time range and use strongly consistent, fully paginated base-table reads for authoritative availability. The event is a compact projection of the appointment or block, including start/end, status, hold expiry, duration/buffer snapshots, and version.
+- Owner unavailable blocks also have authoritative `PK = BUSINESS#<business_id>, SK = BLOCK#<block_id>` records. Strongly query and fully paginate the `BLOCK#` prefix for every availability check, then filter interval intersections in memory. This small-business read avoids assuming a maximum block length: a vacation block that began before the appointment lookback still excludes the slot. A block's calendar event is a UI projection, not the only conflict source.
 - Appointment metadata may be stored at `PK = APPOINTMENT#<appointment_id>, SK = META` and written transactionally with its calendar event record.
 - Client records use `PK = BUSINESS#<business_id>, SK = CLIENT#<client_id>`; client-phone lookup can use a GSI or a dedicated phone-index item. Treat GSI reads as non-authoritative for writes because GSIs are eventually consistent.
 - Store a per-business calendar revision item: `PK = BUSINESS#<business_id>, SK = CALENDAR#REVISION`.
+- A separate due-work GSI indexes outbox records by `delivery_state` and `next_attempt_at`; it is only a wake-up index, never a source of truth for booking or delivery ownership.
 - Keep separate records for appointments, unavailable blocks, client-level notes, appointment-level notes, conversation state, outbox events, and audit events. Avoid storing sensitive access codes in general note fields.
 
 Partitioning by business prepares the data model for additional businesses without introducing a multi-region or sharded system. The initial deployment is still one business and one schedulable crew/resource.
@@ -162,37 +164,42 @@ Partitioning by business prepares the data model for additional businesses witho
 DynamoDB does not provide SQL range-exclusion constraints. Do not implement availability as a read-then-write sequence with no concurrency protection.
 
 Recommended low-volume single-business strategy:
-1. Strongly read the current business calendar revision and all relevant calendar events for the candidate interval, including any maximum visit duration/buffer lookback needed to catch an event already in progress.
-2. Calculate availability with deterministic code.
-3. Use one `TransactWriteItems` operation to conditionally advance the calendar revision from the value read, write the pending hold/appointment metadata and calendar event, and write an idempotency record.
-4. If the revision condition fails, re-read availability and retry a bounded number of times. If the slot is no longer available, offer alternatives.
-5. Apply the same conditional transaction discipline to approvals, cancellations, owner blocks, and reschedules.
+1. Strongly read the business calendar revision **before** reading any calendar events, blocks, or scheduling policy. Every calendar-affecting write, including an operating-hours or holiday edit, must advance this revision in its transaction. Reading the revision after events can combine stale events with a new revision and permit a conflicting write.
+2. Strongly read the persisted policy. Require finite `maximum_visit_minutes` and `maximum_buffer_minutes` before booking writes. For a candidate `[start, end)`, query visit/hold events starting at or after `start - maximum_visit_minutes - maximum_buffer_minutes` and before `end + maximum_buffer_minutes`, with strong consistency and all pages. Reject a new visit or buffer above those caps. This window includes an earlier long visit and a later adjacent visit; never cap the number of returned events. Query every calendar day touched by the window if the event index is later partitioned by day. Separately, strongly query all block records under the `BLOCK#` prefix; do not apply the visit lookback cap to blocks. A policy edit that lowers either cap must be rejected while an active confirmed visit or pending hold has a larger stored duration/buffer snapshot; otherwise the lookback could miss it.
+3. Calculate availability from the visit/hold events and authoritative blocks. Ignore pending holds with `hold_expires_at <= now` even if their expiry job has not run. For two visits, require a gap of at least `max(candidate.buffer_minutes, existing.buffer_minutes)`; do not add a gap at the first/last working-hours boundary or around an unavailable block.
+4. Use one `TransactWriteItems` operation to conditionally advance the revision **from step 1**, conditionally write/update appointment metadata and calendar event, and put the idempotency result, audit event, and required outbox records. Keep below DynamoDB transaction size/item limits; reject an operation that cannot fit instead of splitting the atomic change.
+5. If the revision condition fails, start again at step 1 and retry a bounded number of times. A changed calendar may make the requested slot unavailable; return a conflict with fresh alternatives. Replays with the same actor, operation, and idempotency key return the stored result; a reused key with a different payload is an error.
+6. Apply this discipline to hold creation, owner approval/decline, expiry, cancellation, block creation/editing, policy edits, owner appointment edits, and reschedule swaps. A replacement request may overlap only its own original appointment during validation. Approval checks all *other* active reservations and atomically cancels the old event while confirming the replacement. The original remains untouched on decline, expiry, or failed approval.
 
 This serializes competing changes to a small business calendar through optimistic concurrency without running a lock server. Keep transactions small and test overlapping requests under concurrency. If volume or multi-crew scheduling grows, revisit resource partitioning and a relational database with exclusion constraints.
 
+Approval also checks `hold_expires_at > decision_at` against the scheduling service's fresh UTC time and the expected pending version. Because time passes without a revision write, use a fresh `decision_at` immediately before submitting the transaction, not the earlier availability-read time. The expiry worker uses the opposite expiry condition and cannot overwrite an approval. A conflicting owner duration increase or move leaves the confirmed appointment unchanged and emits no change notice.
+
 ### 5.3 Time, duration, and buffer
 
-- Store instants as UTC epoch/time values and store the business timezone as an IANA timezone identifier.
+- Store instants as UTC epoch/time values; pilot business timezone is the IANA identifier `America/Los_Angeles`, including daylight saving.
 - Interpret client local-date phrases in the business timezone; test daylight-saving transitions.
-- Home-size category maps to an owner-configured estimated duration. Snapshot duration on each appointment; allow an owner override even after approval.
+- Small/medium/large home-size categories have configurable pilot defaults of 1/2/3 hours and a current 3-hour maximum. Snapshot duration on each appointment; allow an owner override even after approval.
 - Appointment slots must fit the entire duration within business hours and must not overlap confirmed events, active pending holds, or unavailable blocks.
-- Default fixed travel buffer is 30 minutes. The implementation must settle whether buffer is modeled after each visit or between neighboring visits; the architecture supports a fixed configurable value, not route-aware estimation.
+- Default fixed travel buffer is 30 minutes between visits only, with none before the first or after the last. Keep it configurable; no route-aware estimation in the MVP.
+- Monday–Friday, 8:00 a.m.–5:00 p.m. is the pilot baseline. Close observed US federal holidays by default using the [OPM holiday schedule](https://www.opm.gov/policy-data-oversight/pay-leave/federal-holidays/), with owner-editable date exceptions. Holiday edits use the same calendar revision transaction as blocks so an old availability result cannot authorize a conflicting booking; reject a new closure that conflicts with an existing confirmed visit until the owner moves or cancels that visit explicitly.
 - No dynamic address-based routing in MVP.
 
 ### 5.4 Holds and expiry
 
 - Pending request stores `hold_expires_at` in UTC. Availability code treats a hold as inactive as soon as `hold_expires_at <= now`, regardless of whether cleanup has run.
 - EventBridge invokes a lightweight expiry job periodically (e.g. every 5–15 minutes, exact cadence TBD) to transition expired holds and enqueue client notices.
-- The expiry job is idempotent. Before expiry, an owner approval checks the timestamp transactionally; a late approval cannot confirm an expired request.
+- The expiry job is idempotent. Approval and expiry use conditional status/version writes; approval also requires `hold_expires_at > now`. A late approval cannot confirm an expired request, even before cleanup.
 - DynamoDB TTL can be used only to clean up disposable records after their retention period; TTL is asynchronous and must never be relied on for availability or exact expiration timing.
 
 ## 6. Notifications and reliability
 
-- For every committed state change, transactionally write an outbox record with the change. A worker sends client/owner SMS asynchronously through SQS-triggered Lambda.
-- Configure SQS redrive to a DLQ, bounded retries, and CloudWatch alarms for DLQ depth and age of oldest message.
-- Sending is at-least-once. Include idempotency keys/provider IDs and design templates so retries do not cause duplicate bookings or contradictory state; provider send idempotency may be limited, so log delivery attempts.
+- For every committed state change, transactionally write one immutable notification intent per recipient/template with a stable `outbox_id`, event version, and `PENDING` delivery state. The state write and outbox puts are one DynamoDB transaction. No direct SQS send is required in that transaction.
+- An EventBridge-triggered dispatcher queries the due-work GSI for due `PENDING`, `RETRYABLE`, and lease-expired `SENDING` records and sends `outbox_id` to SQS. A periodic sweep repeats this query, so a crash after the database commit, a missed invocation, or a worker crash after claim cannot strand the record. GSI lag delays dispatch but cannot lose the record. A crash after `SendMessage` may enqueue a duplicate; the consumer always rereads the authoritative outbox item.
+- The SQS consumer conditionally claims a due record with a short lease and attempt number, setting `SENDING` and `next_attempt_at` to the lease expiry in the same conditional update. It marks `SENT` with provider ID on success, or records error, backoff, and a `RETRYABLE` due time on failure. An expired `SENDING` lease can be reclaimed; duplicate queue messages that cannot claim do nothing. A provider timeout after accepting a message can still produce a duplicate SMS on retry unless the provider supports an idempotency key; surface this limit and keep messages status-safe.
+- Configure SQS redrive to a DLQ and bounded delivery attempts. Alarm on oldest due outbox age, expired leases, delivery failures, and DLQ depth. A DLQ entry does not delete its outbox record: operators can inspect and replay by resetting its due time after correcting the cause.
 - Persist booking state before telling either party that it changed.
-- SMS delivery failure does not roll back the appointment. It creates a visible notification failure for owner follow-up.
+- SMS delivery failure does not roll back the appointment. Exhausted attempts mark the outbox `FAILED` for visible owner follow-up, with redacted error details.
 - Webhook handler acknowledges only after durable message/event persistence. Deduplicate by provider event ID.
 
 ## 7. Security and privacy
@@ -287,12 +294,12 @@ Cognito is preferred for password and token management. Do not use SMS OTP as th
 ## 12. Deployment decisions to confirm
 
 1. AWS region and whether there is an existing project AWS account to use.
-2. Actual operating days and timezone.
+2. `America/Los_Angeles` with daylight saving, Monday–Friday 8:00 a.m.–5:00 p.m., and editable observed US federal holiday closures are confirmed.
 3. Twilio vs another SMS provider, business jurisdiction, phone-number type, registration and consent requirements.
 4. OpenAI vs another model provider and a small tool-call evaluation before choosing a model ID.
 5. Whether the initial owner calendar/admin view is required for POC or can arrive with MVP.
-6. Schedule granularity (recommend 15-minute increments) and maximum visit duration/buffer semantics.
-7. Whether one crew/resource is a safe initial assumption.
+6. 15-minute start increments, a current 3-hour maximum, and a 30-minute between-visit buffer with no first/last boundary buffer are confirmed.
+7. One crew/resource is confirmed for the pilot.
 8. Message and note retention duration; access-code storage remains excluded absent a separate security decision.
 
 ## 13. References
