@@ -1,0 +1,24 @@
+# Small Business Scheduling Assistant
+
+An SMS-first scheduling assistant for a small home-cleaning business. Clients request, reschedule, and cancel visits by text; the owner approves new requests by SMS. A shared scheduling system is the source of truth for availability and appointment status.
+
+## Project documents
+
+- [Product Requirements Document (PRD)](PRD.md)
+- [High-Level Design (HLD)](HLD.md)
+
+## Current MVP direction
+
+- Flexible, one-off appointment requests (recurring schedules deferred).
+- Owner approval required before new appointments are confirmed.
+- Configurable pending-request hold, defaulting to 24 hours.
+- Booking horizon of 14 days.
+- Business hours default to 8:00 a.m.–5:00 p.m.; operating days and timezone remain to be configured.
+- Client-specific visit duration with an owner override per appointment.
+- Configurable travel buffer, defaulting to 30 minutes.
+- SMS-first owner and client workflows, with a minimal owner calendar/admin view.
+- Free client cancellations; cancelled time becomes available for future requests.
+
+## Status
+
+Planning and requirements. See the PRD and HLD for scope, assumptions, open questions, proposed architecture, and phased rollout. No production scheduling service has been implemented yet.
