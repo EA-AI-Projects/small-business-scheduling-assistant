@@ -8,6 +8,7 @@ An SMS-first scheduling assistant for a small home-cleaning business. Clients re
 - [High-Level Design (HLD)](doc/HLD.md)
 - [Technical Architecture](doc/ARCHITECTURE.md)
 - [Scheduling service contracts](doc/SCHEDULING_CONTRACTS.md)
+- [Human–agent team agreement](doc/TEAM_AGREEMENT.md)
 
 ## Current MVP direction
 
