@@ -5,6 +5,7 @@ import pytest
 
 from scheduling.domain.availability import (
     AvailabilityPolicy,
+    InvalidPolicy,
     LocalWindow,
     available_starts,
     pilot_policy,
@@ -122,6 +123,16 @@ def test_fall_back_returns_both_real_instants_for_repeated_hour() -> None:
     ]
     assert len(repeated_one_oclock) == 8
     assert len(set(repeated_one_oclock)) == 8
+
+
+def test_nonexistent_dst_window_boundary_is_rejected_explicitly() -> None:
+    day = date(2026, 3, 8)
+    with pytest.raises(InvalidPolicy, match="nonexistent DST boundary"):
+        pilot_policy({day: (LocalWindow(time(2, 30), time(4)),)})
+
+    weekly = policy(hours=(LocalWindow(time(2, 30), time(4)),), day_of_week=6)
+    with pytest.raises(InvalidPolicy, match="nonexistent DST boundary"):
+        available_starts(weekly, day, 30, (), datetime(2026, 3, 7, 12, tzinfo=UTC))
 
 
 def test_horizon_duration_and_today_cutoff() -> None:

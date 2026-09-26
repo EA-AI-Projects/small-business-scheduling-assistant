@@ -4,11 +4,16 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime
 from typing import Annotated
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from scheduling.adapters.memory import InMemoryCalendarRepository
-from scheduling.domain.availability import AvailabilityRepository, AvailabilityService
+from scheduling.domain.availability import (
+    AvailabilityRepository,
+    AvailabilityService,
+    InvalidDuration,
+    InvalidPolicy,
+)
 from scheduling.domain.calendar import CalendarService, CalendarStatus
 
 
@@ -86,9 +91,14 @@ def create_app(
     def availability(
         business_id: str, query: Annotated[AvailabilityQueryRequest, Query()]
     ) -> AvailabilityResponse:
-        starts = availability_service.find_starts(
-            business_id, query.day, query.duration_minutes, now()
-        )
+        try:
+            starts = availability_service.find_starts(
+                business_id, query.day, query.duration_minutes, now()
+            )
+        except InvalidDuration as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except InvalidPolicy as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         return AvailabilityResponse(
             business_id=business_id, day=query.day, starts_at=list(starts)
         )

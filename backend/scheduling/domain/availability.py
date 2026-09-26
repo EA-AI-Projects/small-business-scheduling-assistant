@@ -14,6 +14,14 @@ class HolidayCalendar(StrEnum):
     US_FEDERAL = "US_FEDERAL"
 
 
+class InvalidDuration(ValueError):
+    """Requested visit duration violates the configured policy."""
+
+
+class InvalidPolicy(ValueError):
+    """Configured working hours cannot be interpreted on the requested date."""
+
+
 @dataclass(frozen=True)
 class LocalWindow:
     opens: time
@@ -40,7 +48,7 @@ class AvailabilityPolicy:
     holiday_calendar: HolidayCalendar | None = None
 
     def __post_init__(self) -> None:
-        ZoneInfo(self.timezone)
+        zone = ZoneInfo(self.timezone)
         if not all(0 <= day <= 6 for day in self.weekly_windows):
             raise ValueError("Weekdays must be 0 (Monday) through 6 (Sunday)")
         if self.booking_horizon_days <= 0 or self.slot_increment_minutes <= 0:
@@ -53,6 +61,12 @@ class AvailabilityPolicy:
             self.closing_buffer_minutes,
         ) < 0:
             raise ValueError("Buffers cannot be negative")
+        for day, windows in self.date_exceptions.items():
+            for window in windows:
+                if not _local_instants(day, window.opens, zone) or not _local_instants(
+                    day, window.closes, zone
+                ):
+                    raise InvalidPolicy("Date exception has a nonexistent DST boundary")
 
 
 def _local_instants(day: date, wall_time: time, zone: ZoneInfo) -> tuple[datetime, ...]:
@@ -90,7 +104,7 @@ def available_starts(
     if now.tzinfo is None:
         raise ValueError("Current instant must be timezone-aware")
     if duration_minutes <= 0 or duration_minutes > policy.maximum_visit_minutes:
-        raise ValueError("Visit duration is outside the configured range")
+        raise InvalidDuration("Visit duration is outside the configured range")
 
     zone = ZoneInfo(policy.timezone)
     local_today = now.astimezone(zone).date()
@@ -115,6 +129,10 @@ def available_starts(
     result: set[datetime] = set()
 
     for window in windows:
+        open_instants = _local_instants(day, window.opens, zone)
+        close_instants = _local_instants(day, window.closes, zone)
+        if not open_instants or not close_instants:
+            raise InvalidPolicy("Working window has a nonexistent DST boundary")
         wall = datetime.combine(day, window.opens)
         last_wall = datetime.combine(day, window.closes)
         while wall < last_wall:
@@ -125,14 +143,14 @@ def available_starts(
                     continue
                 if end_local.date() != day or end_local.replace(tzinfo=None) > last_wall:
                     continue
-                for open_instant in _local_instants(day, window.opens, zone):
+                for open_instant in open_instants:
                     if start >= open_instant + opening_buffer:
                         break
                 else:
                     continue
                 if not any(
                     end <= close_instant - closing_buffer
-                    for close_instant in _local_instants(day, window.closes, zone)
+                    for close_instant in close_instants
                 ):
                     continue
                 if any(_visit_conflicts(start, end, event, gap) for event in active_events):

@@ -86,3 +86,10 @@ def test_availability_api_uses_pilot_policy_and_active_calendar() -> None:
         params={"day": "2026-07-03", "duration_minutes": 60},
     )
     assert holiday.json()["starts_at"] == []
+
+    too_long = client.get(
+        "/v1/businesses/pilot/availability",
+        params={"day": day.isoformat(), "duration_minutes": 181},
+    )
+    assert too_long.status_code == 422
+    assert "configured range" in too_long.json()["detail"]
