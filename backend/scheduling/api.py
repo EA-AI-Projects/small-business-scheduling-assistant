@@ -18,6 +18,7 @@ class EventResponse(BaseModel):
     end_at: datetime
     status: CalendarStatus
     hold_expires_at: datetime | None
+    buffer_minutes: int
 
 
 class CalendarResponse(BaseModel):

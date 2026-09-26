@@ -63,11 +63,12 @@ def _visit_conflicts(
     start: datetime,
     end: datetime,
     event: CalendarEvent,
-    minimum_gap: timedelta,
+    candidate_gap: timedelta,
 ) -> bool:
     if event.status == CalendarStatus.UNAVAILABLE:
         return start < event.end_at and event.start_at < end
-    return not (end + minimum_gap <= event.start_at or event.end_at + minimum_gap <= start)
+    required_gap = max(candidate_gap, timedelta(minutes=event.buffer_minutes))
+    return not (end + required_gap <= event.start_at or event.end_at + required_gap <= start)
 
 
 def available_starts(

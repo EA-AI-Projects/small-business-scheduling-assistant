@@ -26,6 +26,7 @@ class CalendarEvent:
     end_at: datetime
     status: CalendarStatus
     hold_expires_at: datetime | None = None
+    buffer_minutes: int = 0
 
     def __post_init__(self) -> None:
         if self.start_at.tzinfo is None or self.end_at.tzinfo is None:
@@ -36,6 +37,8 @@ class CalendarEvent:
             raise ValueError("Pending events require hold expiry")
         if self.hold_expires_at is not None and self.hold_expires_at.tzinfo is None:
             raise ValueError("Hold expiry must be timezone-aware")
+        if self.buffer_minutes < 0:
+            raise ValueError("Buffer snapshot cannot be negative")
 
     def occupies_time(self, now: datetime) -> bool:
         if self.status in (CalendarStatus.CONFIRMED, CalendarStatus.UNAVAILABLE):

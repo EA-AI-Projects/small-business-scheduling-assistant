@@ -65,6 +65,18 @@ def test_long_visit_started_before_query_day_and_exception_closure() -> None:
     assert available_starts(policy(exceptions={day: ()}), day, 60, (), now) == ()
 
 
+def test_existing_visit_buffer_snapshot_survives_config_change() -> None:
+    day = date(2026, 10, 5)
+    now = datetime(2026, 10, 4, 12, tzinfo=UTC)
+    visit = CalendarEvent(
+        "visit", local(day, 9), local(day, 10), CalendarStatus.CONFIRMED,
+        buffer_minutes=60,
+    )
+    starts = available_starts(policy(), day, 60, (visit,), now)
+    assert local(day, 10, 30) not in starts
+    assert local(day, 11) in starts
+
+
 def test_spring_forward_skips_nonexistent_starts() -> None:
     day = date(2026, 3, 8)
     now = datetime(2026, 3, 7, 12, tzinfo=UTC)
