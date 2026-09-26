@@ -176,11 +176,12 @@ Approval also checks `hold_expires_at > decision_at` against the scheduling serv
 
 ### 5.3 Time, duration, and buffer
 
-- Store instants as UTC epoch/time values and store the business timezone as an IANA timezone identifier.
+- Store instants as UTC epoch/time values; pilot business timezone is the IANA identifier `America/Los_Angeles`, including daylight saving.
 - Interpret client local-date phrases in the business timezone; test daylight-saving transitions.
 - Small/medium/large home-size categories have configurable pilot defaults of 1/2/3 hours and a current 3-hour maximum. Snapshot duration on each appointment; allow an owner override even after approval.
 - Appointment slots must fit the entire duration within business hours and must not overlap confirmed events, active pending holds, or unavailable blocks.
-- Default fixed travel buffer is 30 minutes. The owner said no buffer is needed at the first/last visit boundary; confirm that it applies only between visits. The architecture supports a fixed configurable value, not route-aware estimation.
+- Default fixed travel buffer is 30 minutes between visits only, with none before the first or after the last. Keep it configurable; no route-aware estimation in the MVP.
+- Monday–Friday, 8:00 a.m.–5:00 p.m. is the pilot baseline. Close observed US federal holidays by default using the [OPM holiday schedule](https://www.opm.gov/policy-data-oversight/pay-leave/federal-holidays/), with owner-editable date exceptions. Holiday edits use the same calendar revision transaction as blocks so an old availability result cannot authorize a conflicting booking; reject a new closure that conflicts with an existing confirmed visit until the owner moves or cancels that visit explicitly.
 - No dynamic address-based routing in MVP.
 
 ### 5.4 Holds and expiry
@@ -292,11 +293,11 @@ Cognito is preferred for password and token management. Do not use SMS OTP as th
 ## 12. Deployment decisions to confirm
 
 1. AWS region and whether there is an existing project AWS account to use.
-2. Normal operating weekdays, the holiday calendar, and whether the owner's “PST” means `America/Los_Angeles` with daylight saving or fixed UTC−08:00. Daily hours are confirmed as 8:00 a.m.–5:00 p.m.; holidays are closed.
+2. `America/Los_Angeles` with daylight saving, Monday–Friday 8:00 a.m.–5:00 p.m., and editable observed US federal holiday closures are confirmed.
 3. Twilio vs another SMS provider, business jurisdiction, phone-number type, registration and consent requirements.
 4. OpenAI vs another model provider and a small tool-call evaluation before choosing a model ID.
 5. Whether the initial owner calendar/admin view is required for POC or can arrive with MVP.
-6. 15-minute start increments and a current 3-hour maximum are confirmed; clarify the 30-minute buffer rule at first/last visit boundaries.
+6. 15-minute start increments, a current 3-hour maximum, and a 30-minute between-visit buffer with no first/last boundary buffer are confirmed.
 7. One crew/resource is confirmed for the pilot.
 8. Message and note retention duration; access-code storage remains excluded absent a separate security decision.
 
