@@ -2,9 +2,16 @@
 
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
+from enum import StrEnum
+from typing import Protocol
 from zoneinfo import ZoneInfo
 
-from scheduling.domain.calendar import CalendarEvent, CalendarStatus
+from scheduling.domain.calendar import CalendarEvent, CalendarRepository, CalendarStatus
+from scheduling.domain.holidays import observed_us_federal_holidays
+
+
+class HolidayCalendar(StrEnum):
+    US_FEDERAL = "US_FEDERAL"
 
 
 @dataclass(frozen=True)
@@ -30,6 +37,7 @@ class AvailabilityPolicy:
     opening_buffer_minutes: int
     closing_buffer_minutes: int
     date_exceptions: dict[date, tuple[LocalWindow, ...]] = field(default_factory=dict)
+    holiday_calendar: HolidayCalendar | None = None
 
     def __post_init__(self) -> None:
         ZoneInfo(self.timezone)
@@ -89,7 +97,15 @@ def available_starts(
     if day < local_today or day > local_today + timedelta(days=policy.booking_horizon_days):
         return ()
 
-    windows = policy.date_exceptions.get(day, policy.weekly_windows.get(day.weekday(), ()))
+    if day in policy.date_exceptions:
+        windows = policy.date_exceptions[day]
+    elif (
+        policy.holiday_calendar == HolidayCalendar.US_FEDERAL
+        and day in observed_us_federal_holidays(day.year)
+    ):
+        windows = ()
+    else:
+        windows = policy.weekly_windows.get(day.weekday(), ())
     duration = timedelta(minutes=duration_minutes)
     gap = timedelta(minutes=policy.minimum_visit_gap_minutes)
     opening_buffer = timedelta(minutes=policy.opening_buffer_minutes)
@@ -125,3 +141,40 @@ def available_starts(
             wall += timedelta(minutes=policy.slot_increment_minutes)
 
     return tuple(sorted(result))
+
+
+def pilot_policy(
+    date_exceptions: dict[date, tuple[LocalWindow, ...]] | None = None,
+) -> AvailabilityPolicy:
+    """Owner-approved starting policy; persisted owner settings replace these values."""
+    weekday_hours = (LocalWindow(time(8), time(17)),)
+    return AvailabilityPolicy(
+        timezone="America/Los_Angeles",
+        weekly_windows={weekday: weekday_hours for weekday in range(5)},
+        booking_horizon_days=14,
+        slot_increment_minutes=15,
+        maximum_visit_minutes=180,
+        minimum_visit_gap_minutes=30,
+        opening_buffer_minutes=0,
+        closing_buffer_minutes=0,
+        date_exceptions=date_exceptions or {},
+        holiday_calendar=HolidayCalendar.US_FEDERAL,
+    )
+
+
+class AvailabilityRepository(CalendarRepository, Protocol):
+    def read_policy(self, business_id: str) -> AvailabilityPolicy: ...
+
+
+class AvailabilityService:
+    def __init__(self, repository: AvailabilityRepository) -> None:
+        self._repository = repository
+
+    def find_starts(
+        self, business_id: str, day: date, duration_minutes: int, now: datetime
+    ) -> tuple[datetime, ...]:
+        if not business_id:
+            raise ValueError("Business ID is required")
+        policy = self._repository.read_policy(business_id)
+        snapshot = self._repository.read_calendar(business_id)
+        return available_starts(policy, day, duration_minutes, snapshot.events, now)

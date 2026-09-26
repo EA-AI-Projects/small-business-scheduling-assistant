@@ -3,8 +3,14 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from scheduling.domain.availability import AvailabilityPolicy, LocalWindow, available_starts
+from scheduling.domain.availability import (
+    AvailabilityPolicy,
+    LocalWindow,
+    available_starts,
+    pilot_policy,
+)
 from scheduling.domain.calendar import CalendarEvent, CalendarStatus
+from scheduling.domain.holidays import observed_us_federal_holidays
 
 
 def policy(
@@ -66,6 +72,20 @@ def test_long_visit_started_before_working_window_and_exception_closure() -> Non
     assert available_starts(policy(exceptions={day: ()}), day, 60, (), now) == ()
 
 
+def test_visit_started_on_previous_date_excludes_early_query_slots() -> None:
+    day = date(2026, 10, 5)
+    now = datetime(2026, 10, 4, 12, tzinfo=UTC)
+    prior_day = day - timedelta(days=1)
+    visit = CalendarEvent(
+        "cross-date", local(prior_day, 23), local(day, 1), CalendarStatus.CONFIRMED
+    )
+    overnight_test_policy = policy(hours=(LocalWindow(time(0), time(3)),))
+    starts = available_starts(overnight_test_policy, day, 60, (visit,), now)
+    assert local(day, 0) not in starts
+    assert local(day, 1, 15) not in starts
+    assert local(day, 1, 30) in starts
+
+
 def test_existing_visit_buffer_snapshot_survives_config_change() -> None:
     day = date(2026, 10, 5)
     now = datetime(2026, 10, 4, 12, tzinfo=UTC)
@@ -120,3 +140,39 @@ def test_current_three_hour_visit_limit() -> None:
     assert local(day, 8, 15) in available_starts(policy(), day, 180, (), now)
     with pytest.raises(ValueError):
         available_starts(policy(), day, 181, (), now)
+
+
+def test_observed_us_federal_holiday_dates_match_opm_schedule() -> None:
+    assert observed_us_federal_holidays(2026) == frozenset({
+        date(2026, 1, 1), date(2026, 1, 19), date(2026, 2, 16),
+        date(2026, 5, 25), date(2026, 6, 19), date(2026, 7, 3),
+        date(2026, 9, 7), date(2026, 10, 12), date(2026, 11, 11),
+        date(2026, 11, 26), date(2026, 12, 25),
+    })
+    assert date(2027, 6, 18) in observed_us_federal_holidays(2027)
+    assert date(2027, 7, 5) in observed_us_federal_holidays(2027)
+    assert date(2027, 12, 24) in observed_us_federal_holidays(2027)
+    assert date(2021, 12, 31) in observed_us_federal_holidays(2021)
+
+
+def test_pilot_policy_weekdays_holiday_override_and_first_last_boundaries() -> None:
+    now = datetime(2026, 6, 29, 12, tzinfo=UTC)
+    baseline = pilot_policy()
+    assert baseline.timezone == "America/Los_Angeles"
+    assert baseline.slot_increment_minutes == 15
+    assert baseline.maximum_visit_minutes == 180
+    assert baseline.minimum_visit_gap_minutes == 30
+    assert available_starts(baseline, date(2026, 7, 3), 60, (), now) == ()
+    assert available_starts(baseline, date(2026, 7, 4), 60, (), now) == ()
+
+    open_holiday = pilot_policy({date(2026, 7, 3): (LocalWindow(time(8), time(17)),)})
+    assert local(date(2026, 7, 3), 8) in available_starts(
+        open_holiday, date(2026, 7, 3), 60, (), now,
+    )
+    normal_monday = date(2026, 7, 6)
+    starts = available_starts(baseline, normal_monday, 60, (), now)
+    assert local(normal_monday, 8) in starts
+    assert local(normal_monday, 16) in starts
+
+    closed_monday = pilot_policy({normal_monday: ()})
+    assert available_starts(closed_monday, normal_monday, 60, (), now) == ()

@@ -3,6 +3,7 @@
 from collections import defaultdict
 from threading import RLock
 
+from scheduling.domain.availability import AvailabilityPolicy, pilot_policy
 from scheduling.domain.calendar import CalendarEvent, CalendarSnapshot
 
 
@@ -15,6 +16,7 @@ class InMemoryCalendarRepository:
         self._lock = RLock()
         self._events: dict[str, tuple[CalendarEvent, ...]] = defaultdict(tuple)
         self._revisions: dict[str, int] = defaultdict(int)
+        self._policies: dict[str, AvailabilityPolicy] = {}
 
     def read_calendar(self, business_id: str) -> CalendarSnapshot:
         with self._lock:
@@ -23,6 +25,14 @@ class InMemoryCalendarRepository:
                 revision=self._revisions[business_id],
                 events=self._events[business_id],
             )
+
+    def read_policy(self, business_id: str) -> AvailabilityPolicy:
+        with self._lock:
+            return self._policies.get(business_id, pilot_policy())
+
+    def set_policy_for_test(self, business_id: str, policy: AvailabilityPolicy) -> None:
+        with self._lock:
+            self._policies[business_id] = policy
 
     def replace_for_test(
         self, business_id: str, expected_revision: int, events: tuple[CalendarEvent, ...]
