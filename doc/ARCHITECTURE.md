@@ -149,10 +149,11 @@ The core calendar, appointment state, approval policy, and availability calculat
 Use a small number of tables and access-pattern-first keys. A single table is a reasonable MVP option:
 
 - Business partition key: `PK = BUSINESS#<business_id>`.
-- Calendar records have sort keys beginning `EVENT#<UTC-start>#<event_id>`; query the business partition by a bounded time range and use strongly consistent base-table reads for authoritative availability.
+- Calendar records have sort keys beginning `EVENT#<UTC-start>#<event_id>`; query the business partition by a bounded time range and use strongly consistent, fully paginated base-table reads for authoritative availability. The event is a compact projection of the appointment or block, including start/end, status, hold expiry, duration/buffer snapshots, and version.
 - Appointment metadata may be stored at `PK = APPOINTMENT#<appointment_id>, SK = META` and written transactionally with its calendar event record.
 - Client records use `PK = BUSINESS#<business_id>, SK = CLIENT#<client_id>`; client-phone lookup can use a GSI or a dedicated phone-index item. Treat GSI reads as non-authoritative for writes because GSIs are eventually consistent.
 - Store a per-business calendar revision item: `PK = BUSINESS#<business_id>, SK = CALENDAR#REVISION`.
+- A separate due-work GSI indexes outbox records by `delivery_state` and `next_attempt_at`; it is only a wake-up index, never a source of truth for booking or delivery ownership.
 - Keep separate records for appointments, unavailable blocks, client-level notes, appointment-level notes, conversation state, outbox events, and audit events. Avoid storing sensitive access codes in general note fields.
 
 Partitioning by business prepares the data model for additional businesses without introducing a multi-region or sharded system. The initial deployment is still one business and one schedulable crew/resource.
@@ -162,13 +163,15 @@ Partitioning by business prepares the data model for additional businesses witho
 DynamoDB does not provide SQL range-exclusion constraints. Do not implement availability as a read-then-write sequence with no concurrency protection.
 
 Recommended low-volume single-business strategy:
-1. Strongly read the current business calendar revision and all relevant calendar events for the candidate interval, including any maximum visit duration/buffer lookback needed to catch an event already in progress.
-2. Calculate availability with deterministic code.
-3. Use one `TransactWriteItems` operation to conditionally advance the calendar revision from the value read, write the pending hold/appointment metadata and calendar event, and write an idempotency record.
-4. If the revision condition fails, re-read availability and retry a bounded number of times. If the slot is no longer available, offer alternatives.
-5. Apply the same conditional transaction discipline to approvals, cancellations, owner blocks, and reschedules.
+1. Require a configured finite `maximum_visit_minutes` and `maximum_buffer_minutes` before accepting booking writes. For a candidate `[start, end)`, query events starting at or after `start - maximum_visit_minutes - maximum_buffer_minutes` and before `end + maximum_buffer_minutes`, with strong consistency and all pages. Reject a visit or buffer above those caps. This window includes an earlier long visit and a later adjacent visit; never cap the number of returned events. Query every calendar day touched by the window if the event index is later partitioned by day.
+2. Strongly read the calendar revision and calculate availability from the event set. Ignore pending holds with `hold_expires_at <= now` even if their expiry job has not run. Use the owner-approved buffer rule from issue #1; until it is configured, booking writes are disabled.
+3. Use one `TransactWriteItems` operation to conditionally advance the revision, conditionally write/update appointment metadata and calendar event, and put the idempotency result, audit event, and required outbox records. Keep below DynamoDB transaction size/item limits; reject an operation that cannot fit instead of splitting the atomic change.
+4. If the revision condition fails, strongly re-read and retry a bounded number of times. A changed calendar may make the requested slot unavailable; return a conflict with fresh alternatives. Replays with the same actor, operation, and idempotency key return the stored result; a reused key with a different payload is an error.
+5. Apply this discipline to hold creation, owner approval/decline, expiry, cancellation, block creation/editing, owner appointment edits, and reschedule swaps. A replacement request may overlap only its own original appointment during validation. Approval checks all *other* active reservations and atomically cancels the old event while confirming the replacement. The original remains untouched on decline, expiry, or failed approval.
 
 This serializes competing changes to a small business calendar through optimistic concurrency without running a lock server. Keep transactions small and test overlapping requests under concurrency. If volume or multi-crew scheduling grows, revisit resource partitioning and a relational database with exclusion constraints.
+
+Approval also checks `hold_expires_at > decision_at` against the scheduling service's fresh UTC time and the expected pending version. Because time passes without a revision write, use a fresh `decision_at` immediately before submitting the transaction, not the earlier availability-read time. The expiry worker uses the opposite expiry condition and cannot overwrite an approval. A conflicting owner duration increase or move leaves the confirmed appointment unchanged and emits no change notice.
 
 ### 5.3 Time, duration, and buffer
 
@@ -183,16 +186,17 @@ This serializes competing changes to a small business calendar through optimisti
 
 - Pending request stores `hold_expires_at` in UTC. Availability code treats a hold as inactive as soon as `hold_expires_at <= now`, regardless of whether cleanup has run.
 - EventBridge invokes a lightweight expiry job periodically (e.g. every 5–15 minutes, exact cadence TBD) to transition expired holds and enqueue client notices.
-- The expiry job is idempotent. Before expiry, an owner approval checks the timestamp transactionally; a late approval cannot confirm an expired request.
+- The expiry job is idempotent. Approval and expiry use conditional status/version writes; approval also requires `hold_expires_at > now`. A late approval cannot confirm an expired request, even before cleanup.
 - DynamoDB TTL can be used only to clean up disposable records after their retention period; TTL is asynchronous and must never be relied on for availability or exact expiration timing.
 
 ## 6. Notifications and reliability
 
-- For every committed state change, transactionally write an outbox record with the change. A worker sends client/owner SMS asynchronously through SQS-triggered Lambda.
-- Configure SQS redrive to a DLQ, bounded retries, and CloudWatch alarms for DLQ depth and age of oldest message.
-- Sending is at-least-once. Include idempotency keys/provider IDs and design templates so retries do not cause duplicate bookings or contradictory state; provider send idempotency may be limited, so log delivery attempts.
+- For every committed state change, transactionally write one immutable notification intent per recipient/template with a stable `outbox_id`, event version, and `PENDING` delivery state. The state write and outbox puts are one DynamoDB transaction. No direct SQS send is required in that transaction.
+- An EventBridge-triggered dispatcher queries the due-work GSI for `PENDING` and retryable records and sends `outbox_id` to SQS. A second periodic sweep revisits any record still due, so a crash after the database commit or a missed GSI/dispatcher invocation cannot strand it. GSI lag delays dispatch but cannot lose the record. A crash after `SendMessage` may enqueue a duplicate; the consumer always rereads the authoritative outbox item.
+- The SQS consumer conditionally claims a due record with a short lease and attempt number, then sends via the provider. It marks `SENT` with provider ID on success, or records error, backoff, and `next_attempt_at` on failure. Expired leases are retryable. Duplicate queue messages that cannot claim do nothing. A provider timeout after accepting a message can still produce a duplicate SMS on retry unless the provider supports an idempotency key; surface this limit and keep messages status-safe.
+- Configure SQS redrive to a DLQ and bounded delivery attempts. Alarm on oldest due outbox age, expired leases, delivery failures, and DLQ depth. A DLQ entry does not delete its outbox record: operators can inspect and replay by resetting its due time after correcting the cause.
 - Persist booking state before telling either party that it changed.
-- SMS delivery failure does not roll back the appointment. It creates a visible notification failure for owner follow-up.
+- SMS delivery failure does not roll back the appointment. Exhausted attempts mark the outbox `FAILED` for visible owner follow-up, with redacted error details.
 - Webhook handler acknowledges only after durable message/event persistence. Deduplicate by provider event ID.
 
 ## 7. Security and privacy

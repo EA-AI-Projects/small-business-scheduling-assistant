@@ -7,6 +7,7 @@ An SMS-first scheduling assistant for a small home-cleaning business. Clients re
 - [Product Requirements Document (PRD)](doc/PRD.md)
 - [High-Level Design (HLD)](doc/HLD.md)
 - [Technical Architecture](doc/ARCHITECTURE.md)
+- [Scheduling service contracts](doc/SCHEDULING_CONTRACTS.md)
 
 ## Current MVP direction
 

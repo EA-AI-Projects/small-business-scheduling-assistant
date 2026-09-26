@@ -44,8 +44,8 @@
                                      |
                                      v
                               +-------------+
-                              | Relational  |
-                              | database    |
+                              | DynamoDB    |
+                              | on-demand   |
                               +------+------+ 
                                      ^
                                      |
@@ -108,10 +108,10 @@ Owns all business rules and state transitions:
 
 ### 3.6 Database and background jobs
 
-- Relational storage for clients, appointments, blocks, conversations, notes, configuration, audit events, and notification outbox.
-- Background worker for hold expiration and retrying outbound notifications.
+- DynamoDB on-demand stores clients, appointments, blocks, conversations, notes, configuration, audit events, and notification outbox records.
+- Scheduled Lambda jobs expire holds and recover due outbox records; SQS/Lambda handles outbound delivery.
 - Use transactional outbox pattern so state changes and required notifications are not separated by a crash.
-- Use database constraints/transactional locking to prevent overlapping active time reservations for the same resource.
+- Use a strongly consistent calendar read and conditional calendar-revision update in one DynamoDB transaction to prevent overlapping active reservations for the single crew.
 
 ## 4. Core data model (logical)
 
@@ -122,7 +122,7 @@ Owns all business rules and state transitions:
 - `id`, `name`, `phone_e164` (unique per business unless shared-number handling is added), `service_address`, `home_size_category`, `default_duration_minutes`, `active`, timestamps
 
 ### Appointment
-- `id`, `business_id`, `client_id`, `start_at`, `end_at`, `duration_minutes`, `buffer_minutes`, `status`, `requested_by`, `approved_by`, `hold_expires_at`, timestamps
+- `id`, `business_id`, `client_id`, `start_at`, `end_at`, `duration_minutes`, `buffer_minutes`, `status`, `requested_by`, `approved_by`, `hold_expires_at`, optional `replaces_appointment_id`, timestamps
 - Preserve the appointment’s duration and buffer snapshot so later profile/config changes do not silently rewrite existing bookings.
 
 ### UnavailableBlock
@@ -180,7 +180,7 @@ For an appointment candidate:
 6. Return only valid candidate start times.
 7. On request creation and approval, repeat validation inside a transaction to handle races.
 
-Use a single-resource exclusion strategy initially. PostgreSQL range/exclusion constraints are a strong option for preventing overlapping active reservations; alternatively use explicit resource locking and transactional conflict queries. The implementation must define precisely whether buffers are stored as part of occupied intervals or calculated symmetrically between adjacent visits. This is an open design detail to resolve with the business.
+Use the single-crew DynamoDB calendar-revision transaction described in [ARCHITECTURE.md](ARCHITECTURE.md#5-data-architecture-and-conflict-correctness). The maximum duration and buffer must be configured before booking writes; they bound the lookback query. Exact buffer semantics remain an owner decision in issue #1. All calendar mutations, including edits, expiry, and reschedule swaps, follow the same transaction discipline.
 
 All timestamps should be stored in UTC and rendered in the configured business timezone. Daylight-saving transitions, local working hours, and date-only client phrases require explicit timezone-aware parsing and tests.
 
@@ -242,12 +242,12 @@ All timestamps should be stored in UTC and rendered in the configured business t
 
 ## 10. Deployment and operations (initial direction)
 
-For a pilot, prefer a managed application runtime, managed relational database, and established SMS provider rather than self-hosting telecom infrastructure. Exact vendor choices depend on geography, pricing, number availability, compliance needs, and developer preference. Keep a staging environment and test with synthetic contacts before enabling real client traffic.
+For a pilot, use the proposed AWS Lambda, DynamoDB on-demand, and SQS architecture with an established SMS provider. Provider and region still depend on geography, pricing, number availability, and compliance needs. Keep a staging environment and test with synthetic contacts before enabling real client traffic.
 
 Operational essentials:
 - Health/readiness endpoint and structured, redacted logs.
 - Alerts for inbound webhook outage, outbound SMS failures, and worker backlog.
-- Database migrations and rollback/backup plan.
+- DynamoDB schema evolution and rollback/backup plan.
 - Configuration for business timezone, hours, hold duration, buffer, and category durations.
 - Manual emergency procedure for pausing the assistant and reverting to ordinary owner texting.
 
@@ -266,7 +266,7 @@ Operational essentials:
 
 | Risk | Mitigation |
 |---|---|
-| Double booking due to concurrent requests | Transactional availability recheck and database-level overlap protection |
+| Double booking due to concurrent requests | Strong calendar reads and a conditional revision update in every calendar transaction |
 | Owner reply applied to wrong request | Explicit request references, ambiguity detection, confirmation, audit log |
 | AI claims a booking without a successful write | Only confirm after scheduling service returns persisted result |
 | One-day holds block useful availability | Configurable expiry, owner visibility, automatic release and client notice; review pilot metrics |
@@ -282,7 +282,7 @@ Operational essentials:
 1. Business timezone and operating days/holidays.
 2. Home-size categories and default duration mapping.
 3. Exact buffer semantics and whether the buffer is between visits only.
-4. Reschedule rule confirmation (recommended replacement-first transaction).
+4. Reschedule rule: retain the original confirmed appointment until the replacement is approved; atomically swap them on approval (owner confirmed in issue #3).
 5. How owner creates unavailable time in the preferred MVP workflow.
 6. Business jurisdiction, SMS provider/number, consent, opt-out, and data-retention requirements.
 7. Whether entry codes are excluded entirely or need a separate protected workflow.

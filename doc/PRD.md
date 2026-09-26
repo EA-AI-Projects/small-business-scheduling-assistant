@@ -84,7 +84,7 @@ An AI-assisted SMS interface that identifies intent, gathers required details, e
 - Cancellation updates the calendar and releases the appointment’s time for future requests.
 - Notify the owner by SMS when a client cancels.
 - Do not proactively message other clients about newly available time in the MVP.
-- Rescheduling is handled as a new time request tied to the client; avoid losing the original confirmed appointment until the replacement is approved. Exact transition and customer messaging should be confirmed in design.
+- Rescheduling is handled as a new time request tied to the client. Keep the original confirmed appointment until the replacement is approved; a declined or expired replacement leaves it unchanged. Approval swaps them atomically. The owner confirmed this rule in issue #3.
 
 ### 6.5 SMS conversation behavior
 
@@ -166,7 +166,7 @@ No numerical improvement target is set until the baseline and pilot cohort are k
 - The meaning of the 30-minute buffer (between every pair of visits, including first/last visit boundaries) must be confirmed.
 - Home-size categories and their estimated durations need owner input.
 - The owner needs a defined method to add unavailable time; the minimal web view is the MVP fallback.
-- Rescheduling semantics need final confirmation (recommended: replacement request first, retain old appointment until replacement approval).
+- The owner confirmed replacement-first rescheduling and rejection of conflicting duration increases in issue #3; the original confirmed appointment remains unchanged in either failure case.
 - SMS provider, number provisioning, consent/opt-out, and jurisdiction-specific compliance are design/deployment decisions.
 - Whether the wife needs access or notifications is deferred; initial owner communication goes to one phone.
 - Notes involving access codes require a separate security decision; excluded from ordinary AI note-taking.
