@@ -25,7 +25,7 @@ An SMS-first scheduling assistant for a small home-cleaning business. Clients re
 
 ## Status
 
-The backend scaffold exposes a health endpoint and a read-only calendar API backed by a synthetic local adapter. Booking writes remain disabled until the pilot policy in issue #1 and transactional persistence in issues #5–#7 are implemented. No production scheduling service has been deployed.
+The backend scaffold exposes a health endpoint and a read-only calendar API backed by a synthetic local adapter. A deterministic availability calculator accepts explicit pilot policy values, but is not wired to live configuration while issue #1 is unanswered. Booking writes remain disabled until the pilot policy and transactional persistence in issues #6–#7 are implemented. No production scheduling service has been deployed.
 
 ## Local backend
 
@@ -37,7 +37,7 @@ backend/.venv/bin/python -m pip install -e './backend[dev]'
 backend/.venv/bin/python -m uvicorn scheduling.api:app --app-dir backend --reload
 ```
 
-Then open `http://127.0.0.1:8000/docs` or request `GET /health`. `GET /v1/businesses/pilot/calendar` requires timezone-aware `start_at` and `end_at` query parameters. The in-memory calendar contains no customer data and resets on restart. The read endpoint is a local harness, not an authenticated owner API.
+Then open `http://127.0.0.1:8000/docs` or request `GET /health`. `GET /v1/businesses/pilot/calendar` requires timezone-aware `start_at` and `end_at` query parameters. `GET /v1/businesses/pilot/availability` accepts `day` and `duration_minutes`, and returns UTC starts under the owner-approved pilot policy. The in-memory calendar contains no customer data and resets on restart. These read endpoints are a local harness, not authenticated production routes.
 
 Focused checks:
 

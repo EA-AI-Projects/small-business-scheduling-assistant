@@ -54,3 +54,42 @@ def test_local_adapter_rejects_stale_calendar_revision() -> None:
     repository.replace_for_test("pilot", expected_revision=0, events=())
     with pytest.raises(RevisionConflict):
         repository.replace_for_test("pilot", expected_revision=0, events=())
+
+
+def test_availability_api_uses_pilot_policy_and_active_calendar() -> None:
+    repository = InMemoryCalendarRepository()
+    now = datetime(2026, 6, 29, 12, tzinfo=UTC)
+    day = datetime(2026, 7, 6, tzinfo=UTC).date()
+    start = datetime(2026, 7, 6, 16, tzinfo=UTC)  # 9 a.m. Pacific daylight time
+    repository.replace_for_test(
+        "pilot",
+        0,
+        (
+            CalendarEvent(
+                "visit", start, start + timedelta(hours=1), CalendarStatus.CONFIRMED
+            ),
+        ),
+    )
+    client = TestClient(create_app(repository, clock=lambda: now))
+
+    response = client.get(
+        "/v1/businesses/pilot/availability",
+        params={"day": day.isoformat(), "duration_minutes": 60},
+    )
+    assert response.status_code == 200
+    starts = response.json()["starts_at"]
+    assert "2026-07-06T15:00:00Z" not in starts  # 8 a.m. lacks travel gap before visit
+    assert "2026-07-06T17:30:00Z" in starts  # 10:30 a.m. has travel gap
+
+    holiday = client.get(
+        "/v1/businesses/pilot/availability",
+        params={"day": "2026-07-03", "duration_minutes": 60},
+    )
+    assert holiday.json()["starts_at"] == []
+
+    too_long = client.get(
+        "/v1/businesses/pilot/availability",
+        params={"day": day.isoformat(), "duration_minutes": 181},
+    )
+    assert too_long.status_code == 422
+    assert "configured range" in too_long.json()["detail"]
