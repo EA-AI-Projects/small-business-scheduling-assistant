@@ -273,6 +273,23 @@ class DynamoDBCalendarRepository:
             self._client.transact_write_items(TransactItems=writes)
         except Exception as exc:
             response = getattr(exc, "response", {})
-            if isinstance(response, dict) and response.get("Error", {}).get("Code") == "TransactionCanceledException":
+            if not isinstance(response, dict) or response.get("Error", {}).get("Code") != "TransactionCanceledException":
+                raise
+            reasons = response.get("CancellationReasons")
+            if isinstance(reasons, list):
+                codes = [reason.get("Code") for reason in reasons if isinstance(reason, dict)]
+                if any(code not in ("None", "ConditionalCheckFailed", "TransactionConflict") for code in codes):
+                    raise
+                if "TransactionConflict" in codes:
+                    raise RevisionConflict("Calendar transaction conflicted") from exc
+                if any(codes[index] == "ConditionalCheckFailed" for index in (0, 3) if index < len(codes)):
+                    raise RevisionConflict("Calendar or idempotency condition changed") from exc
+                raise
+            # Some clients omit per-item reasons. Verify the two expected
+            # conditional guards rather than interpreting all cancellations as races.
+            if (
+                self.read_revision(hold.business_id) != expected_revision
+                or self.read_idempotency(commit.command) is not None
+            ):
                 raise RevisionConflict("Calendar or idempotency condition changed") from exc
             raise

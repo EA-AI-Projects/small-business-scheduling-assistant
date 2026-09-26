@@ -3,9 +3,18 @@
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
+from botocore.exceptions import ClientError
+
 from scheduling.adapters.dynamodb import DynamoDBCalendarRepository, encode_policy
 from scheduling.domain.availability import pilot_policy
-from scheduling.domain.holds import CreateHold, HoldCommit, OutboxIntent, PendingHold
+from scheduling.domain.holds import (
+    CreateHold,
+    HoldCommit,
+    OutboxIntent,
+    PendingHold,
+    RevisionConflict,
+)
 
 
 class RecordingClient:
@@ -76,3 +85,36 @@ def test_hold_transaction_contains_revision_metadata_event_replay_audit_and_noti
     assert any(key.startswith("IDEMPOTENCY#") for key in sort_keys)
     assert any(key.startswith("AUDIT#") for key in sort_keys)
     assert sum(key.startswith("OUTBOX#") for key in sort_keys) == 2
+
+
+def test_transaction_cancellation_retries_only_expected_conditional_races() -> None:
+    class CancellingClient(RecordingClient):
+        def __init__(self, reasons: list[dict[str, str]]) -> None:
+            super().__init__()
+            self.reasons = reasons
+
+        def transact_write_items(self, **kwargs: Any) -> dict[str, Any]:
+            raise ClientError(
+                {"Error": {"Code": "TransactionCanceledException", "Message": "cancelled"},
+                 "CancellationReasons": self.reasons},
+                "TransactWriteItems",
+            )
+
+    start = datetime(2026, 9, 29, 16, tzinfo=UTC)
+    command = CreateHold("business-1", "client-1", "client-1", "key-1", start, 60)
+    hold = PendingHold("hold-1", "business-1", "client-1", start, start.replace(hour=17),
+                       start.replace(day=30), 60, 30, 8)
+    commit = HoldCommit(command, command.request_hash(), hold, "audit-1", ())
+
+    with pytest.raises(RevisionConflict):
+        DynamoDBCalendarRepository(
+            CancellingClient([{"Code": "ConditionalCheckFailed"}]), "scheduling"
+        ).commit_hold(7, commit)
+    with pytest.raises(RevisionConflict):
+        DynamoDBCalendarRepository(
+            CancellingClient([{"Code": "TransactionConflict"}]), "scheduling"
+        ).commit_hold(7, commit)
+    with pytest.raises(ClientError):
+        DynamoDBCalendarRepository(
+            CancellingClient([{"Code": "ThrottlingError"}]), "scheduling"
+        ).commit_hold(7, commit)
