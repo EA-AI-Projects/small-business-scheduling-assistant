@@ -24,7 +24,7 @@ An SMS-first scheduling assistant for a small home-cleaning business. Clients re
 
 ## Status
 
-The backend scaffold exposes a health endpoint and a read-only calendar API backed by a synthetic local adapter. Booking writes remain disabled until the pilot policy in issue #1 and transactional persistence in issues #5–#7 are implemented. No production scheduling service has been deployed.
+The backend scaffold exposes a health endpoint and a read-only calendar API backed by a synthetic local adapter. A deterministic availability calculator accepts explicit pilot policy values, but is not wired to live configuration while issue #1 is unanswered. Booking writes remain disabled until the pilot policy and transactional persistence in issues #6–#7 are implemented. No production scheduling service has been deployed.
 
 ## Local backend
 
