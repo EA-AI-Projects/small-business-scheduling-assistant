@@ -5,7 +5,7 @@ read seam is shared by the API and future SMS adapter; neither adapter owns rule
 """
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Protocol
 
@@ -27,6 +27,7 @@ class CalendarEvent:
     status: CalendarStatus
     hold_expires_at: datetime | None = None
     buffer_minutes: int = 0
+    duration_minutes: int | None = None
 
     def __post_init__(self) -> None:
         if self.start_at.tzinfo is None or self.end_at.tzinfo is None:
@@ -39,6 +40,11 @@ class CalendarEvent:
             raise ValueError("Hold expiry must be timezone-aware")
         if self.buffer_minutes < 0:
             raise ValueError("Buffer snapshot cannot be negative")
+        if self.duration_minutes is not None and (
+            self.duration_minutes <= 0
+            or self.end_at - self.start_at != timedelta(minutes=self.duration_minutes)
+        ):
+            raise ValueError("Duration snapshot must match the event interval")
 
     def occupies_time(self, now: datetime) -> bool:
         if self.status in (CalendarStatus.CONFIRMED, CalendarStatus.UNAVAILABLE):
