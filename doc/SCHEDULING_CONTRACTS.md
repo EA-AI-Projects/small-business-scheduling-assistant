@@ -1,6 +1,7 @@
 # Scheduling service contracts
 
-**Status:** implementation contract, 2026-09-26  
+**Status:** implementation contract, 2026-09-26
+
 **Related:** [PRD](PRD.md), [HLD](HLD.md), [data architecture](ARCHITECTURE.md#5-data-architecture-and-conflict-correctness), [issue #3](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/issues/3)
 
 The scheduling service is the sole writer of appointments, holds, calendar blocks, audit events, and notification intents. SMS and owner UI call the same operations. Every successful state-changing operation returns the persisted state and its calendar revision; callers must not announce success before that response. Times are RFC 3339 UTC instants at the boundary and are rendered in the configured business timezone. Intervals are half-open `[start_at, end_at)`.
