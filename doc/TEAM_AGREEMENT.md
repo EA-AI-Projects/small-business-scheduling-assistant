@@ -15,8 +15,8 @@ This agreement governs work on the Small Business Scheduling Assistant. Enrique 
 | A business rule or priority is unclear | Answer the numbered questions in the issue, including any constraints or examples. A partial answer is fine. | Mark `needs-owner-input`, ask the smallest specific question, and explain what work it blocks. Continue independent work. |
 | Enrique answers an issue | No label, status, or closure action is needed. | Read the answer, confirm which questions it resolves, record the decision in the relevant docs, change the ownership label to `agent-owned` when ready, and resume work. If an answer is incomplete, ask only the remaining question. |
 | An issue is ready for implementation | Clarify priorities if asked. | Own the next step, implement in dependency order, and keep the board and issue current. Delegate bounded tasks when useful; review and integrate their results. |
-| A change is ready for review | Review the linked pull request and answer any requested product questions. | Explain the change, validation, remaining risks, and exact review action. Address review comments and failing checks. |
-| An external action needs approval | Authorize the specific merge, deployment, purchase, or other irreversible action when satisfied. | Prepare a concrete, reviewable result first. Perform the action after authorization and record the outcome. |
+| A change is ready for product review | Review the described behavior and answer any requested product questions. | Complete independent agent review and validation first, mark the PR ready, then explain the change, risks, and exact merge order. |
+| A merge or other external action needs approval | Explicitly authorize each merge in a PR comment or the manager chat; authorize a deployment, purchase, or other irreversible action separately. | Prepare a concrete, reviewable result first. Perform only the authorized action and record the outcome. |
 
 An answer on GitHub is enough to hand work back to the manager. If Enrique answers in chat, the manager records the decision on the issue so the board remains understandable without chat history. Enrique should leave the issue open; the manager closes it after the acceptance checks are met and the change is merged and verified.
 
@@ -26,6 +26,16 @@ An answer on GitHub is enough to hand work back to the manager. If Enrique answe
 - Add `blocked` only when a named dependency prevents the next owner from progressing. State the dependency and what will unblock it in the issue. It may coexist with an ownership label.
 - `Todo` means unstarted; `In Progress` means implementation or review is underway; `Done` means acceptance checks passed and the merged change was verified. A pending pull request remains `In Progress`.
 - The manager links pull requests to issues and updates GitHub at meaningful transitions: start, blocker, review request, merge, and completion. Routine checks without a change do not need comments.
+
+## Pull request review and merge
+
+1. A draft PR means agent implementation or validation is incomplete. Do not ask Enrique to review or merge a draft.
+2. Before marking a PR ready, have an independent agent review its diff against the linked issue acceptance checks. The manager addresses findings, records that review in a PR comment, and reruns focused tests, lint/type checks, and any GitHub checks. State explicitly when no GitHub check runs exist; local checks are not CI.
+3. Once the independent review and validation pass, the manager marks the PR ready and gives Enrique a concise product/behavior review request, material risks, and the exact stack order. Enrique reviews business behavior rather than serving as the only code reviewer.
+4. Enrique explicitly authorizes **each** merge in a PR comment or the manager chat. The manager performs the merge after that authorization, reconciles downstream branches and bases, verifies the merged result, and only then closes the linked issues and marks them Done. For the current stack the order is [#8](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/pull/8) → [#9](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/pull/9) → [#10](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/pull/10).
+5. PRs use Enrique's `ealemank` GitHub identity, so he cannot submit a formal GitHub approval on his own PR. His PR comment or manager-chat authorization is the approval record. The independent agent's review is recorded in the PR discussion.
+
+At this agreement's adoption, PRs #8–#10 have no GitHub check runs. Report local tests and checks by name; do not describe them as passing CI.
 
 ## Working rules
 
