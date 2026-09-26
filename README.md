@@ -25,7 +25,7 @@ An SMS-first scheduling assistant for a small home-cleaning business. Clients re
 
 ## Status
 
-The backend scaffold exposes a health endpoint and a read-only calendar API backed by a synthetic local adapter. A deterministic availability calculator accepts explicit pilot policy values, but is not wired to live configuration while issue #1 is unanswered. Booking writes remain disabled until the pilot policy and transactional persistence in issues #6–#7 are implemented. No production scheduling service has been deployed.
+The backend exposes a health endpoint and read-only calendar and availability APIs backed by a synthetic local adapter. The owner-approved pilot policy is encoded as a default for local tests; the DynamoDB adapter requires that policy to be persisted before booking. A hold command now uses revision-guarded atomic writes, while authenticated booking routes and later appointment transitions remain under development. No production scheduling service has been deployed.
 
 ## Local backend
 

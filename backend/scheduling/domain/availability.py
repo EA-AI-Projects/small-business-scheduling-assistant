@@ -44,6 +44,8 @@ class AvailabilityPolicy:
     minimum_visit_gap_minutes: int
     opening_buffer_minutes: int
     closing_buffer_minutes: int
+    hold_minutes: int = 1440
+    maximum_buffer_minutes: int = 30
     date_exceptions: dict[date, tuple[LocalWindow, ...]] = field(default_factory=dict)
     holiday_calendar: HolidayCalendar | None = None
 
@@ -55,6 +57,10 @@ class AvailabilityPolicy:
             raise ValueError("Horizon and slot increment must be positive")
         if self.maximum_visit_minutes <= 0:
             raise ValueError("Maximum visit duration must be positive")
+        if self.hold_minutes <= 0:
+            raise ValueError("Hold duration must be positive")
+        if self.maximum_buffer_minutes < self.minimum_visit_gap_minutes:
+            raise ValueError("Maximum buffer must cover the configured visit gap")
         if min(
             self.minimum_visit_gap_minutes,
             self.opening_buffer_minutes,
