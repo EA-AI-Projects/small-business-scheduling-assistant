@@ -219,6 +219,35 @@ class DynamoDBCalendarRepository:
             ),
         )
 
+    def due_hold_ids(self, now: datetime, limit: int) -> tuple[str, ...]:
+        """Use the eventual index for wake-up only; callers strongly reread metadata."""
+        if limit <= 0:
+            raise ValueError("Due-hold query limit must be positive")
+        ids: list[str] = []
+        last_key: dict[str, Any] | None = None
+        while len(ids) < limit:
+            arguments: dict[str, Any] = {
+                "TableName": self._table,
+                "IndexName": "HoldDueIndex",
+                "KeyConditionExpression": "hold_due_pk = :state AND hold_due_sk <= :due",
+                "ExpressionAttributeValues": {
+                    ":state": {"S": "HOLD#PENDING"},
+                    ":due": {"S": f"{_instant(now)}#~"},
+                },
+                "Limit": limit - len(ids),
+            }
+            if last_key is not None:
+                arguments["ExclusiveStartKey"] = last_key
+            page = self._client.query(**arguments)
+            ids.extend(
+                item["PK"]["S"].removeprefix("APPOINTMENT#")
+                for item in page.get("Items", ())
+            )
+            last_key = page.get("LastEvaluatedKey")
+            if not last_key:
+                break
+        return tuple(ids)
+
     def read_replacement_guard(
         self, business_id: str, original_id: str
     ) -> ReplacementGuard | None:
@@ -349,6 +378,8 @@ class DynamoDBCalendarRepository:
             "duration_minutes": {"N": str(hold.duration_minutes)},
             "buffer_minutes": {"N": str(hold.buffer_minutes)},
             "version": {"N": "1"},
+            "hold_due_pk": {"S": "HOLD#PENDING"},
+            "hold_due_sk": {"S": f"{_instant(hold.hold_expires_at)}#{hold.hold_id}"},
         }
         if hold.replaces_appointment_id is not None:
             metadata["replaces_appointment_id"] = {"S": hold.replaces_appointment_id}
