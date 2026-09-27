@@ -82,6 +82,14 @@ def test_hold_transaction_contains_revision_metadata_event_replay_audit_and_noti
     assert all(write["Put"]["ConditionExpression"] == "attribute_not_exists(PK)" for write in writes[1:])
     sort_keys = [write["Put"]["Item"]["SK"]["S"] for write in writes[1:]]
     assert "META" in sort_keys
+    metadata = next(
+        write["Put"]["Item"] for write in writes[1:]
+        if write["Put"]["Item"]["SK"]["S"] == "META"
+    )
+    assert metadata["hold_due_pk"] == {"S": "HOLD#PENDING"}
+    assert metadata["hold_due_sk"] == {
+        "S": f"{hold.hold_expires_at.isoformat(timespec='microseconds')}#hold-1"
+    }
     assert any(key.startswith("EVENT#") for key in sort_keys)
     assert any(key.startswith("IDEMPOTENCY#") for key in sort_keys)
     assert any(key.startswith("AUDIT#") for key in sort_keys)
@@ -93,6 +101,33 @@ def test_hold_transaction_contains_revision_metadata_event_replay_audit_and_noti
     assert all(item["outbox_due_pk"] == {"S": "OUTBOX#PENDING"} for item in notices)
     assert all(item["dispatch_after"] == item["next_attempt_at"] for item in notices)
     assert all(item["created_at"] == {"S": start.isoformat(timespec="microseconds")} for item in notices)
+
+
+def test_due_hold_index_query_is_bounded_and_paginates() -> None:
+    class DueClient(RecordingClient):
+        def query(self, **kwargs: Any) -> dict[str, Any]:
+            self.queries.append(kwargs)
+            if len(self.queries) == 1:
+                return {
+                    "Items": [{"PK": {"S": "APPOINTMENT#hold-1"}}],
+                    "LastEvaluatedKey": {"PK": {"S": "APPOINTMENT#hold-1"}},
+                }
+            return {"Items": [{"PK": {"S": "APPOINTMENT#hold-2"}}]}
+
+    client = DueClient()
+    repository = DynamoDBCalendarRepository(client, "scheduling")
+    now = datetime(2026, 9, 29, 16, tzinfo=UTC)
+
+    assert repository.due_hold_ids(now, 2) == ("hold-1", "hold-2")
+    assert client.queries[0]["IndexName"] == "HoldDueIndex"
+    assert client.queries[0]["Limit"] == 2
+    assert client.queries[1]["Limit"] == 1
+    assert client.queries[1]["ExclusiveStartKey"] == {
+        "PK": {"S": "APPOINTMENT#hold-1"}
+    }
+    assert client.queries[0]["ExpressionAttributeValues"][":due"] == {
+        "S": f"{now.isoformat(timespec='microseconds')}#~"
+    }
 
 
 def test_transaction_cancellation_retries_only_expected_conditional_races() -> None:

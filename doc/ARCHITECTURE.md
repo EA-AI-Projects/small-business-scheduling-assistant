@@ -188,8 +188,9 @@ Approval also checks `hold_expires_at > decision_at` against the scheduling serv
 ### 5.4 Holds and expiry
 
 - Pending request stores `hold_expires_at` in UTC. Availability code treats a hold as inactive as soon as `hold_expires_at <= now`, regardless of whether cleanup has run.
+- Pending appointment metadata carries `hold_due_pk = HOLD#PENDING` and `hold_due_sk = <expiry UTC>#<hold_id>` for a sparse `HoldDueIndex` GSI projecting the base `PK` and `SK`. A terminal transition removes those attributes in the same transaction. The scheduled worker queries a bounded, paginated due batch, then strongly rereads each base appointment because the index is eventually consistent.
 - EventBridge invokes a lightweight expiry job periodically (e.g. every 5–15 minutes, exact cadence TBD) to transition expired holds and enqueue client notices.
-- The expiry job is idempotent. Approval and expiry use conditional status/version writes; approval also requires `hold_expires_at > now`. A late approval cannot confirm an expired request, even before cleanup.
+- The expiry job uses a stable per-hold/version idempotency key and the existing lifecycle transaction. Approval and expiry use conditional status/version writes; approval also requires `hold_expires_at > now`. A late approval cannot confirm an expired request, even before cleanup. Stale index entries and lost approval races are skipped; unexpected errors fail the invocation for EventBridge retry. The worker logs examined, expired, stale, and oldest-overdue metrics. Deployment must configure retries and alert on repeated failures or growing overdue age (issue #23).
 - DynamoDB TTL can be used only to clean up disposable records after their retention period; TTL is asynchronous and must never be relied on for availability or exact expiration timing.
 
 ## 6. Notifications and reliability
