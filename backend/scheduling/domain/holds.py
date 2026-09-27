@@ -8,6 +8,7 @@ from typing import Protocol
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+from scheduling.domain.appointments import Appointment, ReplacementGuard
 from scheduling.domain.availability import AvailabilityPolicy, available_starts
 from scheduling.domain.calendar import CalendarEvent, CalendarSnapshot, CalendarStatus
 
@@ -30,6 +31,14 @@ class TooManyConflicts(Exception):
     """The bounded revision retry budget was exhausted."""
 
 
+class InvalidReplacement(Exception):
+    """The original is not a confirmed visit owned by this client."""
+
+
+class ReplacementPending(Exception):
+    """This original already has an active replacement request."""
+
+
 @dataclass(frozen=True)
 class CreateHold:
     business_id: str
@@ -38,6 +47,7 @@ class CreateHold:
     idempotency_key: str
     start_at: datetime
     duration_minutes: int
+    replaces_appointment_id: str | None = None
 
     def __post_init__(self) -> None:
         if not all((self.business_id, self.actor_id, self.client_id, self.idempotency_key)):
@@ -53,6 +63,7 @@ class CreateHold:
                 "client_id": self.client_id,
                 "start_at": self.start_at.astimezone(UTC).isoformat(),
                 "duration_minutes": self.duration_minutes,
+                "replaces_appointment_id": self.replaces_appointment_id,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -71,6 +82,7 @@ class PendingHold:
     duration_minutes: int
     buffer_minutes: int
     calendar_revision: int
+    replaces_appointment_id: str | None = None
 
     def calendar_event(self) -> CalendarEvent:
         return CalendarEvent(
@@ -106,6 +118,7 @@ class HoldCommit:
     result: PendingHold
     audit_id: str
     outbox: tuple[OutboxIntent, ...]
+    created_at: datetime
 
 
 class HoldRepository(Protocol):
@@ -120,6 +133,12 @@ class HoldRepository(Protocol):
     def read_calendar_for_hold(
         self, business_id: str, start_at: datetime, end_at: datetime, policy: AvailabilityPolicy
     ) -> CalendarSnapshot: ...
+
+    def read_appointment(self, appointment_id: str) -> Appointment | None: ...
+
+    def read_replacement_guard(
+        self, business_id: str, original_id: str
+    ) -> ReplacementGuard | None: ...
 
     def commit_hold(self, expected_revision: int, commit: HoldCommit) -> None: ...
 
@@ -144,6 +163,21 @@ class HoldService:
             # Revision is intentionally read before the policy and event snapshot.
             revision = self._repository.read_revision(command.business_id)
             policy = self._repository.read_policy(command.business_id)
+            original: Appointment | None = None
+            if command.replaces_appointment_id is not None:
+                original = self._repository.read_appointment(command.replaces_appointment_id)
+                if (
+                    original is None
+                    or original.business_id != command.business_id
+                    or original.client_id != command.client_id
+                    or original.status != CalendarStatus.CONFIRMED
+                ):
+                    raise InvalidReplacement("Original confirmed appointment was not found")
+                guard = self._repository.read_replacement_guard(
+                    command.business_id, original.appointment_id
+                )
+                if guard is not None and guard.expires_at > now:
+                    raise ReplacementPending("Original already has an active replacement")
             snapshot = self._repository.read_calendar_for_hold(
                 command.business_id,
                 command.start_at,
@@ -152,9 +186,13 @@ class HoldService:
             )
             if snapshot.revision != revision:
                 continue
+            events = tuple(
+                event for event in snapshot.events
+                if original is None or event.event_id != original.appointment_id
+            )
             local_day = command.start_at.astimezone(ZoneInfo(policy.timezone)).date()
             starts = available_starts(
-                policy, local_day, command.duration_minutes, snapshot.events, now
+                policy, local_day, command.duration_minutes, events, now
             )
             start = command.start_at.astimezone(UTC)
             if start not in starts:
@@ -164,7 +202,14 @@ class HoldService:
                 if full_snapshot.revision != revision:
                     continue
                 alternatives = available_starts(
-                    policy, local_day, command.duration_minutes, full_snapshot.events, now
+                    policy,
+                    local_day,
+                    command.duration_minutes,
+                    tuple(
+                        event for event in full_snapshot.events
+                        if original is None or event.event_id != original.appointment_id
+                    ),
+                    now,
                 )
                 raise SlotConflict(alternatives[:5])
             result = PendingHold(
@@ -177,6 +222,7 @@ class HoldService:
                 duration_minutes=command.duration_minutes,
                 buffer_minutes=policy.minimum_visit_gap_minutes,
                 calendar_revision=revision + 1,
+                replaces_appointment_id=command.replaces_appointment_id,
             )
             commit = HoldCommit(
                 command=command,
@@ -187,6 +233,7 @@ class HoldService:
                     OutboxIntent(f"{hold_id}#owner", hold_id, "owner", "hold-request"),
                     OutboxIntent(f"{hold_id}#client", hold_id, "client", "hold-pending"),
                 ),
+                created_at=now.astimezone(UTC),
             )
             try:
                 self._repository.commit_hold(revision, commit)

@@ -4,6 +4,7 @@ from collections import defaultdict
 from datetime import datetime
 from threading import RLock
 
+from scheduling.domain.appointments import Appointment, ReplacementGuard
 from scheduling.domain.availability import AvailabilityPolicy, pilot_policy
 from scheduling.domain.calendar import CalendarEvent, CalendarSnapshot
 from scheduling.domain.holds import (
@@ -12,6 +13,7 @@ from scheduling.domain.holds import (
     IdempotencyRecord,
     RevisionConflict,
 )
+from scheduling.domain.lifecycle import AppointmentCommand, TransitionCommit, TransitionRecord
 
 
 class InMemoryCalendarRepository:
@@ -21,7 +23,10 @@ class InMemoryCalendarRepository:
         self._revisions: dict[str, int] = defaultdict(int)
         self._policies: dict[str, AvailabilityPolicy] = {}
         self._idempotency: dict[tuple[str, str, str, str], IdempotencyRecord] = {}
+        self._transition_idempotency: dict[tuple[str, str, str, str], TransitionRecord] = {}
         self._holds: dict[str, HoldCommit] = {}
+        self._appointments: dict[str, Appointment] = {}
+        self._replacement_guards: dict[tuple[str, str], ReplacementGuard] = {}
         self._outbox: dict[str, object] = {}
         self._audit: dict[str, object] = {}
 
@@ -45,9 +50,119 @@ class InMemoryCalendarRepository:
             key = self._idempotency_key(commit.command)
             if key in self._idempotency:
                 raise RevisionConflict("Idempotency record already exists")
+            original_id = commit.result.replaces_appointment_id
+            if original_id is not None:
+                guard_key = (business_id, original_id)
+                guard = self._replacement_guards.get(guard_key)
+                if guard is not None and guard.expires_at > commit.created_at:
+                    raise RevisionConflict("Original already has an active replacement")
+                self._replacement_guards[guard_key] = ReplacementGuard(
+                    original_id, commit.result.hold_id, commit.result.hold_expires_at
+                )
             self._events[business_id] += (commit.result.calendar_event(),)
             self._holds[commit.result.hold_id] = commit
+            self._appointments[commit.result.hold_id] = Appointment(
+                appointment_id=commit.result.hold_id,
+                business_id=business_id,
+                client_id=commit.result.client_id,
+                start_at=commit.result.start_at,
+                end_at=commit.result.end_at,
+                status=commit.result.calendar_event().status,
+                hold_expires_at=commit.result.hold_expires_at,
+                duration_minutes=commit.result.duration_minutes,
+                buffer_minutes=commit.result.buffer_minutes,
+                version=1,
+                replaces_appointment_id=original_id,
+            )
             self._idempotency[key] = IdempotencyRecord(commit.request_hash, commit.result)
+            self._audit[commit.audit_id] = commit
+            for intent in commit.outbox:
+                self._outbox[intent.outbox_id] = intent
+            self._revisions[business_id] += 1
+
+    def read_appointment(self, appointment_id: str) -> Appointment | None:
+        with self._lock:
+            return self._appointments.get(appointment_id)
+
+    def read_replacement_guard(
+        self, business_id: str, original_id: str
+    ) -> ReplacementGuard | None:
+        with self._lock:
+            return self._replacement_guards.get((business_id, original_id))
+
+    @staticmethod
+    def _transition_key(command: AppointmentCommand) -> tuple[str, str, str, str]:
+        return (
+            command.business_id,
+            command.actor_id,
+            command.operation.value,
+            command.idempotency_key,
+        )
+
+    def read_transition_idempotency(
+        self, command: AppointmentCommand
+    ) -> TransitionRecord | None:
+        with self._lock:
+            return self._transition_idempotency.get(self._transition_key(command))
+
+    def commit_transition(self, expected_revision: int, commit: TransitionCommit) -> None:
+        with self._lock:
+            business_id = commit.command.business_id
+            if self._revisions[business_id] != expected_revision:
+                raise RevisionConflict("Calendar revision changed")
+            current = self._appointments.get(commit.before.appointment_id)
+            if current != commit.before:
+                raise RevisionConflict("Appointment status or version changed")
+            key = self._transition_key(commit.command)
+            if key in self._transition_idempotency:
+                raise RevisionConflict("Idempotency record already exists")
+            if commit.command.operation.value == "approve" and (
+                current.hold_expires_at is None
+                or current.hold_expires_at <= commit.decision_at
+            ):
+                raise RevisionConflict("Hold expired before approval commit")
+            if commit.command.operation.value == "expire" and (
+                current.hold_expires_at is None
+                or current.hold_expires_at > commit.decision_at
+            ):
+                raise RevisionConflict("Hold is not yet expired")
+
+            replaced = commit.result.replaced_appointment
+            if replaced is not None:
+                original = self._appointments.get(replaced.appointment_id)
+                guard_key = (business_id, replaced.appointment_id)
+                guard = self._replacement_guards.get(guard_key)
+                if (
+                    original is None
+                    or original.status.value != "CONFIRMED"
+                    or original.version + 1 != replaced.version
+                    or guard is None
+                    or guard.replacement_id != current.appointment_id
+                    or guard.expires_at <= commit.decision_at
+                ):
+                    raise RevisionConflict("Replacement original changed")
+
+            self._appointments[current.appointment_id] = commit.result.appointment
+            if replaced is not None:
+                self._appointments[replaced.appointment_id] = replaced
+            removed = {current.appointment_id}
+            if replaced is not None:
+                removed.add(replaced.appointment_id)
+            self._events[business_id] = tuple(
+                event for event in self._events[business_id] if event.event_id not in removed
+            )
+            if commit.result.appointment.occupies_time(commit.decision_at):
+                self._events[business_id] += (commit.result.appointment.calendar_event(),)
+
+            original_id = current.replaces_appointment_id
+            if original_id is not None and commit.clear_replacement_guard:
+                guard_key = (business_id, original_id)
+                guard = self._replacement_guards.get(guard_key)
+                if guard is not None and guard.replacement_id == current.appointment_id:
+                    del self._replacement_guards[guard_key]
+            self._transition_idempotency[key] = TransitionRecord(
+                commit.request_hash, commit.result
+            )
             self._audit[commit.audit_id] = commit
             for intent in commit.outbox:
                 self._outbox[intent.outbox_id] = intent
