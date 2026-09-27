@@ -86,6 +86,13 @@ def test_hold_transaction_contains_revision_metadata_event_replay_audit_and_noti
     assert any(key.startswith("IDEMPOTENCY#") for key in sort_keys)
     assert any(key.startswith("AUDIT#") for key in sort_keys)
     assert sum(key.startswith("OUTBOX#") for key in sort_keys) == 2
+    notices = [
+        write["Put"]["Item"] for write in writes[1:]
+        if write["Put"]["Item"]["SK"]["S"].startswith("OUTBOX#")
+    ]
+    assert all(item["outbox_due_pk"] == {"S": "OUTBOX#PENDING"} for item in notices)
+    assert all(item["dispatch_after"] == item["next_attempt_at"] for item in notices)
+    assert all(item["created_at"] == {"S": start.isoformat(timespec="microseconds")} for item in notices)
 
 
 def test_transaction_cancellation_retries_only_expected_conditional_races() -> None:

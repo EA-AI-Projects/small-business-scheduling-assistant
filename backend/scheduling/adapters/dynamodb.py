@@ -5,6 +5,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from hashlib import sha256
 from typing import Any, Protocol
 
+from scheduling.adapters.outbox_aws import due_keys
 from scheduling.domain.appointments import Appointment, ReplacementGuard
 from scheduling.domain.availability import AvailabilityPolicy, HolidayCalendar, LocalWindow
 from scheduling.domain.calendar import CalendarEvent, CalendarSnapshot, CalendarStatus
@@ -22,6 +23,7 @@ from scheduling.domain.lifecycle import (
     TransitionRecord,
     TransitionResult,
 )
+from scheduling.domain.outbox import DeliveryState
 
 
 class DynamoClient(Protocol):
@@ -368,12 +370,16 @@ class DynamoDBCalendarRepository:
         outbox = [
             put({
                 **self._business_key(hold.business_id, f"OUTBOX#{intent.outbox_id}"),
+                **due_keys(DeliveryState(intent.delivery_state), commit.created_at, intent.outbox_id),
                 "outbox_id": {"S": intent.outbox_id},
                 "hold_id": {"S": hold.hold_id},
                 "recipient": {"S": intent.recipient},
                 "template": {"S": intent.template},
                 "delivery_state": {"S": intent.delivery_state},
-                "next_attempt_at": {"S": _instant(datetime.now(UTC))},
+                "created_at": {"S": _instant(commit.created_at)},
+                "next_attempt_at": {"S": _instant(commit.created_at)},
+                "dispatch_after": {"S": _instant(commit.created_at)},
+                "attempts": {"N": "0"},
                 "event_version": {"N": "1"},
             }) for intent in commit.outbox
         ]
@@ -592,12 +598,16 @@ class DynamoDBCalendarRepository:
         for intent in commit.outbox:
             writes.append(fresh_put({
                 **self._business_key(before.business_id, f"OUTBOX#{intent.outbox_id}"),
+                **due_keys(DeliveryState(intent.delivery_state), commit.decision_at, intent.outbox_id),
                 "outbox_id": {"S": intent.outbox_id},
                 "appointment_id": {"S": before.appointment_id},
                 "recipient": {"S": intent.recipient},
                 "template": {"S": intent.template},
                 "delivery_state": {"S": intent.delivery_state},
+                "created_at": {"S": _instant(commit.decision_at)},
                 "next_attempt_at": {"S": _instant(commit.decision_at)},
+                "dispatch_after": {"S": _instant(commit.decision_at)},
+                "attempts": {"N": "0"},
                 "event_version": {"N": str(after.version)},
             }))
         if len(writes) > 100:
