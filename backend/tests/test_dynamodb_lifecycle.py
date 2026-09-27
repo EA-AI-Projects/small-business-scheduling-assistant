@@ -88,6 +88,12 @@ def test_approve_checks_expiry_and_writes_metadata_event_audit_and_outbox_atomic
         write.get("Put", {}).get("Item", {}).get("SK", {}).get("S", "").startswith("OUTBOX#")
         for write in writes
     )
+    notice = next(
+        write["Put"]["Item"] for write in writes
+        if write.get("Put", {}).get("Item", {}).get("SK", {}).get("S", "").startswith("OUTBOX#")
+    )
+    assert notice["outbox_due_pk"] == {"S": "OUTBOX#PENDING"}
+    assert notice["dispatch_after"] == notice["next_attempt_at"]
 
 
 def test_decline_deletes_calendar_event_and_expiry_uses_opposite_time_condition() -> None:
