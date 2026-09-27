@@ -70,6 +70,7 @@ def test_hold_transaction_contains_revision_metadata_event_replay_audit_and_noti
             OutboxIntent("owner-1", "hold-1", "owner", "hold-request"),
             OutboxIntent("client-1", "hold-1", "client", "hold-pending"),
         ),
+        start,
     )
 
     repository.commit_hold(7, commit)
@@ -104,7 +105,7 @@ def test_transaction_cancellation_retries_only_expected_conditional_races() -> N
     command = CreateHold("business-1", "client-1", "client-1", "key-1", start, 60)
     hold = PendingHold("hold-1", "business-1", "client-1", start, start.replace(hour=17),
                        start.replace(day=30), 60, 30, 8)
-    commit = HoldCommit(command, command.request_hash(), hold, "audit-1", ())
+    commit = HoldCommit(command, command.request_hash(), hold, "audit-1", (), start)
 
     with pytest.raises(RevisionConflict):
         DynamoDBCalendarRepository(
@@ -118,3 +119,33 @@ def test_transaction_cancellation_retries_only_expected_conditional_races() -> N
         DynamoDBCalendarRepository(
             CancellingClient([{"Code": "ThrottlingError"}]), "scheduling"
         ).commit_hold(7, commit)
+
+
+def test_replacement_hold_claims_original_guard_in_same_transaction() -> None:
+    client = RecordingClient()
+    repository = DynamoDBCalendarRepository(client, "scheduling")
+    start = datetime(2026, 9, 29, 16, tzinfo=UTC)
+    command = CreateHold(
+        "business-1", "client-1", "client-1", "replacement-key", start, 60,
+        "original-1",
+    )
+    hold = PendingHold(
+        "replacement-1", "business-1", "client-1", start, start.replace(hour=17),
+        start.replace(day=30), 60, 30, 8, "original-1",
+    )
+    commit = HoldCommit(
+        command, command.request_hash(), hold, "audit-1",
+        (
+            OutboxIntent("owner-1", hold.hold_id, "owner", "hold-request"),
+            OutboxIntent("client-1", hold.hold_id, "client", "hold-pending"),
+        ),
+        start,
+    )
+
+    repository.commit_hold(7, commit)
+
+    writes = client.transactions[0]["TransactItems"]
+    guard = writes[-1]["Put"]
+    assert guard["Item"]["SK"] == {"S": "REPLACEMENT#original-1"}
+    assert guard["Item"]["replacement_id"] == {"S": "replacement-1"}
+    assert guard["ConditionExpression"] == "attribute_not_exists(PK) OR expires_at <= :now"
