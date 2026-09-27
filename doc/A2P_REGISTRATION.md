@@ -1,6 +1,6 @@
 # A2P registration notes for the scheduling pilot
 
-The public policy pages are in `pages/`. They describe the Small Business Scheduling Assistant proof of concept and contain no placeholder brand or contact details. The stated support email is `ealeman.kikito@gmail.com`. Review the policies against actual behavior before publishing or submitting them to Twilio.
+The public policy pages are in `docs/`. They describe the Small Business Scheduling Assistant proof of concept and contain no placeholder brand or contact details. The stated support email is `ealeman.kikito@gmail.com`. Review the policies against actual behavior before publishing or submitting them to Twilio.
 
 ## Sender and consent
 

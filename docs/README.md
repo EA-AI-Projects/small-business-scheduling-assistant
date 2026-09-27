@@ -1,8 +1,8 @@
-# Scheduling SMS policy pages
+# Scheduling SMS policy site
 
 These static pages are prepared for GitHub Pages. They identify the Small Business Scheduling Assistant proof of concept and use the supplied support email. Confirm that the statements about data use, vendors, retention, and consent match the actual service before publishing. The pages intentionally do not name the person behind the registered Twilio brand; that may cause a brand mismatch during A2P review.
 
-The site source is in `/pages` on branch `codex/a2p-policy-pages`. GitHub's branch publishing setting cannot use `/pages`, so `.github/workflows/deploy-pages.yml` uploads this folder. In **Settings → Pages**, choose **GitHub Actions** as the source. Then run the **Deploy policy pages** workflow from the **Actions** tab if it has not already run successfully. The expected direct links are:
+These files are published on branch `codex/a2p-policy-pages`. In **Settings → Pages**, choose **Deploy from a branch**, branch **codex/a2p-policy-pages**, folder **/docs**, and save. If the branch is later merged into `main`, change the Pages source to `main` and **/docs**. The expected direct links are:
 
 - `https://ea-ai-projects.github.io/small-business-scheduling-assistant/privacy-policy/`
 - `https://ea-ai-projects.github.io/small-business-scheduling-assistant/terms-and-conditions/`
