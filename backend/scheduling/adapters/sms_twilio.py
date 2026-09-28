@@ -44,7 +44,8 @@ class TwilioSmsSender:
         self._timezone = ZoneInfo(timezone)
         if status_callback is not None:
             parsed = urlsplit(status_callback)
-            if parsed.scheme != "https" or not parsed.netloc or parsed.path != "/webhooks/sms/status":
+            if (parsed.scheme != "https" or not parsed.netloc
+                    or parsed.path != "/webhooks/sms/status" or parsed.query or parsed.fragment):
                 raise ValueError("Status callback needs an exact HTTPS URL")
         self._status_callback = status_callback
 

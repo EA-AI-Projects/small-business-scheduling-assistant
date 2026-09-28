@@ -21,7 +21,7 @@ def create_twilio_ingress_app(service: SmsIngressService, auth_token: str,
                               business_id: str | None = None) -> FastAPI:
     """The configured public URL is trusted; proxy Host headers never define the signed URL."""
     parsed = urlsplit(inbound_url)
-    if not auth_token or parsed.scheme != "https" or not parsed.netloc or parsed.query:
+    if not auth_token or parsed.scheme != "https" or not parsed.netloc or parsed.query or parsed.fragment:
         raise ValueError("Twilio ingress needs a token and exact HTTPS webhook URL")
     if parsed.path != "/webhooks/sms/inbound":
         raise ValueError("Twilio ingress URL must name the inbound webhook path")
@@ -30,7 +30,8 @@ def create_twilio_ingress_app(service: SmsIngressService, auth_token: str,
     if status_url is not None:
         status_parsed = urlsplit(status_url)
         if (status_parsed.scheme != "https" or not status_parsed.netloc
-                or status_parsed.query or status_parsed.path != "/webhooks/sms/status"):
+                or status_parsed.query or status_parsed.fragment
+                or status_parsed.path != "/webhooks/sms/status"):
             raise ValueError("Twilio status needs an exact HTTPS webhook URL")
     validator = RequestValidator(auth_token)
     now = clock or (lambda: datetime.now(UTC))
