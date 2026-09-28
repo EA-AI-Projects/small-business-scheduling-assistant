@@ -93,7 +93,7 @@ class DynamoSmsIngressStore(SmsIngressStore):
                           optout["opted_out_at"]["S"] if optout is not None else None)
             if (stopped_at is not None and consent is not None and
                     consent.agreed_at > datetime.fromisoformat(stopped_at)):
-                if optout is not None:
+                if optout is not None and "legal_hold_reason" not in optout:
                     writes.append({"Delete": {
                         "TableName": self._table,
                         "Key": self._key(receipt.business_id, f"SMS_OPTOUT#{receipt.sender}"),
@@ -143,8 +143,7 @@ class DynamoSmsIngressStore(SmsIngressStore):
         raise RuntimeError("SMS thread changed during every receipt attempt")
 
     def is_opted_out(self, business_id: str, phone_e164: str) -> bool:
-        return (self._get(business_id, f"SMS_SUPPRESS#{phone_e164}") is not None or
-                self._get(business_id, f"SMS_OPTOUT#{phone_e164}") is not None)
+        return self._get(business_id, f"SMS_SUPPRESS#{phone_e164}") is not None
 
     def record_outbound(self, business_id: str, phone_e164: str,
                         provider_id: str, sent_at: datetime) -> None:
@@ -335,8 +334,9 @@ class DynamoSmsIngressStore(SmsIngressStore):
                         continue
                     thread_key = f"SMS_THREAD#{phone}"
                     thread = self._get(business_id, thread_key)
-                    if (thread is not None and
-                            thread.get("last_program_text_at", {}).get("S", "") > cutoff):
+                    last_text = (thread.get("last_program_text_at", thread.get("last_exchange_at", {}))
+                                 .get("S", "") if thread is not None else "")
+                    if last_text > cutoff:
                         continue
                     values = {":cutoff": {"S": cutoff}, ":recorded": item[field]}
                     try:
@@ -344,8 +344,12 @@ class DynamoSmsIngressStore(SmsIngressStore):
                             {"ConditionCheck": {
                                 "TableName": self._table,
                                 "Key": self._key(business_id, thread_key),
-                                "ConditionExpression": ("attribute_not_exists(last_program_text_at) "
-                                                        "OR last_program_text_at <= :cutoff"),
+                                "ConditionExpression": (
+                                    "last_program_text_at <= :cutoff OR "
+                                    "(attribute_not_exists(last_program_text_at) AND "
+                                    "(attribute_not_exists(last_exchange_at) OR "
+                                    "last_exchange_at <= :cutoff))"
+                                ),
                                 "ExpressionAttributeValues": {":cutoff": values[":cutoff"]},
                             }},
                             {"Delete": {

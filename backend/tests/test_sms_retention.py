@@ -36,7 +36,7 @@ class MemoryDynamo:
                 check = action["ConditionCheck"]
                 key = check["Key"]["SK"]["S"]
                 clock = ("last_program_text_at" if "last_program_text_at" in
-                         check["ConditionExpression"] else "last_exchange_at")
+                         items.get(key, {}) else "last_exchange_at")
                 if (key in items and clock in items[key] and
                         items[key][clock]["S"] > check["ExpressionAttributeValues"]
                         [":cutoff"]["S"]):
@@ -229,6 +229,38 @@ def test_purge_racing_new_legal_hold_preserves_evidence() -> None:
     assert store.purge_expired_evidence("pilot", NOW) == 1
     assert len([item for item in dynamo.items.values()
                 if "legal_hold_reason" in item]) == 1
+
+
+def test_legacy_exchange_clock_prevents_early_evidence_purge() -> None:
+    dynamo = MemoryDynamo()
+    store = DynamoSmsIngressStore(dynamo, "synthetic")
+    store.put_consent(_consent(NOW.replace(year=NOW.year - 5)))
+    dynamo.items["SMS_THREAD#+14155550101"] = {
+        "SK": {"S": "SMS_THREAD#+14155550101"},
+        "last_exchange_at": {"S": NOW.replace(year=NOW.year - 1).isoformat(
+            timespec="microseconds")},
+    }
+    assert store.purge_expired_evidence("pilot", NOW) == 0
+    assert store.read_consent("pilot", "+14155550101") is not None
+
+
+def test_start_keeps_held_stop_evidence_while_clearing_suppression() -> None:
+    dynamo = MemoryDynamo()
+    store = DynamoSmsIngressStore(dynamo, "synthetic")
+    old = NOW.replace(year=NOW.year - 5)
+    store.put_received(InboundReceipt(
+        "pilot", "SM-held-stop", "+14155550101", "+14155550000", None,
+        old, SenderRole.CLIENT, "client-1", Keyword.STOP, False,
+    ))
+    optout_key = "SMS_OPTOUT#+14155550101"
+    store.set_evidence_legal_hold("pilot", optout_key, "documented case")
+    store.put_consent(_consent(NOW))
+    store.put_received(InboundReceipt(
+        "pilot", "SM-held-start", "+14155550101", "+14155550000", None,
+        NOW + timedelta(seconds=1), SenderRole.CLIENT, "client-1", Keyword.START, False,
+    ))
+    assert "legal_hold_reason" in dynamo.items[optout_key]
+    assert not store.is_opted_out("pilot", "+14155550101")
 
 
 def test_old_stop_evidence_purges_but_suppression_remains() -> None:
