@@ -1,0 +1,393 @@
+"""Authenticated owner HTTP adapter for the persisted scheduling services.
+
+The caller supplies a token verifier. In production it must validate the Cognito
+access token (issuer, signature, expiry, token_use and client ID) before returning
+an owner principal. No request field or HTTP header can assert an actor role.
+"""
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, time
+from typing import Annotated, Protocol, cast
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from scheduling.adapters.dynamodb import DynamoClient, DynamoDBCalendarRepository
+from scheduling.domain.appointments import Appointment
+from scheduling.domain.availability import AvailabilityPolicy, HolidayCalendar, LocalWindow
+from scheduling.domain.holds import (
+    CreateHold,
+    HoldRepository,
+    HoldService,
+    IdempotencyKeyReused,
+    InvalidReplacement,
+    ReplacementPending,
+    RevisionConflict,
+    SlotConflict,
+    TooManyConflicts,
+)
+from scheduling.domain.lifecycle import (
+    Action,
+    ActorRole,
+    AppointmentCommand,
+    HoldExpired,
+    InvalidTransition,
+    LifecycleRepository,
+    LifecycleService,
+    StaleVersion,
+)
+from scheduling.domain.owner_calendar import (
+    BlockNotFound,
+    OwnerAction,
+    OwnerCalendarCommand,
+    OwnerCalendarRepository,
+    OwnerCalendarService,
+    UnavailableBlock,
+)
+from scheduling.domain.owner_policy import (
+    OwnerPolicyService,
+    PolicyCommand,
+    PolicyConflict,
+    PolicyNotConfigured,
+    PolicyRecord,
+    PolicyRepository,
+)
+
+
+@dataclass(frozen=True)
+class OwnerPrincipal:
+    actor_id: str
+    business_id: str
+
+
+class OwnerTokenVerifier(Protocol):
+    def __call__(self, token: str) -> OwnerPrincipal: ...
+
+
+class OwnerRepository(Protocol):
+    """The owner adapter needs the calendar, hold and lifecycle repository methods."""
+
+    def read_revision(self, business_id: str) -> int: ...
+    def read_calendar(self, business_id: str) -> object: ...
+    def read_pending_requests(self, business_id: str, now: datetime) -> tuple[Appointment, ...]: ...
+    def read_appointment(self, appointment_id: str) -> Appointment | None: ...
+    def read_block(self, business_id: str, block_id: str) -> UnavailableBlock | None: ...
+    def read_policy_record(self, business_id: str) -> PolicyRecord | None: ...
+
+
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class WindowBody(StrictModel):
+    opens: time
+    closes: time
+
+
+class PolicyBody(StrictModel):
+    timezone: str
+    weekly_windows: dict[int, list[WindowBody]]
+    booking_horizon_days: int = Field(gt=0)
+    slot_increment_minutes: int = Field(gt=0)
+    maximum_visit_minutes: int = Field(gt=0)
+    minimum_visit_gap_minutes: int = Field(ge=0)
+    opening_buffer_minutes: int = Field(ge=0)
+    closing_buffer_minutes: int = Field(ge=0)
+    hold_minutes: int = Field(gt=0)
+    maximum_buffer_minutes: int = Field(ge=0)
+    date_exceptions: dict[date, list[WindowBody]] = Field(default_factory=dict)
+    holiday_calendar: HolidayCalendar | None = None
+
+    @field_validator("timezone")
+    @classmethod
+    def valid_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError("Unknown business timezone") from exc
+        return value
+
+    def policy(self) -> AvailabilityPolicy:
+        def windows(items: list[WindowBody]) -> tuple[LocalWindow, ...]:
+            return tuple(LocalWindow(item.opens, item.closes) for item in items)
+
+        return AvailabilityPolicy(
+            timezone=self.timezone,
+            weekly_windows={day: windows(items) for day, items in self.weekly_windows.items()},
+            booking_horizon_days=self.booking_horizon_days,
+            slot_increment_minutes=self.slot_increment_minutes,
+            maximum_visit_minutes=self.maximum_visit_minutes,
+            minimum_visit_gap_minutes=self.minimum_visit_gap_minutes,
+            opening_buffer_minutes=self.opening_buffer_minutes,
+            closing_buffer_minutes=self.closing_buffer_minutes,
+            hold_minutes=self.hold_minutes,
+            maximum_buffer_minutes=self.maximum_buffer_minutes,
+            date_exceptions={day: windows(items) for day, items in self.date_exceptions.items()},
+            holiday_calendar=self.holiday_calendar,
+        )
+
+
+class PolicyEditBody(StrictModel):
+    expected_revision: int = Field(ge=0)
+    expected_version: int = Field(gt=0)
+    policy: PolicyBody
+
+
+class HoldBody(StrictModel):
+    client_id: str = Field(min_length=1)
+    start_at: datetime
+    duration_minutes: int = Field(gt=0)
+    replaces_appointment_id: str | None = None
+
+
+class DecisionBody(StrictModel):
+    expected_version: int = Field(gt=0)
+
+
+class EditAppointmentBody(DecisionBody):
+    start_at: datetime | None = None
+    duration_minutes: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def require_change(self) -> "EditAppointmentBody":
+        if self.start_at is None and self.duration_minutes is None:
+            raise ValueError("An appointment edit needs a start or duration")
+        return self
+
+
+class BlockBody(StrictModel):
+    expected_revision: int = Field(ge=0)
+    start_at: datetime
+    end_at: datetime
+
+
+class MoveBlockBody(BlockBody):
+    expected_version: int = Field(gt=0)
+
+
+class RemoveBlockBody(StrictModel):
+    expected_revision: int = Field(ge=0)
+    expected_version: int = Field(gt=0)
+
+
+class ManualAppointmentBody(StrictModel):
+    expected_revision: int = Field(ge=0)
+    client_id: str = Field(min_length=1)
+    start_at: datetime
+    duration_minutes: int = Field(gt=0)
+
+
+def _error(code: str, message: str, status: int, current: object | None = None) -> HTTPException:
+    detail: dict[str, object] = {"error": {"code": code, "message": message}}
+    if current is not None:
+        detail["current"] = current
+    return HTTPException(status_code=status, detail=detail)
+
+
+def create_owner_app(
+    repository: object,
+    verify_token: OwnerTokenVerifier,
+    clock: Callable[[], datetime] | None = None,
+) -> FastAPI:
+    """Mount only authenticated owner routes; local synthetic API stays separate."""
+    app = FastAPI(title="Scheduling owner API", version="0.1.0")
+    now = clock or (lambda: datetime.now(UTC))
+    security = HTTPBearer(auto_error=False)
+
+    @app.exception_handler(HTTPException)
+    def owner_http_error(_request: Request, exc: HTTPException) -> JSONResponse:
+        if isinstance(exc.detail, dict) and "error" in exc.detail:
+            return JSONResponse(status_code=exc.status_code, content=exc.detail)
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+    store = cast(OwnerRepository, repository)
+    holds = HoldService(cast(HoldRepository, repository))
+    lifecycle = LifecycleService(cast(LifecycleRepository, repository), now)
+    calendar = OwnerCalendarService(cast(OwnerCalendarRepository, repository), now)
+    policy = OwnerPolicyService(cast(PolicyRepository, repository), now)
+
+    def principal(
+        business_id: str,
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)],
+    ) -> OwnerPrincipal:
+        if credentials is None:
+            raise _error("UNAUTHORIZED", "Owner authentication is required", 401)
+        try:
+            owner = verify_token(credentials.credentials)
+        except Exception as exc:
+            raise _error("UNAUTHORIZED", "Invalid owner credentials", 401) from exc
+        if not owner.actor_id or not owner.business_id:
+            raise _error("UNAUTHORIZED", "Invalid owner identity", 401)
+        if owner.business_id != business_id:
+            raise _error("FORBIDDEN", "Owner cannot access this business", 403)
+        return owner
+
+    def key(idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1)]) -> str:
+        return idempotency_key
+
+    def run(operation: Callable[[], object], current: Callable[[], object | None] | None = None) -> object:
+        try:
+            return operation()
+        except IdempotencyKeyReused as exc:
+            raise _error("IDEMPOTENCY_KEY_REUSED", str(exc), 409) from exc
+        except (RevisionConflict, StaleVersion, TooManyConflicts) as exc:
+            raise _error("STALE_VERSION", str(exc), 409, current() if current else None) from exc
+        except (SlotConflict, ReplacementPending, PolicyConflict) as exc:
+            raise _error("SLOT_CONFLICT", str(exc), 409, current() if current else None) from exc
+        except HoldExpired as exc:
+            raise _error("HOLD_EXPIRED", str(exc), 409, current() if current else None) from exc
+        except (InvalidTransition, InvalidReplacement, BlockNotFound) as exc:
+            raise _error("INVALID_TARGET", str(exc), 409, current() if current else None) from exc
+        except PolicyNotConfigured as exc:
+            raise _error("POLICY_NOT_CONFIGURED", str(exc), 409) from exc
+        except ValueError as exc:
+            raise _error("INVALID_REQUEST", str(exc), 422) from exc
+
+    def appointment_state(appointment_id: str, business_id: str) -> dict[str, object] | None:
+        target = store.read_appointment(appointment_id)
+        if target is None or target.business_id != business_id:
+            return None
+        return {"appointment_id": target.appointment_id, "status": target.status.value,
+                "start_at": target.start_at.isoformat(), "duration_minutes": target.duration_minutes,
+                "version": target.version}
+
+    def block_state(block_id: str, business_id: str) -> dict[str, object] | None:
+        target = store.read_block(business_id, block_id)
+        if target is None:
+            return None
+        return {"block_id": target.block_id, "start_at": target.start_at.isoformat(),
+                "end_at": target.end_at.isoformat(), "version": target.version}
+
+    def policy_state(business_id: str) -> dict[str, object] | None:
+        record = store.read_policy_record(business_id)
+        if record is None:
+            return None
+        return {"version": record.version,
+                "calendar_revision": store.read_revision(business_id)}
+
+    @app.get("/v1/owner/businesses/{business_id}/calendar")
+    def owner_calendar(business_id: str, owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:
+        del owner
+        snapshot = store.read_calendar(business_id)
+        return snapshot
+
+    @app.get("/v1/owner/businesses/{business_id}/requests")
+    def pending_requests(business_id: str, owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:
+        del owner
+        return store.read_pending_requests(business_id, now())
+
+    @app.get("/v1/owner/businesses/{business_id}/policy")
+    def get_policy(business_id: str, owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:
+        del owner
+        record = store.read_policy_record(business_id)
+        if record is None:
+            raise _error("POLICY_NOT_CONFIGURED", "Persist the pilot policy first", 404)
+        return {"record": record, "calendar_revision": store.read_revision(business_id)}
+
+    @app.post("/v1/owner/businesses/{business_id}/policy/seed")
+    def seed_policy(business_id: str, owner: Annotated[OwnerPrincipal, Depends(principal)],
+                    request_key: Annotated[str, Depends(key)]) -> object:
+        return run(lambda: policy.seed(business_id, owner.actor_id, request_key))
+
+    @app.put("/v1/owner/businesses/{business_id}/policy")
+    def edit_policy(business_id: str, body: PolicyEditBody,
+                    owner: Annotated[OwnerPrincipal, Depends(principal)],
+                    request_key: Annotated[str, Depends(key)]) -> object:
+        return run(lambda: policy.apply(PolicyCommand(
+            business_id, owner.actor_id, request_key, body.expected_revision,
+            body.expected_version, body.policy.policy())), lambda: policy_state(business_id))
+
+    @app.post("/v1/owner/businesses/{business_id}/requests")
+    def create_request(business_id: str, body: HoldBody,
+                       owner: Annotated[OwnerPrincipal, Depends(principal)],
+                       request_key: Annotated[str, Depends(key)]) -> object:
+        return run(lambda: holds.create(CreateHold(
+            business_id, owner.actor_id, body.client_id, request_key,
+            body.start_at, body.duration_minutes, body.replaces_appointment_id), now()))
+
+    def transition(business_id: str, appointment_id: str, body: DecisionBody,
+                   owner: OwnerPrincipal, request_key: str, action: Action,
+                   start_at: datetime | None = None,
+                   duration_minutes: int | None = None) -> object:
+        return run(lambda: lifecycle.apply(AppointmentCommand(
+            business_id, appointment_id, owner.actor_id, ActorRole.OWNER, action,
+            request_key, body.expected_version, start_at, duration_minutes)),
+            lambda: appointment_state(appointment_id, business_id))
+
+    @app.post("/v1/owner/businesses/{business_id}/requests/{appointment_id}/approve")
+    def approve(business_id: str, appointment_id: str, body: DecisionBody,
+                owner: Annotated[OwnerPrincipal, Depends(principal)],
+                request_key: Annotated[str, Depends(key)]) -> object:
+        return transition(business_id, appointment_id, body, owner, request_key, Action.APPROVE)
+
+    @app.post("/v1/owner/businesses/{business_id}/requests/{appointment_id}/decline")
+    def decline(business_id: str, appointment_id: str, body: DecisionBody,
+                owner: Annotated[OwnerPrincipal, Depends(principal)],
+                request_key: Annotated[str, Depends(key)]) -> object:
+        return transition(business_id, appointment_id, body, owner, request_key, Action.DECLINE)
+
+    @app.post("/v1/owner/businesses/{business_id}/appointments/{appointment_id}/cancel")
+    def cancel(business_id: str, appointment_id: str, body: DecisionBody,
+               owner: Annotated[OwnerPrincipal, Depends(principal)],
+               request_key: Annotated[str, Depends(key)]) -> object:
+        return transition(business_id, appointment_id, body, owner, request_key, Action.CANCEL)
+
+    @app.patch("/v1/owner/businesses/{business_id}/appointments/{appointment_id}")
+    def edit_appointment(business_id: str, appointment_id: str, body: EditAppointmentBody,
+                         owner: Annotated[OwnerPrincipal, Depends(principal)],
+                         request_key: Annotated[str, Depends(key)]) -> object:
+        return transition(business_id, appointment_id, body, owner, request_key, Action.EDIT,
+                          body.start_at, body.duration_minutes)
+
+    def owner_write(command: Callable[[], OwnerCalendarCommand],
+                    current: Callable[[], object | None] | None = None) -> object:
+        return run(lambda: calendar.apply(command()), current)
+
+    @app.post("/v1/owner/businesses/{business_id}/blocks")
+    def create_block(business_id: str, body: BlockBody,
+                     owner: Annotated[OwnerPrincipal, Depends(principal)],
+                     request_key: Annotated[str, Depends(key)]) -> object:
+        return owner_write(lambda: OwnerCalendarCommand(
+            business_id, owner.actor_id, request_key, OwnerAction.CREATE_BLOCK,
+            body.expected_revision, start_at=body.start_at, end_at=body.end_at))
+
+    @app.put("/v1/owner/businesses/{business_id}/blocks/{block_id}")
+    def move_block(business_id: str, block_id: str, body: MoveBlockBody,
+                   owner: Annotated[OwnerPrincipal, Depends(principal)],
+                   request_key: Annotated[str, Depends(key)]) -> object:
+        return owner_write(lambda: OwnerCalendarCommand(
+            business_id, owner.actor_id, request_key, OwnerAction.MOVE_BLOCK,
+            body.expected_revision, block_id=block_id, expected_version=body.expected_version,
+            start_at=body.start_at, end_at=body.end_at),
+            lambda: block_state(block_id, business_id))
+
+    @app.delete("/v1/owner/businesses/{business_id}/blocks/{block_id}")
+    def remove_block(business_id: str, block_id: str, body: RemoveBlockBody,
+                     owner: Annotated[OwnerPrincipal, Depends(principal)],
+                     request_key: Annotated[str, Depends(key)]) -> object:
+        return owner_write(lambda: OwnerCalendarCommand(
+            business_id, owner.actor_id, request_key, OwnerAction.REMOVE_BLOCK,
+            body.expected_revision, block_id=block_id, expected_version=body.expected_version),
+            lambda: block_state(block_id, business_id))
+
+    @app.post("/v1/owner/businesses/{business_id}/appointments")
+    def create_appointment(business_id: str, body: ManualAppointmentBody,
+                           owner: Annotated[OwnerPrincipal, Depends(principal)],
+                           request_key: Annotated[str, Depends(key)]) -> object:
+        return owner_write(lambda: OwnerCalendarCommand(
+            business_id, owner.actor_id, request_key, OwnerAction.CREATE_APPOINTMENT,
+            body.expected_revision, client_id=body.client_id, start_at=body.start_at,
+            duration_minutes=body.duration_minutes))
+
+    return app
+
+
+def create_persisted_owner_app(client: DynamoClient, table_name: str,
+                               verify_token: OwnerTokenVerifier,
+                               clock: Callable[[], datetime] | None = None) -> FastAPI:
+    """Build the non-local owner API with strongly read DynamoDB state."""
+    return create_owner_app(DynamoDBCalendarRepository(client, table_name), verify_token, clock)

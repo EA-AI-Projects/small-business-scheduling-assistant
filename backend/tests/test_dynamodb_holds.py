@@ -66,6 +66,38 @@ def test_bounded_event_query_paginates_and_blocks_are_read_separately() -> None:
     assert repository.read_policy("business-1") == pilot_policy()
 
 
+def test_pending_owner_requests_reread_metadata_and_exclude_expired_entries() -> None:
+    class PendingClient(RecordingClient):
+        def get_item(self, **kwargs: Any) -> dict[str, Any]:
+            if kwargs["Key"]["PK"]["S"] == "APPOINTMENT#active":
+                return {"Item": {
+                    "business_id": {"S": "business-1"}, "client_id": {"S": "client-1"},
+                    "start_at": {"S": "2026-09-29T16:00:00+00:00"},
+                    "end_at": {"S": "2026-09-29T17:00:00+00:00"},
+                    "status": {"S": "PENDING_APPROVAL"},
+                    "hold_expires_at": {"S": "2026-09-28T17:00:00+00:00"},
+                    "duration_minutes": {"N": "60"}, "buffer_minutes": {"N": "30"},
+                    "version": {"N": "1"},
+                }}
+            return {}
+
+        def query(self, **kwargs: Any) -> dict[str, Any]:
+            self.queries.append(kwargs)
+            return {"Items": [
+                {"event_id": {"S": "active"}, "status": {"S": "PENDING_APPROVAL"}},
+                {"event_id": {"S": "confirmed"}, "status": {"S": "CONFIRMED"}},
+            ]}
+
+    client = PendingClient()
+    repository = DynamoDBCalendarRepository(client, "scheduling")
+    now = datetime(2026, 9, 28, 16, tzinfo=UTC)
+    assert [request.appointment_id for request in repository.read_pending_requests(
+        "business-1", now
+    )] == ["active"]
+    assert repository.read_pending_requests("business-1", now.replace(hour=18)) == ()
+    assert all(query["ConsistentRead"] for query in client.queries)
+
+
 def test_hold_transaction_contains_revision_metadata_event_replay_audit_and_notices() -> None:
     client = RecordingClient()
     repository = DynamoDBCalendarRepository(client, "scheduling")
