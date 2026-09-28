@@ -120,8 +120,8 @@ Minimal authenticated owner interface:
 - Support client-level notes and appointment-level notes as separate records.
 - Notes are visible only to authorized business users and are not exposed to other clients.
 - The assistant should not silently convert sensitive or ambiguous conversation content into durable notes; the owner should be able to review/edit notes.
-- Avoid storing access codes or other credentials as ordinary notes. If operationally essential, define a separate protected handling approach, access controls, retention, and audit requirements before implementation.
-- Define retention and deletion behavior before launch, including message history and client records.
+- Exclude entry/access codes from this MVP entirely; do not request, extract, store, or send them through the scheduling assistant.
+- Delete SMS message bodies 90 days after the last scheduling exchange, and ordinary client/appointment notes 12 months after the last visit. Keep only minimal consent/opt-out evidence for four years after the last program text, unless a documented legal hold requires longer. The owner approved these pilot periods in issue #16; implementation belongs to the SMS and profile issues.
 
 ## 7. Core status model
 
@@ -169,9 +169,9 @@ No numerical improvement target is set until the baseline and pilot cohort are k
 - Small/medium/large categories default to 1/2/3 hours, current maximum 3 hours, and 15-minute start increments. These values are configurable.
 - The owner needs a defined method to add unavailable time; the minimal web view is the MVP fallback.
 - The owner confirmed replacement-first rescheduling and rejection of conflicting duration increases in issue #3; the original confirmed appointment remains unchanged in either failure case.
-- SMS provider, number provisioning, consent/opt-out, and jurisdiction-specific compliance are design/deployment decisions.
+- The SMS pilot is limited to senders and recipients in California, US. Use Twilio; approval of the business number and messaging campaign is still pending. Consent is obtained in person using the documented [pilot consent process](https://ea-ai-projects.github.io/small-business-scheduling-assistant/sms-consent/) and a private record of the participant's clear yes, method, timestamp, and script version. No initial automated enrollment text is sent before consent. Handle STOP/HELP before live messaging; use only explicitly authorized test numbers until launch approval.
 - Whether the wife needs access or notifications is deferred; initial owner communication goes to one phone.
-- Notes involving access codes require a separate security decision; excluded from ordinary AI note-taking.
+- Entry/access codes are excluded from the MVP.
 
 ## 11. Suggested delivery phases
 

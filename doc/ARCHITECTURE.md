@@ -27,7 +27,7 @@ The goal is low idle cost and low operational overhead—not a large-scale SaaS 
 | Hold expiry | EventBridge scheduled rule invokes a small expiry handler periodically; status is also checked synchronously on every read/write | No server is left running; overdue holds cannot remain bookable merely because a scheduled job is delayed |
 | Logs/metrics | Amazon CloudWatch Logs and basic metrics/alarms | Native AWS operations; explicitly set retention to bound log cost and avoid sensitive message logging |
 | Infrastructure/deploy | AWS SAM template + GitHub Actions OIDC; Amplify GitHub integration for frontend | Declarative repeatable AWS resources; avoids long-lived AWS keys in GitHub |
-| AWS region | Configure one region close to the business and SMS provider; confirm before deployment | No region has been selected yet; avoid hard-coding the NeuroSpineDx region without checking latency, service availability, and SMS registration |
+| AWS region | `us-west-1` in the owner's authenticated AWS account `339713090487` | Owner-confirmed pilot target in issue #17; no resources are provisioned by this decision |
 
 ### Stack continuity with NeuroSpineDx
 
@@ -95,8 +95,8 @@ The inspected repository currently uses Next.js/React, Python/FastAPI, Amplify H
 
 ### External dependencies
 
-- Twilio (or another selected SMS provider) for the SMS phone number, inbound SMS, outbound messages, and delivery status.
-- OpenAI API (or a selected alternative) for message interpretation and response drafting.
+- Twilio for the SMS phone number, inbound SMS, outbound messages, and delivery status.
+- OpenAI API for message interpretation and response drafting; select the production model after the issue #24 evaluation.
 
 The core calendar, appointment state, approval policy, and availability calculation stay in AWS and do not depend on either external provider being available.
 
@@ -155,7 +155,7 @@ Use a small number of tables and access-pattern-first keys. A single table is a 
 - Client records use `PK = BUSINESS#<business_id>, SK = CLIENT#<client_id>`; client-phone lookup can use a GSI or a dedicated phone-index item. Treat GSI reads as non-authoritative for writes because GSIs are eventually consistent.
 - Store a per-business calendar revision item: `PK = BUSINESS#<business_id>, SK = CALENDAR#REVISION`.
 - A separate `OutboxDueIndex` GSI uses `outbox_due_pk = OUTBOX#<PENDING|RETRYABLE|SENDING>` and `outbox_due_sk = <dispatch_after UTC>#<outbox_id>`. It can project only base-table keys. The dispatcher queries all three due states with pagination, then strongly rereads each base-table record; the eventually consistent GSI is only a wake-up index, never a source of truth for delivery ownership.
-- Keep separate records for appointments, unavailable blocks, client-level notes, appointment-level notes, conversation state, outbox events, and audit events. Avoid storing sensitive access codes in general note fields.
+- Keep separate records for appointments, unavailable blocks, client-level notes, appointment-level notes, conversation state, outbox events, and audit events. Exclude entry/access codes from the MVP data model.
 
 Partitioning by business prepares the data model for additional businesses without introducing a multi-region or sharded system. The initial deployment is still one business and one schedulable crew/resource.
 
@@ -213,8 +213,8 @@ Approval also checks `hold_expires_at > decision_at` against the scheduling serv
 - Least-privilege Lambda execution role scoped to required DynamoDB keys/table, SQS queue, Parameter Store names/KMS key, and CloudWatch logs.
 - Store third-party keys as SecureString parameters; retrieve/cache at runtime. Never place keys in source, frontend bundles, model prompts, or logs.
 - Do not log raw SMS body, access code, full address, or model prompt by default. Use message/request IDs and redacted structured metadata for diagnostics.
-- Define client consent, message opt-out, record retention, and deletion/export policies before onboarding real customers.
-- Use separate client-level and booking-level notes. Do not let model extraction silently create permanent notes; use owner-reviewable drafts. Exclude entry codes from ordinary notes; decide on a separate protected design if the business insists on storing them.
+- Implement the issue #16 consent, opt-out, and retention decisions and define deletion/export handling before onboarding real customers.
+- Use separate client-level and booking-level notes. Do not let model extraction silently create permanent notes; use owner-reviewable drafts. Do not collect or store entry/access codes in this MVP.
 - Single AWS account is acceptable for a pilot only with separate dev/prod naming, restricted IAM, budgets/alerts, and no real customer data in development.
 
 ## 8. Infrastructure and delivery
@@ -238,7 +238,7 @@ Approval also checks `hold_expires_at > decision_at` against the scheduling serv
 
 - `local`: FastAPI + DynamoDB Local or a lightweight local adapter; mocked Twilio/OpenAI by default.
 - `dev`: synthetic client data, SMS sandbox/test number where available, low-cost AWS stack.
-- `pilot`: actual business number and explicitly authorized clients; human approval always enabled.
+- `pilot`: actual approved Twilio business number and explicitly authorized California clients; human approval always enabled. Do not send live SMS until number/campaign approval, consent records, STOP/HELP handling, and separate test-number authorization are in place.
 - No need for Kubernetes, ECS/Fargate, RDS/Aurora, NAT Gateway, ElastiCache, or always-on EC2 in the MVP.
 
 ## 9. Cost strategy and tradeoffs
@@ -294,16 +294,16 @@ Cognito is preferred for password and token management. Do not use SMS OTP as th
 - Use only synthetic data before pilot; live SMS tests must use explicitly authorized test numbers.
 - Track operational indicators: API errors/latency, Lambda throttles/errors, transaction conflicts, outbox age, SMS delivery failures, DLQ depth, expired holds, LLM timeout/rate, and estimated AWS spend.
 
-## 12. Deployment decisions to confirm
+## 12. Pilot decisions and remaining gates
 
-1. AWS region and whether there is an existing project AWS account to use.
+1. AWS account `339713090487` and region `us-west-1` are confirmed for the pilot. Resource provisioning and deployment need separate authorization.
 2. `America/Los_Angeles` with daylight saving, Monday–Friday 8:00 a.m.–5:00 p.m., and editable observed US federal holiday closures are confirmed.
-3. Twilio vs another SMS provider, business jurisdiction, phone-number type, registration and consent requirements.
-4. OpenAI vs another model provider and a small tool-call evaluation before choosing a model ID.
-5. Whether the initial owner calendar/admin view is required for POC or can arrive with MVP.
+3. Twilio and California-only pilot messaging are confirmed. The in-person consent process and private yes/no evidence record are documented on the `a2p-policy-pages` branch. Business-number/campaign approval, STOP/HELP behavior, and explicit test-number authorization remain before live SMS.
+4. OpenAI is confirmed; start the issue #24 scheduling-message evaluation with `gpt-6-luna`. No production model ID is selected until the malformed/ambiguous-message evaluation passes. The owner specified no additional data-handling or budget constraints.
+5. The first POC includes the authenticated owner calendar.
 6. 15-minute start increments, a current 3-hour maximum, and a 30-minute between-visit buffer with no first/last boundary buffer are confirmed.
 7. One crew/resource is confirmed for the pilot.
-8. Message and note retention duration; access-code storage remains excluded absent a separate security decision.
+8. The owner approved deleting SMS message bodies 90 days after the last scheduling exchange and ordinary client/appointment notes 12 months after the last visit; keep minimal consent/opt-out evidence four years after the last program text, with documented legal holds as an exception. Entry/access codes are excluded from the MVP.
 
 ## 13. References
 

@@ -130,12 +130,13 @@ Owns all business rules and state transitions:
 
 ### Note
 - `id`, `business_id`, `client_id`, nullable `appointment_id`, `body`, `created_by`, `source`, `review_status`, timestamps
-- Client-level note has no appointment ID; visit-specific note references an appointment. Apply stricter handling or exclusion for credentials/access codes.
+- Client-level note has no appointment ID; visit-specific note references an appointment. Exclude entry/access codes entirely from the MVP.
+- Delete ordinary client and appointment notes 12 months after the last visit, except during a documented legal hold.
 
 ### Conversation and Message
 - `Conversation`: client/phone association, current conversation state, timestamps.
 - `Message`: provider message ID, direction, delivery status, minimized/redacted content where possible, timestamps.
-- Define retention and deletion policy before production; do not retain message bodies indefinitely by default.
+- Delete SMS message bodies 90 days after the last scheduling exchange. Keep minimal consent and opt-out evidence separately for four years after the last program text, except during a documented legal hold. Do not copy full message bodies into that evidence record.
 
 ### AuditEvent
 - Actor (owner/client/system), source, action, entity reference, timestamp, and minimal before/after fields needed for accountability. Avoid copying sensitive message content into audit records.
@@ -234,15 +235,15 @@ All timestamps should be stored in UTC and rendered in the configured business t
 - Least-privilege service credentials; secrets stored in managed secret storage/environment configuration, never in prompts or logs.
 - Encrypt data in transit and at rest through deployment platform/database capabilities.
 - Restrict access to client details and notes; avoid showing one client’s information to another.
-- Avoid normal-note storage for entry codes. If needed later, require explicit business approval, dedicated encrypted field/vault, access logging, retention/rotation policy, and careful SMS handling.
+- Exclude entry/access codes from the MVP; a later protected workflow requires a separate owner decision and design.
 - Idempotent webhook processing and outbound delivery retries.
 - Backups and restore tests appropriate to a small business production service.
 - Monitor webhook failures, SMS delivery errors, failed scheduling operations, expired holds, and unusual conflict attempts.
-- Define data export/deletion and retention practices before onboarding real clients.
+- Implement the issue #16 retention periods and data export/deletion practices before onboarding real clients.
 
 ## 10. Deployment and operations (initial direction)
 
-For a pilot, use the proposed AWS Lambda, DynamoDB on-demand, and SQS architecture with an established SMS provider. Provider and region still depend on geography, pricing, number availability, and compliance needs. Keep a staging environment and test with synthetic contacts before enabling real client traffic.
+For the pilot, use AWS account `339713090487` in `us-west-1` with the proposed Lambda, DynamoDB on-demand, and SQS architecture. The first proof of concept includes the authenticated owner calendar. Use Twilio for the California-only SMS pilot; business-number and campaign approval are pending. Keep a staging environment and test with synthetic contacts before enabling real client traffic. This choice does not authorize resource provisioning, deployment, or live SMS.
 
 Operational essentials:
 - Health/readiness endpoint and structured, redacted logs.
@@ -283,9 +284,9 @@ Operational essentials:
 2. Small/medium/large defaults of 1/2/3 hours, a current maximum of 3 hours, and 15-minute increments are confirmed and configurable.
 3. Configurable 30-minute travel buffer between visits only; none before the first or after the last.
 4. Reschedule rule: retain the original confirmed appointment until the replacement is approved; atomically swap them on approval (owner confirmed in issue #3).
-5. How owner creates unavailable time in the preferred MVP workflow.
-6. Business jurisdiction, SMS provider/number, consent, opt-out, and data-retention requirements.
-7. Whether entry codes are excluded entirely or need a separate protected workflow.
+5. The first proof of concept includes the authenticated owner calendar; its unavailable-block flow is the fallback for owner corrections.
+6. California-only pilot SMS uses Twilio and the documented in-person consent process; business-number/campaign approval remains pending. STOP/HELP behavior and the owner-approved 90-day message, 12-month ordinary-note, and four-year minimal consent/opt-out evidence periods must be implemented before live messaging.
+7. Entry/access codes are excluded from this MVP.
 8. One crew/resource is confirmed for the pilot; revisit only if staff capacity changes.
 
 ## 14. Effort framing
