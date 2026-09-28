@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from jwt import PyJWKClient
 
 from scheduling.adapters.dynamodb import DynamoClient
-from scheduling.owner_api import OwnerPrincipal, create_persisted_owner_app
+from scheduling.owner_api import OwnerPrincipal, OwnerUiConfig, create_persisted_owner_app
 
 
 class SigningKeys(Protocol):
@@ -61,7 +61,19 @@ def create_cognito_owner_app(
     owner_sub: str,
     business_id: str,
     clock: Callable[[], datetime] | None = None,
+    ui_domain: str | None = None,
+    ui_redirect_uri: str | None = None,
 ) -> FastAPI:
     """Construct the persisted API with a required, validated Cognito owner token."""
     verifier = CognitoOwnerTokenVerifier(issuer, client_id, owner_sub, business_id)
-    return create_persisted_owner_app(client, table_name, verifier, clock)
+    if (ui_domain is None) != (ui_redirect_uri is None):
+        raise ValueError("Owner UI domain and redirect URI must be configured together")
+    ui_config = None
+    if ui_domain is not None and ui_redirect_uri is not None:
+        domain = ui_domain.rstrip("/")
+        if not domain.startswith("https://") or not ui_redirect_uri.startswith("https://"):
+            raise ValueError("Owner UI OAuth endpoints require HTTPS")
+        ui_config = OwnerUiConfig(business_id, client_id,
+                                  f"{domain}/oauth2/authorize",
+                                  f"{domain}/oauth2/token", ui_redirect_uri)
+    return create_persisted_owner_app(client, table_name, verifier, clock, ui_config)
