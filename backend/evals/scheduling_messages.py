@@ -111,6 +111,7 @@ def case_passes(case: Case, proposal: dict[str, Any]) -> bool:
         return (proposal["needs_clarification"] is True and
                 proposal["intent"] == "clarify" and
                 proposal["request_reference"] is None and
+                proposal["date_text"] is None and
                 proposal["owner_decision"] is None and
                 isinstance(proposal["question"], str) and
                 bool(proposal["question"].strip()))

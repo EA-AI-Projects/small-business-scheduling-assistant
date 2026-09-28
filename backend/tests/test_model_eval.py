@@ -45,6 +45,7 @@ def test_ambiguous_owner_reply_cannot_pass_with_a_proposed_approval() -> None:
     assert case_passes(case, proposal)
     assert not case_passes(case, {**proposal, "owner_decision": "approve"})
     assert not case_passes(case, {**proposal, "request_reference": "A-101"})
+    assert not case_passes(case, {**proposal, "date_text": "2026-10-02T15:00:00"})
 
 
 def test_exact_owner_reference_needs_correct_intent_target_and_decision() -> None:
@@ -56,3 +57,14 @@ def test_exact_owner_reference_needs_correct_intent_target_and_decision() -> Non
     assert case_passes(case, proposal)
     assert not case_passes(case, {**proposal, "intent": "unsupported"})
     assert not case_passes(case, {**proposal, "request_reference": "B-202"})
+
+
+def test_ambiguous_date_cannot_pass_with_a_guessed_calendar_time() -> None:
+    case = next(case for case in CASES if case.name == "broad-window")
+    proposal = {
+        "intent": "clarify", "request_reference": None, "date_text": None,
+        "owner_decision": None, "needs_clarification": True,
+        "question": "What start time do you prefer?",
+    }
+    assert case_passes(case, proposal)
+    assert not case_passes(case, {**proposal, "date_text": "2026-10-02 15:00"})
