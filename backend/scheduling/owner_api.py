@@ -10,11 +10,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 from hashlib import sha256
+from importlib.resources import files
 from typing import Annotated, Protocol, cast
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -71,6 +73,15 @@ from scheduling.domain.owner_policy import (
 class OwnerPrincipal:
     actor_id: str
     business_id: str
+
+
+@dataclass(frozen=True)
+class OwnerUiConfig:
+    business_id: str
+    client_id: str
+    authorize_url: str
+    token_url: str
+    redirect_uri: str
 
 
 class OwnerTokenVerifier(Protocol):
@@ -220,11 +231,48 @@ def create_owner_app(
     repository: object,
     verify_token: OwnerTokenVerifier,
     clock: Callable[[], datetime] | None = None,
+    ui_config: OwnerUiConfig | None = None,
 ) -> FastAPI:
     """Mount only authenticated owner routes; local synthetic API stays separate."""
     app = FastAPI(title="Scheduling owner API", version="0.1.0")
     now = clock or (lambda: datetime.now(UTC))
     security = HTTPBearer(auto_error=False)
+
+    if ui_config is not None:
+        def ui_asset(name: str) -> str:
+            return files("scheduling").joinpath("ui", name).read_text(encoding="utf-8")
+
+        @app.get("/owner", response_class=HTMLResponse)
+        def owner_ui() -> HTMLResponse:
+            token_url = urlsplit(ui_config.token_url)
+            token_origin = f"{token_url.scheme}://{token_url.netloc}"
+            return HTMLResponse(ui_asset("index.html"), headers={
+                "Cache-Control": "no-store",
+                "Referrer-Policy": "no-referrer",
+                "Content-Security-Policy": (
+                    "default-src 'none'; script-src 'self'; style-src 'self'; "
+                    f"connect-src 'self' {token_origin}; base-uri 'none'; "
+                    "object-src 'none'; frame-ancestors 'none'"
+                ),
+            })
+
+        @app.get("/owner/app.js")
+        def owner_ui_script() -> Response:
+            return Response(ui_asset("app.js"), media_type="text/javascript")
+
+        @app.get("/owner/style.css")
+        def owner_ui_style() -> Response:
+            return Response(ui_asset("style.css"), media_type="text/css")
+
+        @app.get("/owner/config")
+        def owner_ui_config() -> dict[str, str]:
+            return {
+                "business_id": ui_config.business_id,
+                "client_id": ui_config.client_id,
+                "authorize_url": ui_config.authorize_url,
+                "token_url": ui_config.token_url,
+                "redirect_uri": ui_config.redirect_uri,
+            }
 
     @app.exception_handler(HTTPException)
     def owner_http_error(_request: Request, exc: HTTPException) -> JSONResponse:
@@ -366,6 +414,24 @@ def create_owner_app(
         snapshot = store.read_calendar(business_id)
         return snapshot
 
+    @app.get("/v1/owner/businesses/{business_id}/appointments/{appointment_id}")
+    def get_owner_appointment(business_id: str, appointment_id: str,
+                              owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:
+        del owner
+        target = store.read_appointment(appointment_id)
+        if target is None or target.business_id != business_id:
+            raise _error("NOT_FOUND", "Appointment was not found", 404)
+        return target
+
+    @app.get("/v1/owner/businesses/{business_id}/blocks/{block_id}")
+    def get_owner_block(business_id: str, block_id: str,
+                        owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:
+        del owner
+        target = store.read_block(business_id, block_id)
+        if target is None:
+            raise _error("NOT_FOUND", "Block was not found", 404)
+        return target
+
     @app.get("/v1/owner/businesses/{business_id}/requests")
     def pending_requests(business_id: str, owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:
         del owner
@@ -378,6 +444,29 @@ def create_owner_app(
         if record is None:
             raise _error("POLICY_NOT_CONFIGURED", "Persist the pilot policy first", 404)
         return {"record": record, "calendar_revision": store.read_revision(business_id)}
+
+    @app.get("/v1/owner/businesses/{business_id}/local-time")
+    def resolve_local_time(business_id: str, value: str,
+                           owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:
+        del owner
+        record = store.read_policy_record(business_id)
+        if record is None:
+            raise _error("POLICY_NOT_CONFIGURED", "Persist the pilot policy first", 409)
+        try:
+            wall = datetime.fromisoformat(value)
+        except ValueError as exc:
+            raise _error("INVALID_REQUEST", "Use a local date and time", 422) from exc
+        if wall.tzinfo is not None:
+            raise _error("INVALID_REQUEST", "Local time must have no UTC offset", 422)
+        zone = ZoneInfo(record.policy.timezone)
+        choices: set[datetime] = set()
+        for fold in (0, 1):
+            candidate = wall.replace(tzinfo=zone, fold=fold).astimezone(UTC)
+            if candidate.astimezone(zone).replace(tzinfo=None) == wall:
+                choices.add(candidate)
+        if len(choices) != 1:
+            raise _error("INVALID_REQUEST", "Local time is missing or ambiguous at DST change", 422)
+        return {"instant": next(iter(choices)).isoformat()}
 
     @app.post("/v1/owner/businesses/{business_id}/policy/seed")
     def seed_policy(business_id: str, owner: Annotated[OwnerPrincipal, Depends(principal)],
@@ -479,6 +568,8 @@ def create_owner_app(
 
 def create_persisted_owner_app(client: DynamoClient, table_name: str,
                                verify_token: OwnerTokenVerifier,
-                               clock: Callable[[], datetime] | None = None) -> FastAPI:
+                               clock: Callable[[], datetime] | None = None,
+                               ui_config: OwnerUiConfig | None = None) -> FastAPI:
     """Build the non-local owner API with strongly read DynamoDB state."""
-    return create_owner_app(DynamoDBCalendarRepository(client, table_name), verify_token, clock)
+    return create_owner_app(DynamoDBCalendarRepository(client, table_name), verify_token,
+                            clock, ui_config)
