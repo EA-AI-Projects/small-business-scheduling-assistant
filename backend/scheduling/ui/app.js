@@ -2,7 +2,8 @@
 
 const $ = (id) => document.getElementById(id);
 const state = { config: null, token: null, policy: null, calendar: null,
-  requests: [], clients: [], selectedClient: null, zone: "UTC" };
+  requests: [], clients: [], selectedClient: null, selectedEvent: null, zone: "UTC",
+  generation: 0, notesRequest: 0, eventRequest: 0 };
 
 function node(tag, className = "", value = "") {
   const item = document.createElement(tag);
@@ -62,8 +63,12 @@ async function change(path, method, body, success, idempotent = true) {
     await api(path, { method, body, idempotent });
   } catch (error) {
     if (error.status === 409) {
-      await refresh().catch(() => {});
-      notice(`Nothing was saved: ${error.message}. Current state has been refreshed.`, true);
+      try {
+        await refresh(true);
+        notice(`Nothing was saved: ${error.message}. Current state has been refreshed.`, true);
+      } catch (refreshError) {
+        notice(`Nothing was saved: ${error.message}. Current state could not load: ${refreshError.message}`, true);
+      }
     } else {
       notice(`Nothing was saved: ${error.message}`, true);
     }
@@ -97,10 +102,26 @@ async function signIn() {
 }
 
 function signOut() {
+  state.generation += 1;
+  state.notesRequest += 1;
+  state.eventRequest += 1;
   state.token = null;
   state.calendar = null;
+  state.policy = null;
   state.requests = [];
   state.clients = [];
+  state.selectedClient = null;
+  state.selectedEvent = null;
+  state.zone = "UTC";
+  sessionStorage.removeItem("owner-pkce-verifier");
+  sessionStorage.removeItem("owner-oauth-state");
+  for (const id of ["calendar-days", "event-detail", "request-list", "client-list",
+    "note-list", "policy-summary"]) clear($(id));
+  for (const id of ["block-form", "profile-form", "note-form", "exception-form"]) $(id).reset();
+  $("profile-form").elements.namedItem("client_id").readOnly = false;
+  $("calendar-zone").textContent = "";
+  $("request-count").textContent = "";
+  $("notice").textContent = "";
   $("workspace").hidden = true;
   $("signed-out").hidden = false;
   $("connection").textContent = "Signed out";
@@ -209,19 +230,25 @@ function field(label, value, type = "text") {
 }
 
 async function showEvent(event) {
+  const generation = state.generation;
+  const request = ++state.eventRequest;
   const host = $("event-detail");
   clear(host);
+  state.selectedEvent = event;
   const block = event.status === "UNAVAILABLE";
   try {
     const detail = await api(block ? `/blocks/${encodeURIComponent(event.event_id)}`
       : `/appointments/${encodeURIComponent(event.event_id)}`);
+    if (generation !== state.generation || request !== state.eventRequest) return;
     host.append(node("p", "badge", event.status.replaceAll("_", " ")));
     host.append(node("p", "", `${localStamp(event.start_at)}–${localTime(event.end_at)}`));
     if (!block) host.append(node("p", "meta", `Client ${detail.client_id} · ${detail.duration_minutes} minutes`));
     if (!block) host.append(button("Open client and visit notes", async () => {
+      const clickGeneration = state.generation;
       const client = state.clients.find((item) => item.client_id === detail.client_id);
       if (!client) { notice("Client profile is not available", true); return; }
       await selectClient(client);
+      if (clickGeneration !== state.generation || state.selectedClient !== client.client_id) return;
       $("note-form").elements.namedItem("appointment_id").value = detail.appointment_id;
       document.querySelector('.tabs button[data-tab="clients"]').click();
     }));
@@ -265,7 +292,9 @@ async function showEvent(event) {
     } else if (detail.status === "PENDING_APPROVAL") {
       host.append(node("p", "hint", "Use Requests to approve or decline this exact request."));
     }
-  } catch (error) { notice(error.message, true); }
+  } catch (error) {
+    if (generation === state.generation && request === state.eventRequest) notice(error.message, true);
+  }
 }
 
 function renderRequests() {
@@ -315,11 +344,16 @@ async function selectClient(client) {
 }
 
 async function renderNotes() {
+  const generation = state.generation;
+  const request = ++state.notesRequest;
+  const clientId = state.selectedClient;
   const host = $("note-list");
   clear(host);
-  if (!state.selectedClient) return;
+  if (!clientId) return;
   try {
-    const notes = await api(`/clients/${encodeURIComponent(state.selectedClient)}/notes`);
+    const notes = await api(`/clients/${encodeURIComponent(clientId)}/notes`);
+    if (generation !== state.generation || request !== state.notesRequest ||
+        clientId !== state.selectedClient) return;
     if (!notes.length) host.append(node("p", "empty", "No ordinary notes"));
     for (const note of notes) {
       const row = node("div", "note-row");
@@ -332,7 +366,9 @@ async function renderNotes() {
       }, "danger"));
       host.append(row);
     }
-  } catch (error) { notice(error.message, true); }
+  } catch (error) {
+    if (generation === state.generation && request === state.notesRequest) notice(error.message, true);
+  }
 }
 
 function renderPolicy() {
@@ -351,13 +387,16 @@ function renderPolicy() {
   }
 }
 
-async function refresh() {
+async function refresh(preserveSelectedEvent = false) {
+  const generation = state.generation;
+  const selectedEventId = preserveSelectedEvent ? state.selectedEvent?.event_id : null;
   const [calendar, requests, clients, policy] = await Promise.all([
     api("/calendar"), api("/requests"), api("/clients"), api("/policy").catch((error) => {
       if (error.status === 404) return null;
       throw error;
     }),
   ]);
+  if (generation !== state.generation) throw new Error("Owner session ended");
   state.calendar = calendar;
   state.requests = requests;
   state.clients = clients;
@@ -365,6 +404,8 @@ async function refresh() {
   state.zone = policy?.record.policy.timezone || "UTC";
   if (!$("calendar-date").value) $("calendar-date").value = dayKey(new Date().toISOString());
   renderCalendar();
+  state.eventRequest += 1;
+  state.selectedEvent = null;
   $("event-detail").textContent = "Choose an appointment or block.";
   renderRequests();
   renderClients();
@@ -372,6 +413,12 @@ async function refresh() {
   if (state.selectedClient) {
     const selected = clients.find((client) => client.client_id === state.selectedClient);
     if (selected) await selectClient(selected);
+  }
+  if (generation !== state.generation) throw new Error("Owner session ended");
+  if (selectedEventId) {
+    const selected = calendar.events.find((event) => event.event_id === selectedEventId);
+    if (selected) await showEvent(selected);
+    else $("event-detail").textContent = "Selected item is no longer on the calendar.";
   }
 }
 
