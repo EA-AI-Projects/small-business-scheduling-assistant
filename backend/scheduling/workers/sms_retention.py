@@ -1,4 +1,4 @@
-"""Scheduled SMS body purge for the owner-approved 90-day pilot period."""
+"""Scheduled SMS body and four-year evidence retention for the pilot."""
 
 import os
 from datetime import UTC, datetime
@@ -11,5 +11,8 @@ from scheduling.adapters.sms_dynamodb import DynamoSmsIngressStore
 
 def handler(_event: dict[str, Any], _context: object) -> dict[str, int]:
     store = DynamoSmsIngressStore(boto3.client("dynamodb"), os.environ["SCHEDULING_TABLE_NAME"])
-    count = store.purge_expired_bodies(os.environ["BUSINESS_ID"], datetime.now(UTC))
-    return {"deleted_sms_bodies": count}
+    now = datetime.now(UTC)
+    business_id = os.environ["BUSINESS_ID"]
+    bodies = store.purge_expired_bodies(business_id, now)
+    evidence = store.purge_expired_evidence(business_id, now)
+    return {"deleted_sms_bodies": bodies, "deleted_sms_evidence": evidence}

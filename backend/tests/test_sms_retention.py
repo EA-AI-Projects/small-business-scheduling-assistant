@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from scheduling.adapters.sms_dynamodb import DynamoSmsIngressStore
-from scheduling.domain.sms_ingress import InboundReceipt, Keyword, SenderRole
+from scheduling.domain.sms_ingress import ConsentEvidence, InboundReceipt, Keyword, SenderRole
 from scheduling.domain.sms_status import SmsDeliveryStatus
 
 NOW = datetime(2026, 9, 28, 17, tzinfo=UTC)
@@ -23,33 +23,65 @@ class MemoryDynamo:
         return {"Items": [item for key, item in self.items.items() if key.startswith(prefix)]}
 
     def transact_write_items(self, **kwargs: Any) -> dict[str, Any]:
+        # Apply each transaction to a copy so a failed condition has no effects.
+        items = {key: dict(value) for key, value in self.items.items()}
         for action in kwargs["TransactItems"]:
             if "Put" in action:
                 item = action["Put"]["Item"]
                 key = item["SK"]["S"]
-                if key in self.items:
+                if key in items and "ConditionExpression" in action["Put"]:
                     raise RuntimeError("duplicate receipt")
-                self.items[key] = dict(item)
+                items[key] = dict(item)
             elif "ConditionCheck" in action:
                 check = action["ConditionCheck"]
                 key = check["Key"]["SK"]["S"]
-                assert self.items[key]["last_exchange_at"]["S"] <= (
-                    check["ExpressionAttributeValues"][":cutoff"]["S"]
-                )
+                clock = ("last_program_text_at" if "last_program_text_at" in
+                         check["ConditionExpression"] else "last_exchange_at")
+                if (key in items and clock in items[key] and
+                        items[key][clock]["S"] > check["ExpressionAttributeValues"]
+                        [":cutoff"]["S"]):
+                    raise RuntimeError("conditional conflict")
+            elif "Delete" in action:
+                delete = action["Delete"]
+                key = delete["Key"]["SK"]["S"]
+                if "ConditionExpression" in delete:
+                    old = items.get(key)
+                    field = next(name for name in
+                                 ("opted_out_at", "suppressed_at", "agreed_at")
+                                 if name in delete["ConditionExpression"])
+                    expected = delete["ExpressionAttributeValues"].get(
+                        ":recorded", delete["ExpressionAttributeValues"].get(":at"))
+                    if (old is None or "legal_hold_reason" in old or
+                            old[field] != expected):
+                        raise RuntimeError("conditional conflict")
+                items.pop(key, None)
             else:
                 update = action["Update"]
                 key = update["Key"]["SK"]["S"]
                 if update["UpdateExpression"] == "REMOVE body":
-                    self.items[key].pop("body")
+                    items[key].pop("body")
                 else:
-                    self.items.setdefault(key, {"SK": {"S": key}})["last_exchange_at"] = (
-                        update["ExpressionAttributeValues"][":at"]
-                    )
+                    current = items.setdefault(key, {"SK": {"S": key}})
+                    for assignment in update["UpdateExpression"].removeprefix("SET ").split(", "):
+                        field, value = assignment.split(" = ")
+                        field = update.get("ExpressionAttributeNames", {}).get(field, field)
+                        incoming = update["ExpressionAttributeValues"][value]
+                        if (field in {"last_exchange_at", "last_program_text_at"} and
+                                current.get(field, {}).get("S", "") > incoming["S"]):
+                            raise RuntimeError("conditional conflict")
+                        current[field] = incoming
+        self.items = items
         return {}
 
     def update_item(self, **kwargs: Any) -> dict[str, Any]:
         key = kwargs["Key"]["SK"]["S"]
-        values = kwargs["ExpressionAttributeValues"]
+        values = kwargs.get("ExpressionAttributeValues", {})
+        if "legal_hold_reason" in kwargs["UpdateExpression"]:
+            if kwargs["UpdateExpression"].startswith("SET"):
+                self.items[key]["legal_hold_reason"] = values[":reason"]
+            else:
+                self.items[key].pop("legal_hold_reason", None)
+            return {}
         previous = self.items.get(key)
         rank = int(values[":rank"]["N"])
         if previous is not None and int(previous["status_rank"]["N"]) > rank:
@@ -63,6 +95,39 @@ class MemoryDynamo:
         if ":error" in values:
             self.items[key]["error_code"] = values[":error"]
         return {}
+
+
+class TransactionCancelled(Exception):
+    def __init__(self) -> None:
+        self.response = {"Error": {"Code": "TransactionCanceledException"}}
+
+
+class NewTextBeforePurge(MemoryDynamo):
+    def __init__(self) -> None:
+        super().__init__()
+        self.inject = False
+
+    def transact_write_items(self, **kwargs: Any) -> dict[str, Any]:
+        if self.inject and "ConditionCheck" in kwargs["TransactItems"][0]:
+            self.inject = False
+            self.items["SMS_THREAD#+14155550101"]["last_program_text_at"] = {
+                "S": NOW.isoformat(timespec="microseconds")}
+            raise TransactionCancelled()
+        return super().transact_write_items(**kwargs)
+
+
+class NewHoldBeforePurge(MemoryDynamo):
+    def __init__(self) -> None:
+        super().__init__()
+        self.inject = False
+
+    def transact_write_items(self, **kwargs: Any) -> dict[str, Any]:
+        if self.inject and "ConditionCheck" in kwargs["TransactItems"][0]:
+            self.inject = False
+            key = kwargs["TransactItems"][1]["Delete"]["Key"]["SK"]["S"]
+            self.items[key]["legal_hold_reason"] = {"S": "documented case"}
+            raise TransactionCancelled()
+        return super().transact_write_items(**kwargs)
 
 
 def _receipt(sid: str, when: datetime) -> InboundReceipt:
@@ -106,3 +171,81 @@ def test_failed_provider_callback_is_linked_for_owner_follow_up() -> None:
     assert len(failures) == 1
     assert failures[0].outbox_id == "outbox-1"
     assert failures[0].error_code == "30007"
+
+
+def _consent(when: datetime) -> ConsentEvidence:
+    return ConsentEvidence("pilot", "client-1", "Synthetic Person", "+14155550101",
+                           when, "pilot-v1")
+
+
+def test_evidence_expires_four_years_after_latest_inbound_or_outbound() -> None:
+    dynamo = MemoryDynamo()
+    store = DynamoSmsIngressStore(dynamo, "synthetic")
+    old = NOW.replace(year=NOW.year - 5)
+    recent = NOW.replace(year=NOW.year - 3)
+    store.put_consent(_consent(old))
+    store.put_received(_receipt("SM-inbound", recent))
+    assert store.purge_expired_evidence("pilot", NOW) == 0
+    store.record_outbound("pilot", "+14155550101", "SM-out", NOW)
+    assert store.purge_expired_evidence("pilot", NOW.replace(year=NOW.year + 3)) == 0
+    assert store.purge_expired_evidence("pilot", NOW.replace(year=NOW.year + 4)) == 2
+    assert store.read_consent("pilot", "+14155550101") is None
+
+
+def test_evidence_hold_and_concurrent_text_prevent_deletion() -> None:
+    dynamo = MemoryDynamo()
+    store = DynamoSmsIngressStore(dynamo, "synthetic")
+    old = NOW.replace(year=NOW.year - 5)
+    store.put_consent(_consent(old))
+    history = next(key for key in dynamo.items if key.startswith("SMS_CONSENT#"))
+    store.set_evidence_legal_hold("pilot", history, "documented case")
+    assert store.purge_expired_evidence("pilot", NOW) == 1
+    assert history in dynamo.items
+    store.record_outbound("pilot", "+14155550101", "SM-new", NOW)
+    store.set_evidence_legal_hold("pilot", history, None)
+    assert store.purge_expired_evidence("pilot", NOW) == 0
+    assert history in dynamo.items
+
+
+def test_purge_racing_new_program_text_preserves_evidence() -> None:
+    dynamo = NewTextBeforePurge()
+    store = DynamoSmsIngressStore(dynamo, "synthetic")
+    old = NOW.replace(year=NOW.year - 5)
+    store.put_consent(_consent(old))
+    dynamo.items["SMS_THREAD#+14155550101"] = {
+        "SK": {"S": "SMS_THREAD#+14155550101"},
+        "last_program_text_at": {"S": old.isoformat(timespec="microseconds")},
+    }
+    dynamo.inject = True
+    assert store.purge_expired_evidence("pilot", NOW) == 0
+    assert store.read_consent("pilot", "+14155550101") is not None
+
+
+def test_purge_racing_new_legal_hold_preserves_evidence() -> None:
+    dynamo = NewHoldBeforePurge()
+    store = DynamoSmsIngressStore(dynamo, "synthetic")
+    store.put_consent(_consent(NOW.replace(year=NOW.year - 5)))
+    dynamo.inject = True
+    assert store.purge_expired_evidence("pilot", NOW) == 1
+    assert len([item for item in dynamo.items.values()
+                if "legal_hold_reason" in item]) == 1
+
+
+def test_old_stop_evidence_purges_but_suppression_remains() -> None:
+    dynamo = MemoryDynamo()
+    store = DynamoSmsIngressStore(dynamo, "synthetic")
+    old = NOW.replace(year=NOW.year - 5)
+    stop = InboundReceipt("pilot", "SM-stop", "+14155550101", "+14155550000",
+                          None, old, SenderRole.CLIENT, "client-1", Keyword.STOP, False)
+    store.put_received(stop)
+    assert store.is_opted_out("pilot", "+14155550101")
+    assert store.purge_expired_evidence("pilot", NOW) == 1
+    assert "SMS_OPTOUT#+14155550101" not in dynamo.items
+    assert "SMS_SUPPRESS#+14155550101" in dynamo.items
+    assert store.is_opted_out("pilot", "+14155550101")
+    store.put_consent(_consent(NOW))
+    start = InboundReceipt("pilot", "SM-start", "+14155550101", "+14155550000",
+                           None, NOW + timedelta(seconds=1), SenderRole.CLIENT,
+                           "client-1", Keyword.START, False)
+    store.put_received(start)
+    assert not store.is_opted_out("pilot", "+14155550101")
