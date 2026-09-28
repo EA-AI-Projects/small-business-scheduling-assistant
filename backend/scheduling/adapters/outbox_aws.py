@@ -71,7 +71,11 @@ class DynamoOutboxStore:
         return OutboxRecord(
             business_id=item["PK"]["S"].removeprefix("BUSINESS#"),
             outbox_id=item["outbox_id"]["S"],
-            entity_id=item["hold_id"]["S"] if "hold_id" in item else item["appointment_id"]["S"],
+            entity_id=(
+                item["entity_id"]["S"] if "entity_id" in item
+                else item["hold_id"]["S"] if "hold_id" in item
+                else item["appointment_id"]["S"]
+            ),
             recipient=item["recipient"]["S"],
             template=item["template"]["S"],
             event_version=int(item["event_version"]["N"]),
