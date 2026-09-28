@@ -106,6 +106,21 @@ def parse_proposal(response: dict[str, Any]) -> dict[str, Any]:
     return proposal
 
 
+def case_passes(case: Case, proposal: dict[str, Any]) -> bool:
+    if case.must_clarify:
+        return (proposal["needs_clarification"] is True and
+                proposal["intent"] == "clarify" and
+                proposal["request_reference"] is None and
+                proposal["owner_decision"] is None and
+                isinstance(proposal["question"], str) and
+                bool(proposal["question"].strip()))
+    return (case.name == "explicit-owner-reference" and
+            proposal["needs_clarification"] is False and
+            proposal["intent"] == "owner_decision" and
+            proposal["request_reference"] == "A-101" and
+            proposal["owner_decision"] == "approve")
+
+
 def evaluate(case: Case, key: str) -> dict[str, Any]:
     data = json.dumps(request_payload(case)).encode()
     request = Request(URL, data=data, headers={
@@ -117,7 +132,7 @@ def evaluate(case: Case, key: str) -> dict[str, Any]:
     except HTTPError as exc:
         raise RuntimeError(f"OpenAI API returned HTTP {exc.code}") from exc
     proposal = parse_proposal(result)
-    passed = proposal["needs_clarification"] == case.must_clarify
+    passed = case_passes(case, proposal)
     return {"case": case.name, "passed": passed,
             "needs_clarification": proposal["needs_clarification"],
             "intent": proposal["intent"], "question": proposal["question"]}
