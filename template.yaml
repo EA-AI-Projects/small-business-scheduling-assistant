@@ -145,19 +145,26 @@ Resources:
             - Effect: Allow
               Action:
                 - dynamodb:GetItem
-                - dynamodb:Query
-                - dynamodb:Scan
-                - dynamodb:TransactWriteItems
+                - dynamodb:PutItem
                 - dynamodb:UpdateItem
-              Resource:
-                - !GetAtt SchedulingTable.Arn
-                - !Sub '${SchedulingTable.Arn}/index/*'
+                - dynamodb:DeleteItem
+                - dynamodb:ConditionCheckItem
+              Resource: !GetAtt SchedulingTable.Arn
+            - Effect: Allow
+              Action: [dynamodb:Query, dynamodb:Scan]
+              Resource: [!GetAtt SchedulingTable.Arn, !Sub '${SchedulingTable.Arn}/index/*']
       Events:
         OwnerRoot:
           Type: HttpApi
           Properties:
             ApiId: !Ref OwnerHttpApi
             Path: /owner
+            Method: GET
+        OwnerAssets:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OwnerHttpApi
+            Path: /owner/{proxy+}
             Method: GET
         OwnerProxy:
           Type: HttpApi
@@ -179,7 +186,10 @@ Resources:
       Policies:
         - Statement:
             - Effect: Allow
-              Action: [dynamodb:GetItem, dynamodb:Query, dynamodb:TransactWriteItems]
+              Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem, dynamodb:ConditionCheckItem]
+              Resource: !GetAtt SchedulingTable.Arn
+            - Effect: Allow
+              Action: [dynamodb:Query]
               Resource: [!GetAtt SchedulingTable.Arn, !Sub '${SchedulingTable.Arn}/index/*']
       Events:
         Sweep:
@@ -204,8 +214,11 @@ Resources:
       Policies:
         - Statement:
             - Effect: Allow
-              Action: [dynamodb:GetItem, dynamodb:Query, dynamodb:UpdateItem]
-              Resource: [!GetAtt SchedulingTable.Arn, !Sub '${SchedulingTable.Arn}/index/*']
+              Action: [dynamodb:GetItem, dynamodb:UpdateItem]
+              Resource: !GetAtt SchedulingTable.Arn
+            - Effect: Allow
+              Action: [dynamodb:Query]
+              Resource: !Sub '${SchedulingTable.Arn}/index/OutboxDueIndex'
             - Effect: Allow
               Action: [sqs:SendMessage]
               Resource: !GetAtt OutboxQueue.Arn
@@ -228,8 +241,11 @@ Resources:
       Policies:
         - Statement:
             - Effect: Allow
-              Action: [dynamodb:GetItem, dynamodb:Query, dynamodb:Scan, dynamodb:TransactWriteItems]
-              Resource: [!GetAtt SchedulingTable.Arn, !Sub '${SchedulingTable.Arn}/index/*']
+              Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem, dynamodb:ConditionCheckItem]
+              Resource: !GetAtt SchedulingTable.Arn
+            - Effect: Allow
+              Action: [dynamodb:Query, dynamodb:Scan]
+              Resource: !GetAtt SchedulingTable.Arn
       Events:
         Daily:
           Type: Schedule
@@ -249,7 +265,7 @@ Resources:
       Policies:
         - Statement:
             - Effect: Allow
-              Action: [dynamodb:GetItem, dynamodb:Query, dynamodb:Scan, dynamodb:TransactWriteItems, dynamodb:UpdateItem]
+              Action: [dynamodb:GetItem, dynamodb:Query, dynamodb:Scan, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem, dynamodb:ConditionCheckItem]
               Resource: !GetAtt SchedulingTable.Arn
       Events:
         Daily:
