@@ -34,6 +34,7 @@ from scheduling.domain.owner_calendar import (
 from scheduling.domain.owner_policy import (
     PolicyCommand,
     PolicyCommit,
+    PolicyNotConfigured,
     PolicyRecord,
     PolicyReplay,
     PolicyResult,
@@ -181,7 +182,7 @@ class DynamoDBCalendarRepository:
     def read_policy(self, business_id: str) -> AvailabilityPolicy:
         record = self.read_policy_record(business_id)
         if record is None:
-            raise ValueError("Persisted scheduling policy is required before booking")
+            raise PolicyNotConfigured("Persist the pilot policy before booking")
         return record.policy
 
     def read_policy_record(self, business_id: str) -> PolicyRecord | None:
@@ -534,6 +535,23 @@ class DynamoDBCalendarRepository:
                 if "replaces_appointment_id" in item else None
             ),
         )
+
+    def read_pending_requests(self, business_id: str, now: datetime) -> tuple[Appointment, ...]:
+        # Event projections are strongly read and paginated; metadata is reread
+        # before presenting a request, so stale due-index entries cannot leak in.
+        events = self._query(business_id, "PK = :pk AND begins_with(SK, :prefix)",
+                             {":prefix": {"S": "EVENT#"}})
+        pending: list[Appointment] = []
+        for item in events:
+            if item["status"]["S"] != CalendarStatus.PENDING_APPROVAL.value:
+                continue
+            appointment = self.read_appointment(item["event_id"]["S"])
+            if (appointment is not None and appointment.business_id == business_id
+                    and appointment.status == CalendarStatus.PENDING_APPROVAL
+                    and appointment.hold_expires_at is not None
+                    and appointment.hold_expires_at > now):
+                pending.append(appointment)
+        return tuple(sorted(pending, key=lambda appointment: appointment.start_at))
 
     def due_hold_ids(self, now: datetime, limit: int) -> tuple[str, ...]:
         """Use the eventual index for wake-up only; callers strongly reread metadata."""

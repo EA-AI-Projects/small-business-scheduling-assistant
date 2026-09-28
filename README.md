@@ -25,7 +25,7 @@ An SMS-first scheduling assistant for a small home-cleaning business. Clients re
 
 ## Status
 
-The backend exposes a health endpoint and read-only calendar and availability APIs backed by a synthetic local adapter. The owner-approved pilot policy is encoded as a default for local tests; the DynamoDB adapter requires the owner policy seed before booking. Hold creation, appointment transitions, owner policy edits, blocks, and manual appointments use revision-guarded atomic writes. Provider-independent outbox dispatch and delivery logic includes a scheduled Lambda dispatcher entry point; queue resources and the SMS sender remain under development. Authenticated booking routes and external SMS delivery remain under development. No production scheduling service has been deployed.
+The backend exposes a health endpoint and read-only calendar and availability APIs backed by a synthetic local adapter. The owner-approved pilot policy is encoded as a default for local tests; the DynamoDB adapter requires the owner policy seed before booking. Hold creation, appointment transitions, owner policy edits, blocks, and manual appointments use revision-guarded atomic writes. Provider-independent outbox dispatch and delivery logic includes a scheduled Lambda dispatcher entry point; queue resources and the SMS sender remain under development. An authenticated owner API is implemented but not deployed; external SMS delivery remains under development. No production scheduling service has been deployed.
 
 ## Local backend
 
@@ -38,6 +38,12 @@ backend/.venv/bin/python -m uvicorn scheduling.api:app --app-dir backend --reloa
 ```
 
 Then open `http://127.0.0.1:8000/docs` or request `GET /health`. `GET /v1/businesses/pilot/calendar` requires timezone-aware `start_at` and `end_at` query parameters. `GET /v1/businesses/pilot/availability` accepts `day` and `duration_minutes`, and returns UTC starts under the owner-approved pilot policy. The in-memory calendar contains no customer data and resets on restart. These read endpoints are a local harness, not authenticated production routes.
+
+## Owner command API
+
+`scheduling.owner_auth.create_cognito_owner_app` constructs a separate owner API with a DynamoDB repository and Cognito access-token verification. Its caller must supply the DynamoDB client/table, Cognito issuer, app-client ID, configured owner subject, and business ID. The verifier checks the token signature, issuer, expiry, app client, token type, and exact owner subject; every owner route also checks the business in the path. The hosting layer must expose only this authenticated app for non-local owner access and supply these settings securely. No owner route is mounted by the synthetic `scheduling.api:app` harness.
+
+Owner routes are under `/v1/owner/businesses/{business_id}`. They list pending requests and the calendar, seed/read/edit scheduling policy, create requests, approve or decline an exact request, cancel or edit an appointment, create/move/remove unavailable blocks, and create a confirmed manual appointment. Every mutation requires `Authorization: Bearer <Cognito access token>` and `Idempotency-Key`; requests for edits and decisions carry expected versions or calendar revisions. A replay with the same key and body returns the original committed result. The service writes the result, revision, audit, and notification intent atomically. The owner UI and AWS integration are tracked separately in #19 and #23.
 
 Focused checks:
 

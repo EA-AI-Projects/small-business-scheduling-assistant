@@ -97,6 +97,14 @@ class InMemoryCalendarRepository:
         with self._lock:
             return self._appointments.get(appointment_id)
 
+    def read_pending_requests(self, business_id: str, now: datetime) -> tuple[Appointment, ...]:
+        with self._lock:
+            return tuple(sorted((appointment for appointment in self._appointments.values()
+                if appointment.business_id == business_id
+                and appointment.status.value == "PENDING_APPROVAL"
+                and appointment.hold_expires_at is not None
+                and appointment.hold_expires_at > now), key=lambda appointment: appointment.start_at))
+
     def read_replacement_guard(
         self, business_id: str, original_id: str
     ) -> ReplacementGuard | None:
