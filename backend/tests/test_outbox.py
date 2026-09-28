@@ -16,6 +16,7 @@ from scheduling.domain.outbox import (
     DispatchService,
     OutboxConflict,
     OutboxRecord,
+    PermanentDeliveryFailure,
     consume_sqs_batch,
     decode_queue_message,
 )
@@ -183,6 +184,20 @@ def test_concurrent_duplicate_consumers_claim_once() -> None:
         results = list(pool.map(lambda _: consumer.consume("business-1", "notice-1"), range(2)))
     assert sorted(results) == [ConsumeOutcome.SENT, ConsumeOutcome.SKIPPED]
     assert sender.calls == 1
+
+
+def test_permanent_consent_failure_does_not_retry() -> None:
+    class NoConsentSender:
+        def deliver(self, record: OutboxRecord) -> str:
+            raise PermanentDeliveryFailure("CONSENT_REQUIRED")
+
+    store = MemoryStore()
+    outcome = ConsumeService(store, NoConsentSender(), lambda: NOW).consume(
+        "business-1", "notice-1"
+    )
+    assert outcome == ConsumeOutcome.FAILED
+    assert store.record.state == DeliveryState.FAILED
+    assert store.record.next_attempt_at is None
 
 
 def test_concurrent_dispatchers_cannot_cause_two_logical_deliveries() -> None:

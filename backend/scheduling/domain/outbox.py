@@ -31,6 +31,10 @@ class DeliveryFailure(Exception):
         super().__init__(code)
 
 
+class PermanentDeliveryFailure(DeliveryFailure):
+    """A policy or data gate that another provider attempt cannot repair."""
+
+
 @dataclass(frozen=True)
 class OutboxRecord:
     business_id: str
@@ -168,6 +172,11 @@ class ConsumeService:
                 raise ValueError("Sender must return a provider message ID")
             self._store.mark_sent(claimed, provider_id, _utc(self._clock()))
             return ConsumeOutcome.SENT
+        except PermanentDeliveryFailure as exc:
+            self._store.mark_failure(
+                claimed, DeliveryState.FAILED, None, exc.code, _utc(self._clock())
+            )
+            return ConsumeOutcome.FAILED
         except DeliveryFailure as exc:
             failed_at = _utc(self._clock())
             if claimed.attempts >= self._max_attempts:

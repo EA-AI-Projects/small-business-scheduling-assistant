@@ -21,6 +21,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from scheduling.adapters.dynamodb import DynamoClient, DynamoDBCalendarRepository
+from scheduling.adapters.sms_dynamodb import DynamoSmsIngressStore
 from scheduling.domain.appointments import Appointment
 from scheduling.domain.availability import AvailabilityPolicy, HolidayCalendar, LocalWindow
 from scheduling.domain.client_records import (
@@ -67,6 +68,7 @@ from scheduling.domain.owner_policy import (
     PolicyRecord,
     PolicyRepository,
 )
+from scheduling.domain.sms_ingress import SmsIngressStore, record_in_person_consent
 
 
 @dataclass(frozen=True)
@@ -220,6 +222,13 @@ class LegalHoldBody(StrictModel):
     reason: str | None
 
 
+class InPersonConsentBody(StrictModel):
+    phone_e164: str = Field(min_length=2, max_length=16)
+    participant_name: str = Field(min_length=1, max_length=200)
+    script_version: str = Field(min_length=1, max_length=80)
+    clear_yes: bool
+
+
 def _error(code: str, message: str, status: int, current: object | None = None) -> HTTPException:
     detail: dict[str, object] = {"error": {"code": code, "message": message}}
     if current is not None:
@@ -232,6 +241,7 @@ def create_owner_app(
     verify_token: OwnerTokenVerifier,
     clock: Callable[[], datetime] | None = None,
     ui_config: OwnerUiConfig | None = None,
+    sms_store: SmsIngressStore | None = None,
 ) -> FastAPI:
     """Mount only authenticated owner routes; local synthetic API stays separate."""
     app = FastAPI(title="Scheduling owner API", version="0.1.0")
@@ -376,6 +386,22 @@ def create_owner_app(
             business_id, client_id, body.name, body.phone_e164, body.service_address,
             body.home_size, body.default_duration_minutes, body.active,
             body.expected_version, record.policy.maximum_visit_minutes, now()))
+
+    if sms_store is not None:
+        @app.post("/v1/owner/businesses/{business_id}/clients/{client_id}/sms-consent")
+        def capture_sms_consent(business_id: str, client_id: str, body: InPersonConsentBody,
+                                owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:
+            del owner
+            if not body.clear_yes:
+                raise _error("CONSENT_NOT_GIVEN", "Record consent only after a clear yes", 422)
+            try:
+                return record_in_person_consent(
+                    sms_store, cast(ClientRecordRepository, repository), business_id,
+                    client_id, body.phone_e164, body.participant_name,
+                    body.script_version, now(),
+                )
+            except ValueError as exc:
+                raise _error("INVALID_CONSENT", str(exc), 422) from exc
 
     @app.get("/v1/owner/businesses/{business_id}/clients/{client_id}/notes")
     def list_client_notes(business_id: str, client_id: str,
@@ -572,4 +598,4 @@ def create_persisted_owner_app(client: DynamoClient, table_name: str,
                                ui_config: OwnerUiConfig | None = None) -> FastAPI:
     """Build the non-local owner API with strongly read DynamoDB state."""
     return create_owner_app(DynamoDBCalendarRepository(client, table_name), verify_token,
-                            clock, ui_config)
+                            clock, ui_config, DynamoSmsIngressStore(client, table_name))

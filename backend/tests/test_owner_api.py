@@ -8,6 +8,8 @@ from fastapi.testclient import TestClient
 from scheduling.adapters.dynamodb import encode_policy
 from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.domain.availability import pilot_policy
+from scheduling.domain.client_records import ClientRecordService, HomeSize
+from scheduling.domain.sms_ingress import ConsentEvidence
 from scheduling.owner_api import OwnerPrincipal, create_owner_app
 
 NOW = datetime(2026, 6, 29, 12, tzinfo=UTC)
@@ -41,6 +43,35 @@ def test_owner_routes_reject_missing_invalid_and_cross_business_credentials() ->
     assert api.post(f"{BASE}/policy/seed", headers={
         "Authorization": "Bearer verified-owner",
     }).status_code == 422
+
+
+def test_owner_records_in_person_yes_without_sending_enrollment_sms() -> None:
+    repository = InMemoryCalendarRepository()
+    ClientRecordService(repository).save_profile(
+        "pilot", "client-1", "Synthetic Client", "+14155550101", "123 Test Street",
+        HomeSize.SMALL, 60, True, 0, 180, NOW,
+    )
+
+    class ConsentStore:
+        evidence: ConsentEvidence | None = None
+
+        def put_consent(self, evidence: ConsentEvidence) -> None:
+            self.evidence = evidence
+
+    store = ConsentStore()
+    api = TestClient(create_owner_app(repository, lambda token: OwnerPrincipal("owner-1", "pilot")
+                                      if token == "verified-owner" else None,  # type: ignore[arg-type]
+                                      lambda: NOW, sms_store=store))  # type: ignore[arg-type]
+    path = f"{BASE}/clients/client-1/sms-consent"
+    body = {"phone_e164": "+14155550101", "participant_name": "Synthetic Client",
+            "script_version": "pilot-v1", "clear_yes": True}
+    assert api.post(path, json=body).status_code == 401
+    assert api.post(path, json={**body, "clear_yes": False}, headers=headers()).status_code == 422
+    response = api.post(path, json=body, headers=headers())
+    assert response.status_code == 200, response.text
+    assert store.evidence is not None
+    assert store.evidence.method == "in_person"
+    assert store.evidence.agreed_at == NOW
 
 
 def test_owner_request_approval_replay_and_stale_conflict() -> None:
