@@ -1,0 +1,7 @@
+# Keep in sync with pyproject.toml for AWS SAM's Python ZIP builder.
+boto3>=1.35,<2
+fastapi>=0.115,<1
+mangum>=0.19,<1
+PyJWT[crypto]>=2.10,<3
+twilio>=9,<10
+uvicorn>=0.30,<1
