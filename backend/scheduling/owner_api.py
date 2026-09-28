@@ -5,9 +5,11 @@ access token (issuer, signature, expiry, token_use and client ID) before returni
 an owner principal. No request field or HTTP header can assert an actor role.
 """
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
+from hashlib import sha256
 from typing import Annotated, Protocol, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -19,6 +21,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from scheduling.adapters.dynamodb import DynamoClient, DynamoDBCalendarRepository
 from scheduling.domain.appointments import Appointment
 from scheduling.domain.availability import AvailabilityPolicy, HolidayCalendar, LocalWindow
+from scheduling.domain.client_records import (
+    ClientRecordRepository,
+    ClientRecordService,
+    HomeSize,
+    RecordConflict,
+    RecordNotFound,
+)
 from scheduling.domain.holds import (
     CreateHold,
     HoldRepository,
@@ -181,6 +190,21 @@ class ManualAppointmentBody(StrictModel):
     duration_minutes: int = Field(gt=0)
 
 
+class ClientProfileBody(StrictModel):
+    expected_version: int = Field(ge=0)
+    name: str = Field(min_length=1, max_length=200)
+    phone_e164: str = Field(min_length=2, max_length=16)
+    service_address: str = Field(min_length=1, max_length=500)
+    home_size: HomeSize
+    default_duration_minutes: int = Field(gt=0)
+    active: bool = True
+
+
+class ClientNoteBody(StrictModel):
+    appointment_id: str | None = None
+    body: str = Field(min_length=1, max_length=2000)
+
+
 def _error(code: str, message: str, status: int, current: object | None = None) -> HTTPException:
     detail: dict[str, object] = {"error": {"code": code, "message": message}}
     if current is not None:
@@ -209,6 +233,7 @@ def create_owner_app(
     lifecycle = LifecycleService(cast(LifecycleRepository, repository), now)
     calendar = OwnerCalendarService(cast(OwnerCalendarRepository, repository), now)
     policy = OwnerPolicyService(cast(PolicyRepository, repository), now)
+    clients = ClientRecordService(cast(ClientRecordRepository, repository))
 
     def principal(
         business_id: str,
@@ -244,6 +269,10 @@ def create_owner_app(
             raise _error("INVALID_TARGET", str(exc), 409, current() if current else None) from exc
         except PolicyNotConfigured as exc:
             raise _error("POLICY_NOT_CONFIGURED", str(exc), 409) from exc
+        except RecordConflict as exc:
+            raise _error("RECORD_CONFLICT", str(exc), 409) from exc
+        except RecordNotFound as exc:
+            raise _error("NOT_FOUND", str(exc), 404) from exc
         except ValueError as exc:
             raise _error("INVALID_REQUEST", str(exc), 422) from exc
 
@@ -268,6 +297,58 @@ def create_owner_app(
             return None
         return {"version": record.version,
                 "calendar_revision": store.read_revision(business_id)}
+
+    @app.get("/v1/owner/businesses/{business_id}/clients")
+    def list_clients(business_id: str,
+                     owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:
+        del owner
+        return cast(ClientRecordRepository, repository).list_profiles(business_id)
+
+    @app.get("/v1/owner/businesses/{business_id}/clients/{client_id}")
+    def get_client(business_id: str, client_id: str,
+                   owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:
+        del owner
+        profile = cast(ClientRecordRepository, repository).read_profile(business_id, client_id)
+        if profile is None:
+            raise _error("NOT_FOUND", "Client was not found", 404)
+        return profile
+
+    @app.put("/v1/owner/businesses/{business_id}/clients/{client_id}")
+    def save_client(business_id: str, client_id: str, body: ClientProfileBody,
+                    owner: Annotated[OwnerPrincipal, Depends(principal)],
+                    request_key: Annotated[str, Depends(key)]) -> object:
+        del owner, request_key
+        record = store.read_policy_record(business_id)
+        if record is None:
+            raise _error("POLICY_NOT_CONFIGURED", "Persist the pilot policy first", 409)
+        return run(lambda: clients.save_profile(
+            business_id, client_id, body.name, body.phone_e164, body.service_address,
+            body.home_size, body.default_duration_minutes, body.active,
+            body.expected_version, record.policy.maximum_visit_minutes, now()))
+
+    @app.get("/v1/owner/businesses/{business_id}/clients/{client_id}/notes")
+    def list_client_notes(business_id: str, client_id: str,
+                          owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:
+        del owner
+        return run(lambda: clients.list_notes(business_id, client_id, now()))
+
+    @app.post("/v1/owner/businesses/{business_id}/clients/{client_id}/notes")
+    def create_client_note(business_id: str, client_id: str, body: ClientNoteBody,
+                           owner: Annotated[OwnerPrincipal, Depends(principal)],
+                           request_key: Annotated[str, Depends(key)]) -> object:
+        note_identity = json.dumps([business_id, client_id, owner.actor_id, request_key],
+                                   separators=(",", ":"))
+        note_id = sha256(note_identity.encode()).hexdigest()
+        return run(lambda: clients.create_note(
+            business_id, client_id, body.appointment_id, body.body,
+            owner.actor_id, now(), note_id))
+
+    @app.delete("/v1/owner/businesses/{business_id}/clients/{client_id}/notes/{note_id}")
+    def delete_client_note(business_id: str, client_id: str, note_id: str,
+                           owner: Annotated[OwnerPrincipal, Depends(principal)],
+                           request_key: Annotated[str, Depends(key)]) -> object:
+        del owner, request_key
+        return run(lambda: clients.delete_note(business_id, client_id, note_id))
 
     @app.get("/v1/owner/businesses/{business_id}/calendar")
     def owner_calendar(business_id: str, owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:

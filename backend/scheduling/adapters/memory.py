@@ -7,6 +7,7 @@ from threading import RLock
 from scheduling.domain.appointments import Appointment, ReplacementGuard
 from scheduling.domain.availability import AvailabilityPolicy, pilot_policy
 from scheduling.domain.calendar import CalendarEvent, CalendarSnapshot
+from scheduling.domain.client_records import ClientNote, ClientProfile, RecordConflict
 from scheduling.domain.holds import (
     CreateHold,
     HoldCommit,
@@ -42,6 +43,81 @@ class InMemoryCalendarRepository:
         self._replacement_guards: dict[tuple[str, str], ReplacementGuard] = {}
         self._outbox: dict[str, object] = {}
         self._audit: dict[str, object] = {}
+        self._clients: dict[tuple[str, str], ClientProfile] = {}
+        self._client_phones: dict[tuple[str, str], str] = {}
+        self._client_notes: dict[tuple[str, str, str], ClientNote] = {}
+
+    def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None:
+        with self._lock:
+            return self._clients.get((business_id, client_id))
+
+    def list_profiles(self, business_id: str) -> tuple[ClientProfile, ...]:
+        with self._lock:
+            return tuple(sorted((profile for (owner, _), profile in self._clients.items()
+                                 if owner == business_id), key=lambda profile: profile.client_id))
+
+    def read_verified_phone(self, business_id: str, phone_e164: str) -> ClientProfile | None:
+        with self._lock:
+            client_id = self._client_phones.get((business_id, phone_e164))
+            profile = self._clients.get((business_id, client_id)) if client_id else None
+            return (profile if profile and profile.phone_e164 == phone_e164
+                    and profile.phone_verified_at is not None and profile.active else None)
+
+    def save_profile(self, profile: ClientProfile, expected_version: int,
+                     previous_phone: str | None) -> None:
+        with self._lock:
+            key = (profile.business_id, profile.client_id)
+            current = self._clients.get(key)
+            if (current.version if current else 0) != expected_version:
+                raise RecordConflict("Client profile version changed")
+            if (current.phone_e164 if current else None) != previous_phone:
+                raise RecordConflict("Client phone changed")
+            phone_key = (profile.business_id, profile.phone_e164)
+            mapped = self._client_phones.get(phone_key)
+            if mapped is not None and mapped != profile.client_id:
+                raise RecordConflict("Phone is already assigned to another client")
+            if previous_phone and previous_phone != profile.phone_e164:
+                del self._client_phones[(profile.business_id, previous_phone)]
+            self._clients[key] = profile
+            self._client_phones[phone_key] = profile.client_id
+
+    def read_note(self, business_id: str, client_id: str,
+                  note_id: str) -> ClientNote | None:
+        with self._lock:
+            return self._client_notes.get((business_id, client_id, note_id))
+
+    def list_notes(self, business_id: str, client_id: str) -> tuple[ClientNote, ...]:
+        with self._lock:
+            return tuple(sorted((note for (owner, client, _), note in self._client_notes.items()
+                                 if owner == business_id and client == client_id),
+                                key=lambda note: (note.created_at, note.note_id)))
+
+    def put_note(self, note: ClientNote) -> None:
+        with self._lock:
+            key = (note.business_id, note.client_id, note.note_id)
+            existing = self._client_notes.get(key)
+            if existing is not None and existing != note:
+                raise RecordConflict("Note ID was already used")
+            self._client_notes[key] = note
+
+    def delete_note(self, note: ClientNote) -> None:
+        with self._lock:
+            key = (note.business_id, note.client_id, note.note_id)
+            current = self._client_notes.get(key)
+            if current is not None and current.legal_hold_reason is not None:
+                raise RecordConflict("Note is under legal hold")
+            if self._client_notes.get(key) == note:
+                del self._client_notes[key]
+
+    def last_visit_end(self, business_id: str, client_id: str,
+                       now: datetime) -> datetime | None:
+        with self._lock:
+            ends = [appointment.end_at for appointment in self._appointments.values()
+                    if appointment.business_id == business_id
+                    and appointment.client_id == client_id
+                    and appointment.status.value == "CONFIRMED"
+                    and appointment.end_at <= now]
+            return max(ends, default=None)
 
     def read_revision(self, business_id: str) -> int:
         with self._lock:

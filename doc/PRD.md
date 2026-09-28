@@ -121,7 +121,7 @@ Minimal authenticated owner interface:
 - Notes are visible only to authorized business users and are not exposed to other clients.
 - The assistant should not silently convert sensitive or ambiguous conversation content into durable notes; the owner should be able to review/edit notes.
 - Exclude entry/access codes from this MVP entirely; do not request, extract, store, or send them through the scheduling assistant.
-- Delete SMS message bodies 90 days after the last scheduling exchange, and ordinary client/appointment notes 12 months after the last visit. Keep only minimal consent/opt-out evidence for four years after the last program text, unless a documented legal hold requires longer. The owner approved these pilot periods in issue #16; implementation belongs to the SMS and profile issues.
+- Delete SMS message bodies 90 days after the last scheduling exchange, and ordinary client/appointment notes 12 months after the last completed visit. If a client has never completed a visit, delete each note 12 months after its creation. Reject a new note when the client's last completed visit was already more than 12 months ago. Keep only minimal consent/opt-out evidence for four years after the last program text, unless a documented legal hold requires longer. The owner approved these pilot periods and edge cases in issues #16 and #21; implementation belongs to the SMS and profile issues.
 
 ## 7. Core status model
 
