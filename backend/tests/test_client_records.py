@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scheduling.adapters.memory import InMemoryCalendarRepository
+from scheduling.domain.calendar import CalendarStatus
 from scheduling.domain.client_records import (
     ClientNote,
     ClientRecordService,
@@ -93,6 +94,21 @@ def test_note_scope_retention_and_access_code_exclusion() -> None:
     with pytest.raises(ValueError, match="retention window"):
         service.create_note(BUSINESS, "client-1", None, "Late note", "owner-1",
                             anniversary + timedelta(days=1))
+
+
+def test_only_ended_uncancelled_confirmed_appointment_counts_as_visit() -> None:
+    repository, service = ready()
+    save(service, "client-1", "+14155550101")
+    appointment = OwnerCalendarService(repository, lambda: NOW).apply(
+        OwnerCalendarCommand(BUSINESS, "owner-1", "manual", OwnerAction.CREATE_APPOINTMENT,
+                             repository.read_revision(BUSINESS), client_id="client-1",
+                             start_at=START, duration_minutes=60)).appointment
+    assert appointment is not None
+    assert repository.last_visit_end(BUSINESS, "client-1", appointment.end_at - timedelta(seconds=1)) is None
+    assert repository.last_visit_end(BUSINESS, "client-1", appointment.end_at) == appointment.end_at
+    repository._appointments[appointment.appointment_id] = replace(
+        appointment, status=CalendarStatus.CANCELLED)
+    assert repository.last_visit_end(BUSINESS, "client-1", appointment.end_at) is None
 
 
 def test_never_visited_notes_expire_from_creation_and_legal_hold_survives() -> None:
