@@ -7,7 +7,10 @@ import pytest
 from botocore.exceptions import ClientError
 
 from scheduling.adapters.dynamodb import DynamoDBCalendarRepository, encode_policy
+from scheduling.adapters.outbox_aws import DynamoOutboxStore
+from scheduling.domain.appointments import Appointment
 from scheduling.domain.availability import pilot_policy
+from scheduling.domain.calendar import CalendarStatus
 from scheduling.domain.holds import (
     CreateHold,
     HoldCommit,
@@ -15,6 +18,14 @@ from scheduling.domain.holds import (
     PendingHold,
     RevisionConflict,
 )
+from scheduling.domain.owner_calendar import (
+    OwnerAction,
+    OwnerCalendarCommand,
+    OwnerCalendarCommit,
+    OwnerCalendarResult,
+    UnavailableBlock,
+)
+from scheduling.domain.owner_policy import PolicyCommand, PolicyCommit, PolicyRecord, PolicyResult
 
 
 class RecordingClient:
@@ -191,3 +202,101 @@ def test_replacement_hold_claims_original_guard_in_same_transaction() -> None:
     assert guard["Item"]["SK"] == {"S": "REPLACEMENT#original-1"}
     assert guard["Item"]["replacement_id"] == {"S": "replacement-1"}
     assert guard["ConditionExpression"] == "attribute_not_exists(PK) OR expires_at <= :now"
+
+
+def test_policy_seed_and_edit_write_revision_version_audit_and_outbox_atomically() -> None:
+    client = RecordingClient()
+    repository = DynamoDBCalendarRepository(client, "scheduling")
+    policy = pilot_policy()
+    now = datetime(2026, 9, 28, 15, tzinfo=UTC)
+    seed = PolicyCommand("business-1", "owner-1", "seed", 0, None, policy)
+    repository.commit_policy(0, PolicyCommit(
+        seed, seed.request_hash(), PolicyResult(PolicyRecord(policy, 1), 1), now, "seed-audit"
+    ))
+
+    writes = client.transactions[0]["TransactItems"]
+    assert len(writes) == 5
+    assert writes[0]["Update"]["ConditionExpression"] == "attribute_not_exists(PK)"
+    assert writes[1]["Put"]["ConditionExpression"] == "attribute_not_exists(PK)"
+    assert writes[1]["Put"]["Item"]["version"] == {"N": "1"}
+    assert writes[3]["Put"]["Item"]["SK"] == {"S": "AUDIT#seed-audit"}
+    assert writes[4]["Put"]["Item"]["outbox_due_pk"] == {"S": "OUTBOX#PENDING"}
+
+    edit = PolicyCommand("business-1", "owner-1", "edit", 1, 1, policy)
+    repository.commit_policy(1, PolicyCommit(
+        edit, edit.request_hash(), PolicyResult(PolicyRecord(policy, 2), 2), now, "edit-audit"
+    ))
+    edited = client.transactions[1]["TransactItems"]
+    assert edited[0]["Update"]["ConditionExpression"] == "revision = :old"
+    assert edited[1]["Put"]["ConditionExpression"] == "#version = :old_version"
+    assert edited[1]["Put"]["ExpressionAttributeValues"][":old_version"] == {"N": "1"}
+    assert DynamoOutboxStore._record(writes[4]["Put"]["Item"]).entity_id == "business-1"
+
+
+def test_owner_block_and_manual_appointment_write_guarded_transactions() -> None:
+    client = RecordingClient()
+    repository = DynamoDBCalendarRepository(client, "scheduling")
+    now = datetime(2026, 9, 28, 15, tzinfo=UTC)
+    start = datetime(2026, 9, 29, 16, tzinfo=UTC)
+    block = UnavailableBlock("block-1", "business-1", start, start.replace(hour=17), 1)
+    create = OwnerCalendarCommand(
+        "business-1", "owner-1", "block-key", OwnerAction.CREATE_BLOCK, 7,
+        start_at=block.start_at, end_at=block.end_at,
+    )
+    intent = OutboxIntent("block-notice", block.block_id, "owner", "block_time")
+    repository.commit_owner_calendar(7, OwnerCalendarCommit(
+        create, create.request_hash(), None, OwnerCalendarResult(8, block), now,
+        "block-audit", (intent,),
+    ))
+    block_writes = client.transactions[0]["TransactItems"]
+    assert block_writes[0]["Update"]["ConditionExpression"] == "revision = :old"
+    assert block_writes[1]["Put"]["Item"]["SK"] == {"S": "BLOCK#block-1"}
+    assert block_writes[1]["Put"]["Item"]["version"] == {"N": "1"}
+    assert DynamoOutboxStore._record(block_writes[-1]["Put"]["Item"]).entity_id == "block-1"
+
+    moved = UnavailableBlock("block-1", "business-1", start.replace(hour=18),
+                             start.replace(hour=19), 2)
+    move = OwnerCalendarCommand(
+        "business-1", "owner-1", "move-key", OwnerAction.MOVE_BLOCK, 8,
+        block_id="block-1", expected_version=1,
+        start_at=moved.start_at, end_at=moved.end_at,
+    )
+    repository.commit_owner_calendar(8, OwnerCalendarCommit(
+        move, move.request_hash(), block, OwnerCalendarResult(9, moved), now,
+        "move-audit", (intent,),
+    ))
+    move_put = client.transactions[1]["TransactItems"][1]["Put"]
+    assert move_put["ConditionExpression"] == "#version = :old_version"
+    assert move_put["ExpressionAttributeValues"][":old_version"] == {"N": "1"}
+
+    remove = OwnerCalendarCommand(
+        "business-1", "owner-1", "remove-key", OwnerAction.REMOVE_BLOCK, 9,
+        block_id="block-1", expected_version=2,
+    )
+    repository.commit_owner_calendar(9, OwnerCalendarCommit(
+        remove, remove.request_hash(), moved, OwnerCalendarResult(10), now,
+        "remove-audit", (intent,),
+    ))
+    remove_delete = client.transactions[2]["TransactItems"][1]["Delete"]
+    assert remove_delete["ConditionExpression"] == "#version = :old_version"
+    assert remove_delete["ExpressionAttributeValues"][":old_version"] == {"N": "2"}
+
+    appointment = Appointment(
+        "manual-1", "business-1", "client-1", start, start.replace(hour=17),
+        CalendarStatus.CONFIRMED, None, 60, 30, 1,
+    )
+    manual = OwnerCalendarCommand(
+        "business-1", "owner-1", "manual-key", OwnerAction.CREATE_APPOINTMENT, 8,
+        start_at=start, client_id="client-1", duration_minutes=60,
+    )
+    client_notice = OutboxIntent("manual-notice", appointment.appointment_id,
+                                 "client", "create_owner_appointment")
+    repository.commit_owner_calendar(8, OwnerCalendarCommit(
+        manual, manual.request_hash(), None, OwnerCalendarResult(9, appointment=appointment),
+        now, "manual-audit", (client_notice,),
+    ))
+    manual_writes = client.transactions[3]["TransactItems"]
+    assert manual_writes[1]["Put"]["Item"]["PK"] == {"S": "APPOINTMENT#manual-1"}
+    assert manual_writes[2]["Put"]["Item"]["event_id"] == {"S": "manual-1"}
+    assert manual_writes[1]["Put"]["ConditionExpression"] == "attribute_not_exists(PK)"
+    assert DynamoOutboxStore._record(manual_writes[-1]["Put"]["Item"]).entity_id == "manual-1"

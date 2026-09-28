@@ -14,6 +14,13 @@ from scheduling.domain.holds import (
     RevisionConflict,
 )
 from scheduling.domain.lifecycle import AppointmentCommand, TransitionCommit, TransitionRecord
+from scheduling.domain.owner_calendar import (
+    OwnerCalendarCommand,
+    OwnerCalendarCommit,
+    OwnerCalendarReplay,
+    UnavailableBlock,
+)
+from scheduling.domain.owner_policy import PolicyCommand, PolicyCommit, PolicyRecord, PolicyReplay
 
 
 class InMemoryCalendarRepository:
@@ -22,10 +29,16 @@ class InMemoryCalendarRepository:
         self._events: dict[str, tuple[CalendarEvent, ...]] = defaultdict(tuple)
         self._revisions: dict[str, int] = defaultdict(int)
         self._policies: dict[str, AvailabilityPolicy] = {}
+        self._policy_versions: dict[str, int] = {}
+        self._policy_replays: dict[tuple[str, str, str, str], PolicyReplay] = {}
         self._idempotency: dict[tuple[str, str, str, str], IdempotencyRecord] = {}
         self._transition_idempotency: dict[tuple[str, str, str, str], TransitionRecord] = {}
         self._holds: dict[str, HoldCommit] = {}
         self._appointments: dict[str, Appointment] = {}
+        self._blocks: dict[tuple[str, str], UnavailableBlock] = {}
+        self._owner_calendar_replays: dict[
+            tuple[str, str, str, str], OwnerCalendarReplay
+        ] = {}
         self._replacement_guards: dict[tuple[str, str], ReplacementGuard] = {}
         self._outbox: dict[str, object] = {}
         self._audit: dict[str, object] = {}
@@ -173,8 +186,57 @@ class InMemoryCalendarRepository:
             return CalendarSnapshot(
                 business_id=business_id,
                 revision=self._revisions[business_id],
-                events=self._events[business_id],
+                events=self._events[business_id] + tuple(
+                    block.calendar_event()
+                    for (owner_business, _), block in self._blocks.items()
+                    if owner_business == business_id
+                ),
             )
+
+    def read_block(self, business_id: str, block_id: str) -> UnavailableBlock | None:
+        with self._lock:
+            return self._blocks.get((business_id, block_id))
+
+    @staticmethod
+    def _owner_calendar_key(command: OwnerCalendarCommand) -> tuple[str, str, str, str]:
+        return (
+            command.business_id, command.actor_id, command.operation.value,
+            command.idempotency_key,
+        )
+
+    def read_owner_calendar_replay(
+        self, command: OwnerCalendarCommand
+    ) -> OwnerCalendarReplay | None:
+        with self._lock:
+            return self._owner_calendar_replays.get(self._owner_calendar_key(command))
+
+    def commit_owner_calendar(self, expected_revision: int, commit: OwnerCalendarCommit) -> None:
+        with self._lock:
+            business_id = commit.command.business_id
+            if self._revisions[business_id] != expected_revision:
+                raise RevisionConflict("Calendar revision changed")
+            before = commit.before_block
+            if before is not None and self._blocks.get((business_id, before.block_id)) != before:
+                raise RevisionConflict("Block version changed")
+            key = self._owner_calendar_key(commit.command)
+            if key in self._owner_calendar_replays:
+                raise RevisionConflict("Owner calendar key already used")
+            block = commit.result.block
+            appointment = commit.result.appointment
+            if before is not None:
+                del self._blocks[(business_id, before.block_id)]
+            if block is not None:
+                self._blocks[(business_id, block.block_id)] = block
+            if appointment is not None:
+                self._appointments[appointment.appointment_id] = appointment
+                self._events[business_id] += (appointment.calendar_event(),)
+            self._owner_calendar_replays[key] = OwnerCalendarReplay(
+                commit.request_hash, commit.result
+            )
+            self._audit[commit.audit_id] = commit
+            for intent in commit.outbox:
+                self._outbox[intent.outbox_id] = intent
+            self._revisions[business_id] += 1
 
     def read_calendar_for_hold(
         self,
@@ -189,9 +251,44 @@ class InMemoryCalendarRepository:
         with self._lock:
             return self._policies.get(business_id, pilot_policy())
 
+    def read_policy_record(self, business_id: str) -> PolicyRecord | None:
+        with self._lock:
+            policy = self._policies.get(business_id)
+            return PolicyRecord(policy, self._policy_versions[business_id]) if policy else None
+
+    @staticmethod
+    def _policy_replay_key(command: PolicyCommand) -> tuple[str, str, str, str]:
+        return (
+            command.business_id, command.actor_id, command.operation,
+            command.idempotency_key,
+        )
+
+    def read_policy_replay(self, command: PolicyCommand) -> PolicyReplay | None:
+        with self._lock:
+            return self._policy_replays.get(self._policy_replay_key(command))
+
+    def commit_policy(self, expected_revision: int, commit: PolicyCommit) -> None:
+        with self._lock:
+            business_id = commit.command.business_id
+            if self._revisions[business_id] != expected_revision:
+                raise RevisionConflict("Calendar revision changed")
+            previous_version = self._policy_versions.get(business_id)
+            if previous_version != commit.command.expected_version:
+                raise RevisionConflict("Policy version changed")
+            key = self._policy_replay_key(commit.command)
+            if key in self._policy_replays:
+                raise RevisionConflict("Policy idempotency key already used")
+            self._policies[business_id] = commit.result.record.policy
+            self._policy_versions[business_id] = commit.result.record.version
+            self._policy_replays[key] = PolicyReplay(commit.request_hash, commit.result)
+            self._audit[commit.audit_id] = commit
+            self._outbox[f"{commit.audit_id}#owner"] = commit
+            self._revisions[business_id] += 1
+
     def set_policy_for_test(self, business_id: str, policy: AvailabilityPolicy) -> None:
         with self._lock:
             self._policies[business_id] = policy
+            self._policy_versions[business_id] = 1
 
     def replace_for_test(
         self, business_id: str, expected_revision: int, events: tuple[CalendarEvent, ...]

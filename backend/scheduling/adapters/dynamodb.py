@@ -24,6 +24,20 @@ from scheduling.domain.lifecycle import (
     TransitionResult,
 )
 from scheduling.domain.outbox import DeliveryState
+from scheduling.domain.owner_calendar import (
+    OwnerCalendarCommand,
+    OwnerCalendarCommit,
+    OwnerCalendarReplay,
+    OwnerCalendarResult,
+    UnavailableBlock,
+)
+from scheduling.domain.owner_policy import (
+    PolicyCommand,
+    PolicyCommit,
+    PolicyRecord,
+    PolicyReplay,
+    PolicyResult,
+)
 
 
 class DynamoClient(Protocol):
@@ -101,6 +115,24 @@ def _appointment_from_payload(raw: dict[str, Any]) -> Appointment:
     )
 
 
+def _block_payload(block: UnavailableBlock) -> dict[str, Any]:
+    return {
+        "block_id": block.block_id,
+        "business_id": block.business_id,
+        "start_at": _instant(block.start_at),
+        "end_at": _instant(block.end_at),
+        "version": block.version,
+    }
+
+
+def _block_from_payload(raw: dict[str, Any]) -> UnavailableBlock:
+    return UnavailableBlock(
+        raw["block_id"], raw["business_id"],
+        datetime.fromisoformat(raw["start_at"]), datetime.fromisoformat(raw["end_at"]),
+        raw["version"],
+    )
+
+
 def encode_policy(policy: AvailabilityPolicy) -> str:
     """Encode the persisted POLICY#SCHEDULING payload used by strong reads."""
     def windows(values: tuple[LocalWindow, ...]) -> list[dict[str, str]]:
@@ -147,10 +179,23 @@ class DynamoDBCalendarRepository:
         return int(item["revision"]["N"]) if item else 0
 
     def read_policy(self, business_id: str) -> AvailabilityPolicy:
+        record = self.read_policy_record(business_id)
+        if record is None:
+            raise ValueError("Persisted scheduling policy is required before booking")
+        return record.policy
+
+    def read_policy_record(self, business_id: str) -> PolicyRecord | None:
         item = self._get(self._business_key(business_id, "POLICY#SCHEDULING"))
         if item is None:
-            raise ValueError("Persisted scheduling policy is required before booking")
-        payload = json.loads(item["payload"]["S"])
+            return None
+        return PolicyRecord(
+            self._decode_policy(item["payload"]["S"]),
+            int(item.get("version", {"N": "1"})["N"]),
+        )
+
+    @staticmethod
+    def _decode_policy(encoded: str) -> AvailabilityPolicy:
+        payload = json.loads(encoded)
 
         def windows(raw: list[dict[str, str]]) -> tuple[LocalWindow, ...]:
             return tuple(LocalWindow(time.fromisoformat(w["opens"]), time.fromisoformat(w["closes"])) for w in raw)
@@ -175,6 +220,277 @@ class DynamoDBCalendarRepository:
                 if payload.get("holiday_calendar") else None
             ),
         )
+
+    def read_policy_replay(self, command: PolicyCommand) -> PolicyReplay | None:
+        item = self._get(self._business_key(
+            command.business_id,
+            _command_sort_key(command.actor_id, command.operation, command.idempotency_key),
+        ))
+        if item is None:
+            return None
+        response = json.loads(item["response"]["S"])
+        return PolicyReplay(
+            item["request_hash"]["S"],
+            PolicyResult(
+                PolicyRecord(
+                    self._decode_policy(response["policy"]), response["policy_version"]
+                ),
+                response["calendar_revision"],
+            ),
+        )
+
+    def read_block(self, business_id: str, block_id: str) -> UnavailableBlock | None:
+        item = self._get(self._business_key(business_id, f"BLOCK#{block_id}"))
+        if item is None:
+            return None
+        return UnavailableBlock(
+            block_id, business_id,
+            datetime.fromisoformat(item["start_at"]["S"]),
+            datetime.fromisoformat(item["end_at"]["S"]),
+            int(item["version"]["N"]),
+        )
+
+    def read_owner_calendar_replay(
+        self, command: OwnerCalendarCommand
+    ) -> OwnerCalendarReplay | None:
+        item = self._get(self._business_key(
+            command.business_id,
+            _command_sort_key(command.actor_id, command.operation.value, command.idempotency_key),
+        ))
+        if item is None:
+            return None
+        response = json.loads(item["response"]["S"])
+        return OwnerCalendarReplay(
+            item["request_hash"]["S"],
+            OwnerCalendarResult(
+                response["calendar_revision"],
+                _block_from_payload(response["block"]) if response["block"] else None,
+                _appointment_from_payload(response["appointment"])
+                if response["appointment"] else None,
+            ),
+        )
+
+    def commit_owner_calendar(self, expected_revision: int, commit: OwnerCalendarCommit) -> None:
+        command = commit.command
+        business_id = command.business_id
+        before = commit.before_block
+        block = commit.result.block
+        appointment = commit.result.appointment
+        revision_condition = (
+            "attribute_not_exists(PK)" if expected_revision == 0 else "revision = :old"
+        )
+        revision_values: dict[str, Any] = {":new": {"N": str(expected_revision + 1)}}
+        if expected_revision:
+            revision_values[":old"] = {"N": str(expected_revision)}
+        writes: list[dict[str, Any]] = [{"Update": {
+            "TableName": self._table,
+            "Key": self._business_key(business_id, "CALENDAR#REVISION"),
+            "UpdateExpression": "SET revision = :new",
+            "ConditionExpression": revision_condition,
+            "ExpressionAttributeValues": revision_values,
+        }}]
+
+        def fresh_put(item: dict[str, Any]) -> dict[str, Any]:
+            return {"Put": {
+                "TableName": self._table, "Item": item,
+                "ConditionExpression": "attribute_not_exists(PK)",
+            }}
+
+        if block is not None:
+            block_item = {
+                **self._business_key(business_id, f"BLOCK#{block.block_id}"),
+                "event_id": {"S": block.block_id},
+                "start_at": {"S": _instant(block.start_at)},
+                "end_at": {"S": _instant(block.end_at)},
+                "status": {"S": CalendarStatus.UNAVAILABLE.value},
+                "duration_minutes": {
+                    "N": str(int((block.end_at - block.start_at).total_seconds() // 60))
+                },
+                "buffer_minutes": {"N": "0"},
+                "version": {"N": str(block.version)},
+            }
+            if before is None:
+                writes.append(fresh_put(block_item))
+            else:
+                writes.append({"Put": {
+                    "TableName": self._table,
+                    "Item": block_item,
+                    "ConditionExpression": "#version = :old_version",
+                    "ExpressionAttributeNames": {"#version": "version"},
+                    "ExpressionAttributeValues": {
+                        ":old_version": {"N": str(before.version)}
+                    },
+                }})
+        elif before is not None:
+            writes.append({"Delete": {
+                "TableName": self._table,
+                "Key": self._business_key(business_id, f"BLOCK#{before.block_id}"),
+                "ConditionExpression": "#version = :old_version",
+                "ExpressionAttributeNames": {"#version": "version"},
+                "ExpressionAttributeValues": {":old_version": {"N": str(before.version)}},
+            }})
+        elif appointment is not None:
+            writes.append(fresh_put(self._appointment_item(appointment)))
+            writes.append(fresh_put(self._event_item(appointment)))
+        else:
+            raise ValueError("Owner calendar commit has no change")
+
+        response = {
+            "calendar_revision": commit.result.calendar_revision,
+            "block": _block_payload(block) if block else None,
+            "appointment": _appointment_payload(appointment) if appointment else None,
+        }
+        writes.append(fresh_put({
+            **self._business_key(
+                business_id,
+                _command_sort_key(
+                    command.actor_id, command.operation.value, command.idempotency_key
+                ),
+            ),
+            "request_hash": {"S": commit.request_hash},
+            "response": {"S": json.dumps(response, sort_keys=True)},
+        }))
+        writes.append(fresh_put({
+            **self._business_key(business_id, f"AUDIT#{commit.audit_id}"),
+            "action": {"S": command.operation.value},
+            "actor_id": {"S": command.actor_id},
+            "calendar_revision": {"N": str(commit.result.calendar_revision)},
+        }))
+        if block is not None:
+            event_version = block.version
+        elif appointment is not None:
+            event_version = appointment.version
+        else:
+            assert before is not None
+            event_version = before.version
+        for intent in commit.outbox:
+            writes.append(fresh_put({
+                **self._business_key(business_id, f"OUTBOX#{intent.outbox_id}"),
+                **due_keys(DeliveryState.PENDING, commit.decision_at, intent.outbox_id),
+                "outbox_id": {"S": intent.outbox_id},
+                "entity_id": {"S": intent.hold_id},
+                "recipient": {"S": intent.recipient},
+                "template": {"S": intent.template},
+                "delivery_state": {"S": "PENDING"},
+                "created_at": {"S": _instant(commit.decision_at)},
+                "next_attempt_at": {"S": _instant(commit.decision_at)},
+                "dispatch_after": {"S": _instant(commit.decision_at)},
+                "attempts": {"N": "0"},
+                "event_version": {"N": str(event_version)},
+            }))
+        if len(writes) > 100:
+            raise ValueError("Owner calendar transaction exceeds DynamoDB item limit")
+        try:
+            self._client.transact_write_items(TransactItems=writes)
+        except Exception as exc:
+            error_response = getattr(exc, "response", {})
+            if not isinstance(error_response, dict) or error_response.get("Error", {}).get("Code") != "TransactionCanceledException":
+                raise
+            reasons = error_response.get("CancellationReasons")
+            if isinstance(reasons, list):
+                codes = [reason.get("Code") for reason in reasons if isinstance(reason, dict)]
+                if any(code not in ("None", "ConditionalCheckFailed", "TransactionConflict") for code in codes):
+                    raise
+            raise RevisionConflict("Owner calendar or idempotency condition changed") from exc
+
+    def commit_policy(self, expected_revision: int, commit: PolicyCommit) -> None:
+        command = commit.command
+        old_version = command.expected_version
+        revision_condition = (
+            "attribute_not_exists(PK)" if expected_revision == 0 else "revision = :old"
+        )
+        revision_values: dict[str, Any] = {":new": {"N": str(expected_revision + 1)}}
+        if expected_revision:
+            revision_values[":old"] = {"N": str(expected_revision)}
+        policy_condition = (
+            "attribute_not_exists(PK)" if old_version is None else "#version = :old_version"
+        )
+        policy_item = {
+            **self._business_key(command.business_id, "POLICY#SCHEDULING"),
+            "payload": {"S": encode_policy(commit.result.record.policy)},
+            "version": {"N": str(commit.result.record.version)},
+        }
+        policy_put: dict[str, Any] = {
+            "TableName": self._table,
+            "Item": policy_item,
+            "ConditionExpression": policy_condition,
+        }
+        if old_version is not None:
+            policy_put["ExpressionAttributeNames"] = {"#version": "version"}
+            policy_put["ExpressionAttributeValues"] = {
+                ":old_version": {"N": str(old_version)}
+            }
+        replay_payload = {
+            "policy": encode_policy(commit.result.record.policy),
+            "policy_version": commit.result.record.version,
+            "calendar_revision": commit.result.calendar_revision,
+        }
+        outbox_id = f"{commit.audit_id}#owner"
+        writes = [
+            {"Update": {
+                "TableName": self._table,
+                "Key": self._business_key(command.business_id, "CALENDAR#REVISION"),
+                "UpdateExpression": "SET revision = :new",
+                "ConditionExpression": revision_condition,
+                "ExpressionAttributeValues": revision_values,
+            }},
+            {"Put": policy_put},
+            {"Put": {
+                "TableName": self._table,
+                "Item": {
+                    **self._business_key(
+                        command.business_id,
+                        _command_sort_key(
+                            command.actor_id, command.operation, command.idempotency_key
+                        ),
+                    ),
+                    "request_hash": {"S": commit.request_hash},
+                    "response": {"S": json.dumps(replay_payload, sort_keys=True)},
+                },
+                "ConditionExpression": "attribute_not_exists(PK)",
+            }},
+            {"Put": {
+                "TableName": self._table,
+                "Item": {
+                    **self._business_key(command.business_id, f"AUDIT#{commit.audit_id}"),
+                    "action": {"S": command.operation},
+                    "actor_id": {"S": command.actor_id},
+                    "policy_version": {"N": str(commit.result.record.version)},
+                    "calendar_revision": {"N": str(commit.result.calendar_revision)},
+                },
+                "ConditionExpression": "attribute_not_exists(PK)",
+            }},
+            {"Put": {
+                "TableName": self._table,
+                "Item": {
+                    **self._business_key(command.business_id, f"OUTBOX#{outbox_id}"),
+                    **due_keys(DeliveryState.PENDING, commit.decision_at, outbox_id),
+                    "outbox_id": {"S": outbox_id},
+                    "entity_id": {"S": command.business_id},
+                    "recipient": {"S": "owner"},
+                    "template": {"S": command.operation},
+                    "delivery_state": {"S": "PENDING"},
+                    "created_at": {"S": _instant(commit.decision_at)},
+                    "next_attempt_at": {"S": _instant(commit.decision_at)},
+                    "dispatch_after": {"S": _instant(commit.decision_at)},
+                    "attempts": {"N": "0"},
+                    "event_version": {"N": str(commit.result.record.version)},
+                },
+                "ConditionExpression": "attribute_not_exists(PK)",
+            }},
+        ]
+        try:
+            self._client.transact_write_items(TransactItems=writes)
+        except Exception as exc:
+            response = getattr(exc, "response", {})
+            if not isinstance(response, dict) or response.get("Error", {}).get("Code") != "TransactionCanceledException":
+                raise
+            reasons = response.get("CancellationReasons")
+            if isinstance(reasons, list):
+                codes = [reason.get("Code") for reason in reasons if isinstance(reason, dict)]
+                if any(code not in ("None", "ConditionalCheckFailed", "TransactionConflict") for code in codes):
+                    raise
+            raise RevisionConflict("Policy or calendar revision changed") from exc
 
     def read_idempotency(self, command: CreateHold) -> IdempotencyRecord | None:
         item = self._get(self._business_key(command.business_id, _idempotency_sort_key(command)))
