@@ -109,7 +109,7 @@ Owns all business rules and state transitions:
 ### 3.6 Database and background jobs
 
 - DynamoDB on-demand stores clients, appointments, blocks, conversations, notes, configuration, audit events, and notification outbox records.
-- Scheduled Lambda jobs expire holds and recover due outbox records; SQS/Lambda handles outbound delivery.
+- Scheduled Lambda jobs expire holds, recover due outbox records, and purge ordinary notes after the approved retention period; SQS/Lambda handles outbound delivery.
 - Use transactional outbox pattern so state changes and required notifications are not separated by a crash.
 - Use a strongly consistent calendar read and conditional calendar-revision update in one DynamoDB transaction to prevent overlapping active reservations for the single crew.
 
@@ -131,7 +131,7 @@ Owns all business rules and state transitions:
 ### Note
 - `id`, `business_id`, `client_id`, nullable `appointment_id`, `body`, `created_by`, `source`, `review_status`, timestamps
 - Client-level note has no appointment ID; visit-specific note references an appointment. Exclude entry/access codes entirely from the MVP.
-- Delete ordinary client and appointment notes 12 months after the last visit, except during a documented legal hold.
+- Delete ordinary client and appointment notes 12 months after the last completed visit, except during a documented legal hold. An authenticated owner can set or release the hold with a reason on an existing note; a conditional write prevents a race with purge. An overdue note becomes eligible for the next purge after release. A confirmed appointment whose end time has passed counts as completed unless cancelled. For a client with no completed visit, delete each note 12 months after its creation. Reject a new note if the last completed visit was already more than 12 months ago.
 
 ### Conversation and Message
 - `Conversation`: client/phone association, current conversation state, timestamps.

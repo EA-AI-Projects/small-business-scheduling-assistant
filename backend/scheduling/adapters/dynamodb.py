@@ -9,6 +9,7 @@ from scheduling.adapters.outbox_aws import due_keys
 from scheduling.domain.appointments import Appointment, ReplacementGuard
 from scheduling.domain.availability import AvailabilityPolicy, HolidayCalendar, LocalWindow
 from scheduling.domain.calendar import CalendarEvent, CalendarSnapshot, CalendarStatus
+from scheduling.domain.client_records import ClientNote, ClientProfile, HomeSize, RecordConflict
 from scheduling.domain.holds import (
     CreateHold,
     HoldCommit,
@@ -46,11 +47,28 @@ class DynamoClient(Protocol):
 
     def query(self, **kwargs: Any) -> dict[str, Any]: ...
 
+    def scan(self, **kwargs: Any) -> dict[str, Any]: ...
+
     def transact_write_items(self, **kwargs: Any) -> dict[str, Any]: ...
+
+    def update_item(self, **kwargs: Any) -> dict[str, Any]: ...
 
 
 def _instant(value: datetime) -> str:
     return value.astimezone(UTC).isoformat(timespec="microseconds")
+
+
+def _record_transaction_conflict(exc: Exception) -> bool:
+    response = getattr(exc, "response", {})
+    if not isinstance(response, dict) or response.get("Error", {}).get("Code") != "TransactionCanceledException":
+        return False
+    reasons = response.get("CancellationReasons")
+    if isinstance(reasons, list):
+        codes = [reason.get("Code") for reason in reasons if isinstance(reason, dict)]
+        if any(code not in ("None", "ConditionalCheckFailed", "TransactionConflict")
+               for code in codes):
+            return False
+    return True
 
 
 def _hold_payload(hold: PendingHold) -> dict[str, Any]:
@@ -174,6 +192,224 @@ class DynamoDBCalendarRepository:
         return self._client.get_item(
             TableName=self._table, Key=key, ConsistentRead=True
         ).get("Item")
+
+    @staticmethod
+    def _profile_from_item(item: dict[str, Any]) -> ClientProfile:
+        return ClientProfile(
+            business_id=item["business_id"]["S"],
+            client_id=item["client_id"]["S"],
+            name=item["name"]["S"],
+            phone_e164=item["phone_e164"]["S"],
+            service_address=item["service_address"]["S"],
+            home_size=HomeSize(item["home_size"]["S"]),
+            default_duration_minutes=int(item["default_duration_minutes"]["N"]),
+            active=item["active"]["BOOL"],
+            version=int(item["version"]["N"]),
+            created_at=datetime.fromisoformat(item["created_at"]["S"]),
+            updated_at=datetime.fromisoformat(item["updated_at"]["S"]),
+            phone_verified_at=(datetime.fromisoformat(item["phone_verified_at"]["S"])
+                               if "phone_verified_at" in item else None),
+        )
+
+    def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None:
+        item = self._get(self._business_key(business_id, f"CLIENT#{client_id}"))
+        return self._profile_from_item(item) if item else None
+
+    def list_profiles(self, business_id: str) -> tuple[ClientProfile, ...]:
+        items = self._query(business_id, "PK = :pk AND begins_with(SK, :prefix)",
+                            {":prefix": {"S": "CLIENT#"}})
+        return tuple(self._profile_from_item(item) for item in items)
+
+    def read_verified_phone(self, business_id: str, phone_e164: str) -> ClientProfile | None:
+        index = self._get(self._business_key(business_id, f"PHONE#{phone_e164}"))
+        if index is None:
+            return None
+        profile = self.read_profile(business_id, index["client_id"]["S"])
+        if (profile is None or not profile.active or profile.phone_e164 != phone_e164
+                or profile.phone_verified_at is None):
+            return None
+        return profile
+
+    def save_profile(self, profile: ClientProfile, expected_version: int,
+                     previous_phone: str | None) -> None:
+        item: dict[str, Any] = {
+            **self._business_key(profile.business_id, f"CLIENT#{profile.client_id}"),
+            "business_id": {"S": profile.business_id},
+            "client_id": {"S": profile.client_id},
+            "name": {"S": profile.name},
+            "phone_e164": {"S": profile.phone_e164},
+            "service_address": {"S": profile.service_address},
+            "home_size": {"S": profile.home_size.value},
+            "default_duration_minutes": {"N": str(profile.default_duration_minutes)},
+            "active": {"BOOL": profile.active},
+            "version": {"N": str(profile.version)},
+            "created_at": {"S": _instant(profile.created_at)},
+            "updated_at": {"S": _instant(profile.updated_at)},
+        }
+        if profile.phone_verified_at is not None:
+            item["phone_verified_at"] = {"S": _instant(profile.phone_verified_at)}
+        profile_put: dict[str, Any] = {"TableName": self._table, "Item": item,
+                                        "ConditionExpression": ("attribute_not_exists(PK)"
+                                                                if expected_version == 0
+                                                                else "version = :old_version"),
+                                        }
+        if expected_version:
+            profile_put["ExpressionAttributeValues"] = {
+                ":old_version": {"N": str(expected_version)}}
+        writes: list[dict[str, Any]] = [{"Put": profile_put}]
+        if previous_phone != profile.phone_e164:
+            phone_put = {
+                "TableName": self._table,
+                "Item": {**self._business_key(profile.business_id,
+                                               f"PHONE#{profile.phone_e164}"),
+                         "client_id": {"S": profile.client_id}},
+                "ConditionExpression": "attribute_not_exists(PK)",
+            }
+            writes.append({"Put": phone_put})
+            if previous_phone is not None:
+                writes.append({"Delete": {
+                    "TableName": self._table,
+                    "Key": self._business_key(profile.business_id, f"PHONE#{previous_phone}"),
+                    "ConditionExpression": "client_id = :client_id",
+                    "ExpressionAttributeValues": {":client_id": {"S": profile.client_id}},
+                }})
+        try:
+            self._client.transact_write_items(TransactItems=writes)
+        except Exception as exc:
+            if not _record_transaction_conflict(exc):
+                raise
+            raise RecordConflict("Profile version or phone mapping changed") from exc
+
+    @staticmethod
+    def _note_from_item(item: dict[str, Any]) -> ClientNote:
+        return ClientNote(
+            business_id=item["business_id"]["S"],
+            client_id=item["client_id"]["S"],
+            note_id=item["note_id"]["S"],
+            appointment_id=(item["appointment_id"]["S"] if "appointment_id" in item else None),
+            body=item["body"]["S"],
+            created_by=item["created_by"]["S"],
+            created_at=datetime.fromisoformat(item["created_at"]["S"]),
+            legal_hold_reason=(item["legal_hold_reason"]["S"]
+                               if "legal_hold_reason" in item else None),
+        )
+
+    @staticmethod
+    def _note_key(business_id: str, client_id: str, note_id: str) -> dict[str, dict[str, str]]:
+        client_key = sha256(client_id.encode()).hexdigest()
+        return DynamoDBCalendarRepository._business_key(
+            business_id, f"NOTE#CLIENT#{client_key}#{note_id}")
+
+    def read_note(self, business_id: str, client_id: str,
+                  note_id: str) -> ClientNote | None:
+        item = self._get(self._note_key(business_id, client_id, note_id))
+        return self._note_from_item(item) if item else None
+
+    def list_notes(self, business_id: str, client_id: str) -> tuple[ClientNote, ...]:
+        client_key = sha256(client_id.encode()).hexdigest()
+        items = self._query(business_id, "PK = :pk AND begins_with(SK, :prefix)",
+                            {":prefix": {"S": f"NOTE#CLIENT#{client_key}#"}})
+        return tuple(sorted((self._note_from_item(item) for item in items),
+                            key=lambda note: (note.created_at, note.note_id)))
+
+    def put_note(self, note: ClientNote) -> None:
+        item: dict[str, Any] = {
+            **self._note_key(note.business_id, note.client_id, note.note_id),
+            "business_id": {"S": note.business_id},
+            "client_id": {"S": note.client_id},
+            "note_id": {"S": note.note_id},
+            "body": {"S": note.body},
+            "created_by": {"S": note.created_by},
+            "created_at": {"S": _instant(note.created_at)},
+        }
+        if note.appointment_id is not None:
+            item["appointment_id"] = {"S": note.appointment_id}
+        try:
+            self._client.transact_write_items(TransactItems=[{"Put": {
+                "TableName": self._table, "Item": item,
+                "ConditionExpression": "attribute_not_exists(PK)",
+            }}])
+        except Exception as exc:
+            if not _record_transaction_conflict(exc):
+                raise
+            raise RecordConflict("Note ID was already used") from exc
+
+    def delete_note(self, note: ClientNote) -> None:
+        try:
+            self._client.transact_write_items(TransactItems=[{"Delete": {
+                "TableName": self._table,
+                "Key": self._note_key(note.business_id, note.client_id, note.note_id),
+                "ConditionExpression": "created_at = :created AND attribute_not_exists(legal_hold_reason)",
+                "ExpressionAttributeValues": {":created": {"S": _instant(note.created_at)}},
+            }}])
+        except Exception as exc:
+            if not _record_transaction_conflict(exc):
+                raise
+            raise RecordConflict("Note changed or is under legal hold") from exc
+
+    def update_note_hold(self, before: ClientNote, after: ClientNote) -> None:
+        if (before.business_id, before.client_id, before.note_id) != (
+                after.business_id, after.client_id, after.note_id):
+            raise ValueError("Legal hold update cannot change note identity")
+        values = {":created": {"S": _instant(before.created_at)}}
+        condition = "created_at = :created AND "
+        if before.legal_hold_reason is None:
+            condition += "attribute_not_exists(legal_hold_reason)"
+        else:
+            condition += "legal_hold_reason = :previous_reason"
+            values[":previous_reason"] = {"S": before.legal_hold_reason}
+        if after.legal_hold_reason is None:
+            update = "REMOVE legal_hold_reason"
+        else:
+            update = "SET legal_hold_reason = :reason"
+            values[":reason"] = {"S": after.legal_hold_reason}
+        try:
+            self._client.update_item(
+                TableName=self._table,
+                Key=self._note_key(before.business_id, before.client_id, before.note_id),
+                ConditionExpression=condition,
+                UpdateExpression=update,
+                ExpressionAttributeValues=values,
+            )
+        except Exception as exc:
+            response = getattr(exc, "response", {})
+            code = response.get("Error", {}).get("Code") if isinstance(response, dict) else None
+            if code != "ConditionalCheckFailedException":
+                raise
+            raise RecordConflict("Note changed before legal hold update") from exc
+
+    def last_visit_end(self, business_id: str, client_id: str,
+                       now: datetime) -> datetime | None:
+        # Strong scan is acceptable for the one-business pilot. A client-visit index
+        # can replace it when volume warrants; an eventual GSI cannot authorize deletion.
+        latest: datetime | None = None
+        last_key: dict[str, Any] | None = None
+        while True:
+            arguments: dict[str, Any] = {
+                "TableName": self._table,
+                "ConsistentRead": True,
+                "FilterExpression": ("begins_with(PK, :appointment) AND business_id = :business "
+                                     "AND client_id = :client AND #status = :confirmed "
+                                     "AND end_at <= :now"),
+                "ExpressionAttributeNames": {"#status": "status"},
+                "ExpressionAttributeValues": {
+                    ":appointment": {"S": "APPOINTMENT#"},
+                    ":business": {"S": business_id},
+                    ":client": {"S": client_id},
+                    ":confirmed": {"S": CalendarStatus.CONFIRMED.value},
+                    ":now": {"S": _instant(now)},
+                },
+                "ProjectionExpression": "end_at",
+            }
+            if last_key is not None:
+                arguments["ExclusiveStartKey"] = last_key
+            page = self._client.scan(**arguments)
+            for item in page.get("Items", ()):
+                end = datetime.fromisoformat(item["end_at"]["S"])
+                latest = max(latest, end) if latest else end
+            last_key = page.get("LastEvaluatedKey")
+            if not last_key:
+                return latest
 
     def read_revision(self, business_id: str) -> int:
         item = self._get(self._business_key(business_id, "CALENDAR#REVISION"))
