@@ -69,15 +69,27 @@ class DynamoSmsIngressStore(SmsIngressStore):
             "ConditionExpression": "attribute_not_exists(PK)",
         }}]
         if receipt.keyword == Keyword.STOP:
-            writes.append({"Update": {
+            writes.append({"Put": {
                 "TableName": self._table,
-                "Key": self._key(receipt.business_id, f"SMS_OPTOUT#{receipt.sender}"),
-                "UpdateExpression": "SET opted_out_at = :at, phone_e164 = :phone",
-                "ExpressionAttributeValues": {
-                    ":at": {"S": _instant(receipt.received_at)},
-                    ":phone": {"S": receipt.sender},
-                },
+                "Item": {**self._key(receipt.business_id,
+                                      f"SMS_OPTOUT_EVENT#{receipt.sender}#{receipt.provider_id}"),
+                         "phone_e164": {"S": receipt.sender},
+                         "opted_out_at": {"S": _instant(receipt.received_at)}},
+                "ConditionExpression": "attribute_not_exists(PK)",
             }})
+            current_stop = self._get(receipt.business_id, f"SMS_OPTOUT#{receipt.sender}")
+            if current_stop is None or "legal_hold_reason" not in current_stop:
+                writes.append({"Update": {
+                    "TableName": self._table,
+                    "Key": self._key(receipt.business_id, f"SMS_OPTOUT#{receipt.sender}"),
+                    "UpdateExpression": "SET opted_out_at = :at, phone_e164 = :phone "
+                                        "REMOVE cleared_at",
+                    "ConditionExpression": "attribute_not_exists(legal_hold_reason)",
+                    "ExpressionAttributeValues": {
+                        ":at": {"S": _instant(receipt.received_at)},
+                        ":phone": {"S": receipt.sender},
+                    },
+                }})
             writes.append({"Put": {
                 "TableName": self._table,
                 "Item": {**self._key(receipt.business_id, f"SMS_SUPPRESS#{receipt.sender}"),
@@ -93,12 +105,19 @@ class DynamoSmsIngressStore(SmsIngressStore):
                           optout["opted_out_at"]["S"] if optout is not None else None)
             if (stopped_at is not None and consent is not None and
                     consent.agreed_at > datetime.fromisoformat(stopped_at)):
-                if optout is not None and "legal_hold_reason" not in optout:
-                    writes.append({"Delete": {
+                if optout is not None:
+                    writes.append({"Update" if "legal_hold_reason" in optout else "Delete": {
                         "TableName": self._table,
                         "Key": self._key(receipt.business_id, f"SMS_OPTOUT#{receipt.sender}"),
-                        "ConditionExpression": "opted_out_at = :at",
-                        "ExpressionAttributeValues": {":at": optout["opted_out_at"]},
+                        "ConditionExpression": ("opted_out_at = :at AND " +
+                            ("attribute_exists(legal_hold_reason)" if "legal_hold_reason" in optout
+                             else "attribute_not_exists(legal_hold_reason)")),
+                        "ExpressionAttributeValues": {
+                            ":at": optout["opted_out_at"],
+                            ":cleared": {"S": _instant(receipt.received_at)},
+                        } if "legal_hold_reason" in optout else {":at": optout["opted_out_at"]},
+                        **({"UpdateExpression": "SET cleared_at = :cleared"}
+                           if "legal_hold_reason" in optout else {}),
                     }})
                 if suppress is not None:
                     writes.append({"Delete": {
@@ -132,18 +151,48 @@ class DynamoSmsIngressStore(SmsIngressStore):
             try:
                 self._client.transact_write_items(TransactItems=attempt)
                 return True
-            except Exception:
+            except Exception as exc:
                 # A duplicate provider retry is harmless. A racing newer message
                 # can change the thread; reread it before retrying. Other errors
                 # propagate so Twilio retries rather than dropping a STOP.
                 if self._get(receipt.business_id, f"SMS#{receipt.provider_id}") is not None:
                     return False
-                if len(attempt) == len(writes):
+                response = getattr(exc, "response", {})
+                conflict = (isinstance(response, dict) and response.get("Error", {}).get("Code")
+                            == "TransactionCanceledException")
+                if conflict and receipt.keyword == Keyword.STOP:
+                    current = self._get(receipt.business_id, f"SMS_OPTOUT#{receipt.sender}")
+                    if current is not None and "legal_hold_reason" in current:
+                        writes = [action for action in writes if not (
+                            "Update" in action and action["Update"]["Key"]["SK"]["S"]
+                            == f"SMS_OPTOUT#{receipt.sender}")]
+                if conflict and receipt.keyword == Keyword.START:
+                    current = self._get(receipt.business_id, f"SMS_OPTOUT#{receipt.sender}")
+                    if current is not None and "legal_hold_reason" in current:
+                        for action in writes:
+                            if ("Delete" in action and action["Delete"]["Key"]["SK"]["S"]
+                                    == f"SMS_OPTOUT#{receipt.sender}"):
+                                action.pop("Delete")
+                                action["Update"] = {
+                                    "TableName": self._table,
+                                    "Key": self._key(receipt.business_id,
+                                                     f"SMS_OPTOUT#{receipt.sender}"),
+                                    "UpdateExpression": "SET cleared_at = :cleared",
+                                    "ConditionExpression": ("opted_out_at = :at AND "
+                                                            "attribute_exists(legal_hold_reason)"),
+                                    "ExpressionAttributeValues": {
+                                        ":at": current["opted_out_at"],
+                                        ":cleared": {"S": _instant(receipt.received_at)},
+                                    },
+                                }
+                if not conflict and len(attempt) == len(writes):
                     raise
         raise RuntimeError("SMS thread changed during every receipt attempt")
 
     def is_opted_out(self, business_id: str, phone_e164: str) -> bool:
-        return self._get(business_id, f"SMS_SUPPRESS#{phone_e164}") is not None
+        marker = self._get(business_id, f"SMS_SUPPRESS#{phone_e164}")
+        legacy = self._get(business_id, f"SMS_OPTOUT#{phone_e164}")
+        return marker is not None or (legacy is not None and "cleared_at" not in legacy)
 
     def record_outbound(self, business_id: str, phone_e164: str,
                         provider_id: str, sent_at: datetime) -> None:
@@ -226,7 +275,8 @@ class DynamoSmsIngressStore(SmsIngressStore):
     def set_evidence_legal_hold(self, business_id: str, sort_key: str,
                                 reason: str | None) -> None:
         """Trusted admin operation; callers must authorize and document the case."""
-        if not sort_key.startswith(("SMS_CONSENT#", "SMS_CONSENT_CURRENT#", "SMS_OPTOUT#")):
+        if not sort_key.startswith(("SMS_CONSENT#", "SMS_CONSENT_CURRENT#", "SMS_OPTOUT#",
+                                    "SMS_OPTOUT_EVENT#")):
             raise ValueError("Only SMS evidence records can be held")
         if reason is not None and (not reason.strip() or len(reason) > 500):
             raise ValueError("Legal hold needs a documented reason under 500 characters")
@@ -309,7 +359,8 @@ class DynamoSmsIngressStore(SmsIngressStore):
         """Delete four-year-old consent/STOP evidence; keep active suppression state."""
         cutoff = _four_year_cutoff(now)
         removed = 0
-        for prefix in ("SMS_CONSENT#", "SMS_CONSENT_CURRENT#", "SMS_OPTOUT#"):
+        for prefix in ("SMS_CONSENT#", "SMS_CONSENT_CURRENT#", "SMS_OPTOUT#",
+                       "SMS_OPTOUT_EVENT#"):
             start: dict[str, Any] | None = None
             while True:
                 arguments: dict[str, Any] = {
@@ -328,7 +379,8 @@ class DynamoSmsIngressStore(SmsIngressStore):
                     if "legal_hold_reason" in item:
                         continue
                     phone = item["phone_e164"]["S"]
-                    field = "opted_out_at" if prefix == "SMS_OPTOUT#" else "agreed_at"
+                    field = ("opted_out_at" if prefix.startswith("SMS_OPTOUT") else
+                             "agreed_at")
                     recorded = item[field]["S"]
                     if recorded > cutoff:
                         continue
@@ -339,27 +391,41 @@ class DynamoSmsIngressStore(SmsIngressStore):
                     if last_text > cutoff:
                         continue
                     values = {":cutoff": {"S": cutoff}, ":recorded": item[field]}
+                    actions: list[dict[str, Any]] = []
+                    if (prefix == "SMS_OPTOUT#" and "cleared_at" not in item and
+                            self._get(business_id, f"SMS_SUPPRESS#{phone}") is None):
+                        # Legacy STOP rows predate the separate active marker.
+                        # Migrate suppression atomically with evidence deletion.
+                        actions.append({"Put": {
+                            "TableName": self._table,
+                            "Item": {**self._key(business_id, f"SMS_SUPPRESS#{phone}"),
+                                     "phone_e164": {"S": phone},
+                                     "suppressed_at": item["opted_out_at"],
+                                     "suppressed": {"BOOL": True}},
+                            "ConditionExpression": "attribute_not_exists(PK)",
+                        }})
+                    actions.extend([
+                        {"ConditionCheck": {
+                            "TableName": self._table,
+                            "Key": self._key(business_id, thread_key),
+                            "ConditionExpression": (
+                                "last_program_text_at <= :cutoff OR "
+                                "(attribute_not_exists(last_program_text_at) AND "
+                                "(attribute_not_exists(last_exchange_at) OR "
+                                "last_exchange_at <= :cutoff))"
+                            ),
+                            "ExpressionAttributeValues": {":cutoff": values[":cutoff"]},
+                        }},
+                        {"Delete": {
+                            "TableName": self._table,
+                            "Key": self._key(business_id, item["SK"]["S"]),
+                            "ConditionExpression": (f"{field} = :recorded AND "
+                                                    "attribute_not_exists(legal_hold_reason)"),
+                            "ExpressionAttributeValues": {":recorded": values[":recorded"]},
+                        }},
+                    ])
                     try:
-                        self._client.transact_write_items(TransactItems=[
-                            {"ConditionCheck": {
-                                "TableName": self._table,
-                                "Key": self._key(business_id, thread_key),
-                                "ConditionExpression": (
-                                    "last_program_text_at <= :cutoff OR "
-                                    "(attribute_not_exists(last_program_text_at) AND "
-                                    "(attribute_not_exists(last_exchange_at) OR "
-                                    "last_exchange_at <= :cutoff))"
-                                ),
-                                "ExpressionAttributeValues": {":cutoff": values[":cutoff"]},
-                            }},
-                            {"Delete": {
-                                "TableName": self._table,
-                                "Key": self._key(business_id, item["SK"]["S"]),
-                                "ConditionExpression": (f"{field} = :recorded AND "
-                                                        "attribute_not_exists(legal_hold_reason)"),
-                                "ExpressionAttributeValues": {":recorded": values[":recorded"]},
-                            }},
-                        ])
+                        self._client.transact_write_items(TransactItems=actions)
                     except Exception as exc:
                         response = getattr(exc, "response", {})
                         if (isinstance(response, dict) and response.get("Error", {}).get("Code")

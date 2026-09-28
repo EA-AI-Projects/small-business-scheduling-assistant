@@ -62,7 +62,8 @@ class MemoryDynamo:
                     items[key].pop("body")
                 else:
                     current = items.setdefault(key, {"SK": {"S": key}})
-                    for assignment in update["UpdateExpression"].removeprefix("SET ").split(", "):
+                    set_part, _, remove_part = update["UpdateExpression"].partition(" REMOVE ")
+                    for assignment in set_part.removeprefix("SET ").split(", "):
                         field, value = assignment.split(" = ")
                         field = update.get("ExpressionAttributeNames", {}).get(field, field)
                         incoming = update["ExpressionAttributeValues"][value]
@@ -70,6 +71,8 @@ class MemoryDynamo:
                                 current.get(field, {}).get("S", "") > incoming["S"]):
                             raise RuntimeError("conditional conflict")
                         current[field] = incoming
+                    if remove_part:
+                        current.pop(remove_part, None)
         self.items = items
         return {}
 
@@ -263,6 +266,39 @@ def test_start_keeps_held_stop_evidence_while_clearing_suppression() -> None:
     assert not store.is_opted_out("pilot", "+14155550101")
 
 
+def test_legacy_stop_without_suppression_marker_still_blocks_delivery() -> None:
+    dynamo = MemoryDynamo()
+    store = DynamoSmsIngressStore(dynamo, "synthetic")
+    dynamo.items["SMS_OPTOUT#+14155550101"] = {
+        "SK": {"S": "SMS_OPTOUT#+14155550101"},
+        "phone_e164": {"S": "+14155550101"},
+        "opted_out_at": {"S": NOW.replace(year=NOW.year - 5).isoformat(
+            timespec="microseconds")},
+    }
+    assert store.is_opted_out("pilot", "+14155550101")
+    assert store.purge_expired_evidence("pilot", NOW) == 1
+    assert "SMS_OPTOUT#+14155550101" not in dynamo.items
+    assert store.is_opted_out("pilot", "+14155550101")
+
+
+def test_second_stop_does_not_overwrite_held_stop_evidence() -> None:
+    dynamo = MemoryDynamo()
+    store = DynamoSmsIngressStore(dynamo, "synthetic")
+    old = NOW.replace(year=NOW.year - 1)
+    for sid, when in (("SM-first-stop", old), ("SM-second-stop", NOW)):
+        if sid == "SM-second-stop":
+            store.set_evidence_legal_hold("pilot", "SMS_OPTOUT#+14155550101",
+                                          "documented case")
+        store.put_received(InboundReceipt(
+            "pilot", sid, "+14155550101", "+14155550000", None,
+            when, SenderRole.CLIENT, "client-1", Keyword.STOP, False,
+        ))
+    assert dynamo.items["SMS_OPTOUT#+14155550101"]["opted_out_at"]["S"] == (
+        old.isoformat(timespec="microseconds"))
+    assert "SMS_OPTOUT_EVENT#+14155550101#SM-second-stop" in dynamo.items
+    assert store.is_opted_out("pilot", "+14155550101")
+
+
 def test_old_stop_evidence_purges_but_suppression_remains() -> None:
     dynamo = MemoryDynamo()
     store = DynamoSmsIngressStore(dynamo, "synthetic")
@@ -271,7 +307,7 @@ def test_old_stop_evidence_purges_but_suppression_remains() -> None:
                           None, old, SenderRole.CLIENT, "client-1", Keyword.STOP, False)
     store.put_received(stop)
     assert store.is_opted_out("pilot", "+14155550101")
-    assert store.purge_expired_evidence("pilot", NOW) == 1
+    assert store.purge_expired_evidence("pilot", NOW) == 2
     assert "SMS_OPTOUT#+14155550101" not in dynamo.items
     assert "SMS_SUPPRESS#+14155550101" in dynamo.items
     assert store.is_opted_out("pilot", "+14155550101")
