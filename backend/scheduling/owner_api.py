@@ -403,6 +403,12 @@ def create_owner_app(
             except ValueError as exc:
                 raise _error("INVALID_CONSENT", str(exc), 422) from exc
 
+        @app.get("/v1/owner/businesses/{business_id}/sms-delivery-failures")
+        def sms_delivery_failures(business_id: str,
+                                  owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:
+            del owner
+            return sms_store.list_delivery_failures(business_id)
+
     @app.get("/v1/owner/businesses/{business_id}/clients/{client_id}/notes")
     def list_client_notes(business_id: str, client_id: str,
                           owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:

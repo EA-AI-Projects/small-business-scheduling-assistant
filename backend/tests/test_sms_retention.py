@@ -5,6 +5,7 @@ from typing import Any
 
 from scheduling.adapters.sms_dynamodb import DynamoSmsIngressStore
 from scheduling.domain.sms_ingress import InboundReceipt, Keyword, SenderRole
+from scheduling.domain.sms_status import SmsDeliveryStatus
 
 NOW = datetime(2026, 9, 28, 17, tzinfo=UTC)
 
@@ -18,7 +19,8 @@ class MemoryDynamo:
         return {"Item": item} if item is not None else {}
 
     def query(self, **kwargs: Any) -> dict[str, Any]:
-        return {"Items": [item for key, item in self.items.items() if key.startswith("SMS#")]}
+        prefix = kwargs["ExpressionAttributeValues"][":prefix"]["S"]
+        return {"Items": [item for key, item in self.items.items() if key.startswith(prefix)]}
 
     def transact_write_items(self, **kwargs: Any) -> dict[str, Any]:
         for action in kwargs["TransactItems"]:
@@ -46,6 +48,20 @@ class MemoryDynamo:
         return {}
 
     def update_item(self, **kwargs: Any) -> dict[str, Any]:
+        key = kwargs["Key"]["SK"]["S"]
+        values = kwargs["ExpressionAttributeValues"]
+        previous = self.items.get(key)
+        rank = int(values[":rank"]["N"])
+        if previous is not None and int(previous["status_rank"]["N"]) > rank:
+            return {}
+        self.items[key] = {
+            "SK": {"S": key}, "status_rank": values[":rank"],
+            "delivery_status": values[":status"], "recipient": values[":recipient"],
+            "observed_at": values[":at"], "outbox_id": values[":outbox"],
+            "provider_id": values[":provider"],
+        }
+        if ":error" in values:
+            self.items[key]["error_code"] = values[":error"]
         return {}
 
 
@@ -67,3 +83,26 @@ def test_body_waits_until_90_days_after_last_exchange() -> None:
     assert "body" not in dynamo.items["SMS#SM-first"]
     assert "provider_id" in dynamo.items["SMS#SM-first"]
     assert store.put_received(_receipt("SM-first", first)) is False
+
+
+def test_outbound_reply_extends_last_exchange_window() -> None:
+    dynamo = MemoryDynamo()
+    store = DynamoSmsIngressStore(dynamo, "synthetic")
+    first = NOW - timedelta(days=100)
+    outbound = NOW - timedelta(days=20)
+    store.put_received(_receipt("SM-first", first))
+    store.record_outbound("pilot", "+14155550101", "SM-out", outbound)
+    assert store.purge_expired_bodies("pilot", NOW) == 0
+    assert store.purge_expired_bodies("pilot", outbound + timedelta(days=90)) == 1
+    assert "body" not in dynamo.items["SMS#SM-first"]
+    assert dynamo.items["SMS_OUT#SM-out"]["recipient"]["S"] == "+14155550101"
+
+
+def test_failed_provider_callback_is_linked_for_owner_follow_up() -> None:
+    store = DynamoSmsIngressStore(MemoryDynamo(), "synthetic")
+    store.put_status(SmsDeliveryStatus("pilot", "outbox-1", "SM-failed",
+                                       "undelivered", "+14155550101", NOW, "30007"))
+    failures = store.list_delivery_failures("pilot")
+    assert len(failures) == 1
+    assert failures[0].outbox_id == "outbox-1"
+    assert failures[0].error_code == "30007"

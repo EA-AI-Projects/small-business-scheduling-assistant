@@ -1,12 +1,17 @@
 """Trusted SMS ingress boundary; no scheduling command is inferred here."""
 
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from scheduling.domain.client_records import ACCESS_CODE_PATTERN, ClientProfile
+
+if TYPE_CHECKING:
+    from scheduling.domain.sms_status import SmsDeliveryStatus
 
 PHONE = re.compile(r"^\+[1-9][0-9]{1,14}$")
 STOP_WORDS = frozenset({"STOP", "STOPALL", "UNSUBSCRIBE", "END", "QUIT", "REVOKE", "OPTOUT"})
@@ -61,9 +66,12 @@ class ConsentEvidence:
 
 class SmsIngressStore(Protocol):
     def put_received(self, receipt: InboundReceipt) -> bool: ...
+    def record_outbound(self, business_id: str, phone_e164: str,
+                        provider_id: str, sent_at: datetime) -> None: ...
     def is_opted_out(self, business_id: str, phone_e164: str) -> bool: ...
     def read_consent(self, business_id: str, phone_e164: str) -> ConsentEvidence | None: ...
     def put_consent(self, evidence: ConsentEvidence) -> None: ...
+    def list_delivery_failures(self, business_id: str) -> tuple[SmsDeliveryStatus, ...]: ...
 
 
 class VerifiedClientLookup(Protocol):

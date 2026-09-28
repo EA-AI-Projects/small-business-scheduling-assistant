@@ -1,8 +1,9 @@
 """Twilio delivery from committed outbox intents and trusted business records."""
 
-from datetime import datetime
+from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any, Protocol
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 from zoneinfo import ZoneInfo
 
 from scheduling.domain.appointments import Appointment
@@ -27,7 +28,8 @@ class TwilioSmsSender:
                  consent: SmsIngressStore, business_id: str, from_number: str,
                  owner_number: str, *, timezone: str = "America/Los_Angeles",
                  status_callback: str | None = None,
-                 authorized_recipients: frozenset[str]) -> None:
+                 authorized_recipients: frozenset[str],
+                 clock: Callable[[], datetime] | None = None) -> None:
         if not business_id:
             raise ValueError("Business ID is required")
         self._messages = messages
@@ -48,6 +50,7 @@ class TwilioSmsSender:
                     or parsed.path != "/webhooks/sms/status" or parsed.query or parsed.fragment):
                 raise ValueError("Status callback needs an exact HTTPS URL")
         self._status_callback = status_callback
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     def deliver(self, record: OutboxRecord) -> str:
         if record.business_id != self._business_id:
@@ -65,17 +68,20 @@ class TwilioSmsSender:
             to = normalize_phone(profile.phone_e164)
             evidence = self._consent.read_consent(record.business_id, to)
             if (profile.phone_verified_at is None or evidence is None
-                    or evidence.client_id != profile.client_id
-                    or self._consent.is_opted_out(record.business_id, to)):
+                    or evidence.client_id != profile.client_id):
                 raise PermanentDeliveryFailure("CONSENT_REQUIRED")
         else:
             to = self._owner
+        if self._consent.is_opted_out(record.business_id, to):
+            raise PermanentDeliveryFailure("OPTED_OUT")
         if to not in self._authorized_recipients:
             raise PermanentDeliveryFailure("RECIPIENT_NOT_AUTHORIZED")
         body = self._render(record, appointment, profile)
         kwargs = {"from_": self._from, "to": to, "body": body}
         if self._status_callback is not None:
-            kwargs["status_callback"] = self._status_callback
+            kwargs["status_callback"] = (self._status_callback + "?" + urlencode({
+                "outbox_id": record.outbox_id,
+            }))
         try:
             result = self._messages.create(**kwargs)
         except Exception as exc:
@@ -84,6 +90,7 @@ class TwilioSmsSender:
         provider_id = getattr(result, "sid", None)
         if not isinstance(provider_id, str) or not provider_id:
             raise DeliveryFailure("PROVIDER_ID_MISSING")
+        self._consent.record_outbound(record.business_id, to, provider_id, self._clock())
         return provider_id
 
     def _render(self, record: OutboxRecord, appointment: Appointment | None,

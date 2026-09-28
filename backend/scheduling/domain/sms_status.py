@@ -15,6 +15,7 @@ STATUS_RANK = {
 @dataclass(frozen=True)
 class SmsDeliveryStatus:
     business_id: str
+    outbox_id: str
     provider_id: str
     status: str
     recipient: str
@@ -22,7 +23,8 @@ class SmsDeliveryStatus:
     error_code: str | None = None
 
     def __post_init__(self) -> None:
-        if not self.business_id or not self.provider_id or self.status not in STATUS_RANK:
+        if (not self.business_id or not self.outbox_id or not self.provider_id
+                or self.status not in STATUS_RANK):
             raise ValueError("Invalid delivery status identity")
         normalize_phone(self.recipient)
         if self.observed_at.tzinfo is None:

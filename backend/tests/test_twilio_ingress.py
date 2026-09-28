@@ -147,10 +147,13 @@ def test_status_callback_requires_signature_and_records_provider_result() -> Non
     client, _, store = setup()
     fields = {"MessageSid": "SM-status", "MessageStatus": "undelivered",
               "To": "+14155550101", "ErrorCode": "30007"}
-    assert client.post("/webhooks/sms/status", data=fields,
+    path = "/webhooks/sms/status?outbox_id=notice-1"
+    assert client.post(path, data=fields,
                        headers={"X-Twilio-Signature": "bad"}).status_code == 403
-    signature = RequestValidator(TOKEN).compute_signature(STATUS_URL, FormData(fields))
-    assert client.post("/webhooks/sms/status", data=fields,
+    signature = RequestValidator(TOKEN).compute_signature(
+        STATUS_URL + "?outbox_id=notice-1", FormData(fields))
+    assert client.post(path, data=fields,
                        headers={"X-Twilio-Signature": signature}).status_code == 204
     assert store.statuses["SM-status"].status == "undelivered"
+    assert store.statuses["SM-status"].outbox_id == "notice-1"
     assert store.statuses["SM-status"].error_code == "30007"

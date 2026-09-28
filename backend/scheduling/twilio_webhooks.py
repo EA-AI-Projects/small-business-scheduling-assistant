@@ -3,7 +3,7 @@
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import cast
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from starlette.datastructures import FormData, UploadFile
@@ -51,10 +51,20 @@ def create_twilio_ingress_app(service: SmsIngressService, auth_token: str,
     if status_url is not None and status_store is not None and business_id is not None:
         @app.post("/webhooks/sms/status")
         async def status(request: Request) -> Response:
-            fields = await _verified_form(request, validator, status_url)
+            try:
+                query = parse_qsl(request.url.query, keep_blank_values=True, strict_parsing=True)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="Malformed status query") from exc
+            if len(query) != 1 or query[0][0] != "outbox_id" or not query[0][1]:
+                raise HTTPException(status_code=400, detail="Status callback needs an outbox ID")
+            outbox_id = query[0][1]
+            if len(outbox_id) > 256:
+                raise HTTPException(status_code=400, detail="Outbox ID is too long")
+            signed_url = status_url + "?" + urlencode({"outbox_id": outbox_id})
+            fields = await _verified_form(request, validator, signed_url, allow_query=True)
             try:
                 status_store.put_status(SmsDeliveryStatus(
-                    business_id, fields.get("MessageSid", ""),
+                    business_id, outbox_id, fields.get("MessageSid", ""),
                     fields.get("MessageStatus", ""),
                     normalize_phone(fields.get("To", "")), now(),
                     fields.get("ErrorCode") or None,
@@ -67,8 +77,8 @@ def create_twilio_ingress_app(service: SmsIngressService, auth_token: str,
 
 
 async def _verified_form(request: Request, validator: RequestValidator,
-                         public_url: str) -> dict[str, str]:
-    if request.url.query or request.headers.get("content-type", "").split(";", 1)[0] != (
+                         public_url: str, *, allow_query: bool = False) -> dict[str, str]:
+    if (request.url.query and not allow_query) or request.headers.get("content-type", "").split(";", 1)[0] != (
         "application/x-www-form-urlencoded"
     ):
         raise HTTPException(status_code=415, detail="Unsupported webhook encoding")

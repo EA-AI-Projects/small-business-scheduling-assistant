@@ -3,7 +3,13 @@
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
-from scheduling.domain.sms_ingress import ConsentEvidence, InboundReceipt, Keyword, SmsIngressStore
+from scheduling.domain.sms_ingress import (
+    ConsentEvidence,
+    InboundReceipt,
+    Keyword,
+    SmsIngressStore,
+    normalize_phone,
+)
 from scheduling.domain.sms_status import STATUS_RANK, SmsDeliveryStatus
 
 
@@ -104,6 +110,47 @@ class DynamoSmsIngressStore(SmsIngressStore):
     def is_opted_out(self, business_id: str, phone_e164: str) -> bool:
         return self._get(business_id, f"SMS_OPTOUT#{phone_e164}") is not None
 
+    def record_outbound(self, business_id: str, phone_e164: str,
+                        provider_id: str, sent_at: datetime) -> None:
+        """Advance the retention clock after provider acceptance, without storing the body."""
+        phone = normalize_phone(phone_e164)
+        if not provider_id or sent_at.tzinfo is None:
+            raise ValueError("Outbound evidence needs a provider ID and aware timestamp")
+        receipt_key = f"SMS_OUT#{provider_id}"
+        thread_key = f"SMS_THREAD#{phone}"
+        sent = _instant(sent_at)
+        outbound = {
+            **self._key(business_id, receipt_key),
+            "provider_id": {"S": provider_id},
+            "recipient": {"S": phone},
+            "sent_at": {"S": sent},
+        }
+        for _ in range(3):
+            writes: list[dict[str, Any]] = [{"Put": {
+                "TableName": self._table, "Item": outbound,
+                "ConditionExpression": "attribute_not_exists(PK)",
+            }}]
+            thread = self._get(business_id, thread_key)
+            if thread is None or thread.get("last_exchange_at", {}).get("S", "") < sent:
+                writes.append({"Update": {
+                    "TableName": self._table,
+                    "Key": self._key(business_id, thread_key),
+                    "UpdateExpression": "SET last_exchange_at = :at",
+                    "ConditionExpression": (
+                        "attribute_not_exists(last_exchange_at) OR last_exchange_at <= :at"
+                    ),
+                    "ExpressionAttributeValues": {":at": {"S": sent}},
+                }})
+            try:
+                self._client.transact_write_items(TransactItems=writes)
+                return
+            except Exception:
+                if self._get(business_id, receipt_key) is not None:
+                    return
+                if len(writes) == 1:
+                    raise
+        raise RuntimeError("SMS thread changed during every outbound attempt")
+
     def read_consent(self, business_id: str, phone_e164: str) -> ConsentEvidence | None:
         item = self._get(business_id, f"SMS_CONSENT_CURRENT#{phone_e164}")
         if item is None:
@@ -140,9 +187,12 @@ class DynamoSmsIngressStore(SmsIngressStore):
             ":status": {"S": status.status},
             ":recipient": {"S": status.recipient},
             ":at": {"S": _instant(status.observed_at)},
+            ":outbox": {"S": status.outbox_id},
+            ":provider": {"S": status.provider_id},
         }
         expression = ("SET status_rank = :rank, delivery_status = :status, "
-                      "recipient = :recipient, observed_at = :at")
+                      "recipient = :recipient, observed_at = :at, "
+                      "outbox_id = :outbox, provider_id = :provider")
         if status.error_code is not None:
             expression += ", error_code = :error"
             values[":error"] = {"S": status.error_code}
@@ -163,6 +213,36 @@ class DynamoSmsIngressStore(SmsIngressStore):
             ):
                 return  # Stale or conflicting callback; first terminal result wins.
             raise
+
+    def list_delivery_failures(self, business_id: str) -> tuple[SmsDeliveryStatus, ...]:
+        """Owner follow-up view; a callback never blindly resends an accepted SMS."""
+        failures: list[SmsDeliveryStatus] = []
+        start: dict[str, Any] | None = None
+        while True:
+            arguments: dict[str, Any] = {
+                "TableName": self._table,
+                "KeyConditionExpression": "PK = :pk AND begins_with(SK, :prefix)",
+                "ExpressionAttributeValues": {
+                    ":pk": {"S": f"BUSINESS#{business_id}"},
+                    ":prefix": {"S": "SMS_STATUS#"},
+                },
+                "ConsistentRead": True,
+            }
+            if start is not None:
+                arguments["ExclusiveStartKey"] = start
+            page = self._client.query(**arguments)
+            for item in page.get("Items", ()):
+                status = item["delivery_status"]["S"]
+                if status in {"undelivered", "failed"}:
+                    failures.append(SmsDeliveryStatus(
+                        business_id, item["outbox_id"]["S"], item["provider_id"]["S"],
+                        status, item["recipient"]["S"],
+                        datetime.fromisoformat(item["observed_at"]["S"]),
+                        item["error_code"]["S"] if "error_code" in item else None,
+                    ))
+            start = page.get("LastEvaluatedKey")
+            if start is None:
+                return tuple(failures)
 
     def purge_expired_bodies(self, business_id: str, now: datetime) -> int:
         """Remove only bodies, 90 days after the sender's last scheduling exchange."""

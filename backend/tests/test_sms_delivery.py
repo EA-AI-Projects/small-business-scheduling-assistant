@@ -39,6 +39,11 @@ class Consent:
     def __init__(self) -> None:
         self.approved = True
         self.opted_out = False
+        self.outbound: list[tuple[str, str, str, datetime]] = []
+
+    def record_outbound(self, business_id: str, phone_e164: str,
+                        provider_id: str, sent_at: datetime) -> None:
+        self.outbound.append((business_id, phone_e164, provider_id, sent_at))
 
     def read_consent(self, business_id: str, phone_e164: str) -> ConsentEvidence | None:
         if not self.approved:
@@ -81,9 +86,9 @@ def test_client_destination_is_from_verified_profile_with_consent() -> None:
     assert sender.deliver(record()) == "SM-synthetic"
     assert messages.calls[0]["to"] == records.profile.phone_e164
     assert "pending owner approval" in messages.calls[0]["body"]
-
+    assert consent.outbound[0][1:3] == (records.profile.phone_e164, "SM-synthetic")
     consent.opted_out = True
-    with pytest.raises(PermanentDeliveryFailure, match="CONSENT_REQUIRED"):
+    with pytest.raises(PermanentDeliveryFailure, match="OPTED_OUT"):
         sender.deliver(record())
     assert len(messages.calls) == 1
     consent.opted_out = False
@@ -91,6 +96,18 @@ def test_client_destination_is_from_verified_profile_with_consent() -> None:
     with pytest.raises(PermanentDeliveryFailure, match="CONSENT_REQUIRED"):
         sender.deliver(record())
 
+
+def test_callback_identifies_committed_outbox_intent() -> None:
+    messages, consent, records = Messages(), Consent(), Records()
+    sender = TwilioSmsSender(
+        messages, records, consent, "pilot", "+14155550000", "+14155559999",
+        authorized_recipients=frozenset({"+14155550101"}),
+        status_callback="https://sms.example.test/webhooks/sms/status",
+    )
+    sender.deliver(record())
+    assert messages.calls[0]["status_callback"] == (
+        "https://sms.example.test/webhooks/sms/status?outbox_id=outbox-1"
+    )
 
 def test_unknown_or_stale_intent_never_sends() -> None:
     sender, messages, _, _ = setup()
@@ -118,3 +135,11 @@ def test_provider_failure_is_safe_and_retryable() -> None:
     messages.fail = True
     with pytest.raises(DeliveryFailure, match="PROVIDER_SEND_ERROR"):
         sender.deliver(record())
+
+
+def test_owner_stop_blocks_owner_notifications() -> None:
+    sender, messages, consent, _ = setup()
+    consent.opted_out = True
+    with pytest.raises(PermanentDeliveryFailure, match="OPTED_OUT"):
+        sender.deliver(record("owner", "hold-request"))
+    assert messages.calls == []
