@@ -9,7 +9,6 @@ from fastapi.testclient import TestClient
 from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.domain.calendar import CalendarStatus
 from scheduling.domain.client_records import (
-    ClientNote,
     ClientRecordService,
     HomeSize,
     RecordConflict,
@@ -118,15 +117,15 @@ def test_never_visited_notes_expire_from_creation_and_legal_hold_survives() -> N
     anniversary = NOW.replace(year=NOW.year + 1)
     assert service.list_notes(BUSINESS, "client-1", anniversary - timedelta(seconds=1)) == (note,)
     assert service.list_notes(BUSINESS, "client-1", anniversary) == ()
-    held = replace(note, legal_hold_reason="documented case")
+    held = service.change_note_hold(BUSINESS, "client-1", note.note_id, "documented case")
     assert not note_expired(held, None, anniversary + timedelta(days=365))
-    repository.put_note(ClientNote(BUSINESS, "client-1", "held", None,
-                                   "Synthetic held note", "owner-1", NOW,
-                                   "documented case"))
-    assert purge_business_notes(repository, BUSINESS, anniversary) == 1
+    assert purge_business_notes(repository, BUSINESS, anniversary) == 0
     assert len(repository.list_notes(BUSINESS, "client-1")) == 1
     with pytest.raises(RecordConflict, match="legal hold"):
-        service.delete_note(BUSINESS, "client-1", "held")
+        service.delete_note(BUSINESS, "client-1", note.note_id)
+    service.change_note_hold(BUSINESS, "client-1", note.note_id, None)
+    assert purge_business_notes(repository, BUSINESS, anniversary) == 1
+    assert repository.list_notes(BUSINESS, "client-1") == ()
 
 
 def test_owner_routes_require_verified_business_identity() -> None:
@@ -146,14 +145,28 @@ def test_owner_routes_require_verified_business_identity() -> None:
     assert api.put(base.replace(BUSINESS, "other"), json=body,
                    headers={"Authorization": "Bearer good",
                             "Idempotency-Key": "profile"}).status_code == 403
-    response = api.put(base, json=body, headers={"Authorization": "Bearer good",
-                                                 "Idempotency-Key": "profile"})
+    response = api.put(base, json=body, headers={"Authorization": "Bearer good"})
     assert response.status_code == 200
     assert response.json()["phone_verified_at"] is None
+    assert api.put(base, json=body, headers={"Authorization": "Bearer good"}).status_code == 409
     assert api.get(base, headers={"Authorization": "Bearer good"}).status_code == 200
     notes = f"{base}/notes"
     created = api.post(notes, json={"body": "Bring supplies"},
                        headers={"Authorization": "Bearer good", "Idempotency-Key": "note"})
     assert created.status_code == 200
+    note_id = created.json()["note_id"]
+    hold_url = f"{notes}/{note_id}/legal-hold"
+    assert api.patch(hold_url, json={"reason": "documented case"}).status_code == 401
+    assert api.patch(hold_url.replace(BUSINESS, "other"),
+                     json={"reason": "documented case"},
+                     headers={"Authorization": "Bearer good"}).status_code == 403
+    held = api.patch(hold_url, json={"reason": "documented case"},
+                     headers={"Authorization": "Bearer good"})
+    assert held.status_code == 200
+    assert held.json()["legal_hold_reason"] == "documented case"
+    assert api.delete(f"{notes}/{note_id}",
+                      headers={"Authorization": "Bearer good"}).status_code == 409
+    assert api.patch(hold_url, json={"reason": None},
+                     headers={"Authorization": "Bearer good"}).status_code == 200
     assert len(api.get(notes, headers={"Authorization": "Bearer good"}).json()) == 1
     assert api.get(notes, headers={"Authorization": "Bearer bad"}).status_code == 401

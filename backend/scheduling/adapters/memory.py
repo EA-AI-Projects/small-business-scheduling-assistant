@@ -109,6 +109,13 @@ class InMemoryCalendarRepository:
             if self._client_notes.get(key) == note:
                 del self._client_notes[key]
 
+    def update_note_hold(self, before: ClientNote, after: ClientNote) -> None:
+        with self._lock:
+            key = (before.business_id, before.client_id, before.note_id)
+            if self._client_notes.get(key) != before:
+                raise RecordConflict("Note changed before legal hold update")
+            self._client_notes[key] = after
+
     def last_visit_end(self, business_id: str, client_id: str,
                        now: datetime) -> datetime | None:
         with self._lock:

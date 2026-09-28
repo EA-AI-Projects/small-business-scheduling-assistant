@@ -51,6 +51,8 @@ class DynamoClient(Protocol):
 
     def transact_write_items(self, **kwargs: Any) -> dict[str, Any]: ...
 
+    def update_item(self, **kwargs: Any) -> dict[str, Any]: ...
+
 
 def _instant(value: datetime) -> str:
     return value.astimezone(UTC).isoformat(timespec="microseconds")
@@ -344,6 +346,37 @@ class DynamoDBCalendarRepository:
             if not _record_transaction_conflict(exc):
                 raise
             raise RecordConflict("Note changed or is under legal hold") from exc
+
+    def update_note_hold(self, before: ClientNote, after: ClientNote) -> None:
+        if (before.business_id, before.client_id, before.note_id) != (
+                after.business_id, after.client_id, after.note_id):
+            raise ValueError("Legal hold update cannot change note identity")
+        values = {":created": {"S": _instant(before.created_at)}}
+        condition = "created_at = :created AND "
+        if before.legal_hold_reason is None:
+            condition += "attribute_not_exists(legal_hold_reason)"
+        else:
+            condition += "legal_hold_reason = :previous_reason"
+            values[":previous_reason"] = {"S": before.legal_hold_reason}
+        if after.legal_hold_reason is None:
+            update = "REMOVE legal_hold_reason"
+        else:
+            update = "SET legal_hold_reason = :reason"
+            values[":reason"] = {"S": after.legal_hold_reason}
+        try:
+            self._client.update_item(
+                TableName=self._table,
+                Key=self._note_key(before.business_id, before.client_id, before.note_id),
+                ConditionExpression=condition,
+                UpdateExpression=update,
+                ExpressionAttributeValues=values,
+            )
+        except Exception as exc:
+            response = getattr(exc, "response", {})
+            code = response.get("Error", {}).get("Code") if isinstance(response, dict) else None
+            if code != "ConditionalCheckFailedException":
+                raise
+            raise RecordConflict("Note changed before legal hold update") from exc
 
     def last_visit_end(self, business_id: str, client_id: str,
                        now: datetime) -> datetime | None:

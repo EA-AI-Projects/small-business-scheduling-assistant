@@ -131,7 +131,7 @@ Owns all business rules and state transitions:
 ### Note
 - `id`, `business_id`, `client_id`, nullable `appointment_id`, `body`, `created_by`, `source`, `review_status`, timestamps
 - Client-level note has no appointment ID; visit-specific note references an appointment. Exclude entry/access codes entirely from the MVP.
-- Delete ordinary client and appointment notes 12 months after the last completed visit, except during a documented legal hold. A confirmed appointment whose end time has passed counts as completed unless cancelled. For a client with no completed visit, delete each note 12 months after its creation. Reject a new note if the last completed visit was already more than 12 months ago.
+- Delete ordinary client and appointment notes 12 months after the last completed visit, except during a documented legal hold. An authenticated owner can set or release the hold with a reason on an existing note; a conditional write prevents a race with purge. An overdue note becomes eligible for the next purge after release. A confirmed appointment whose end time has passed counts as completed unless cancelled. For a client with no completed visit, delete each note 12 months after its creation. Reject a new note if the last completed visit was already more than 12 months ago.
 
 ### Conversation and Message
 - `Conversation`: client/phone association, current conversation state, timestamps.

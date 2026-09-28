@@ -205,6 +205,10 @@ class ClientNoteBody(StrictModel):
     body: str = Field(min_length=1, max_length=2000)
 
 
+class LegalHoldBody(StrictModel):
+    reason: str | None
+
+
 def _error(code: str, message: str, status: int, current: object | None = None) -> HTTPException:
     detail: dict[str, object] = {"error": {"code": code, "message": message}}
     if current is not None:
@@ -315,9 +319,8 @@ def create_owner_app(
 
     @app.put("/v1/owner/businesses/{business_id}/clients/{client_id}")
     def save_client(business_id: str, client_id: str, body: ClientProfileBody,
-                    owner: Annotated[OwnerPrincipal, Depends(principal)],
-                    request_key: Annotated[str, Depends(key)]) -> object:
-        del owner, request_key
+                    owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:
+        del owner
         record = store.read_policy_record(business_id)
         if record is None:
             raise _error("POLICY_NOT_CONFIGURED", "Persist the pilot policy first", 409)
@@ -345,10 +348,17 @@ def create_owner_app(
 
     @app.delete("/v1/owner/businesses/{business_id}/clients/{client_id}/notes/{note_id}")
     def delete_client_note(business_id: str, client_id: str, note_id: str,
-                           owner: Annotated[OwnerPrincipal, Depends(principal)],
-                           request_key: Annotated[str, Depends(key)]) -> object:
-        del owner, request_key
+                           owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:
+        del owner
         return run(lambda: clients.delete_note(business_id, client_id, note_id))
+
+    @app.patch("/v1/owner/businesses/{business_id}/clients/{client_id}/notes/{note_id}/legal-hold")
+    def change_client_note_hold(business_id: str, client_id: str, note_id: str,
+                                body: LegalHoldBody,
+                                owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:
+        del owner
+        return run(lambda: clients.change_note_hold(business_id, client_id, note_id,
+                                                     body.reason))
 
     @app.get("/v1/owner/businesses/{business_id}/calendar")
     def owner_calendar(business_id: str, owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:

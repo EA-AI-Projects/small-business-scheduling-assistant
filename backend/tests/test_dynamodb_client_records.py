@@ -1,5 +1,6 @@
 """DynamoDB client and note writes keep unique identity and scoped keys."""
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -16,7 +17,9 @@ class RecordingClient:
         self.transactions: list[dict[str, Any]] = []
         self.scans: list[dict[str, Any]] = []
         self.scan_pages: list[dict[str, Any]] = []
+        self.updates: list[dict[str, Any]] = []
         self.reject = False
+        self.reject_update = False
 
     def get_item(self, **_kwargs: Any) -> dict[str, Any]:
         return {}
@@ -33,6 +36,13 @@ class RecordingClient:
         if self.reject:
             raise ClientError({"Error": {"Code": "TransactionCanceledException",
                                          "Message": "conditional failure"}}, "TransactWriteItems")
+        return {}
+
+    def update_item(self, **kwargs: Any) -> dict[str, Any]:
+        self.updates.append(kwargs)
+        if self.reject_update:
+            raise ClientError({"Error": {"Code": "ConditionalCheckFailedException",
+                                         "Message": "conditional failure"}}, "UpdateItem")
         return {}
 
 
@@ -81,6 +91,27 @@ def test_note_keys_are_client_scoped_and_delete_respects_legal_hold() -> None:
     repository.delete_note(note)
     condition = client.transactions[1]["TransactItems"][0]["Delete"]["ConditionExpression"]
     assert "attribute_not_exists(legal_hold_reason)" in condition
+
+
+def test_legal_hold_updates_are_conditional() -> None:
+    client = RecordingClient()
+    repository = DynamoDBCalendarRepository(client, "scheduling")
+    note = ClientNote("business-1", "client-1", "note-1", None, "Bring supplies",
+                      "owner-1", NOW)
+    held = replace(note, legal_hold_reason="documented case")
+    repository.update_note_hold(note, held)
+    assert "attribute_not_exists(legal_hold_reason)" in client.updates[0]["ConditionExpression"]
+    assert client.updates[0]["UpdateExpression"] == "SET legal_hold_reason = :reason"
+    repository.update_note_hold(held, note)
+    assert "legal_hold_reason = :previous_reason" in client.updates[1]["ConditionExpression"]
+    assert client.updates[1]["UpdateExpression"] == "REMOVE legal_hold_reason"
+    client.reject_update = True
+    try:
+        repository.update_note_hold(note, held)
+    except RecordConflict:
+        pass
+    else:
+        raise AssertionError("Expected conditional legal hold conflict")
 
 
 def test_last_visit_scans_strongly_and_paginates() -> None:

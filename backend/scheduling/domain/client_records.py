@@ -89,8 +89,11 @@ class ClientNote:
             raise ValueError("Note is too long")
         if self.created_at.tzinfo is None:
             raise ValueError("Note timestamp must be timezone-aware")
-        if self.legal_hold_reason is not None and not self.legal_hold_reason.strip():
-            raise ValueError("Legal hold needs a documented reason")
+        if self.legal_hold_reason is not None:
+            if not self.legal_hold_reason.strip():
+                raise ValueError("Legal hold needs a documented reason")
+            if len(self.legal_hold_reason) > 500 or ACCESS_CODE_PATTERN.search(self.legal_hold_reason):
+                raise ValueError("Legal hold reason is too long or contains an entry/access code")
 
 
 class ClientRecordRepository(Protocol):
@@ -103,6 +106,7 @@ class ClientRecordRepository(Protocol):
     def read_note(self, business_id: str, client_id: str, note_id: str) -> ClientNote | None: ...
     def list_notes(self, business_id: str, client_id: str) -> tuple[ClientNote, ...]: ...
     def put_note(self, note: ClientNote) -> None: ...
+    def update_note_hold(self, before: ClientNote, after: ClientNote) -> None: ...
     def delete_note(self, note: ClientNote) -> None: ...
     def last_visit_end(self, business_id: str, client_id: str,
                        now: datetime) -> datetime | None: ...
@@ -197,6 +201,16 @@ class ClientRecordService:
         if note is None:
             raise RecordNotFound("Note was not found")
         self._repository.delete_note(note)
+
+    def change_note_hold(self, business_id: str, client_id: str, note_id: str,
+                         reason: str | None) -> ClientNote:
+        """Owner-only operation; a conditional write prevents racing with purge."""
+        note = self._repository.read_note(business_id, client_id, note_id)
+        if note is None:
+            raise RecordNotFound("Note was not found")
+        updated = replace(note, legal_hold_reason=reason.strip() if reason is not None else None)
+        self._repository.update_note_hold(note, updated)
+        return updated
 
     def purge_expired_notes(self, business_id: str, client_id: str,
                             now: datetime) -> int:
