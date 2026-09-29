@@ -52,9 +52,18 @@ Parameters:
     Type: String
     AllowedValues: [disabled, authorized]
     Default: disabled
+  EnableSmsConversations:
+    Type: String
+    AllowedValues: [disabled, authorized]
+    Default: disabled
+    Description: Enable receipt handoff only with separately authorized SMS ingress and sending.
 
 Conditions:
   SmsIngressRequested: !Equals [!Ref EnableSmsIngress, 'true']
+  SmsConversationRequested: !And
+    - !Condition SmsIngressRequested
+    - !Equals [!Ref SmsSendEnabled, authorized]
+    - !Equals [!Ref EnableSmsConversations, authorized]
 
 Globals:
   Function:
@@ -139,6 +148,23 @@ Resources:
       SqsManagedSseEnabled: true
       RedrivePolicy:
         deadLetterTargetArn: !GetAtt OutboxDeadLetterQueue.Arn
+        maxReceiveCount: 5
+
+  SmsConversationDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'scheduling-sms-conversation-dlq-${Environment}'
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+  SmsConversationQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'scheduling-sms-conversation-${Environment}'
+      VisibilityTimeout: 180
+      MessageRetentionPeriod: 345600
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt SmsConversationDeadLetterQueue.Arn
         maxReceiveCount: 5
 
   OwnerUserPool:
@@ -257,6 +283,11 @@ Resources:
           OWNER_NUMBER: !Ref OwnerNumber
           TWILIO_INBOUND_URL: !Ref TwilioInboundUrl
           TWILIO_STATUS_URL: !Ref TwilioStatusUrl
+          SMS_CONVERSATION_QUEUE_URL: !Ref SmsConversationQueue
+          SMS_CONVERSATION_HANDOFF_ENABLED: !If
+            - SmsConversationRequested
+            - authorized
+            - disabled
       Policies:
         - Statement:
             - Effect: Allow
@@ -268,6 +299,9 @@ Resources:
             - Effect: Allow
               Action: [ssm:GetParameter]
               Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/scheduling/${Environment}/twilio/auth-token'
+            - Effect: Allow
+              Action: [sqs:SendMessage]
+              Resource: !GetAtt SmsConversationQueue.Arn
       Events:
         Inbound:
           Type: HttpApi
@@ -286,6 +320,48 @@ Resources:
     Condition: SmsIngressRequested
     Properties:
       LogGroupName: !Sub '/aws/lambda/${SmsIngressFunction}'
+      RetentionInDays: 30
+
+  SmsConversationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: scheduling.workers.sms_conversation.handler
+      Environment:
+        Variables:
+          SMS_CONVERSATION_ENABLED: !If
+            - SmsConversationRequested
+            - authorized
+            - disabled
+          OPENAI_API_KEY_PARAM: !Sub '/scheduling/${Environment}/openai/api-key'
+          OWNER_NUMBER: !Ref OwnerNumber
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem, dynamodb:ConditionCheckItem]
+              Resource: !GetAtt SchedulingTable.Arn
+            - Effect: Allow
+              Action: [dynamodb:Query]
+              Resource:
+                - !GetAtt SchedulingTable.Arn
+                - !Sub '${SchedulingTable.Arn}/index/HoldDueIndex'
+            - Effect: Allow
+              Action: [ssm:GetParameter]
+              Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/scheduling/${Environment}/openai/api-key'
+            - Effect: Allow
+              Action: [sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes, sqs:ChangeMessageVisibility]
+              Resource: !GetAtt SmsConversationQueue.Arn
+      Events:
+        Receipts:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt SmsConversationQueue.Arn
+            BatchSize: 10
+            FunctionResponseTypes: [ReportBatchItemFailures]
+            Enabled: !If [SmsConversationRequested, true, false]
+  SmsConversationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${SmsConversationFunction}'
       RetentionInDays: 30
 
   SmsSenderFunction:
@@ -495,6 +571,21 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions: [!Ref AlarmTopic]
+  SmsConversationDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Conversation receipts require inspection; do not replay without checking current state.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - {Name: QueueName, Value: !GetAtt SmsConversationDeadLetterQueue.QueueName}
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
   HoldExpiryErrorAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -594,6 +685,21 @@ Resources:
       MetricName: Errors
       Dimensions:
         - {Name: FunctionName, Value: !Ref SmsSenderFunction}
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+  SmsConversationErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Persisted SMS conversation worker failed.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - {Name: FunctionName, Value: !Ref SmsConversationFunction}
       Statistic: Sum
       Period: 300
       EvaluationPeriods: 2

@@ -44,6 +44,7 @@ from scheduling.domain.sms_ingress import (
     InboundReceipt,
     Keyword,
     SenderRole,
+    normalize_phone,
 )
 
 MAX_CONTEXT_APPOINTMENTS = 8
@@ -106,13 +107,15 @@ class ConsentLookup(Protocol):
 class ConversationService:
     def __init__(self, repository: ConversationRepository, interpreter: MessageInterpreter,
                  holds: HoldService, lifecycle: LifecycleService,
-                 consent: ConsentLookup, clock: Callable[[], datetime]) -> None:
+                 consent: ConsentLookup, clock: Callable[[], datetime],
+                 owner_number: str) -> None:
         self._repository = repository
         self._interpreter = interpreter
         self._holds = holds
         self._lifecycle = lifecycle
         self._consent = consent
         self._clock = clock
+        self._owner_number = normalize_phone(owner_number)
         self._availability = AvailabilityService(repository)
 
     def handle(self, receipt: InboundReceipt) -> ConversationOutcome:
@@ -122,6 +125,8 @@ class ConversationService:
             return ConversationOutcome("This message cannot change the schedule.")
         if len(receipt.body) > MAX_MESSAGE_LENGTH:
             return ConversationOutcome("Please send one scheduling request in a shorter message.")
+        if receipt.role == SenderRole.OWNER and receipt.sender != self._owner_number:
+            return ConversationOutcome("This sender is no longer the verified owner number.")
         now = self._clock()
         if now.tzinfo is None:
             raise ValueError("Processing clock must be timezone-aware")

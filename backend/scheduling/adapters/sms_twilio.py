@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 from scheduling.domain.appointments import Appointment
 from scheduling.domain.client_records import ClientProfile
 from scheduling.domain.outbox import DeliveryFailure, OutboxRecord, PermanentDeliveryFailure
-from scheduling.domain.sms_ingress import SmsIngressStore, normalize_phone
+from scheduling.domain.sms_ingress import Keyword, SenderRole, SmsIngressStore, normalize_phone
 
 
 class SchedulingRecords(Protocol):
@@ -57,6 +57,8 @@ class TwilioSmsSender:
             raise PermanentDeliveryFailure("BUSINESS_MISMATCH")
         if record.recipient not in {"owner", "client"}:
             raise PermanentDeliveryFailure("RECIPIENT_UNKNOWN")
+        if record.template == "conversation-reply":
+            return self._deliver_reply(record)
         appointment = self._records.read_appointment(record.entity_id)
         if appointment is not None and appointment.business_id != record.business_id:
             raise PermanentDeliveryFailure("ENTITY_MISMATCH")
@@ -77,6 +79,37 @@ class TwilioSmsSender:
         if to not in self._authorized_recipients:
             raise PermanentDeliveryFailure("RECIPIENT_NOT_AUTHORIZED")
         body = self._render(record, appointment, profile)
+        return self._send(record, to, body)
+
+    def _deliver_reply(self, record: OutboxRecord) -> str:
+        receipt = self._consent.read_received(record.business_id, record.entity_id)
+        body = self._consent.read_reply_text(record.business_id, record.entity_id)
+        if (receipt is None or body is None or not receipt.authorized_for_commands
+                or receipt.body is None or receipt.keyword != Keyword.OTHER
+                or record.event_version != 0 or record.outbox_id != f"sms-reply#{record.entity_id}"
+                or receipt.role.value != record.recipient):
+            raise PermanentDeliveryFailure("REPLY_UNAVAILABLE")
+        to = normalize_phone(receipt.sender)
+        if receipt.role == SenderRole.OWNER:
+            if to != self._owner:
+                raise PermanentDeliveryFailure("OWNER_MISMATCH")
+        elif receipt.role == SenderRole.CLIENT:
+            profile = (self._records.read_profile(record.business_id, receipt.client_id)
+                       if receipt.client_id is not None else None)
+            evidence = self._consent.read_consent(record.business_id, to)
+            if (profile is None or not profile.active or profile.phone_verified_at is None
+                    or profile.phone_e164 != to or evidence is None
+                    or evidence.client_id != receipt.client_id):
+                raise PermanentDeliveryFailure("CONSENT_REQUIRED")
+        else:
+            raise PermanentDeliveryFailure("RECIPIENT_UNKNOWN")
+        if self._consent.is_opted_out(record.business_id, to):
+            raise PermanentDeliveryFailure("OPTED_OUT")
+        if to not in self._authorized_recipients:
+            raise PermanentDeliveryFailure("RECIPIENT_NOT_AUTHORIZED")
+        return self._send(record, to, body)
+
+    def _send(self, record: OutboxRecord, to: str, body: str) -> str:
         kwargs = {"from_": self._from, "to": to, "body": body}
         if self._status_callback is not None:
             kwargs["status_callback"] = (self._status_callback + "?" + urlencode({

@@ -65,7 +65,8 @@ def setup(proposal: MessageProposal) -> tuple[
     interpreter = Interpreter(proposal)
     consent = Consent()
     return (ConversationService(store, interpreter, HoldService(store),
-                                LifecycleService(store, lambda: NOW), consent, lambda: NOW),
+                                LifecycleService(store, lambda: NOW), consent, lambda: NOW,
+                                "+14155559999"),
             store, interpreter, consent)
 
 
@@ -98,7 +99,8 @@ def test_late_processing_uses_current_clock_not_old_receipt_time() -> None:
         "request_booking", None, "2026-10-01 09:00", None, False))
     late = NOW + timedelta(days=3)
     service = ConversationService(store, model, HoldService(store),
-                                  LifecycleService(store, lambda: late), consent, lambda: late)
+                                  LifecycleService(store, lambda: late), consent, lambda: late,
+                                  "+14155559999")
     result = service.handle(receipt("Book 2026-10-01 09:00"))
     assert not result.committed
     assert store.read_calendar("pilot").events == ()
@@ -111,6 +113,19 @@ def test_ambiguous_owner_reply_cannot_approve_even_if_model_selects_target() -> 
     model.proposal = MessageProposal("owner_decision", hold_id[:8], None, "approve", False)
     result = service.handle(receipt("Yes", role=SenderRole.OWNER))
     assert not result.committed
+    assert store.read_appointment(hold_id).status == CalendarStatus.PENDING_APPROVAL  # type: ignore[union-attr]
+
+
+def test_old_owner_number_cannot_approve_a_persisted_receipt_after_rotation() -> None:
+    _, store, model, consent = setup(MessageProposal(
+        "owner_decision", None, None, "approve", False))
+    hold_id = pending(store)
+    service = ConversationService(store, model, HoldService(store),
+                                  LifecycleService(store, lambda: NOW), consent,
+                                  lambda: NOW, "+14155558888")
+    result = service.handle(receipt(f"Approve {hold_id[:8]}", role=SenderRole.OWNER))
+    assert not result.committed
+    assert not model.calls
     assert store.read_appointment(hold_id).status == CalendarStatus.PENDING_APPROVAL  # type: ignore[union-attr]
 
 
@@ -221,6 +236,16 @@ def test_exact_booking_works_when_model_would_clarify() -> None:
     result = service.handle(receipt("Book 2026-10-01 09:00"))
     assert result.committed
     assert not model.calls
+
+
+def test_duplicate_provider_receipt_reuses_the_same_booking() -> None:
+    service, store, _, _ = setup(MessageProposal("clarify", None, None, None, True))
+    message = receipt("Book 2026-10-01 09:00", provider_id="SM-replayed")
+    first = service.handle(message)
+    replay = service.handle(message)
+    assert first.committed and replay.committed
+    assert first.appointment_id == replay.appointment_id
+    assert len(store.read_calendar("pilot").events) == 1
 
 
 def test_multiple_dates_and_ambiguous_local_time_cannot_create_hold() -> None:

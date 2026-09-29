@@ -88,12 +88,29 @@ def test_approve_checks_expiry_and_writes_metadata_event_audit_and_outbox_atomic
         write.get("Put", {}).get("Item", {}).get("SK", {}).get("S", "").startswith("OUTBOX#")
         for write in writes
     )
+
+
     notice = next(
         write["Put"]["Item"] for write in writes
         if write.get("Put", {}).get("Item", {}).get("SK", {}).get("S", "").startswith("OUTBOX#")
     )
     assert notice["outbox_due_pk"] == {"S": "OUTBOX#PENDING"}
     assert notice["dispatch_after"] == notice["next_attempt_at"]
+
+
+def test_sms_decision_commit_checks_stop_in_the_same_transaction() -> None:
+    client = RecordingClient()
+    before = pending()
+    after = replace(before, status=CalendarStatus.CONFIRMED, version=2)
+    repository = DynamoDBCalendarRepository(
+        client, "scheduling", sms_sender_guard="+14155550101")
+
+    repository.commit_transition(7, transition(before, Action.APPROVE, after))
+
+    checks = [write["ConditionCheck"] for write in
+              client.transactions[0]["TransactItems"] if "ConditionCheck" in write]
+    assert [check["Key"]["SK"]["S"] for check in checks] == [
+        "SMS_SUPPRESS#+14155550101", "SMS_OPTOUT#+14155550101"]
 
 
 def test_decline_deletes_calendar_event_and_expiry_uses_opposite_time_condition() -> None:

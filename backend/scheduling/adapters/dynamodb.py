@@ -40,6 +40,7 @@ from scheduling.domain.owner_policy import (
     PolicyReplay,
     PolicyResult,
 )
+from scheduling.domain.sms_ingress import SmsCommandInterrupted
 
 
 class DynamoClient(Protocol):
@@ -180,9 +181,25 @@ def encode_policy(policy: AvailabilityPolicy) -> str:
 class DynamoDBCalendarRepository:
     """The caller supplies an IAM-scoped boto3 DynamoDB client and table name."""
 
-    def __init__(self, client: DynamoClient, table_name: str) -> None:
+    def __init__(self, client: DynamoClient, table_name: str,
+                 *, sms_sender_guard: str | None = None) -> None:
         self._client = client
         self._table = table_name
+        self._sms_sender_guard = sms_sender_guard
+
+    def _sms_guard_checks(self, business_id: str) -> list[dict[str, Any]]:
+        """STOP and a scheduling commit must serialize on the same Dynamo items."""
+        if self._sms_sender_guard is None:
+            return []
+        return [{"ConditionCheck": {
+            "TableName": self._table,
+            "Key": self._business_key(business_id, f"SMS_SUPPRESS#{self._sms_sender_guard}"),
+            "ConditionExpression": "attribute_not_exists(PK)",
+        }}, {"ConditionCheck": {
+            "TableName": self._table,
+            "Key": self._business_key(business_id, f"SMS_OPTOUT#{self._sms_sender_guard}"),
+            "ConditionExpression": "attribute_not_exists(PK) OR attribute_exists(cleared_at)",
+        }}]
 
     @staticmethod
     def _business_key(business_id: str, sort_key: str) -> dict[str, dict[str, str]]:
@@ -998,6 +1015,7 @@ class DynamoDBCalendarRepository:
                 "ConditionExpression": "attribute_not_exists(PK) OR expires_at <= :now",
                 "ExpressionAttributeValues": {":now": {"S": _instant(commit.created_at)}},
             }})
+        writes.extend(self._sms_guard_checks(hold.business_id))
         if len(writes) > 100:
             raise ValueError("Hold transaction exceeds DynamoDB item limit")
         try:
@@ -1006,6 +1024,10 @@ class DynamoDBCalendarRepository:
             response = getattr(exc, "response", {})
             if not isinstance(response, dict) or response.get("Error", {}).get("Code") != "TransactionCanceledException":
                 raise
+            if self._sms_sender_guard is not None:
+                # A cancelled SMS command is terminal for this receipt. Retrying
+                # it after STOP is cleared could commit an old request.
+                raise SmsCommandInterrupted from exc
             reasons = response.get("CancellationReasons")
             if isinstance(reasons, list):
                 codes = [reason.get("Code") for reason in reasons if isinstance(reason, dict)]
@@ -1211,6 +1233,7 @@ class DynamoDBCalendarRepository:
                 "attempts": {"N": "0"},
                 "event_version": {"N": str(after.version)},
             }))
+        writes.extend(self._sms_guard_checks(before.business_id))
         if len(writes) > 100:
             raise ValueError("Appointment transaction exceeds DynamoDB item limit")
         try:
@@ -1219,6 +1242,8 @@ class DynamoDBCalendarRepository:
             response = getattr(exc, "response", {})
             if not isinstance(response, dict) or response.get("Error", {}).get("Code") != "TransactionCanceledException":
                 raise
+            if self._sms_sender_guard is not None:
+                raise SmsCommandInterrupted from exc
             reasons = response.get("CancellationReasons")
             if isinstance(reasons, list):
                 codes = [reason.get("Code") for reason in reasons if isinstance(reason, dict)]
