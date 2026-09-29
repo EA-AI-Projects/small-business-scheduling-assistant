@@ -6,13 +6,14 @@ from scheduling.adapters.twilio_secret import load_twilio_auth_token
 
 
 class FakeSsm:
-    def __init__(self, value: str) -> None:
+    def __init__(self, value: str, parameter_type: str = "SecureString") -> None:
         self.value = value
+        self.parameter_type = parameter_type
         self.calls: list[dict[str, object]] = []
 
     def get_parameter(self, **kwargs: object) -> dict[str, dict[str, str]]:
         self.calls.append(kwargs)
-        return {"Parameter": {"Value": self.value}}
+        return {"Parameter": {"Value": self.value, "Type": self.parameter_type}}
 
 
 def test_loads_encrypted_parameter_by_exact_name() -> None:
@@ -28,3 +29,6 @@ def test_rejects_unscoped_or_empty_token() -> None:
     assert client.calls == []
     with pytest.raises(ValueError, match="empty"):
         load_twilio_auth_token(client, "/scheduling/dev/twilio/auth-token")
+    with pytest.raises(ValueError, match="SecureString"):
+        load_twilio_auth_token(FakeSsm("plaintext-token", "String"),
+                               "/scheduling/dev/twilio/auth-token")

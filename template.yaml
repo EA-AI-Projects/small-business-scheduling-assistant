@@ -25,10 +25,6 @@ Parameters:
     AllowedValues: ['true', 'false']
     Default: 'false'
     Description: Create the public signed webhook only after its SSM secret and exact URLs are ready.
-  TwilioAuthTokenParameter:
-    Type: String
-    Default: /scheduling/dev/twilio/auth-token
-    AllowedPattern: '/scheduling/.+'
   TwilioAccountSid:
     Type: String
     Default: placeholder
@@ -228,7 +224,7 @@ Resources:
         Variables:
           SCHEDULING_TABLE_NAME: !Ref SchedulingTable
           BUSINESS_ID: !Ref BusinessId
-          TWILIO_AUTH_TOKEN_PARAM: !Ref TwilioAuthTokenParameter
+          TWILIO_AUTH_TOKEN_PARAM: !Sub '/scheduling/${Environment}/twilio/auth-token'
           TWILIO_BUSINESS_NUMBER: !Ref TwilioBusinessNumber
           OWNER_NUMBER: !Ref OwnerNumber
           TWILIO_INBOUND_URL: !Ref TwilioInboundUrl
@@ -243,7 +239,7 @@ Resources:
               Resource: !GetAtt SchedulingTable.Arn
             - Effect: Allow
               Action: [ssm:GetParameter]
-              Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TwilioAuthTokenParameter}'
+              Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/scheduling/${Environment}/twilio/auth-token'
       Events:
         Inbound:
           Type: HttpApi
@@ -274,11 +270,16 @@ Resources:
           BUSINESS_ID: !Ref BusinessId
           SMS_SEND_ENABLED: !Ref SmsSendEnabled
           AUTHORIZED_SMS_RECIPIENTS: !Ref AuthorizedSmsRecipients
-          TWILIO_AUTH_TOKEN_PARAM: !Ref TwilioAuthTokenParameter
+          TWILIO_AUTH_TOKEN_PARAM: !Sub '/scheduling/${Environment}/twilio/auth-token'
           TWILIO_ACCOUNT_SID: !Ref TwilioAccountSid
           TWILIO_BUSINESS_NUMBER: !Ref TwilioBusinessNumber
           OWNER_NUMBER: !Ref OwnerNumber
           TWILIO_STATUS_URL: !Ref TwilioStatusUrl
+          TWILIO_INBOUND_URL: !Ref TwilioInboundUrl
+          SMS_API_BASE_URL: !If
+            - SmsIngressRequested
+            - !Sub 'https://${SmsHttpApi}.execute-api.${AWS::Region}.amazonaws.com'
+            - ''
       Policies:
         - Statement:
             - Effect: Allow
@@ -289,7 +290,7 @@ Resources:
               Resource: !GetAtt SchedulingTable.Arn
             - Effect: Allow
               Action: [ssm:GetParameter]
-              Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TwilioAuthTokenParameter}'
+              Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/scheduling/${Environment}/twilio/auth-token'
             - Effect: Allow
               Action: [sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes, sqs:ChangeMessageVisibility]
               Resource: !GetAtt OutboxQueue.Arn
