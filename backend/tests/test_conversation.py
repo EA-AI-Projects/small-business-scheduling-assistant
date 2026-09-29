@@ -1,9 +1,14 @@
 """Model proposals cannot bypass the trusted scheduling services."""
 
+import json
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
+
+import pytest
 
 from evals.scheduling_messages import CASES
 from scheduling.adapters.memory import InMemoryCalendarRepository
+from scheduling.adapters.openai_messages import OpenAIMessageInterpreter
 from scheduling.domain.calendar import CalendarStatus
 from scheduling.domain.client_records import ClientProfile, HomeSize
 from scheduling.domain.conversation import (
@@ -106,6 +111,30 @@ def test_unauthorized_or_keyword_message_never_reaches_model_or_schedule() -> No
     result = service.handle(receipt("Book 2026-10-01 09:00", authorized=False))
     assert not result.committed
     assert not model.calls
+    assert store.read_calendar("pilot").events == ()
+
+
+def test_long_model_question_returns_normal_clarification_without_calendar_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arguments = {
+        "intent": "clarify", "request_reference": None, "date_text": None,
+        "owner_decision": None, "needs_clarification": True,
+        "question": "Which date would you prefer? " * 8,
+    }
+    monkeypatch.setattr("scheduling.adapters.openai_messages.urlopen",
+                        lambda *_args, **_kwargs: BytesIO(json.dumps({"output": [{
+                            "type": "function_call", "name": "propose_message",
+                            "arguments": json.dumps(arguments),
+                        }]}).encode()))
+    _, store, _, consent = setup(MessageProposal("clarify", None, None, None, True))
+    service = ConversationService(store, OpenAIMessageInterpreter("synthetic-key"),
+                                  HoldService(store), LifecycleService(store, lambda: NOW),
+                                  consent, lambda: NOW, "+14155559999")
+    result = service.handle(receipt("I would like to book an appointment for this week"))
+    assert result.text != "I couldn't understand that message. Please try again later."
+    assert "BOOK" in result.text
+    assert not result.committed
     assert store.read_calendar("pilot").events == ()
 
 
