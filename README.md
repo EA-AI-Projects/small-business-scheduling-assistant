@@ -64,7 +64,7 @@ When `create_cognito_owner_app` receives both `ui_domain` and `ui_redirect_uri`,
 
 The page provides day/week schedule and pending approvals in the business timezone, appointment edits/cancellation, unavailable blocks, date exceptions, client profiles, and separate client/visit notes. Local date-time inputs are resolved by the authenticated API and reject ambiguous or nonexistent daylight-saving times. A conflicting edit refreshes current state and states that nothing was saved. The page and its public OAuth configuration contain no customer data or credentials; data is returned only through authenticated owner routes. Issue #23 must provide the hosted Cognito client, same-origin routing, and deployment settings; this code does not provision or publish them.
 
-Focused checks:
+Focused checks (GitHub Actions `CI` also runs these, plus the DynamoDB Local race tests and `cfn-lint template.yaml`, on every pull request and push to `main`):
 
 ```sh
 backend/.venv/bin/python -m pytest backend/tests
