@@ -12,6 +12,7 @@ An SMS-first scheduling assistant for a small home-cleaning business. Clients re
 - [Local scheduling conversation exercise](doc/CONVERSATION.md)
 - [Scheduling service contracts](doc/SCHEDULING_CONTRACTS.md)
 - [Human–agent team agreement](doc/TEAM_AGREEMENT.md)
+- [A2P registration notes](doc/A2P_REGISTRATION.md) and [public SMS policy pages](docs/README.md)
 
 ## Current MVP direction
 
