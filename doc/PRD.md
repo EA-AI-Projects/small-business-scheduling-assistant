@@ -64,6 +64,7 @@ An AI-assisted SMS interface that identifies intent, gathers required details, e
 ### 6.2 Client profile and visit duration
 
 - Maintain a client profile with contact number, name, service address, and estimated visit duration.
+- The owner enters and verifies client profile fields (name, service address, and home size/duration) in the authenticated calendar. SMS does not collect or change profile fields; it collects only the requested visit date and time. A client whose profile is missing, inactive, or unverified is asked to contact the owner, and no scheduling change occurs. The owner decided this in issue #22.
 - Use configurable small, medium, and large home-size categories with pilot default durations of 1, 2, and 3 hours respectively. The current maximum visit is 3 hours; these values must remain editable by the owner.
 - Permit an owner to override duration for an individual appointment, including after approval.
 - Store the chosen duration on the appointment; later profile changes must not silently change existing appointments.
