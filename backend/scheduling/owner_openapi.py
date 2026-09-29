@@ -11,7 +11,8 @@ from scheduling.owner_api import OwnerPrincipal, create_owner_app
 
 
 def owner_schema() -> dict[str, object]:
-    def reject(_token: str) -> OwnerPrincipal:
+    def reject(token: str) -> OwnerPrincipal:
+        del token
         raise ValueError("Schema export never authenticates")
 
     return create_owner_app(InMemoryCalendarRepository(), reject).openapi()
