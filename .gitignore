@@ -5,3 +5,7 @@ backend/.venv/
 .ruff_cache/
 .aws-sam/
 *.egg-info/
+# Local credentials and other machine-specific configuration.
+.env
+.env.*
+!.env.example
