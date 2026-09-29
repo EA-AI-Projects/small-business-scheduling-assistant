@@ -11,6 +11,8 @@ from scheduling.domain.client_records import ClientProfile
 from scheduling.domain.outbox import DeliveryFailure, OutboxRecord, PermanentDeliveryFailure
 from scheduling.domain.sms_ingress import Keyword, SenderRole, SmsIngressStore, normalize_phone
 
+BLOCK_TEMPLATES = frozenset({"block_time", "edit_block", "remove_block"})
+
 
 class SchedulingRecords(Protocol):
     def read_appointment(self, appointment_id: str) -> Appointment | None: ...
@@ -128,7 +130,8 @@ class TwilioSmsSender:
 
     def _render(self, record: OutboxRecord, appointment: Appointment | None,
                 profile: ClientProfile | None) -> str:
-        if appointment is not None and record.event_version != appointment.version:
+        if (record.template not in BLOCK_TEMPLATES and appointment is not None
+                and record.event_version != appointment.version):
             raise PermanentDeliveryFailure("EVENT_SUPERSEDED")
         return render_notification(record.template, record.recipient, appointment, profile,
                                    self._timezone)
@@ -137,7 +140,7 @@ class TwilioSmsSender:
 def render_notification(template: str, recipient: str, appointment: Appointment | None,
                         profile: ClientProfile | None, timezone: ZoneInfo) -> str:
     """Render a notification body from trusted records; callers check event freshness."""
-    if template in {"block_time", "edit_block", "remove_block"}:
+    if template in BLOCK_TEMPLATES:
         if recipient != "owner":
             raise PermanentDeliveryFailure("TEMPLATE_RECIPIENT_MISMATCH")
         return f"Owner calendar updated ({template}). Check the current calendar."

@@ -23,7 +23,7 @@ Requires Node 22 (see `.nvmrc`).
 
 3. Paste the token into the local sign-in form. It is kept in page memory only.
 
-The same backend serves a text simulator at `http://127.0.0.1:8000/local/texts` that shares this calendar; see [Try the app locally](../README.md#try-the-app-locally).
+The same backend serves a text simulator at `http://127.0.0.1:8000/local/texts` that shares this calendar. Started as above, without `OPENAI_API_KEY`, it accepts only exact commands; see [Try the app locally](../README.md#try-the-app-locally).
 
 Local mode exists only for the synthetic local API. Amplify builds use Cognito mode.
 

@@ -14,6 +14,7 @@ rendered from committed outbox intents with the production templates and are
 shown, never sent.
 """
 
+import logging
 import re
 import threading
 from collections.abc import Callable
@@ -26,7 +27,6 @@ from zoneinfo import ZoneInfo
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel
 
 from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.adapters.sms_twilio import render_notification
@@ -38,7 +38,7 @@ from scheduling.domain.conversation import (
     MessageInterpreter,
     MessageProposal,
 )
-from scheduling.domain.holds import HoldService
+from scheduling.domain.holds import HoldService, OutboxIntent
 from scheduling.domain.lifecycle import LifecycleService
 from scheduling.domain.outbox import PermanentDeliveryFailure
 from scheduling.domain.sms_ingress import (
@@ -49,8 +49,9 @@ from scheduling.domain.sms_ingress import (
     Keyword,
     SenderRole,
 )
-from scheduling.owner_api import OwnerPrincipal
+from scheduling.owner_api import OwnerPrincipal, StrictModel
 
+logger = logging.getLogger(__name__)
 OWNER_PHONE = "+14155559999"
 BUSINESS_PHONE = "+14155550000"
 OWNER = "owner"
@@ -96,6 +97,12 @@ class SimulatedText:
 
 
 class TextSimulator:
+    """One reentrant lock serializes each exchange and capture, so the log stays in
+    commit order and a notification is rendered right after its commit. Concurrent
+    owner-app writes can still commit between a commit and its capture; the harness
+    then shows current appointment details where production would skip a stale one.
+    """
+
     def __init__(self, repository: InMemoryCalendarRepository,
                  interpreter: MessageInterpreter, business_id: str,
                  clock: Callable[[], datetime]) -> None:
@@ -105,7 +112,7 @@ class TextSimulator:
         self._service = ConversationService(
             repository, interpreter, HoldService(repository),
             LifecycleService(repository, clock), LocalConsent(repository), clock, OWNER_PHONE)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._log: list[SimulatedText] = []
         # Seeded history predates the simulator; show only later notifications.
         self._seen = {intent.outbox_id for intent in repository.list_outbox_intents()}
@@ -121,8 +128,8 @@ class TextSimulator:
         return parties
 
     def messages(self) -> list[dict[str, Any]]:
-        self.capture_notifications()
         with self._lock:
+            self.capture_notifications()
             return [asdict(text) for text in self._log]
 
     def send(self, party: str, body: str) -> list[dict[str, Any]]:
@@ -133,76 +140,76 @@ class TextSimulator:
             raise ValueError(f"Keep the message under {MAX_MESSAGE_LENGTH} characters.")
         if PHONE_IN_TEXT.search(text) or ACCESS_CODE_PATTERN.search(text):
             raise ValueError("Use fictional text without phone numbers or access codes.")
-        if party == OWNER:
-            phone, role, client_id, label = OWNER_PHONE, SenderRole.OWNER, None, "Owner"
-        else:
-            profile = self._repository.read_profile(self._business_id, party)
-            if profile is None:
-                raise LookupError("Unknown client.")
-            phone, label = profile.phone_e164, profile.name
-            verified = self._repository.read_verified_phone(self._business_id, phone)
-            role = SenderRole.CLIENT if verified is not None else SenderRole.UNKNOWN
-            client_id = verified.client_id if verified is not None else None
-        start = self._next_sequence()
-        self._append(party, label, "in", "text", text)
-        word = text.upper()
-        if word in STOP_WORDS or word in HELP_WORDS or word == "START":
-            self._append(party, label, "note", "note",
-                         "Keyword texts are handled by Twilio Advanced Opt-Out and are "
-                         "not simulated here. Nothing changed.")
-        elif role == SenderRole.UNKNOWN:
-            self._append(party, label, "note", "note",
-                         "No reply. This number has no active, verified profile with "
-                         "consent, so production ignores the text. Nothing changed.")
-        else:
-            now = self._clock()
-            receipt = InboundReceipt(
-                self._business_id, f"local-{uuid4()}", phone, BUSINESS_PHONE, text, now,
-                role, client_id, Keyword.OTHER, True)
-            outcome = self._service.handle(receipt)
-            self._append(party, label, "out", "reply", outcome.text)
-        self.capture_notifications()
         with self._lock:
-            return [asdict(entry) for entry in self._log if entry.sequence >= start]
+            if party == OWNER:
+                phone, role, client_id, label = OWNER_PHONE, SenderRole.OWNER, None, "Owner"
+            else:
+                profile = self._repository.read_profile(self._business_id, party)
+                if profile is None:
+                    raise LookupError("Unknown client.")
+                phone, label = profile.phone_e164, profile.name
+                verified = self._repository.read_verified_phone(self._business_id, phone)
+                role = SenderRole.CLIENT if verified is not None else SenderRole.UNKNOWN
+                client_id = verified.client_id if verified is not None else None
+            start = len(self._log)
+            self._append(party, label, "in", "text", text)
+            word = text.upper()
+            if word in STOP_WORDS or word in HELP_WORDS or word == "START":
+                self._append(party, label, "note", "note",
+                             "Keyword texts are handled by Twilio Advanced Opt-Out and are "
+                             "not simulated here. Nothing changed.")
+            elif role == SenderRole.UNKNOWN:
+                self._append(party, label, "note", "note",
+                             "No reply. This number has no active, verified profile with "
+                             "consent, so production ignores the text. Nothing changed.")
+            else:
+                receipt = InboundReceipt(
+                    self._business_id, f"local-{uuid4()}", phone, BUSINESS_PHONE, text,
+                    self._clock(), role, client_id, Keyword.OTHER, True)
+                outcome = self._service.handle(receipt)
+                self._append(party, label, "out", "reply", outcome.text)
+            self.capture_notifications()
+            return [asdict(entry) for entry in self._log[start:]]
 
     def capture_notifications(self) -> None:
         """Render each newly committed outbox intent once, as the sender would."""
-        policy = self._repository.read_policy(self._business_id)
-        zone = ZoneInfo(policy.timezone)
-        for intent in self._repository.list_outbox_intents():
-            with self._lock:
+        with self._lock:
+            zone = ZoneInfo(self._repository.read_policy(self._business_id).timezone)
+            for intent in self._repository.list_outbox_intents():
                 if intent.outbox_id in self._seen:
                     continue
                 self._seen.add(intent.outbox_id)
-            appointment = self._repository.read_appointment(intent.hold_id)
-            profile = (self._repository.read_profile(self._business_id, appointment.client_id)
-                       if appointment is not None else None)
-            if intent.recipient == "client":
-                if appointment is None or profile is None:
-                    continue
-                party, label = profile.client_id, profile.name
-            else:
-                party, label = OWNER, "Owner"
-            try:
-                body = render_notification(intent.template, intent.recipient, appointment,
-                                           profile, zone)
-            except PermanentDeliveryFailure as failure:
-                self._append(party, label, "note", "note",
-                             f"A {intent.template} notification would not be sent "
-                             f"({failure.code}).")
-                continue
-            if (intent.recipient == "client" and profile is not None
-                    and self._repository.read_verified_phone(
-                        self._business_id, profile.phone_e164) is None):
-                self._append(party, label, "note", "note",
-                             f"Not sent: this client has no verified phone with consent. "
-                             f"The text would have said: {body}")
-                continue
-            self._append(party, label, "out", "notification", body)
+                self._capture(intent, zone)
 
-    def _next_sequence(self) -> int:
-        with self._lock:
-            return len(self._log) + 1
+    def _capture(self, intent: OutboxIntent, zone: ZoneInfo) -> None:
+        appointment = self._repository.read_appointment(intent.hold_id)
+        profile = (self._repository.read_profile(self._business_id, appointment.client_id)
+                   if appointment is not None else None)
+        if intent.recipient == "client":
+            if appointment is None or profile is None or not profile.active:
+                self._append(OWNER, "Owner", "note", "note",
+                             f"A client {intent.template} notification would not be sent "
+                             "(CLIENT_UNAVAILABLE).")
+                return
+            party, label = profile.client_id, profile.name
+        else:
+            party, label = OWNER, "Owner"
+        try:
+            body = render_notification(intent.template, intent.recipient, appointment,
+                                       profile, zone)
+        except PermanentDeliveryFailure as failure:
+            self._append(party, label, "note", "note",
+                         f"A {intent.template} notification would not be sent "
+                         f"({failure.code}).")
+            return
+        if (intent.recipient == "client" and profile is not None
+                and self._repository.read_verified_phone(
+                    self._business_id, profile.phone_e164) is None):
+            self._append(party, label, "note", "note",
+                         "Not sent: this client has no verified phone with consent. "
+                         f"The text would have said: {body}")
+            return
+        self._append(party, label, "out", "notification", body)
 
     def _append(self, party: str, label: str, direction: str, kind: str, body: str) -> None:
         with self._lock:
@@ -211,7 +218,7 @@ class TextSimulator:
                 direction, kind, body))
 
 
-class SendText(BaseModel):
+class SendText(StrictModel):
     party: str
     body: str
 
@@ -233,8 +240,14 @@ def mount_text_simulator(app: FastAPI, simulator: TextSimulator,
     @app.middleware("http")
     async def capture_after_request(request: Request, call_next: Any) -> Response:
         response: Response = await call_next(request)
+        if request.method in ("GET", "HEAD", "OPTIONS"):
+            return response
         # Owner web app changes commit outbox intents; render them at commit time.
-        simulator.capture_notifications()
+        # A harness failure must not turn an already committed write into an error.
+        try:
+            simulator.capture_notifications()
+        except Exception:
+            logger.exception("Local text simulator could not render a notification")
         return response
 
     @app.get("/local/texts", response_class=HTMLResponse, include_in_schema=False)
@@ -242,7 +255,7 @@ def mount_text_simulator(app: FastAPI, simulator: TextSimulator,
         return HTMLResponse(PAGE, headers={
             "Content-Security-Policy": ("default-src 'none'; script-src 'unsafe-inline'; "
                                         "style-src 'unsafe-inline'; connect-src 'self'; "
-                                        "frame-ancestors 'none'"),
+                                        "frame-ancestors 'none'; base-uri 'none'; form-action 'none'"),
             "Cache-Control": "no-store",
         })
 
@@ -301,7 +314,7 @@ PAGE = """<!doctype html>
     <form id="send">
       <label>Text as <select id="party"></select></label>
       <input id="body" maxlength="1000" autocomplete="off"
-             placeholder="e.g. Book 2026-10-06 or Book 2026-10-06 09:00">
+             placeholder="e.g. Book YYYY-MM-DD or Book YYYY-MM-DD HH:MM">
       <button>Send</button>
     </form>
     <p class="hint">Client: <code>Book YYYY-MM-DD</code>, <code>Book YYYY-MM-DD HH:MM</code>,

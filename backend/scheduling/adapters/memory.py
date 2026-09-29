@@ -178,10 +178,19 @@ class InMemoryCalendarRepository:
             self._revisions[business_id] += 1
 
     def list_outbox_intents(self) -> tuple[OutboxIntent, ...]:
-        """Committed notification intents in commit order (local harnesses only)."""
+        """Committed notification intents in commit order (local harnesses only).
+
+        A policy commit is stored whole; it becomes its owner notification intent.
+        """
         with self._lock:
-            return tuple(intent for intent in self._outbox.values()
-                         if isinstance(intent, OutboxIntent))
+            intents: list[OutboxIntent] = []
+            for outbox_id, entry in self._outbox.items():
+                if isinstance(entry, OutboxIntent):
+                    intents.append(entry)
+                elif isinstance(entry, PolicyCommit):
+                    intents.append(OutboxIntent(outbox_id, entry.command.business_id,
+                                                "owner", entry.command.operation))
+            return tuple(intents)
 
     def read_appointment(self, appointment_id: str) -> Appointment | None:
         with self._lock:

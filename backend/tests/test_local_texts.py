@@ -4,8 +4,11 @@ from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 
+from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.domain.conversation import MessageContext, MessageProposal
-from scheduling.local_owner import create_local_owner_app
+from scheduling.domain.owner_policy import OwnerPolicyService, PolicyCommand
+from scheduling.local_owner import create_local_owner_app, seed_synthetic_data
+from scheduling.local_texts import OfflineInterpreter, TextSimulator
 
 NOW = datetime(2026, 9, 29, 17, tzinfo=UTC)
 TOKEN = "local-test-token-0123456789"
@@ -119,3 +122,33 @@ def test_offline_mode_prompts_for_commands_and_private_data_is_rejected() -> Non
     logged = client.get("/local/texts/state", headers=AUTH).json()["messages"]
     assert all("555" not in message["body"] for message in logged)
     assert all("1234" not in message["body"] for message in logged)
+
+
+def test_keyword_and_unverified_notifications_are_explained_not_sent() -> None:
+    client = local()
+    stop = text(client, "client-1", "STOP")
+    assert [message["kind"] for message in stop] == ["text", "note"]
+    assert "not simulated" in stop[1]["body"]
+    revision = client.get(f"{BASE}/policy", headers=AUTH).json()["calendar_revision"]
+    created = client.post(f"{BASE}/appointments",
+                          headers={**AUTH, "Idempotency-Key": "manual-casey"},
+                          json={"expected_revision": revision, "client_id": "client-3",
+                                "start_at": "2026-10-06T16:00:00Z", "duration_minutes": 180})
+    assert created.status_code == 200, created.text
+    state = client.get("/local/texts/state", headers=AUTH).json()["messages"]
+    casey = [message for message in state if message["party"] == "client-3"]
+    assert [message["kind"] for message in casey] == ["note"]
+    assert casey[0]["body"].startswith("Not sent: this client has no verified phone")
+
+
+def test_owner_policy_change_shows_the_owner_notification() -> None:
+    repository = InMemoryCalendarRepository()
+    seed_synthetic_data(repository, NOW)
+    simulator = TextSimulator(repository, OfflineInterpreter(), "pilot", lambda: NOW)
+    record = repository.read_policy_record("pilot")
+    assert record is not None
+    OwnerPolicyService(repository, lambda: NOW).apply(PolicyCommand(
+        "pilot", "local-owner", "policy-edit", repository.read_revision("pilot"),
+        record.version, record.policy))
+    assert [message["body"] for message in simulator.messages()] == [
+        "Scheduling policy updated. Check the current owner calendar."]

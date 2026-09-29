@@ -41,7 +41,7 @@ One backend process and the owner web app share a single fictional, in-memory ca
 | Owner web app, port 3000 | Terminal B, below | Calls the backend on port 8000. |
 | Text simulator page | Served by the backend at `http://127.0.0.1:8000/local/texts` | The same backend and calendar. |
 
-Terminal A, from the repository root. Omit `source .env` to run without OpenAI; exact commands still work, and free-form texts get the command prompt.
+Terminal A, from the repository root. `.env` supplies `OPENAI_API_KEY`. Without that file, `source` prints an error and the backend starts without OpenAI: exact commands still work, and free-form texts get the command prompt.
 
 ```sh
 (
@@ -51,14 +51,21 @@ Terminal A, from the repository root. Omit `source .env` to run without OpenAI; 
 )
 ```
 
-Terminal B, the first time: `cd frontend && cp .env.example .env.local && npm ci`. Then run `cd frontend && npm run dev`.
+Terminal B, from the repository root:
+
+```sh
+cd frontend
+cp .env.example .env.local   # first time only
+npm ci                       # first time only
+npm run dev
+```
 
 Open `http://127.0.0.1:3000` (owner calendar) and `http://127.0.0.1:8000/local/texts` (text simulator), and paste the printed token into each.
 
-- **Client texts:** choose Avery Example or Blake Sample in the simulator and text `Book YYYY-MM-DD` for a weekday within 14 days, then `Book YYYY-MM-DD HH:MM`. Refresh the owner calendar to see the pending request.
+- **Client texts:** choose Avery Example or Blake Sample in the simulator and text `Book YYYY-MM-DD` for a weekday within 14 days that is not a federal holiday, then `Book YYYY-MM-DD HH:MM`. Refresh the owner calendar to see the pending request.
 - **Owner decisions:** approve or decline in the owner app, or by texting `Approve REF` as the owner. The simulator shows the notification texts each side would receive, rendered with the production templates.
 - **Cancel and reschedule:** client texts `Cancel REF` or `Reschedule REF to YYYY-MM-DD HH:MM`. Rescheduling needs a confirmed visit; the original stays booked until the owner approves the replacement.
-- **Unverified senders:** Casey Demo is deliberately unverified. Their texts get no reply, as in production.
+- **Unverified senders:** Casey Demo is deliberately unverified. Their texts get no reply, as in production; the simulator shows a note explaining why.
 
 Everything resets when Terminal A stops. Hold expiry and other scheduled workers do not run locally. STOP/HELP keywords are handled by Twilio in production and are not simulated.
 
