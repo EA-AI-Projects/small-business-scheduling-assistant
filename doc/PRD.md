@@ -75,7 +75,7 @@ An AI-assisted SMS interface that identifies intent, gathers required details, e
 - Client requests are created as **Pending approval** and temporarily hold the requested time.
 - Default hold duration is 24 hours (one day); owner can configure the duration.
 - The owner receives an SMS summary with client, requested time, duration, and a safe way to identify the pending request.
-- Owner can approve or decline using natural-language replies. If the reply is ambiguous or could refer to multiple requests, the assistant asks for clarification and makes no state change.
+- Owner can approve or decline using natural-language replies. A plain "yes" or "approve" approves, and "decline" declines, only when exactly one request is pending. With several pending requests, or an ambiguous reply, the assistant lists the pending requests, asks which one, and makes no state change. `APPROVE REF` and `DECLINE REF` always work. The owner decided the plain "yes" rule in issue #60.
 - Approval converts the pending request into a confirmed appointment and notifies the client.
 - Decline releases the hold and informs the client.
 - Expiry releases the hold and informs the client that the request expired and they may request another time.
@@ -84,14 +84,19 @@ An AI-assisted SMS interface that identifies intent, gathers required details, e
 ### 6.4 Cancellation and rescheduling
 
 - Clients may cancel without a cancellation cutoff in the MVP.
+- A plain-language cancellation, such as "I can't make Thursday", gets a confirmation question that states the full date and time ("Cancel your Thu Oct 1 at 11:00 AM visit? Reply YES to confirm."). Nothing is cancelled until the client confirms. The owner accepted this extra confirmation text in issue #60.
 - Cancellation updates the calendar and releases the appointment’s time for future requests.
 - Notify the owner by SMS when a client cancels.
 - Do not proactively message other clients about newly available time in the MVP.
-- Rescheduling is handled as a new time request tied to the client. Keep the original confirmed appointment until the replacement is approved; a declined or expired replacement leaves it unchanged. Approval swaps them atomically. The owner confirmed this rule in issue #3.
+- Rescheduling is handled as a new time request tied to the client. Keep the original confirmed appointment until the replacement is approved; a declined or expired replacement leaves it unchanged. Approval swaps them atomically. The owner confirmed this rule in issue #3. A plain-language reschedule ("Can I move Thursday to Friday?") offers replacement times the same way as a new booking; picking one creates the pending replacement.
 
 ### 6.5 SMS conversation behavior
 
-- Support natural-language requests for availability, booking, cancellation, and rescheduling.
+- Support natural-language requests for availability, booking, cancellation, and rescheduling. The language model resolves relative dates and windows ("tomorrow", "Friday afternoon", "this week") into a candidate day range; the backend checks the booking horizon, holidays, working hours, and existing visits before offering times.
+- Each availability reply lists 3–5 real open start times (fewer only when fewer exist) with the full date and time. Offering times writes nothing to the calendar.
+- A pending request is created only when the client's reply maps deterministically to exactly one offered option, such as "11", "the 11 o'clock one", "option 2", or "yes" when a single option was offered. Negated, ambiguous, or unmatched replies ask again and change nothing. The request reply states the full date and time and that owner approval is still required.
+- An offer or confirmation question stays valid for 30 minutes; an answer after that asks the client to request current times and changes nothing. Any new request replaces the previous offer. The owner set the option count and 30-minute validity in issue #60.
+- Exact commands (`BOOK YYYY-MM-DD HH:MM`, `CANCEL REF`, `RESCHEDULE REF to YYYY-MM-DD HH:MM`, `APPROVE REF`, `DECLINE REF`) keep working for clients and the owner.
 - Ask concise follow-up questions when client identity, preferred date/time, or other required booking details are missing.
 - Offer available times within the 14-day booking horizon and business hours.
 - State clearly whether a request is pending, confirmed, declined, cancelled, or expired.
@@ -102,7 +107,7 @@ An AI-assisted SMS interface that identifies intent, gathers required details, e
 ### 6.6 Owner SMS workflow
 
 - Send owner notifications for new pending requests and client cancellations.
-- Permit natural-language approval/decline replies with clarification for ambiguity.
+- Permit natural-language approval/decline replies with clarification for ambiguity (see §6.3).
 - Send confirmation of the resulting action to the owner.
 - Initial owner notification and approval destination is one phone number.
 - Owner must be able to block time and review/correct schedule through a simple web admin view; SMS commands may be added if reliable and unambiguous.

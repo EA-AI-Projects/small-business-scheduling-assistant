@@ -81,6 +81,12 @@ def pending(store: InMemoryCalendarRepository) -> str:
         "pilot", "client-1", "client-1", "seed-hold", START, 120), NOW).hold_id
 
 
+def second_pending(store: InMemoryCalendarRepository) -> str:
+    return HoldService(store).create(CreateHold(
+        "pilot", "client-1", "client-1", "seed-second", START + timedelta(hours=3), 120),
+        NOW).hold_id
+
+
 class NoConsent(Consent):
     def read_consent(self, business_id: str, phone_e164: str) -> ConsentEvidence | None:
         return None
@@ -119,7 +125,8 @@ def test_long_model_question_returns_normal_clarification_without_calendar_chang
 ) -> None:
     arguments = {
         "intent": "clarify", "request_reference": None, "date_text": None,
-        "owner_decision": None, "needs_clarification": True,
+        "date_from": None, "date_to": None, "time_from": None, "time_to": None,
+        "target_date": None, "owner_decision": None, "needs_clarification": True,
         "question": "Which date would you prefer? " * 8,
     }
     monkeypatch.setattr("scheduling.adapters.openai_messages.urlopen",
@@ -133,7 +140,7 @@ def test_long_model_question_returns_normal_clarification_without_calendar_chang
                                   consent, lambda: NOW, "+14155559999")
     result = service.handle(receipt("I would like to book an appointment for this week"))
     assert result.text != "I couldn't understand that message. Please try again later."
-    assert "BOOK" in result.text
+    assert "What day" in result.text
     assert not result.committed
     assert store.read_calendar("pilot").events == ()
 
@@ -160,13 +167,17 @@ def test_late_processing_uses_current_clock_not_old_receipt_time() -> None:
     assert store.read_calendar("pilot").events == ()
 
 
-def test_ambiguous_owner_reply_cannot_approve_even_if_model_selects_target() -> None:
+def test_owner_yes_with_two_pending_cannot_approve_even_if_model_selects_target() -> None:
     service, store, model, _ = setup(MessageProposal("owner_decision", None,
                                                       None, "approve", False))
     hold_id = pending(store)
+    other_id = second_pending(store)
     model.proposal = MessageProposal("owner_decision", hold_id[:8], None, "approve", False)
     result = service.handle(receipt("Yes", role=SenderRole.OWNER))
     assert not result.committed
+    assert "2 requests are pending" in result.text
+    assert hold_id[:8] in result.text and other_id[:8] in result.text
+    assert not model.calls
     assert store.read_appointment(hold_id).status == CalendarStatus.PENDING_APPROVAL  # type: ignore[union-attr]
 
 
@@ -244,8 +255,8 @@ def test_exact_client_booking_creates_pending_hold_and_day_query_only_suggests()
                                                       "2026-10-01", None, False))
     suggestions = service.handle(receipt("Book 2026-10-01"))
     assert not suggestions.committed
-    assert "09:00" in suggestions.text
-    assert "Reply BOOK 2026-10-01 HH:MM" in suggestions.text
+    assert "Open times on Thu Oct 1: 1) 8:00 AM" in suggestions.text
+    assert "Reply with the number or time" in suggestions.text
     assert store.read_calendar("pilot").events == ()
     model.proposal = MessageProposal("request_booking", None, "2026-10-01 09:00", None, False)
     result = service.handle(receipt("Book 2026-10-01 09:00", provider_id="SM-2"))
@@ -369,8 +380,9 @@ def test_reschedule_suggestions_exclude_the_original_visit() -> None:
                                      "2026-10-01", None, False)
     result = service.handle(receipt(f"Reschedule {original_id[:8]} to 2026-10-01"))
     assert not result.committed
-    assert "09:00" in result.text
-    assert f"Reply RESCHEDULE {original_id[:8]} to 2026-10-01 HH:MM" in result.text
+    assert "To move your Thu Oct 1 at 9:00 AM visit" in result.text
+    assert "1) 8:00 AM" in result.text
+    assert "stays booked" in result.text
 
 
 def test_ambiguous_reschedule_asks_for_same_replacement_reference() -> None:
@@ -436,11 +448,11 @@ def test_booking_without_complete_date_and_time_asks_for_it_and_writes_nothing()
     service, store, model, _ = setup(MessageProposal("clarify", None, None, None, True))
     result = service.handle(receipt("Can I get a cleaning next week?"))
     assert not result.committed
-    assert "BOOK YYYY-MM-DD" in result.text
+    assert "What day" in result.text
     model.proposal = MessageProposal("request_booking", None, None, None, False)
     result = service.handle(receipt("I'd like to book a visit"))
     assert not result.committed
-    assert "BOOK YYYY-MM-DD" in result.text
+    assert "What day" in result.text
     assert store.read_calendar("pilot").events == ()
 
 
@@ -453,7 +465,7 @@ def test_model_timeout_gives_safe_retry_and_writes_nothing() -> None:
     hold_id = pending(store)
     before = calendar_state(store)
     for message in (receipt("Can you come Friday?"),
-                    receipt("Yes", role=SenderRole.OWNER, provider_id="SM-owner")):
+                    receipt("Looks fine to me", role=SenderRole.OWNER, provider_id="SM-owner")):
         result = service.handle(message)
         assert not result.committed
         assert "try again later" in result.text
@@ -470,6 +482,7 @@ def test_issue_24_synthetic_cases_cannot_change_calendar_even_with_unsafe_model_
         NOW).hold_id
     LifecycleService(store, lambda: NOW).apply(AppointmentCommand(
         "pilot", confirmed_id, "owner", ActorRole.OWNER, Action.APPROVE, "approve-seed", 1))
+    second_pending(store)  # The owner cases describe two pending requests.
     before = calendar_state(store)
     unsafe = (
         MessageProposal("request_booking", None, "2026-10-05 09:00", None, False),
@@ -496,9 +509,9 @@ def test_issue_24_cases_with_real_references_do_not_let_the_model_pick_one() -> 
         "pilot", "client-1", "client-1", "seed-second", START + timedelta(days=1), 120),
         NOW).hold_id
     before = calendar_state(store)
-    refs = {"A-101": first[:8], "B-202": second[:8]}
+    refs = {"a101a101": first[:8], "b202b202": second[:8]}
     for case in CASES:
-        if case.actor != "owner" or not case.must_clarify:
+        if case.actor != "owner" or case.name == "explicit-owner-reference":
             continue
         body = case.message
         for placeholder, reference in refs.items():
@@ -510,7 +523,7 @@ def test_issue_24_cases_with_real_references_do_not_let_the_model_pick_one() -> 
             assert not result.committed, (case.name, decision)
     assert calendar_state(store) == before
     explicit = next(case for case in CASES if case.name == "explicit-owner-reference")
-    result = service.handle(receipt(explicit.message.replace("A-101", first[:8]),
+    result = service.handle(receipt(explicit.message.replace("a101a101", first[:8]),
                                     role=SenderRole.OWNER, provider_id="SM-real-explicit"))
     assert result.committed
     assert store.read_appointment(first).status == CalendarStatus.CONFIRMED  # type: ignore[union-attr]

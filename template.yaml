@@ -132,6 +132,8 @@ Resources:
           Projection: {ProjectionType: KEYS_ONLY}
       PointInTimeRecoverySpecification: {PointInTimeRecoveryEnabled: true}
       SSESpecification: {SSEEnabled: true}
+      # Only 30-minute SMS offer/confirmation memory sets this attribute.
+      TimeToLiveSpecification: {AttributeName: expires_at_epoch, Enabled: true}
 
   OutboxDeadLetterQueue:
     Type: AWS::SQS::Queue

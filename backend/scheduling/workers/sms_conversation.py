@@ -6,6 +6,7 @@ from typing import Any
 
 import boto3  # type: ignore[import-untyped]
 
+from scheduling.adapters.conversation_state_dynamodb import DynamoConversationStates
 from scheduling.adapters.dynamodb import DynamoDBCalendarRepository
 from scheduling.adapters.openai_messages import OpenAIMessageInterpreter
 from scheduling.adapters.sms_dynamodb import DynamoSmsIngressStore
@@ -32,6 +33,7 @@ def handler(event: dict[str, Any], _context: object) -> dict[str, list[dict[str,
     table = os.environ["SCHEDULING_TABLE_NAME"]
     business_id = os.environ["BUSINESS_ID"]
     store = DynamoSmsIngressStore(dynamo, table)
+    states = DynamoConversationStates(dynamo, table)
     clock = lambda: datetime.now(UTC)
     interpreter = OpenAIMessageInterpreter(_openai_key(
         boto3.client("ssm"), os.environ["OPENAI_API_KEY_PARAM"]))
@@ -44,7 +46,7 @@ def handler(event: dict[str, Any], _context: object) -> dict[str, list[dict[str,
         return ConversationService(
             calendar, interpreter, HoldService(calendar),
             LifecycleService(calendar, clock), store, clock,
-            os.environ["OWNER_NUMBER"],
+            os.environ["OWNER_NUMBER"], states,
         )
 
     processor = ReceiptProcessor(store, None, business_id, clock,

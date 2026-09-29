@@ -7,7 +7,7 @@ current state, and policy before calling the existing transactional services.
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
@@ -21,6 +21,24 @@ from scheduling.domain.availability import (
 )
 from scheduling.domain.calendar import CalendarSnapshot, CalendarStatus
 from scheduling.domain.client_records import ClientProfile
+from scheduling.domain.conversation_state import (
+    MAX_OPTIONS,
+    MIN_OPTIONS,
+    PROMPT_LIFETIME,
+    ConversationState,
+    ConversationStateStore,
+    InMemoryConversationStates,
+    PromptKind,
+    Selection,
+    clock_text,
+    day_text,
+    is_affirmative,
+    is_negative,
+    match_selection,
+    normalized,
+    spread,
+    when_text,
+)
 from scheduling.domain.holds import (
     CreateHold,
     HoldService,
@@ -57,10 +75,18 @@ EXACT_COMMAND = re.compile(
     r"^(approve|decline|cancel)\s+(?:(?:request|appointment)\s+)?"
     rf"({REFERENCE})[.!]?$", re.IGNORECASE)
 BOOK_COMMAND = re.compile(rf"^book\s+({DATE_AND_OPTIONAL_TIME})[.!]?$", re.IGNORECASE)
+CANCEL_WORDS = frozenset({"cancel", "it", "please", "visit", "appointment", "request"})
 RESCHEDULE_COMMAND = re.compile(
     rf"^reschedule\s+({REFERENCE})\s+to\s+({DATE_AND_OPTIONAL_TIME})[.!]?$",
     re.IGNORECASE,
 )
+
+
+OWNER_APPROVAL = re.compile(
+    r"(?:yes|yep|yeah|y|ok|okay|sure|approve|approved|confirm|confirmed)"
+    r"(?:,? (?:approve|approved|please|approve it|it|thanks|thank you))?")
+OWNER_DECLINE = re.compile(r"(?:decline|declined|reject|deny)(?: it| (?:the )?request)?"
+                           r"(?:,? (?:please|thanks|thank you))?")
 
 
 @dataclass(frozen=True)
@@ -69,15 +95,28 @@ class MessageContext:
     today: date
     timezone: str
     references: tuple[str, ...]
+    horizon_days: int = 14
 
 
 @dataclass(frozen=True)
 class MessageProposal:
+    """A model or exact-command interpretation. It never selects a write.
+
+    ``date_from``/``date_to`` and ``time_from``/``time_to`` are the requested
+    local day range and time window (ISO text); ``target_date`` is the local
+    day of an existing visit the sender wants to cancel or move.
+    """
+
     intent: str
     request_reference: str | None
     date_text: str | None
     owner_decision: str | None
     needs_clarification: bool
+    date_from: str | None = None
+    date_to: str | None = None
+    time_from: str | None = None
+    time_to: str | None = None
+    target_date: str | None = None
 
 
 @dataclass(frozen=True)
@@ -108,7 +147,7 @@ class ConversationService:
     def __init__(self, repository: ConversationRepository, interpreter: MessageInterpreter,
                  holds: HoldService, lifecycle: LifecycleService,
                  consent: ConsentLookup, clock: Callable[[], datetime],
-                 owner_number: str) -> None:
+                 owner_number: str, states: ConversationStateStore | None = None) -> None:
         self._repository = repository
         self._interpreter = interpreter
         self._holds = holds
@@ -117,6 +156,7 @@ class ConversationService:
         self._clock = clock
         self._owner_number = normalize_phone(owner_number)
         self._availability = AvailabilityService(repository)
+        self._states = states if states is not None else InMemoryConversationStates()
 
     def handle(self, receipt: InboundReceipt) -> ConversationOutcome:
         if (not receipt.authorized_for_commands or receipt.body is None
@@ -148,21 +188,49 @@ class ConversationService:
             context = MessageContext(
                 receipt.role, now.astimezone(ZoneInfo(policy.timezone)).date(),
                 policy.timezone, tuple(target.appointment_id[:8] for target in targets),
+                policy.booking_horizon_days,
             )
+            prompt = (self._states.read_state(receipt.business_id, receipt.sender)
+                      if receipt.role == SenderRole.CLIENT else None)
             proposal = self._exact_command(receipt.body, context, targets)
-            if proposal is None:
-                proposal = self._interpreter.propose(receipt.body, context)
         except (OSError, ValueError, TypeError, KeyError, RuntimeError):
             return ConversationOutcome("I couldn't understand that message. Please try again later.")
+        exact = proposal is not None
+        if proposal is None:
+            answered = self._answer(receipt, prompt, targets, policy, now)
+            if answered is not None:
+                return answered
+            try:
+                proposal = self._interpreter.propose(receipt.body, context)
+            except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+                return ConversationOutcome(
+                    "I couldn't understand that message. Please try again later.")
+        # Any new request replaces the previous offer or question; only a
+        # "which day" question for a known visit carries into its answer.
+        moving = (prompt if prompt is not None and prompt.kind == PromptKind.RESCHEDULE_DAY
+                  and not prompt.expired(now) else None)
+        self._forget(prompt)
         if proposal.needs_clarification or proposal.intent in ("clarify", "unsupported"):
             return ConversationOutcome(self._clarify(
                 receipt.role, proposal.intent, receipt.body or "", targets))
         if proposal.intent == "owner_decision":
             return self._owner_decision(receipt, proposal, targets)
-        if proposal.intent == "cancel":
+        if exact and proposal.intent == "cancel":
             return self._cancel(receipt, proposal, targets)
-        if proposal.intent in ("request_booking", "reschedule"):
+        if exact:  # BOOK or RESCHEDULE syntax; _request rechecks the literal text.
             return self._request(receipt, proposal, targets, policy, now)
+        # From here on the proposal came from the model: it can only lead to an
+        # offer or a question, never directly to a write.
+        if receipt.role != SenderRole.CLIENT:
+            return ConversationOutcome(self._clarify(receipt.role, "clarify"))
+        if proposal.intent == "cancel":
+            return self._ask_cancel(receipt, proposal, targets, policy, now)
+        if proposal.intent == "reschedule":
+            return self._ask_reschedule(receipt, proposal, targets, policy, now)
+        if proposal.intent in ("availability", "request_booking"):
+            original = (self._active_target(receipt, moving.appointment_id, targets)
+                        if moving is not None else None)
+            return self._offer_from_proposal(receipt, proposal, policy, now, original)
         return ConversationOutcome("Please describe the scheduling change you want.")
 
     def _targets(self, receipt: InboundReceipt, now: datetime) -> tuple[Appointment, ...]:
@@ -185,7 +253,8 @@ class ConversationService:
     def _clarify(role: SenderRole, intent: str, body: str = "",
                  targets: tuple[Appointment, ...] = ()) -> str:
         if role == SenderRole.OWNER:
-            return "Reply APPROVE or DECLINE with one exact request reference."
+            return ("Reply YES to approve or DECLINE to decline when one request is pending, "
+                    "or APPROVE or DECLINE with the request reference.")
         if re.search(r"\breschedule\b", body, re.IGNORECASE):
             match = re.search(rf"\breschedule\s+({REFERENCE})(?=\s|$)",
                               body, re.IGNORECASE)
@@ -193,14 +262,17 @@ class ConversationService:
                       if match is not None else None)
             if target is not None and target.status != CalendarStatus.CONFIRMED:
                 return "That request is pending owner approval. Rescheduling needs a confirmed visit."
-            reference = target.appointment_id[:8] if target is not None else "REFERENCE"
-            return (f"Reply RESCHEDULE {reference} to YYYY-MM-DD for options, or "
-                    f"RESCHEDULE {reference} to YYYY-MM-DD HH:MM to request a time.")
+            if target is not None:
+                reference = target.appointment_id[:8]
+                return (f"Which day would you like instead? Say something like 'Friday "
+                        f"morning', or reply RESCHEDULE {reference} to YYYY-MM-DD for options.")
+            return "Which visit would you like to move, and to what day?"
         if re.search(r"\bcancel\b", body, re.IGNORECASE):
-            return "Reply CANCEL REFERENCE with one exact confirmed appointment reference."
+            return "Which visit would you like to cancel? Tell me its day."
         if intent == "unsupported":
-            return "Please ask for a booking, cancellation, or reschedule."
-        return "Reply BOOK YYYY-MM-DD for options, or BOOK YYYY-MM-DD HH:MM to request a time."
+            return "I can help you book, reschedule, or cancel a cleaning. What would you like to do?"
+        return ("What day would you like a cleaning? You can say something like "
+                "'tomorrow morning' or 'Friday afternoon'.")
 
     @staticmethod
     def _exact_command(body: str, context: MessageContext,
@@ -244,6 +316,9 @@ class ConversationService:
                         targets: tuple[Appointment, ...]) -> ConversationOutcome:
         if receipt.role != SenderRole.OWNER or proposal.owner_decision not in ("approve", "decline"):
             return ConversationOutcome("Owner approval needs an exact request reference.")
+        if proposal.request_reference is None:
+            # Only plain YES/APPROVE/DECLINE act without a reference (see _owner_reply).
+            return ConversationOutcome(self._pending_summary(receipt.business_id, targets))
         target = self._target(receipt.body or "", proposal.request_reference, targets)
         if (target is None or not re.fullmatch(
                 rf"{proposal.owner_decision}\s+(?:request\s+)?"
@@ -323,26 +398,10 @@ class ConversationService:
         if EXPLICIT_DATE.fullmatch(date_text):
             try:
                 day = date.fromisoformat(date_text)
-                if original is None:
-                    starts = self._availability.find_starts(
-                        receipt.business_id, day, profile.default_duration_minutes, now)
-                else:
-                    events = tuple(event for event in self._repository.read_calendar(
-                        receipt.business_id).events if event.event_id != original.appointment_id)
-                    starts = available_starts(policy, day, profile.default_duration_minutes,
-                                              events, now)
-            except (ValueError, InvalidDuration, InvalidPolicy):
+            except ValueError:
                 return ConversationOutcome(
                     f"That date is unavailable. Reply {reply_command} YYYY-MM-DD for options.")
-            if not starts:
-                return ConversationOutcome(
-                    f"No openings on that date. Reply {reply_command} YYYY-MM-DD for options.")
-            zone = ZoneInfo(policy.timezone)
-            choices = ", ".join(start.astimezone(zone).strftime("%H:%M") for start in starts[:5])
-            return ConversationOutcome(
-                f"Available starts on {day.isoformat()}: {choices}. "
-                f"Reply {reply_command} {day.isoformat()} HH:MM to request one; "
-                "owner approval is required.")
+            return self._offer(receipt, profile, policy, now, day, day, None, None, original)
         if not EXPLICIT_START.fullmatch(date_text):
             return ConversationOutcome(self._clarify(
                 receipt.role, "clarify", receipt.body or "", targets))
@@ -364,9 +423,377 @@ class ConversationService:
         except (SlotConflict, InvalidReplacement, ReplacementPending,
                 TooManyConflicts, IdempotencyKeyReused, InvalidDuration, ValueError):
             return ConversationOutcome("That time is unavailable. Please request another exact date and time.")
-        if original is not None:
-            text = (f"Replacement request {result.hold_id[:8]} is pending owner approval. "
-                    f"Your original visit {original.appointment_id[:8]} remains confirmed.")
+        return self._requested(receipt, original, next(iter(instants)), result.hold_id, policy)
+
+    # Conversational flow. The model resolves words like "tomorrow" into a day
+    # range; the backend offers real open times and remembers them. Only a
+    # reply that maps to exactly one remembered option or prompt writes.
+
+    def _forget(self, prompt: ConversationState | None) -> None:
+        if prompt is not None:
+            self._states.clear_state(prompt.business_id, prompt.sender, prompt.state_id)
+
+    def _remember(self, receipt: InboundReceipt, kind: PromptKind, now: datetime, *,
+                  options: tuple[datetime, ...] = (),
+                  appointment: Appointment | None = None) -> None:
+        self._states.put_state(ConversationState(
+            receipt.business_id, receipt.sender, receipt.provider_id, kind, now,
+            now + PROMPT_LIFETIME, options,
+            appointment.appointment_id if appointment is not None else None,
+            appointment.version if appointment is not None else None))
+
+    def _answer(self, receipt: InboundReceipt, prompt: ConversationState | None,
+                targets: tuple[Appointment, ...], policy: AvailabilityPolicy,
+                now: datetime) -> ConversationOutcome | None:
+        """Handle a reply to the business's own offer or question, or return None."""
+        body = receipt.body or ""
+        if receipt.role == SenderRole.OWNER:
+            return self._owner_reply(receipt, targets)
+        if prompt is None or prompt.kind == PromptKind.RESCHEDULE_DAY:
+            return None
+        zone = ZoneInfo(policy.timezone)
+        today = now.astimezone(zone).date()
+        if prompt.kind != PromptKind.CONFIRM_CANCEL:
+            selection, index = match_selection(body, prompt.options, zone, today)
+            answered = selection != Selection.NONE
         else:
-            text = f"Request {result.hold_id[:8]} is pending owner approval, not confirmed yet."
-        return ConversationOutcome(text, True, result.hold_id)
+            answered = is_affirmative(body, CANCEL_WORDS) or is_negative(body)
+        if prompt.expired(now):
+            self._forget(prompt)
+            if not answered:
+                return None
+            return ConversationOutcome(
+                "That offer expired after 30 minutes, so nothing changed. Tell me what day "
+                "works and I'll send the current open times.")
+        if prompt.kind == PromptKind.CONFIRM_CANCEL:
+            if is_negative(body):
+                self._forget(prompt)
+                target = self._active_target(receipt, prompt.appointment_id, targets)
+                kept = f"your {when_text(target.start_at, zone)} visit" if target else "your visit"
+                return ConversationOutcome(f"OK, I kept {kept}. Nothing was cancelled.")
+            if not answered:
+                return None
+            return self._cancel_confirmed(receipt, prompt, targets, zone)
+        count = len(prompt.options)
+        if selection == Selection.AMBIGUOUS:
+            return ConversationOutcome(
+                "I couldn't tell which time you meant, so nothing was booked. Reply with "
+                f"'option 1' to 'option {count}', or the time with AM or PM." if count > 1 else
+                "I couldn't tell if you meant that time, so nothing was booked. Reply YES "
+                "to request it, or tell me another day.")
+        if selection == Selection.UNMATCHED:
+            return ConversationOutcome(
+                "That isn't one of the times I offered, so nothing was booked. Reply with "
+                + (f"an option number, 1 to {count}," if count > 1 else "YES")
+                + " or tell me another day.")
+        if selection != Selection.MATCH or index is None:
+            return None
+        if prompt.kind == PromptKind.OFFER:
+            return self._book_option(receipt, prompt, prompt.options[index], targets, policy, now)
+        # A chosen visit leads to the usual confirmation or day question; no write yet.
+        self._forget(prompt)
+        cancelling = prompt.kind == PromptKind.CHOOSE_CANCEL
+        chosen = next((target for target in targets if target.start_at == prompt.options[index]
+                       and (cancelling or target.status == CalendarStatus.CONFIRMED)), None)
+        if chosen is None:
+            return ConversationOutcome("That visit changed. Please tell me again which one you mean.")
+        return (self._confirm_cancel(receipt, chosen, zone, now) if cancelling
+                else self._ask_day(receipt, chosen, zone, now))
+
+    def _book_option(self, receipt: InboundReceipt, prompt: ConversationState, start: datetime,
+                     targets: tuple[Appointment, ...], policy: AvailabilityPolicy,
+                     now: datetime) -> ConversationOutcome:
+        zone = ZoneInfo(policy.timezone)
+        if receipt.client_id is None:
+            return ConversationOutcome("Only a verified client can request a visit by text.")
+        profile = self._repository.read_profile(receipt.business_id, receipt.client_id)
+        if profile is None or not profile.active or profile.phone_verified_at is None:
+            return ConversationOutcome("Please contact the owner to complete your client profile.")
+        original = None
+        if prompt.appointment_id is not None:
+            original = self._active_target(receipt, prompt.appointment_id, targets)
+            if original is None or original.status != CalendarStatus.CONFIRMED:
+                self._forget(prompt)
+                return ConversationOutcome(
+                    "The visit you wanted to move has changed, so nothing was booked. "
+                    "Please tell me which visit to move.")
+        try:
+            result = self._holds.create(CreateHold(
+                receipt.business_id, receipt.client_id, receipt.client_id, receipt.provider_id,
+                start, profile.default_duration_minutes,
+                original.appointment_id if original is not None else None), now)
+        except (SlotConflict, InvalidReplacement, ReplacementPending, TooManyConflicts,
+                IdempotencyKeyReused, InvalidDuration, ValueError):
+            self._forget(prompt)
+            return ConversationOutcome(
+                f"Sorry, {when_text(start, zone)} is no longer open, so nothing was booked. "
+                "Tell me what day works and I'll send the current open times.")
+        self._forget(prompt)
+        return self._requested(receipt, original, start, result.hold_id, policy)
+
+    @staticmethod
+    def _requested(receipt: InboundReceipt, original: Appointment | None, start: datetime,
+                   hold_id: str, policy: AvailabilityPolicy) -> ConversationOutcome:
+        zone = ZoneInfo(policy.timezone)
+        when = when_text(start, zone)
+        if original is not None:
+            text = (f"Requested a move to {when} (ref {hold_id[:8]}). It's pending owner "
+                    f"approval. Your {when_text(original.start_at, zone)} visit "
+                    f"(ref {original.appointment_id[:8]}) remains confirmed until then.")
+        else:
+            text = (f"Requested {when} (ref {hold_id[:8]}). It's pending owner approval, "
+                    "not confirmed yet.")
+        return ConversationOutcome(text, True, hold_id)
+
+    def _cancel_confirmed(self, receipt: InboundReceipt, prompt: ConversationState,
+                          targets: tuple[Appointment, ...], zone: ZoneInfo) -> ConversationOutcome:
+        self._forget(prompt)
+        target = self._active_target(receipt, prompt.appointment_id, targets)
+        if (target is None or target.version != prompt.appointment_version
+                or receipt.client_id is None):
+            return ConversationOutcome(
+                "That visit changed since I asked, so nothing was cancelled. "
+                "Please tell me again which visit to cancel.")
+        try:
+            result = self._lifecycle.apply(AppointmentCommand(
+                receipt.business_id, target.appointment_id, receipt.client_id,
+                ActorRole.CLIENT, Action.CANCEL, receipt.provider_id, target.version))
+        except (InvalidTransition, StaleVersion, ReplacementPending,
+                TooManyConflicts, IdempotencyKeyReused):
+            return ConversationOutcome("That appointment changed. Please review it before retrying.")
+        what = "visit" if target.status == CalendarStatus.CONFIRMED else "request"
+        return ConversationOutcome(
+            f"Cancelled your {when_text(target.start_at, zone)} {what} "
+            f"(ref {target.appointment_id[:8]}).", True, result.appointment.appointment_id)
+
+    def _owner_reply(self, receipt: InboundReceipt,
+                     targets: tuple[Appointment, ...]) -> ConversationOutcome | None:
+        text = normalized(receipt.body or "")
+        if OWNER_APPROVAL.fullmatch(text):
+            action = Action.APPROVE
+        elif OWNER_DECLINE.fullmatch(text):
+            action = Action.DECLINE
+        else:
+            return None
+        if len(targets) != 1:
+            return ConversationOutcome(self._pending_summary(receipt.business_id, targets))
+        target = targets[0]
+        try:
+            result = self._lifecycle.apply(AppointmentCommand(
+                receipt.business_id, target.appointment_id, receipt.sender,
+                ActorRole.OWNER, action, receipt.provider_id, target.version))
+        except (HoldExpired, InvalidTransition, StaleVersion, SlotConflict,
+                TooManyConflicts, IdempotencyKeyReused):
+            return ConversationOutcome("That request changed. Please review the current calendar.")
+        state = "Approved" if action == Action.APPROVE else "Declined"
+        return ConversationOutcome(
+            f"{state}: {self._request_line(receipt.business_id, target)}.", True,
+            result.appointment.appointment_id)
+
+    def _request_line(self, business_id: str, target: Appointment) -> str:
+        zone = ZoneInfo(self._repository.read_policy(business_id).timezone)
+        profile = self._repository.read_profile(business_id, target.client_id)
+        name = profile.name if profile is not None else "client"
+        return f"{name}, {when_text(target.start_at, zone)} (ref {target.appointment_id[:8]})"
+
+    def _pending_summary(self, business_id: str, targets: tuple[Appointment, ...]) -> str:
+        if not targets:
+            return "No request is waiting for approval right now, so nothing changed."
+        if len(targets) == 1:
+            return (f"Reply YES to approve or DECLINE to decline: "
+                    f"{self._request_line(business_id, targets[0])}.")
+        shown = "; ".join(self._request_line(business_id, target) for target in targets[:3])
+        more = f"; and {len(targets) - 3} more" if len(targets) > 3 else ""
+        return (f"{len(targets)} requests are pending, so nothing changed: {shown}{more}. "
+                "Reply APPROVE or DECLINE with the reference.")
+
+    @staticmethod
+    def _active_target(receipt: InboundReceipt, appointment_id: str | None,
+                       targets: tuple[Appointment, ...]) -> Appointment | None:
+        """Re-resolve a remembered appointment against the sender's current visits."""
+        return next((target for target in targets if target.appointment_id == appointment_id
+                     and target.client_id == receipt.client_id), None)
+
+    def _resolve_target(self, receipt: InboundReceipt, proposal: MessageProposal,
+                        targets: tuple[Appointment, ...], zone: ZoneInfo, verb: str,
+                        statuses: tuple[CalendarStatus, ...], now: datetime
+                        ) -> tuple[Appointment | None, str | None]:
+        candidates = tuple(target for target in targets if target.status in statuses)
+        if proposal.request_reference:
+            named = self._target(receipt.body or "", proposal.request_reference, targets)
+            if named is not None and named.status in statuses:
+                return named, None
+        day = None
+        if proposal.target_date:
+            try:
+                day = date.fromisoformat(proposal.target_date)
+            except ValueError:
+                return None, f"Which visit would you like to {verb}? Tell me its day."
+            candidates = tuple(target for target in candidates
+                               if target.start_at.astimezone(zone).date() == day)
+        if len(candidates) == 1:
+            return candidates[0], None
+        listed = "; ".join(when_text(target.start_at, zone) for target in targets
+                           if target.status in statuses)
+        if not candidates:
+            if not listed:
+                return None, f"I don't see an upcoming visit to {verb}."
+            where = f" on {day_text(day)}" if day is not None else ""
+            return None, f"I don't see a visit{where} to {verb}. Your upcoming visits: {listed}."
+        if len(candidates) > MAX_OPTIONS:
+            return None, (f"Which visit would you like to {verb}? You have {listed}. "
+                          "Tell me the day.")
+        kind = PromptKind.CHOOSE_CANCEL if verb == "cancel" else PromptKind.CHOOSE_MOVE
+        self._states.put_state(ConversationState(
+            receipt.business_id, receipt.sender, receipt.provider_id, kind, now,
+            now + PROMPT_LIFETIME, tuple(target.start_at for target in candidates)))
+        numbered = ", ".join(f"{number}) {when_text(target.start_at, zone)}"
+                             for number, target in enumerate(candidates, 1))
+        return None, (f"Which visit would you like to {verb}? {numbered}. "
+                      "Reply with the number.")
+
+    def _ask_cancel(self, receipt: InboundReceipt, proposal: MessageProposal,
+                    targets: tuple[Appointment, ...], policy: AvailabilityPolicy,
+                    now: datetime) -> ConversationOutcome:
+        zone = ZoneInfo(policy.timezone)
+        target, question = self._resolve_target(
+            receipt, proposal, targets, zone, "cancel",
+            (CalendarStatus.CONFIRMED, CalendarStatus.PENDING_APPROVAL), now)
+        if target is None:
+            return ConversationOutcome(question or "Which visit would you like to cancel?")
+        return self._confirm_cancel(receipt, target, zone, now)
+
+    def _confirm_cancel(self, receipt: InboundReceipt, target: Appointment, zone: ZoneInfo,
+                        now: datetime) -> ConversationOutcome:
+        self._remember(receipt, PromptKind.CONFIRM_CANCEL, now, appointment=target)
+        what = ("visit" if target.status == CalendarStatus.CONFIRMED
+                else "request (still pending approval)")
+        return ConversationOutcome(
+            f"Cancel your {when_text(target.start_at, zone)} {what}? Reply YES to confirm.")
+
+    def _ask_day(self, receipt: InboundReceipt, target: Appointment, zone: ZoneInfo,
+                 now: datetime) -> ConversationOutcome:
+        self._remember(receipt, PromptKind.RESCHEDULE_DAY, now, appointment=target)
+        return ConversationOutcome(
+            f"What day would you like instead of your {when_text(target.start_at, zone)} "
+            "visit? It stays booked until the owner approves a new time.")
+
+    def _ask_reschedule(self, receipt: InboundReceipt, proposal: MessageProposal,
+                        targets: tuple[Appointment, ...], policy: AvailabilityPolicy,
+                        now: datetime) -> ConversationOutcome:
+        zone = ZoneInfo(policy.timezone)
+        target, question = self._resolve_target(
+            receipt, proposal, targets, zone, "move", (CalendarStatus.CONFIRMED,), now)
+        if target is None:
+            if any(item.status == CalendarStatus.PENDING_APPROVAL for item in targets) and \
+                    not any(item.status == CalendarStatus.CONFIRMED for item in targets):
+                return ConversationOutcome(
+                    "Your request is still pending owner approval. Rescheduling needs a "
+                    "confirmed visit; you can cancel the request and ask for another time.")
+            return ConversationOutcome(question or "Which visit would you like to move?")
+        if proposal.date_from is None:
+            return self._ask_day(receipt, target, zone, now)
+        return self._offer_from_proposal(receipt, proposal, policy, now, target)
+
+    def _offer_from_proposal(self, receipt: InboundReceipt, proposal: MessageProposal,
+                             policy: AvailabilityPolicy, now: datetime,
+                             original: Appointment | None) -> ConversationOutcome:
+        if receipt.client_id is None:
+            return ConversationOutcome("Only a verified client can request a visit by text.")
+        profile = self._repository.read_profile(receipt.business_id, receipt.client_id)
+        if profile is None or not profile.active or profile.phone_verified_at is None:
+            return ConversationOutcome("Please contact the owner to complete your client profile.")
+        if proposal.date_from is None:
+            if original is not None:
+                self._remember(receipt, PromptKind.RESCHEDULE_DAY, now, appointment=original)
+            return ConversationOutcome(self._clarify(SenderRole.CLIENT, "clarify"))
+        try:
+            first = date.fromisoformat(proposal.date_from)
+            last = date.fromisoformat(proposal.date_to or proposal.date_from)
+            earliest = time.fromisoformat(proposal.time_from) if proposal.time_from else None
+            latest = time.fromisoformat(proposal.time_to) if proposal.time_to else None
+            if (earliest is None) != (latest is None):  # "After 2" or "before noon".
+                earliest, latest = earliest or time(0), latest or time(23, 59)
+        except ValueError:
+            return ConversationOutcome("I couldn't tell which day you meant. What date works for you?")
+        if last < first or (earliest is not None and latest is not None and latest < earliest):
+            return ConversationOutcome("I couldn't tell which day you meant. What date works for you?")
+        return self._offer(receipt, profile, policy, now, first, last, earliest, latest, original)
+
+    def _offer(self, receipt: InboundReceipt, profile: ClientProfile, policy: AvailabilityPolicy,
+               now: datetime, first: date, last: date, earliest: time | None,
+               latest: time | None, original: Appointment | None) -> ConversationOutcome:
+        """Offer real open times. Offering writes nothing to the calendar."""
+        zone = ZoneInfo(policy.timezone)
+        today = now.astimezone(zone).date()
+        horizon = today + timedelta(days=policy.booking_horizon_days)
+        if last < today:
+            return ConversationOutcome("That date has passed. What day works for you?")
+        if first > horizon:
+            return ConversationOutcome(
+                f"I can book up to {policy.booking_horizon_days} days ahead, through "
+                f"{day_text(horizon)}. What day in that range works for you?")
+        first, last = max(first, today), min(last, horizon)
+        events = None
+        if original is not None:
+            events = tuple(event for event in self._repository.read_calendar(
+                receipt.business_id).events if event.event_id != original.appointment_id)
+        starts: list[datetime] = []
+        try:
+            for offset in range((last - first).days + 1):
+                day = first + timedelta(days=offset)
+                starts.extend(
+                    self._availability.find_starts(
+                        receipt.business_id, day, profile.default_duration_minutes, now)
+                    if events is None else
+                    available_starts(policy, day, profile.default_duration_minutes, events, now))
+        except (InvalidDuration, InvalidPolicy, ValueError):
+            return ConversationOutcome("Please contact the owner to schedule this visit.")
+        span = (f"on {day_text(first)}" if first == last
+                else f"between {day_text(first)} and {day_text(last)}")
+        if not starts:
+            return ConversationOutcome(f"I don't have any openings {span}. Would another day work?")
+        note = ""
+        chosen: tuple[datetime, ...]
+        if earliest is not None and latest is not None:
+            wall = {start: start.astimezone(zone).time() for start in starts}
+            if earliest == latest:
+                exact = tuple(start for start in starts if wall[start] == earliest)
+                target = earliest.hour * 60 + earliest.minute
+                nearest = sorted(starts, key=lambda start: (
+                    abs(wall[start].hour * 60 + wall[start].minute - target), start))
+                chosen = (spread(exact, zone) if exact
+                          else tuple(sorted(nearest[:MIN_OPTIONS])))
+                if not exact:
+                    note = "That exact time isn't open. "
+            else:
+                window = tuple(start for start in starts if earliest <= wall[start] <= latest)
+                chosen = spread(window or tuple(starts), zone)
+                if not window:
+                    note = "Nothing is open in that part of the day. "
+        else:
+            chosen = spread(tuple(starts), zone)
+        # A replacement offer remembers the visit it would replace.
+        self._remember(receipt, PromptKind.OFFER, now, options=chosen, appointment=original)
+        lead = (f"To move your {when_text(original.start_at, zone)} visit: "
+                if original is not None else "")
+        minutes = profile.default_duration_minutes
+        length = f"{minutes // 60}-hour" if minutes % 60 == 0 else f"{minutes}-minute"
+        if len(chosen) == 1:
+            body = (f"{when_text(chosen[0], zone)} is open for your {length} cleaning. "
+                    "Reply YES to request it.")
+        else:
+            days = {start.astimezone(zone).date() for start in chosen}
+            if len(days) == 1:
+                listed = ", ".join(f"{number}) {clock_text(start, zone)}"
+                                   for number, start in enumerate(chosen, 1))
+                body = f"Open times on {day_text(next(iter(days)))}: {listed}."
+            else:
+                listed = ", ".join(f"{number}) {when_text(start, zone)}"
+                                   for number, start in enumerate(chosen, 1))
+                body = f"Open times for your {length} cleaning: {listed}."
+            body += " Reply with the number or time you want."
+        keeps = " Your current visit stays booked until then." if original is not None else ""
+        return ConversationOutcome(
+            f"{note}{lead}{body} The owner approves every request.{keeps} "
+            "This offer is good for 30 minutes.")

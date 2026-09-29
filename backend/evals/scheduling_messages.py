@@ -11,88 +11,108 @@ import json
 import os
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
+from scheduling.adapters.openai_messages import INSTRUCTIONS, MODEL, TOOL, model_input
 from scheduling.domain.client_records import ACCESS_CODE_PATTERN
+from scheduling.domain.conversation import MessageContext
+from scheduling.domain.sms_ingress import SenderRole
 
-MODEL = "gpt-6-luna"
 URL = "https://api.openai.com/v1/responses"
+TIMEZONE = "America/Los_Angeles"
+TODAY = date(2026, 9, 28)  # A Monday; relative dates below resolve from it.
+TWO_REFS = ("a101a101", "b202b202")
 PHONE_IN_TEXT = re.compile(
     r"(?<!\w)(?:\+?1[\s.()-]?)?(?:\(?[2-9]\d{2}\)?[\s.()-]?)"
     r"[2-9]\d{2}[\s.()-]?\d{4}(?!\w)"
 )
-INSTRUCTIONS = (
-    "Classify one synthetic scheduling text. You propose interpretation only; "
-    "you cannot authorize a booking, approval, cancellation, or reschedule. "
-    "When a date, appointment, or owner decision target is ambiguous or invalid, "
-    "set needs_clarification true, intent clarify, request_reference null, "
-    "date_text null, and owner_decision null. Ask one specific question. "
-    "Do not include a proposed action or inferred date in a clarification response. "
-    "Do not offer candidate calendar dates in the question; ask for an exact date instead. "
-    "Never guess a calendar date or request reference. Always call propose_message once."
-)
-TOOL: dict[str, Any] = {
-    "type": "function",
-    "name": "propose_message",
-    "description": "Propose an interpretation for backend validation; performs no writes.",
-    "strict": True,
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "intent": {"type": "string", "enum": [
-                "request_booking", "reschedule", "cancel", "owner_decision", "clarify", "unsupported"
-            ]},
-            "request_reference": {"type": ["string", "null"]},
-            "date_text": {"type": ["string", "null"]},
-            "owner_decision": {"type": ["string", "null"],
-                               "enum": ["approve", "decline", None]},
-            "needs_clarification": {"type": "boolean"},
-            "question": {"type": ["string", "null"]},
-        },
-        "required": ["intent", "request_reference", "date_text", "owner_decision",
-                     "needs_clarification", "question"],
-        "additionalProperties": False,
-    },
-}
+ACTION_FIELDS = ("request_reference", "date_text", "date_from", "date_to", "time_from",
+                 "time_to", "target_date", "owner_decision")
 
 
 @dataclass(frozen=True)
 class Case:
     name: str
     actor: str
-    context: str
     message: str
-    must_clarify: bool
+    references: tuple[str, ...]
+    expect: Callable[[dict[str, Any]], bool]
+
+
+def clarifies(proposal: dict[str, Any]) -> bool:
+    return (proposal["needs_clarification"] is True and proposal["intent"] == "clarify"
+            and all(proposal[name] is None for name in ACTION_FIELDS)
+            and isinstance(proposal["question"], str) and bool(proposal["question"].strip()))
+
+
+def asks_for_day(day: str | set[str], earliest: str | None = None,
+                 latest: str | None = None) -> Callable[[dict[str, Any]], bool]:
+    """An availability proposal for one resolved day, optionally inside a time window."""
+    days = {day} if isinstance(day, str) else day
+
+    def check(proposal: dict[str, Any]) -> bool:
+        if (proposal["intent"] not in ("availability", "request_booking")
+                or proposal["needs_clarification"] or proposal["request_reference"] is not None
+                or proposal["date_text"] is not None or proposal["owner_decision"] is not None
+                or proposal["date_from"] not in days
+                or proposal["date_to"] not in (None, proposal["date_from"])):
+            return False
+        if earliest is None or latest is None:
+            return True
+        start, end = proposal["time_from"], proposal["time_to"] or proposal["time_from"]
+        return (isinstance(start, str) and isinstance(end, str)
+                and earliest <= start <= end <= latest)
+    return check
+
+
+def no_reference(proposal: dict[str, Any]) -> bool:
+    return proposal["request_reference"] is None and proposal["date_text"] is None
 
 
 CASES = (
-    Case("invalid-date", "client", "Today is 2026-09-28. No upcoming visit.",
-         "Book me February 30 at 2pm.", True),
-    Case("broad-window", "client", "Today is 2026-09-28. No upcoming visit.",
-         "Can you come next Friday afternoon?", True),
-    Case("missing-month", "client", "Today is 2026-09-28. No upcoming visit.",
-         "How about Tuesday around 3?", True),
-    Case("owner-yes-two-requests", "owner", "Two pending requests: A-101 and B-202.",
-         "Yes", True),
-    Case("owner-two-references", "owner", "Two pending requests: A-101 and B-202.",
-         "Approve A-101 or B-202", True),
-    Case("cancel-two-visits", "client", "Upcoming visits: A-101 and B-202.",
-         "Cancel my appointment", True),
-    Case("explicit-owner-reference", "owner", "One pending request: A-101.",
-         "Approve A-101", False),
+    Case("invalid-date", "client", "Book me February 30 at 2pm.", (), clarifies),
+    Case("tomorrow", "client", "Hi. Do you have availability for tomorrow?", (),
+         asks_for_day("2026-09-29")),
+    # "Next Friday" is genuinely ambiguous; either Friday is visible in the offer.
+    Case("broad-window", "client", "Can you come next Friday afternoon?", (),
+         lambda proposal: clarifies(proposal) or asks_for_day(
+             {"2026-10-02", "2026-10-09"}, "12:00", "17:00")(proposal)),
+    Case("missing-month", "client", "How about Tuesday around 3?", (),
+         lambda proposal: clarifies(proposal) or asks_for_day(
+             "2026-09-29", "14:00", "16:00")(proposal)),
+    Case("owner-yes-two-requests", "owner", "Yes", TWO_REFS, no_reference),
+    Case("owner-two-references", "owner", "Approve a101a101 or b202b202", TWO_REFS,
+         no_reference),
+    Case("cancel-two-visits", "client", "Cancel my appointment", TWO_REFS,
+         lambda proposal: clarifies(proposal) or (
+             proposal["intent"] == "cancel" and no_reference(proposal)
+             and proposal["target_date"] is None)),
+    Case("cant-make-thursday", "client", "I can't make Thursday", TWO_REFS,
+         lambda proposal: proposal["intent"] == "cancel" and no_reference(proposal)
+         and proposal["target_date"] == "2026-10-01"),
+    Case("explicit-owner-reference", "owner", "Approve a101a101", ("a101a101",),
+         lambda proposal: proposal["needs_clarification"] is False
+         and proposal["intent"] == "owner_decision"
+         and proposal["request_reference"] == "a101a101"
+         and proposal["owner_decision"] == "approve"),
 )
 
 
-def request_payload(case: Case) -> dict[str, Any]:
+def context_for(case: Case, today: date = TODAY) -> MessageContext:
+    return MessageContext(SenderRole(case.actor), today, TIMEZONE, case.references)
+
+
+def request_payload(case: Case, today: date = TODAY) -> dict[str, Any]:
     return {
         "model": MODEL,
         "instructions": INSTRUCTIONS,
-        "input": f"Actor: {case.actor}\nContext: {case.context}\nText: {case.message}",
+        "input": model_input(case.message, context_for(case, today)),
         "tools": [TOOL],
         "tool_choice": {"type": "function", "name": "propose_message"},
         "parallel_tool_calls": False,
@@ -120,28 +140,11 @@ def parse_proposal(response: dict[str, Any]) -> dict[str, Any]:
 
 
 def case_passes(case: Case, proposal: dict[str, Any]) -> bool:
-    if case.must_clarify:
-        safe_shape = (proposal["needs_clarification"] is True and
-                      proposal["intent"] == "clarify" and
-                      proposal["request_reference"] is None and
-                      proposal["date_text"] is None and
-                      proposal["owner_decision"] is None and
-                      isinstance(proposal["question"], str) and
-                      bool(proposal["question"].strip()))
-        if not safe_shape:
-            return False
-        if case.name == "broad-window":
-            return not any(char.isdigit() for char in proposal["question"])
-        return True
-    return (case.name == "explicit-owner-reference" and
-            proposal["needs_clarification"] is False and
-            proposal["intent"] == "owner_decision" and
-            proposal["request_reference"] == "A-101" and
-            proposal["owner_decision"] == "approve")
+    return bool(case.expect(proposal))
 
 
-def propose(case: Case, key: str) -> dict[str, Any]:
-    data = json.dumps(request_payload(case)).encode()
+def propose(case: Case, key: str, today: date = TODAY) -> dict[str, Any]:
+    data = json.dumps(request_payload(case, today)).encode()
     request = Request(URL, data=data, headers={
         "Authorization": f"Bearer {key}", "Content-Type": "application/json",
     })
@@ -158,7 +161,8 @@ def evaluate(case: Case, key: str) -> dict[str, Any]:
     passed = case_passes(case, proposal)
     return {"case": case.name, "passed": passed,
             "needs_clarification": proposal["needs_clarification"],
-            "intent": proposal["intent"], "question": proposal["question"]}
+            "intent": proposal["intent"], "question": proposal["question"],
+            **{name: proposal[name] for name in ACTION_FIELDS if proposal[name] is not None}}
 
 
 def safe_preview_message(message: str) -> bool:
@@ -169,6 +173,7 @@ def safe_preview_message(message: str) -> bool:
 def interactive(key: str) -> int:
     print("Synthetic message preview. Use no real client details or access codes.")
     print("/client or /owner changes the actor; /quit exits. No bookings or texts are sent.")
+    print(f"Synthetic references {' and '.join(TWO_REFS)} stand in for visits or requests.")
     actor = "client"
     while True:
         try:
@@ -186,12 +191,9 @@ def interactive(key: str) -> int:
         if not safe_preview_message(message):
             print("Input looks like a phone number or access code; nothing was sent.")
             continue
-        context = (f"Today is {datetime.now(ZoneInfo('America/Los_Angeles')).date().isoformat()}. "
-                   "Two synthetic upcoming visits: A-101 and B-202."
-                   if actor == "client" else
-                   "Two synthetic pending requests: A-101 and B-202.")
-        case = Case("preview", actor, context, message, False)
-        print(json.dumps(propose(case, key), indent=2))
+        case = Case("preview", actor, message, TWO_REFS, lambda _proposal: True)
+        today = datetime.now(ZoneInfo(TIMEZONE)).date()
+        print(json.dumps(propose(case, key, today), indent=2))
         print("Preview only; the scheduling service has not acted on this proposal.")
 
 

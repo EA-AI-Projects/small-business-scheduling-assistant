@@ -39,6 +39,7 @@ from scheduling.domain.conversation import (
     MessageInterpreter,
     MessageProposal,
 )
+from scheduling.domain.conversation_state import InMemoryConversationStates
 from scheduling.domain.holds import HoldService, OutboxIntent
 from scheduling.domain.lifecycle import LifecycleService
 from scheduling.domain.outbox import PermanentDeliveryFailure
@@ -82,7 +83,11 @@ class LocalConsent:
 class OfflineInterpreter:
     """Without an OpenAI key, every non-command text gets the safe clarification."""
 
+    def __init__(self) -> None:
+        self.consulted = False
+
     def propose(self, body: str, context: MessageContext) -> MessageProposal:
+        self.consulted = True
         return MessageProposal("clarify", None, None, None, True)
 
 
@@ -110,9 +115,11 @@ class TextSimulator:
         self._repository = repository
         self._business_id = business_id
         self._clock = clock
+        self._offline = interpreter if isinstance(interpreter, OfflineInterpreter) else None
         self._service = ConversationService(
             repository, interpreter, HoldService(repository),
-            LifecycleService(repository, clock), LocalConsent(repository), clock, OWNER_PHONE)
+            LifecycleService(repository, clock), LocalConsent(repository), clock, OWNER_PHONE,
+            InMemoryConversationStates())
         self._lock = threading.RLock()
         self._log: list[SimulatedText] = []
         # Seeded history predates the simulator; show only later notifications.
@@ -167,8 +174,15 @@ class TextSimulator:
                 receipt = InboundReceipt(
                     self._business_id, f"local-{uuid4()}", phone, BUSINESS_PHONE, text,
                     self._clock(), role, client_id, Keyword.OTHER, True)
+                if self._offline is not None:
+                    self._offline.consulted = False
                 outcome = self._service.handle(receipt)
                 self._append(party, label, "out", "reply", outcome.text)
+                if self._offline is not None and self._offline.consulted:
+                    self._append(party, label, "note", "note",
+                                 "Plain-language texts need OPENAI_API_KEY. Without it, use "
+                                 "exact commands such as Book YYYY-MM-DD; replies to an "
+                                 "offer, such as a number or YES, still work.")
             self.capture_notifications()
             return [asdict(entry) for entry in self._log[start:]]
 
@@ -316,12 +330,15 @@ PAGE = """<!doctype html>
     <form id="send">
       <label>Text as <select id="party"></select></label>
       <input id="body" maxlength="1000" autocomplete="off"
-             placeholder="e.g. Book YYYY-MM-DD or Book YYYY-MM-DD HH:MM">
+             placeholder="e.g. Do you have anything tomorrow morning?">
       <button>Send</button>
     </form>
-    <p class="hint">Client: <code>Book YYYY-MM-DD</code>, <code>Book YYYY-MM-DD HH:MM</code>,
-    <code>Cancel REF</code>, <code>Reschedule REF to YYYY-MM-DD HH:MM</code>.
-    Owner: <code>Approve REF</code>, <code>Decline REF</code>.
+    <p class="hint">Client: ask in plain words, such as <em>Do you have availability
+    tomorrow?</em>, then reply with an offered number or time, or <em>yes</em>.
+    <em>I can't make Thursday</em> asks before cancelling. Owner: <em>yes</em> or
+    <em>decline</em> acts when exactly one request is pending. Exact commands still work:
+    <code>Book YYYY-MM-DD</code>, <code>Cancel REF</code>, <code>Approve REF</code>.
+    Plain language needs <code>OPENAI_API_KEY</code>.
     Green-bordered messages are notifications that would be texted.</p>
     <div id="log" aria-live="polite"></div>
   </section>
