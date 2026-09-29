@@ -1,0 +1,21 @@
+# AWS Amplify Hosting build for the static owner app. Set AMPLIFY_MONOREPO_APP_ROOT=frontend
+# and the NEXT_PUBLIC_* variables (see frontend/.env.example) on the Amplify app.
+version: 1
+applications:
+  - appRoot: frontend
+    frontend:
+      phases:
+        preBuild:
+          commands:
+            - nvm install 22 && nvm use 22
+            - npm ci
+        build:
+          commands:
+            - npm run build
+      artifacts:
+        baseDirectory: out
+        files:
+          - '**/*'
+      cache:
+        paths:
+          - node_modules/**/*
