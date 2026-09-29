@@ -5,6 +5,7 @@ import { path } from "@/lib/api";
 import { localInput, localStamp, localTime, statusLabel } from "@/lib/time";
 import { errorMessage, useOwner } from "@/owner/OwnerContext";
 
+import { BusyButton } from "../BusyButton";
 import { ConfirmButton } from "../ConfirmButton";
 
 type Detail = { kind: "block"; block: UnavailableBlock } | { kind: "appointment"; appointment: Appointment };
@@ -48,7 +49,7 @@ function BlockEditor({ block }: { block: UnavailableBlock }) {
       <label>Start <input type="datetime-local" value={start} onChange={(e) => setStart(e.target.value)} /></label>
       <label>End <input type="datetime-local" value={end} onChange={(e) => setEnd(e.target.value)} /></label>
       <div className="row-actions">
-        <button type="button" onClick={async () => {
+        <BusyButton onClick={async () => {
           try {
             await change(blockPath, "PUT", {
               expected_revision: revision, expected_version: block.version,
@@ -57,7 +58,7 @@ function BlockEditor({ block }: { block: UnavailableBlock }) {
           } catch (error) {
             notify(`Nothing was saved: ${errorMessage(error)}`, true);
           }
-        }}>Move block</button>
+        }}>Move block</BusyButton>
         <ConfirmButton label="Remove block" confirmation="Confirm removal" className="danger"
           onConfirm={() => change(blockPath, "DELETE",
             { expected_revision: revision, expected_version: block.version }, "Block removed")} />
@@ -90,7 +91,7 @@ function AppointmentEditor({ appointment }: { appointment: Appointment }) {
             <input type="number" min={1} value={duration} onChange={(e) => setDuration(e.target.value)} />
           </label>
           <div className="row-actions">
-            <button type="button" onClick={async () => {
+            <BusyButton onClick={async () => {
               try {
                 await change(appointmentPath, "PATCH", {
                   expected_version: appointment.version, start_at: await resolveLocal(start),
@@ -99,7 +100,7 @@ function AppointmentEditor({ appointment }: { appointment: Appointment }) {
               } catch (error) {
                 notify(`Nothing was saved: ${errorMessage(error)}`, true);
               }
-            }}>Save appointment</button>
+            }}>Save appointment</BusyButton>
             <ConfirmButton label="Cancel appointment" confirmation="Confirm cancellation" className="danger"
               onConfirm={() => change(`${appointmentPath}/cancel`, "POST",
                 { expected_version: appointment.version }, "Appointment cancelled")} />

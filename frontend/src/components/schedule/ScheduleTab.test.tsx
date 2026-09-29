@@ -155,3 +155,17 @@ describe("ScheduleTab", () => {
     expect(screen.getByText("clients|client-1|appt-1")).toBeInTheDocument();
   });
 });
+
+describe("ScheduleTab writes in flight", () => {
+  it("sends one write when Save is double-clicked", async () => {
+    const { writes } = await setup((method) => method === "PATCH" ? { status: 200, body: {} } : undefined);
+    await userEvent.click(screen.getByText("9:00 AM–11:00 AM"));
+    const save = await screen.findByText("Save appointment");
+    fireEvent.click(save);
+    expect(save).toBeDisabled();
+    fireEvent.click(save);
+    await waitFor(() => expect(writes()).toHaveLength(1));
+    await waitFor(() => expect(screen.getByText("Choose an appointment or block.")).toBeInTheDocument());
+    expect(writes()).toHaveLength(1);
+  });
+});
