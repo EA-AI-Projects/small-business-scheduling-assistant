@@ -21,7 +21,9 @@ export class OwnerApi {
   private readonly base: string;
 
   constructor(config: OwnerConfig, private readonly token: string,
-    private readonly onUnauthorized: () => void, private readonly fetcher: Fetcher = fetch) {
+    private readonly onUnauthorized: () => void,
+    // Wrap the global so it is never invoked as a method of this object ("Illegal invocation").
+    private readonly fetcher: Fetcher = (input, init) => fetch(input, init)) {
     this.base = `${config.apiBaseUrl}/v1/owner/businesses/${encodeURIComponent(config.businessId)}`;
   }
 

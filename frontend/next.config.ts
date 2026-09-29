@@ -7,6 +7,8 @@ const nextConfig: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
   images: { unoptimized: true },
+  // Do not let `next dev` write AGENTS.md/CLAUDE.md into the repository.
+  agentRules: false,
 };
 
 export default nextConfig;

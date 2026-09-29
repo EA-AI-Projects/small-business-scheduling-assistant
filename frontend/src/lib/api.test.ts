@@ -40,6 +40,19 @@ describe("OwnerApi", () => {
   });
 });
 
+describe("OwnerApi default fetch", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("calls the global fetch unbound, as browsers require", async () => {
+    // Browsers throw "Illegal invocation" when fetch runs with another object as `this`.
+    vi.stubGlobal("fetch", function strictFetch(this: unknown) {
+      if (this !== undefined && this !== globalThis) throw new TypeError("Illegal invocation");
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    });
+    await expect(new OwnerApi(config, "tok", () => undefined).get("/calendar")).resolves.toEqual({});
+  });
+});
+
 describe("path", () => {
   it("encodes interpolated identifiers", () => {
     expect(path`/clients/${"a/b?c"}/notes`).toBe("/clients/a%2Fb%3Fc/notes");
