@@ -20,6 +20,41 @@ Parameters:
     Type: String
     AllowedPattern: 'https://.+/owner'
     Description: Exact HTTPS /owner callback for the deployed HTTP API custom domain.
+  EnableSmsIngress:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'false'
+    Description: Create the public signed webhook only after its SSM secret and exact URLs are ready.
+  TwilioAuthTokenParameter:
+    Type: String
+    Default: /scheduling/dev/twilio/auth-token
+    AllowedPattern: '/scheduling/.+'
+  TwilioAccountSid:
+    Type: String
+    Default: placeholder
+  TwilioBusinessNumber:
+    Type: String
+    Default: '+14155550000'
+  OwnerNumber:
+    Type: String
+    NoEcho: true
+    Default: '+14155559999'
+  TwilioInboundUrl:
+    Type: String
+    Default: https://example.invalid/webhooks/sms/inbound
+  TwilioStatusUrl:
+    Type: String
+    Default: https://example.invalid/webhooks/sms/status
+  AuthorizedSmsRecipients:
+    Type: String
+    Default: ''
+  SmsSendEnabled:
+    Type: String
+    AllowedValues: [disabled, authorized]
+    Default: disabled
+
+Conditions:
+  SmsIngressRequested: !Equals [!Ref EnableSmsIngress, 'true']
 
 Globals:
   Function:
@@ -177,6 +212,99 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub '/aws/lambda/${OwnerApiFunction}'
+      RetentionInDays: 30
+
+  SmsHttpApi:
+    Type: AWS::Serverless::HttpApi
+    Condition: SmsIngressRequested
+    Properties:
+      StageName: '$default'
+  SmsIngressFunction:
+    Type: AWS::Serverless::Function
+    Condition: SmsIngressRequested
+    Properties:
+      Handler: scheduling.sms_lambda.handler
+      Environment:
+        Variables:
+          SCHEDULING_TABLE_NAME: !Ref SchedulingTable
+          BUSINESS_ID: !Ref BusinessId
+          TWILIO_AUTH_TOKEN_PARAM: !Ref TwilioAuthTokenParameter
+          TWILIO_BUSINESS_NUMBER: !Ref TwilioBusinessNumber
+          OWNER_NUMBER: !Ref OwnerNumber
+          TWILIO_INBOUND_URL: !Ref TwilioInboundUrl
+          TWILIO_STATUS_URL: !Ref TwilioStatusUrl
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem, dynamodb:ConditionCheckItem]
+              Resource: !GetAtt SchedulingTable.Arn
+            - Effect: Allow
+              Action: [dynamodb:Query]
+              Resource: !GetAtt SchedulingTable.Arn
+            - Effect: Allow
+              Action: [ssm:GetParameter]
+              Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TwilioAuthTokenParameter}'
+      Events:
+        Inbound:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref SmsHttpApi
+            Path: /webhooks/sms/inbound
+            Method: POST
+        Status:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref SmsHttpApi
+            Path: /webhooks/sms/status
+            Method: POST
+  SmsIngressLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: SmsIngressRequested
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${SmsIngressFunction}'
+      RetentionInDays: 30
+
+  SmsSenderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: scheduling.workers.sms_outbox.handler
+      Environment:
+        Variables:
+          SCHEDULING_TABLE_NAME: !Ref SchedulingTable
+          BUSINESS_ID: !Ref BusinessId
+          SMS_SEND_ENABLED: !Ref SmsSendEnabled
+          AUTHORIZED_SMS_RECIPIENTS: !Ref AuthorizedSmsRecipients
+          TWILIO_AUTH_TOKEN_PARAM: !Ref TwilioAuthTokenParameter
+          TWILIO_ACCOUNT_SID: !Ref TwilioAccountSid
+          TWILIO_BUSINESS_NUMBER: !Ref TwilioBusinessNumber
+          OWNER_NUMBER: !Ref OwnerNumber
+          TWILIO_STATUS_URL: !Ref TwilioStatusUrl
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem, dynamodb:ConditionCheckItem]
+              Resource: !GetAtt SchedulingTable.Arn
+            - Effect: Allow
+              Action: [dynamodb:Query]
+              Resource: !GetAtt SchedulingTable.Arn
+            - Effect: Allow
+              Action: [ssm:GetParameter]
+              Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TwilioAuthTokenParameter}'
+            - Effect: Allow
+              Action: [sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes, sqs:ChangeMessageVisibility]
+              Resource: !GetAtt OutboxQueue.Arn
+      Events:
+        Outbox:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt OutboxQueue.Arn
+            BatchSize: 10
+            FunctionResponseTypes: [ReportBatchItemFailures]
+            Enabled: false
+  SmsSenderLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${SmsSenderFunction}'
       RetentionInDays: 30
 
   HoldExpiryFunction:
@@ -363,11 +491,43 @@ Resources:
       Threshold: 0
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
+  SmsIngressErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: SmsIngressRequested
+    Properties:
+      AlarmDescription: Signed Twilio webhook Lambda failed.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - {Name: FunctionName, Value: !Ref SmsIngressFunction}
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+  SmsSenderErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: SQS SMS sender Lambda failed.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - {Name: FunctionName, Value: !Ref SmsSenderFunction}
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
 
 Outputs:
   AccountAndRegion:
     Value: !Sub '${AWS::AccountId}/${AWS::Region}'
   OwnerApiUrl:
     Value: !Sub 'https://${OwnerHttpApi}.execute-api.${AWS::Region}.amazonaws.com'
+  SmsApiUrl:
+    Condition: SmsIngressRequested
+    Value: !Sub 'https://${SmsHttpApi}.execute-api.${AWS::Region}.amazonaws.com'
   SchedulingTableName:
     Value: !Ref SchedulingTable

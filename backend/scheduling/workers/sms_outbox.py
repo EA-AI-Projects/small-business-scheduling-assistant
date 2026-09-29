@@ -11,6 +11,7 @@ from scheduling.adapters.dynamodb import DynamoDBCalendarRepository
 from scheduling.adapters.outbox_aws import DynamoOutboxStore
 from scheduling.adapters.sms_dynamodb import DynamoSmsIngressStore
 from scheduling.adapters.sms_twilio import TwilioSmsSender
+from scheduling.adapters.twilio_secret import load_twilio_auth_token
 from scheduling.domain.outbox import ConsumeService, consume_sqs_batch
 
 
@@ -21,7 +22,10 @@ def handler(event: dict[str, Any], _context: object) -> dict[str, list[dict[str,
     table = os.environ["SCHEDULING_TABLE_NAME"]
     dynamo = boto3.client("dynamodb")
     sender = TwilioSmsSender(
-        Client(os.environ["TWILIO_ACCOUNT_SID"], os.environ["TWILIO_AUTH_TOKEN"]).messages,
+        Client(
+            os.environ["TWILIO_ACCOUNT_SID"],
+            load_twilio_auth_token(boto3.client("ssm"), os.environ["TWILIO_AUTH_TOKEN_PARAM"]),
+        ).messages,
         DynamoDBCalendarRepository(dynamo, table), DynamoSmsIngressStore(dynamo, table),
         os.environ["BUSINESS_ID"], os.environ["TWILIO_BUSINESS_NUMBER"],
         os.environ["OWNER_NUMBER"], status_callback=os.environ.get("TWILIO_STATUS_URL"),
