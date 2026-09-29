@@ -176,6 +176,18 @@ def test_queue_failure_keeps_intent_due_and_stale_index_result_is_skipped() -> N
     assert queue.messages == []
 
 
+def test_dispatch_age_uses_effective_due_time_not_intent_creation() -> None:
+    store = MemoryStore()
+    store.record = replace(
+        store.record,
+        created_at=NOW - timedelta(days=2),
+        dispatch_after=NOW - timedelta(minutes=1),
+        next_attempt_at=NOW - timedelta(seconds=20),
+    )
+    report = DispatchService(store, MemoryQueue(), lambda: NOW).run_once()
+    assert report.oldest_due_age_seconds == 20.0
+
+
 def test_concurrent_duplicate_consumers_claim_once() -> None:
     store = MemoryStore()
     sender = Sender()

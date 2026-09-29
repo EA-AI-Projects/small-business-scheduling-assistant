@@ -1,5 +1,6 @@
 """Scheduled outbox dispatcher; infrastructure binds the schedule and queue."""
 
+import json
 import os
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -17,4 +18,6 @@ def dispatch_due_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         boto3.client("dynamodb"), os.environ["SCHEDULING_TABLE_NAME"]
     )
     queue = SQSIntentQueue(boto3.client("sqs"), os.environ["OUTBOX_QUEUE_URL"])
-    return asdict(DispatchService(store, queue, lambda: datetime.now(UTC)).run_once())
+    result = asdict(DispatchService(store, queue, lambda: datetime.now(UTC)).run_once())
+    print(json.dumps({"outbox_dispatch": result}, sort_keys=True))
+    return result

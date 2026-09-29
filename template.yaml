@@ -20,6 +20,10 @@ Parameters:
     Type: String
     AllowedPattern: 'https://.+/owner'
     Description: Exact HTTPS /owner callback for the deployed HTTP API custom domain.
+  AlarmEmail:
+    Type: String
+    AllowedPattern: '[^@ ]+@[^@ ]+\.[^@ ]+'
+    Description: Owner-visible alarm mailbox; recipient must confirm the SNS subscription.
   EnableSmsIngress:
     Type: String
     AllowedValues: ['true', 'false']
@@ -65,6 +69,30 @@ Globals:
         BUSINESS_ID: !Ref BusinessId
 
 Resources:
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'scheduling-alarms-${Environment}'
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AlarmEmail
+  AlarmTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics: [!Ref AlarmTopic]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudWatchAlarmPublish
+            Effect: Allow
+            Principal: {Service: cloudwatch.amazonaws.com}
+            Action: sns:Publish
+            Resource: !Ref AlarmTopic
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:*'
   SchedulingTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Retain
@@ -408,6 +436,50 @@ Resources:
       LogGroupName: !Sub '/aws/lambda/${SmsRetentionFunction}'
       RetentionInDays: 30
 
+  HoldOverdueAgeMetric:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref HoldExpiryLogGroup
+      FilterPattern: '{ $.hold_expiry.oldest_overdue_seconds = * }'
+      MetricTransformations:
+        - MetricNamespace: !Sub 'Scheduling/${Environment}'
+          MetricName: HoldOldestOverdueSeconds
+          MetricValue: '$.hold_expiry.oldest_overdue_seconds'
+  OutboxDueAgeMetric:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref OutboxDispatchLogGroup
+      FilterPattern: '{ $.outbox_dispatch.oldest_due_age_seconds = * }'
+      MetricTransformations:
+        - MetricNamespace: !Sub 'Scheduling/${Environment}'
+          MetricName: OutboxOldestDueAgeSeconds
+          MetricValue: '$.outbox_dispatch.oldest_due_age_seconds'
+  HoldOverdueAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Oldest observed due hold was overdue by more than 15 minutes.
+      Namespace: !Sub 'Scheduling/${Environment}'
+      MetricName: HoldOldestOverdueSeconds
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 900
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+  OutboxDueAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Oldest observed due outbox item was overdue by more than 15 minutes.
+      Namespace: !Sub 'Scheduling/${Environment}'
+      MetricName: OutboxOldestDueAgeSeconds
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 900
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
   OutboxDlqAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -422,6 +494,7 @@ Resources:
       Threshold: 0
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
   HoldExpiryErrorAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -436,6 +509,7 @@ Resources:
       Threshold: 0
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
   OwnerApiErrorAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -450,6 +524,7 @@ Resources:
       Threshold: 0
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
   OutboxDispatchErrorAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -464,6 +539,7 @@ Resources:
       Threshold: 0
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
   NoteRetentionErrorAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -478,6 +554,7 @@ Resources:
       Threshold: 0
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
   SmsRetentionErrorAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -492,6 +569,7 @@ Resources:
       Threshold: 0
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
   SmsIngressErrorAlarm:
     Type: AWS::CloudWatch::Alarm
     Condition: SmsIngressRequested
@@ -507,6 +585,7 @@ Resources:
       Threshold: 0
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
   SmsSenderErrorAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -521,6 +600,7 @@ Resources:
       Threshold: 0
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
 
 Outputs:
   AccountAndRegion:
@@ -532,3 +612,5 @@ Outputs:
     Value: !Sub 'https://${SmsHttpApi}.execute-api.${AWS::Region}.amazonaws.com'
   SchedulingTableName:
     Value: !Ref SchedulingTable
+  AlarmTopicArn:
+    Value: !Ref AlarmTopic

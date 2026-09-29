@@ -1,12 +1,15 @@
 """The scheduled Lambda entry point constructs the AWS dispatch path."""
 
+import json
 from datetime import datetime
 from typing import Any
 
 from scheduling.workers import outbox
 
 
-def test_dispatch_due_handler_uses_configured_table_and_queue(monkeypatch: Any) -> None:
+def test_dispatch_due_handler_uses_configured_table_and_queue(
+    monkeypatch: Any, capsys: Any
+) -> None:
     calls: list[tuple[Any, ...]] = []
     dynamo_client = object()
     sqs_client = object()
@@ -38,3 +41,11 @@ def test_dispatch_due_handler_uses_configured_table_and_queue(monkeypatch: Any) 
         ("store", dynamo_client, "pilot-table"),
         ("queue", sqs_client, "https://sqs.example/queue"),
     ]
+    assert json.loads(capsys.readouterr().out) == {
+        "outbox_dispatch": {
+            "examined": 0,
+            "enqueued": 0,
+            "stale": 0,
+            "oldest_due_age_seconds": 0.0,
+        }
+    }

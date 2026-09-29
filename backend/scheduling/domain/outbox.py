@@ -110,7 +110,9 @@ class DispatchService:
             if record is None or not _is_dispatch_due(record, now):
                 stale += 1
                 continue
-            oldest_age = max(oldest_age, (now - record.created_at).total_seconds())
+            assert record.next_attempt_at is not None and record.dispatch_after is not None
+            due_at = max(record.next_attempt_at, record.dispatch_after)
+            oldest_age = max(oldest_age, (now - due_at).total_seconds())
             # A crash here can create another queue message. The consumer's
             # conditional claim makes duplicate messages harmless to state.
             self._queue.enqueue(record.business_id, record.outbox_id)
