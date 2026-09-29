@@ -265,12 +265,40 @@ Resources:
             ApiId: !Ref OwnerHttpApi
             Path: /owner/{proxy+}
             Method: GET
-        OwnerProxy:
+        OwnerProxyGet:
           Type: HttpApi
           Properties:
             ApiId: !Ref OwnerHttpApi
             Path: /v1/owner/{proxy+}
-            Method: ANY
+            Method: GET
+            Auth: {Authorizer: OwnerJwt}
+        OwnerProxyPost:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OwnerHttpApi
+            Path: /v1/owner/{proxy+}
+            Method: POST
+            Auth: {Authorizer: OwnerJwt}
+        OwnerProxyPut:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OwnerHttpApi
+            Path: /v1/owner/{proxy+}
+            Method: PUT
+            Auth: {Authorizer: OwnerJwt}
+        OwnerProxyPatch:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OwnerHttpApi
+            Path: /v1/owner/{proxy+}
+            Method: PATCH
+            Auth: {Authorizer: OwnerJwt}
+        OwnerProxyDelete:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OwnerHttpApi
+            Path: /v1/owner/{proxy+}
+            Method: DELETE
             Auth: {Authorizer: OwnerJwt}
   OwnerApiLogGroup:
     Type: AWS::Logs::LogGroup

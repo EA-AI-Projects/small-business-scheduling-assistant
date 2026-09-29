@@ -161,3 +161,21 @@ def test_template_wires_cors_and_owner_app_origin() -> None:
     assert "LogoutURLs: [!Sub '${OwnerAppOrigin}/']" in pool_client
     function = _resource(text, "OwnerApiFunction")
     assert "OWNER_APP_ORIGIN: !Ref OwnerAppOrigin" in function
+
+
+def test_owner_api_routes_leave_preflight_to_gateway_cors() -> None:
+    """An authorized ANY/OPTIONS route would catch preflight and return 401."""
+    function = _resource(TEMPLATE.read_text(encoding="utf-8"), "OwnerApiFunction")
+    events = re.findall(
+        r"^        (\w+):\n          Type: HttpApi\n          Properties:\n"
+        r"((?:            .*\n)+)", function, re.MULTILINE)
+    methods: dict[str, str] = {}
+    for name, body in events:
+        path = re.search(r"Path: (\S+)", body)
+        method = re.search(r"Method: (\S+)", body)
+        assert path and method, name
+        if path.group(1) == "/v1/owner/{proxy+}":
+            assert "Auth: {Authorizer: OwnerJwt}" in body, name
+            methods[name] = method.group(1).upper()
+    assert sorted(methods.values()) == sorted(["GET", "POST", "PUT", "PATCH", "DELETE"])
+    assert not {"ANY", "OPTIONS"} & set(methods.values())
