@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { CalendarEvent } from "@/api/types";
 import { datesForView, dayKey, dayTitle, localTime, statusLabel } from "@/lib/time";
@@ -23,6 +23,12 @@ export function ScheduleTab() {
     setHandledStamp(stamp.version);
     if (!stamp.preserveSelection) setSelectedId(null);
   }
+
+  // On narrow screens the detail card sits below the calendar; bring it into view on selection.
+  const detailRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (selectedId) detailRef.current?.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
+  }, [selectedId]);
 
   const events = data.calendar?.events ?? [];
   const selected = selectedId ? events.find((event) => event.event_id === selectedId) : undefined;
@@ -54,7 +60,7 @@ export function ScheduleTab() {
           ))}
         </div>
         <aside className="stack">
-          <section className="card">
+          <section className="card" ref={detailRef} aria-live="polite">
             <h3>Selected item</h3>
             {selected ? (
               <EventDetail key={`${selected.event_id}:${stamp.version}`} event={selected} />
