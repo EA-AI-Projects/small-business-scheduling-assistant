@@ -119,7 +119,7 @@ The core calendar, appointment state, approval policy, and availability calculat
 - Route categories:
   - `POST /webhooks/sms/inbound` — provider-signed inbound messages.
   - `POST /webhooks/sms/status` — delivery status callbacks.
-  - `/owner/*` — authenticated owner schedule, client, configuration, and pending-request operations.
+  - `/v1/owner/*` — authenticated owner schedule, client, configuration, and pending-request operations.
   - Internal worker entry points for SQS messages and scheduled hold expiry.
   - `/health` — non-sensitive readiness check.
 - Use Pydantic request/response schemas, explicit validation, typed domain services, and idempotency keys.
