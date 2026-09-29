@@ -1,26 +1,28 @@
-# Amplify response headers for the owner app (monorepo: this file stays at the repo root).
-# The page's exact connect-src allowlist is a build-time CSP <meta> tag in
-# frontend/src/pages/_document.tsx; browsers enforce both policies.
-customHeaders:
-  - pattern: '**'
-    headers:
-      - key: Content-Security-Policy
-        value: "frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'"
-      - key: Strict-Transport-Security
-        value: max-age=31536000; includeSubDomains
-      - key: X-Content-Type-Options
-        value: nosniff
-      - key: X-Frame-Options
-        value: DENY
-      - key: Referrer-Policy
-        value: no-referrer
-      - key: Permissions-Policy
-        value: camera=(), microphone=(), geolocation=(), payment=()
-  - pattern: '**/*.html'
-    headers:
-      - key: Cache-Control
-        value: no-store
-  - pattern: '/_next/static/**'
-    headers:
-      - key: Cache-Control
-        value: public, max-age=31536000, immutable
+# Amplify response headers for the owner app. This repository is a monorepo, so the file stays
+# at the repository root and uses the per-appRoot format. The page's exact connect-src allowlist
+# is a build-time CSP <meta> tag in frontend/src/pages/_document.tsx; browsers enforce both.
+applications:
+  - appRoot: frontend
+    customHeaders:
+      - pattern: '**'
+        headers:
+          - key: Content-Security-Policy
+            value: "frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'"
+          - key: Strict-Transport-Security
+            value: max-age=31536000; includeSubDomains
+          - key: X-Content-Type-Options
+            value: nosniff
+          - key: X-Frame-Options
+            value: DENY
+          - key: Referrer-Policy
+            value: no-referrer
+          - key: Permissions-Policy
+            value: camera=(), microphone=(), geolocation=(), payment=()
+      - pattern: '**/*.html'
+        headers:
+          - key: Cache-Control
+            value: no-store
+      - pattern: '/_next/static/**'
+        headers:
+          - key: Cache-Control
+            value: public, max-age=31536000, immutable

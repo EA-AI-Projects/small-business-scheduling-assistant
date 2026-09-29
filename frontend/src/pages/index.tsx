@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Workspace } from "@/components/Workspace";
 import { OwnerApi } from "@/lib/api";
-import { authorizeUrl, clearPendingSignIn, completeSignIn, logoutUrl } from "@/lib/auth";
+import { authorizeUrl, clearPendingSignIn, completeSignIn, logoutUrl, tokenExpiry } from "@/lib/auth";
 import { ConfigError, parseConfig, rawConfigFromEnv, type OwnerConfig } from "@/lib/config";
 import { OwnerProvider, errorMessage } from "@/owner/OwnerContext";
 
@@ -49,6 +49,16 @@ function OwnerSession({ config }: { config: OwnerConfig }) {
       .catch((error: unknown) => notify(errorMessage(error), true))
       .finally(() => setCompleting(false));
   }, [config, notify]);
+
+  // End the session when the access token expires, even if an expired-token 401 arrives
+  // without CORS headers and the browser reports it only as a network failure.
+  useEffect(() => {
+    const expiry = token ? tokenExpiry(token) : null;
+    if (expiry === null) return;
+    const timer = window.setTimeout(() => endSession("Your session expired. Sign in again."),
+      Math.max(0, expiry - Date.now() - 30_000));
+    return () => window.clearTimeout(timer);
+  }, [token, endSession]);
 
   const api = useMemo(() => token
     ? new OwnerApi(config, token, () => endSession("Your session ended. Sign in again."))

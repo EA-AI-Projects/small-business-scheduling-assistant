@@ -34,7 +34,7 @@ jobs:
           cache-dependency-path: backend/pyproject.toml
 
       - name: Install backend
-        run: python -m pip install -e './backend[dev]' cfn-lint
+        run: python -m pip install -c backend/ci-constraints.txt -e './backend[dev]' cfn-lint
 
       - name: Ruff
         run: python -m ruff check backend

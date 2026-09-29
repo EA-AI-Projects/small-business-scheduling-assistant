@@ -93,6 +93,22 @@ export async function completeSignIn(config: OwnerConfig, location: URL,
   return accessToken;
 }
 
+/**
+ * Expiry (ms since epoch) from a JWT access token's `exp` claim, or null if unreadable.
+ * Read only to end the in-memory session on time; the API still verifies every token.
+ */
+export function tokenExpiry(token: string): number | null {
+  const payload = token.split(".")[1];
+  if (!payload) return null;
+  try {
+    const json = atob(payload.replaceAll("-", "+").replaceAll("_", "/"));
+    const exp: unknown = (JSON.parse(json) as { exp?: unknown }).exp;
+    return typeof exp === "number" && Number.isFinite(exp) ? exp * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Hosted UI logout ends the Cognito session so the next sign-in asks for credentials. */
 export function logoutUrl(config: OwnerConfig, origin: string): string | null {
   if (config.authMode !== "cognito" || !config.cognitoDomain || !config.clientId) return null;

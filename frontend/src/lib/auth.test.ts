@@ -1,4 +1,4 @@
-import { authorizeUrl, completeSignIn, logoutUrl } from "./auth";
+import { authorizeUrl, completeSignIn, logoutUrl, tokenExpiry } from "./auth";
 import { parseConfig } from "./config";
 
 const config = parseConfig({
@@ -75,5 +75,20 @@ describe("logoutUrl", () => {
     const url = new URL(logoutUrl(config, ORIGIN)!);
     expect(url.pathname).toBe("/logout");
     expect(url.searchParams.get("logout_uri")).toBe(`${ORIGIN}/`);
+  });
+});
+
+describe("tokenExpiry", () => {
+  const jwt = (payload: object) =>
+    `h.${btoa(JSON.stringify(payload)).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "")}.s`;
+
+  it("reads the exp claim in milliseconds", () => {
+    expect(tokenExpiry(jwt({ exp: 1_800_000_000, sub: "owner" }))).toBe(1_800_000_000_000);
+  });
+
+  it("returns null for opaque or malformed tokens", () => {
+    expect(tokenExpiry("local-dev-token-0123456789")).toBeNull();
+    expect(tokenExpiry("a.!!!.b")).toBeNull();
+    expect(tokenExpiry(jwt({ exp: "soon" }))).toBeNull();
   });
 });

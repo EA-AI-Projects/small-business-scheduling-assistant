@@ -62,4 +62,4 @@ CI fails if either generated file is stale. The owner routes do not declare resp
 
 ## Amplify Hosting
 
-`amplify.yml` at the repository root builds this directory as the monorepo app root. On the Amplify app, set `AMPLIFY_MONOREPO_APP_ROOT=frontend` and the Cognito-mode variables above. Creating the Amplify app or connecting the repository is a deployment step that needs separate authorization (#43).
+`amplify.yml` at the repository root builds this directory as the monorepo app root. `customHttp.yml`, also at the root, uses the monorepo `applications`/`appRoot` format; `src/hosting.test.ts` checks both files. Create the Amplify app with platform `WEB` (static hosting). Amplify may detect Next.js and default to `WEB_COMPUTE`, which expects a server build rather than `out/`. On the Amplify app, set `AMPLIFY_MONOREPO_APP_ROOT=frontend` and the Cognito-mode variables above. Creating the Amplify app or connecting the repository is a deployment step that needs separate authorization (#43).

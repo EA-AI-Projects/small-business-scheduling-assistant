@@ -62,4 +62,30 @@ describe("OwnerProvider", () => {
     await waitFor(() => expect(notify).toHaveBeenCalledWith("Nothing was saved: Invalid", true));
     expect(screen.getByText(/v1/)).toBeInTheDocument();
   });
+
+  it("ignores an older refresh that finishes after a newer one", async () => {
+    let calendarCalls = 0;
+    let releaseSlow: () => void = () => undefined;
+    const notify = vi.fn();
+    const { api } = fakeApi(() => undefined);
+    const realGet = api.get.bind(api);
+    vi.spyOn(api, "get").mockImplementation(async <T,>(path: string) => {
+      if (path !== "/calendar") return realGet<T>(path);
+      calendarCalls += 1;
+      const revision = calendarCalls;
+      // The initial load (revision 1) is held until after the second refresh completes.
+      if (revision === 1) await new Promise<void>((resolve) => { releaseSlow = resolve; });
+      return { business_id: "pilot", revision, events: [] } as T;
+    });
+    function Revision() {
+      const { data, refresh } = useOwner();
+      return <button type="button" onClick={() => void refresh()}>rev {data.calendar?.revision ?? "none"}</button>;
+    }
+    render(<OwnerProvider api={api} notify={notify}><Revision /></OwnerProvider>);
+    await userEvent.click(screen.getByText("rev none"));
+    expect(await screen.findByText("rev 2")).toBeInTheDocument();
+    releaseSlow();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.getByText("rev 2")).toBeInTheDocument();
+  });
 });

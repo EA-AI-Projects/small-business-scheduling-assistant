@@ -77,7 +77,11 @@ export function OwnerProvider({ api, notify, children }: {
     if (alive.current) notify(message, error);
   }, [notify]);
 
+  // Overlapping refreshes may finish out of order; only the latest one may update state.
+  const latestRefresh = useRef(0);
+
   const refresh = useCallback(async (preserveSelection = false) => {
+    const request = ++latestRefresh.current;
     const [calendar, requests, clients, policy] = await Promise.all([
       api.get<CalendarSnapshot>("/calendar"),
       api.get<Appointment[]>("/requests"),
@@ -87,7 +91,7 @@ export function OwnerProvider({ api, notify, children }: {
         throw error;
       }),
     ]);
-    if (!alive.current) return;
+    if (!alive.current || request !== latestRefresh.current) return;
     setData({ calendar, requests, clients, policy, zone: policy?.record.policy.timezone ?? "UTC" });
     setLoaded(true);
     setStamp((current) => ({ version: current.version + 1, preserveSelection }));
