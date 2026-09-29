@@ -53,6 +53,9 @@ def test_page_is_public_but_state_and_sending_need_the_local_token() -> None:
                       headers={"Authorization": "Bearer wrong-token-0123456789"}).status_code == 401
     assert client.post("/local/texts", json={"party": "owner", "body": "hi"}).status_code == 401
     assert "/local/texts" not in client.get("/openapi.json").text
+    # One text at a time: Send stays disabled until the reply arrives.
+    assert "if (sending) return;" in page.text
+    assert 'id="send-button"' in page.text
 
 
 def test_text_booking_appears_in_owner_api_and_owner_app_approval_notifies_client() -> None:

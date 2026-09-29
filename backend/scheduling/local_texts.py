@@ -331,7 +331,7 @@ PAGE = """<!doctype html>
       <label>Text as <select id="party"></select></label>
       <input id="body" maxlength="1000" autocomplete="off"
              placeholder="e.g. Do you have anything tomorrow morning?">
-      <button>Send</button>
+      <button id="send-button">Send</button>
     </form>
     <p class="hint">Client: ask in plain words, such as <em>Do you have availability
     tomorrow?</em>, then reply with an offered number or time, or <em>yes</em>.
@@ -392,15 +392,25 @@ $("signin").addEventListener("submit", async (event) => {
     setInterval(() => refresh().catch(() => {}), 3000);
   } catch (error) { token = null; alert_(error.message); }
 });
+let sending = false;
+function setSending(on) {
+  // One text at a time: a reply that waits on the model takes a few seconds.
+  sending = on;
+  for (const id of ["party", "body", "send-button"]) $(id).disabled = on;
+  $("send-button").textContent = on ? "Sending..." : "Send";
+}
 $("send").addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (sending) return;
   $("error").textContent = "";
+  setSending(true);
   try {
     await call("/local/texts", { method: "POST",
       body: JSON.stringify({ party: $("party").value, body: $("body").value }) });
     $("body").value = "";
     await refresh();
   } catch (error) { $("error").textContent = error.message; }
+  finally { setSending(false); $("body").focus(); }
 });
 </script>
 </body>
