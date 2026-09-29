@@ -76,6 +76,30 @@ def pending(store: InMemoryCalendarRepository) -> str:
         "pilot", "client-1", "client-1", "seed-hold", START, 120), NOW).hold_id
 
 
+class NoConsent(Consent):
+    def read_consent(self, business_id: str, phone_e164: str) -> ConsentEvidence | None:
+        return None
+
+
+class OtherClientConsent(Consent):
+    def read_consent(self, business_id: str, phone_e164: str) -> ConsentEvidence | None:
+        return ConsentEvidence(business_id, "client-2", "Other Client", phone_e164, NOW, "pilot-v1")
+
+
+class TimedOut(Interpreter):
+    def propose(self, body: str, context: MessageContext) -> MessageProposal:
+        self.calls.append(context)
+        raise TimeoutError("synthetic model timeout")
+
+
+def calendar_state(store: InMemoryCalendarRepository) -> tuple[tuple[str, str, int], ...]:
+    appointments = (store.read_appointment(event.event_id)
+                    for event in store.read_calendar("pilot").events)
+    return tuple(sorted((appointment.appointment_id, appointment.status.value,
+                         appointment.version)
+                        for appointment in appointments if appointment is not None))
+
+
 def test_unauthorized_or_keyword_message_never_reaches_model_or_schedule() -> None:
     service, store, model, _ = setup(MessageProposal("request_booking", None,
                                                       "2026-10-01 09:00", None, False))
@@ -348,26 +372,7 @@ def test_reschedule_clarification_does_not_offer_pending_request_as_target() -> 
     assert f"RESCHEDULE {pending_id[:8]}" not in outcome.text
 
 
-class NoConsent(Consent):
-    def read_consent(self, business_id: str, phone_e164: str) -> ConsentEvidence | None:
-        return None
-
-
-class TimedOut(Interpreter):
-    def propose(self, body: str, context: MessageContext) -> MessageProposal:
-        self.calls.append(context)
-        raise TimeoutError("synthetic model timeout")
-
-
-def calendar_state(store: InMemoryCalendarRepository) -> tuple[tuple[str, str, int], ...]:
-    appointments = (store.read_appointment(event.event_id)
-                    for event in store.read_calendar("pilot").events)
-    return tuple(sorted((appointment.appointment_id, appointment.status.value,
-                         appointment.version)
-                        for appointment in appointments if appointment is not None))
-
-
-def test_client_without_owner_verified_profile_is_sent_to_owner_without_model_or_write() -> None:
+def test_client_without_owner_verified_profile_is_refused_without_model_or_write() -> None:
     booking = MessageProposal("request_booking", None, "2026-10-01 09:00", None, False)
     service, store, model, _ = setup(booking)
     assert not service.handle(receipt("Book 2026-10-01 09:00",
@@ -380,7 +385,12 @@ def test_client_without_owner_verified_profile_is_sent_to_owner_without_model_or
     inactive.save_profile(ClientProfile(
         "pilot", "client-1", "Synthetic Client", "+14155550101", "123 Test Street",
         HomeSize.MEDIUM, 120, False, 1, NOW, NOW, NOW), 0, None)
-    variants = [(unverified, Consent()), (inactive, Consent()), (store, NoConsent())]
+    other_phone = InMemoryCalendarRepository()
+    other_phone.save_profile(ClientProfile(
+        "pilot", "client-1", "Synthetic Client", "+14155550102", "123 Test Street",
+        HomeSize.MEDIUM, 120, True, 1, NOW, NOW, NOW), 0, None)
+    variants = [(unverified, Consent()), (inactive, Consent()), (store, NoConsent()),
+                (store, OtherClientConsent()), (other_phone, Consent())]
     for repository, consent in variants:
         variant = ConversationService(repository, model, HoldService(repository),
                                       LifecycleService(repository, lambda: NOW), consent,
@@ -399,7 +409,9 @@ def test_booking_without_complete_date_and_time_asks_for_it_and_writes_nothing()
     assert not result.committed
     assert "BOOK YYYY-MM-DD" in result.text
     model.proposal = MessageProposal("request_booking", None, None, None, False)
-    assert not service.handle(receipt("I'd like to book a visit")).committed
+    result = service.handle(receipt("I'd like to book a visit"))
+    assert not result.committed
+    assert "BOOK YYYY-MM-DD" in result.text
     assert store.read_calendar("pilot").events == ()
 
 
@@ -446,3 +458,30 @@ def test_issue_24_synthetic_cases_cannot_change_calendar_even_with_unsafe_model_
                                             provider_id=f"SM-eval-{number}-{variant}"))
             assert not result.committed, (case.name, proposal)
     assert calendar_state(store) == before
+
+
+def test_issue_24_cases_with_real_references_do_not_let_the_model_pick_one() -> None:
+    service, store, model, _ = setup(MessageProposal("clarify", None, None, None, True))
+    first = pending(store)
+    second = HoldService(store).create(CreateHold(
+        "pilot", "client-1", "client-1", "seed-second", START + timedelta(days=1), 120),
+        NOW).hold_id
+    before = calendar_state(store)
+    refs = {"A-101": first[:8], "B-202": second[:8]}
+    for case in CASES:
+        if case.actor != "owner" or not case.must_clarify:
+            continue
+        body = case.message
+        for placeholder, reference in refs.items():
+            body = body.replace(placeholder, reference)
+        for decision in ("approve", "decline"):
+            model.proposal = MessageProposal("owner_decision", first[:8], None, decision, False)
+            result = service.handle(receipt(body, role=SenderRole.OWNER,
+                                            provider_id=f"SM-real-{case.name}-{decision}"))
+            assert not result.committed, (case.name, decision)
+    assert calendar_state(store) == before
+    explicit = next(case for case in CASES if case.name == "explicit-owner-reference")
+    result = service.handle(receipt(explicit.message.replace("A-101", first[:8]),
+                                    role=SenderRole.OWNER, provider_id="SM-real-explicit"))
+    assert result.committed
+    assert store.read_appointment(first).status == CalendarStatus.CONFIRMED  # type: ignore[union-attr]
