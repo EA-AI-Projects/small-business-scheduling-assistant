@@ -1,26 +1,39 @@
-"""Synthetic, read-only tool-call evaluation for the pilot message interpreter.
+"""Read-only tool-call evaluation and fictional-message preview.
 
-Run with OPENAI_API_KEY set in the process environment. This program never calls
-the scheduling service and never includes real client data.
+Run with OPENAI_API_KEY set in the process environment. Fixed cases are synthetic;
+interactive input is user supplied. This program never calls the scheduling service.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
+
+from scheduling.domain.client_records import ACCESS_CODE_PATTERN
 
 MODEL = "gpt-6-luna"
 URL = "https://api.openai.com/v1/responses"
+PHONE_IN_TEXT = re.compile(
+    r"(?<!\w)(?:\+?1[\s.()-]?)?(?:\(?[2-9]\d{2}\)?[\s.()-]?)"
+    r"[2-9]\d{2}[\s.()-]?\d{4}(?!\w)"
+)
 INSTRUCTIONS = (
     "Classify one synthetic scheduling text. You propose interpretation only; "
     "you cannot authorize a booking, approval, cancellation, or reschedule. "
     "When a date, appointment, or owner decision target is ambiguous or invalid, "
-    "set needs_clarification true and ask one specific question. "
+    "set needs_clarification true, intent clarify, request_reference null, "
+    "date_text null, and owner_decision null. Ask one specific question. "
+    "Do not include a proposed action or inferred date in a clarification response. "
+    "Do not offer candidate calendar dates in the question; ask for an exact date instead. "
     "Never guess a calendar date or request reference. Always call propose_message once."
 )
 TOOL: dict[str, Any] = {
@@ -108,13 +121,18 @@ def parse_proposal(response: dict[str, Any]) -> dict[str, Any]:
 
 def case_passes(case: Case, proposal: dict[str, Any]) -> bool:
     if case.must_clarify:
-        return (proposal["needs_clarification"] is True and
-                proposal["intent"] == "clarify" and
-                proposal["request_reference"] is None and
-                proposal["date_text"] is None and
-                proposal["owner_decision"] is None and
-                isinstance(proposal["question"], str) and
-                bool(proposal["question"].strip()))
+        safe_shape = (proposal["needs_clarification"] is True and
+                      proposal["intent"] == "clarify" and
+                      proposal["request_reference"] is None and
+                      proposal["date_text"] is None and
+                      proposal["owner_decision"] is None and
+                      isinstance(proposal["question"], str) and
+                      bool(proposal["question"].strip()))
+        if not safe_shape:
+            return False
+        if case.name == "broad-window":
+            return not any(char.isdigit() for char in proposal["question"])
+        return True
     return (case.name == "explicit-owner-reference" and
             proposal["needs_clarification"] is False and
             proposal["intent"] == "owner_decision" and
@@ -122,7 +140,7 @@ def case_passes(case: Case, proposal: dict[str, Any]) -> bool:
             proposal["owner_decision"] == "approve")
 
 
-def evaluate(case: Case, key: str) -> dict[str, Any]:
+def propose(case: Case, key: str) -> dict[str, Any]:
     data = json.dumps(request_payload(case)).encode()
     request = Request(URL, data=data, headers={
         "Authorization": f"Bearer {key}", "Content-Type": "application/json",
@@ -132,18 +150,62 @@ def evaluate(case: Case, key: str) -> dict[str, Any]:
             result = json.load(response)
     except HTTPError as exc:
         raise RuntimeError(f"OpenAI API returned HTTP {exc.code}") from exc
-    proposal = parse_proposal(result)
+    return parse_proposal(result)
+
+
+def evaluate(case: Case, key: str) -> dict[str, Any]:
+    proposal = propose(case, key)
     passed = case_passes(case, proposal)
     return {"case": case.name, "passed": passed,
             "needs_clarification": proposal["needs_clarification"],
             "intent": proposal["intent"], "question": proposal["question"]}
 
 
-def main() -> int:
+def safe_preview_message(message: str) -> bool:
+    """Reject recognizable private input before any network request."""
+    return not (ACCESS_CODE_PATTERN.search(message) or PHONE_IN_TEXT.search(message))
+
+
+def interactive(key: str) -> int:
+    print("Synthetic message preview. Use no real client details or access codes.")
+    print("/client or /owner changes the actor; /quit exits. No bookings or texts are sent.")
+    actor = "client"
+    while True:
+        try:
+            message = input(f"{actor}> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if message == "/quit":
+            return 0
+        if message in {"/client", "/owner"}:
+            actor = message[1:]
+            continue
+        if not message:
+            continue
+        if not safe_preview_message(message):
+            print("Input looks like a phone number or access code; nothing was sent.")
+            continue
+        context = (f"Today is {datetime.now(ZoneInfo('America/Los_Angeles')).date().isoformat()}. "
+                   "Two synthetic upcoming visits: A-101 and B-202."
+                   if actor == "client" else
+                   "Two synthetic pending requests: A-101 and B-202.")
+        case = Case("preview", actor, context, message, False)
+        print(json.dumps(propose(case, key), indent=2))
+        print("Preview only; the scheduling service has not acted on this proposal.")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--interactive", action="store_true",
+                        help="Preview synthetic messages without scheduling writes")
+    args = parser.parse_args(argv)
     key = os.environ.get("OPENAI_API_KEY")
     if not key:
         print("OPENAI_API_KEY is required for live synthetic evaluation", file=sys.stderr)
         return 2
+    if args.interactive:
+        return interactive(key)
     results = [evaluate(case, key) for case in CASES]
     print(json.dumps({"model": MODEL, "results": results}, indent=2))
     return 0 if all(item["passed"] for item in results) else 1

@@ -4,7 +4,15 @@ import json
 
 import pytest
 
-from evals.scheduling_messages import CASES, TOOL, case_passes, parse_proposal, request_payload
+from evals.scheduling_messages import (
+    CASES,
+    TOOL,
+    case_passes,
+    interactive,
+    parse_proposal,
+    request_payload,
+    safe_preview_message,
+)
 
 
 def test_every_case_uses_only_a_read_only_proposal_tool() -> None:
@@ -68,3 +76,20 @@ def test_ambiguous_date_cannot_pass_with_a_guessed_calendar_time() -> None:
     }
     assert case_passes(case, proposal)
     assert not case_passes(case, {**proposal, "date_text": "2026-10-02 15:00"})
+    assert not case_passes(case, {
+        **proposal, "question": "Do you mean October 2 or October 9?",
+    })
+
+
+def test_preview_rejects_recognizable_sensitive_input() -> None:
+    assert safe_preview_message("Can I book next Friday afternoon?")
+    assert not safe_preview_message("Call me at (415) 555-0123")
+    assert not safe_preview_message("My gate code is 1234")
+
+
+def test_preview_does_not_send_rejected_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    messages = iter(["Call me at (415) 555-0123", "My gate code is 1234", "/quit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(messages))
+    monkeypatch.setattr("evals.scheduling_messages.propose", lambda *_: pytest.fail(
+        "Rejected preview input reached the API call"))
+    assert interactive("unused-key") == 0
