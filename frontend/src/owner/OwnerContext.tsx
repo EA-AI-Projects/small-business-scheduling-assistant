@@ -45,6 +45,8 @@ interface OwnerContextValue {
   selectClient: (clientId: string | null, noteAppointmentId?: string | null) => void;
   /** Visit to prefill on the next client note, set when opening notes from the schedule. */
   noteAppointmentId: string | null;
+  /** Increments on every selectClient call, so forms can reset per selection event. */
+  selectionVersion: number;
 }
 
 const OwnerContext = createContext<OwnerContextValue | null>(null);
@@ -66,6 +68,7 @@ export function OwnerProvider({ api, notify, children }: {
   const [tab, setTab] = useState<Tab>("schedule");
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
   const [noteAppointmentId, setNoteAppointmentId] = useState<string | null>(null);
+  const [selectionVersion, setSelectionVersion] = useState(0);
   // The provider is keyed by session; once unmounted, late responses must not notify.
   const alive = useRef(true);
   useEffect(() => {
@@ -135,6 +138,7 @@ export function OwnerProvider({ api, notify, children }: {
   const selectClient = useCallback((clientId: string | null, appointmentId: string | null = null) => {
     setSelectedClientId(clientId);
     setNoteAppointmentId(appointmentId);
+    setSelectionVersion((current) => current + 1);
   }, []);
 
   useEffect(() => {
@@ -144,9 +148,9 @@ export function OwnerProvider({ api, notify, children }: {
 
   const value = useMemo<OwnerContextValue>(() => ({
     api, data, loaded, stamp, refresh, change, resolveLocal, notify: safeNotify, tab, setTab,
-    selectedClientId, selectClient, noteAppointmentId,
+    selectedClientId, selectClient, noteAppointmentId, selectionVersion,
   }), [api, data, loaded, stamp, refresh, change, resolveLocal, safeNotify, tab,
-    selectedClientId, selectClient, noteAppointmentId]);
+    selectedClientId, selectClient, noteAppointmentId, selectionVersion]);
 
   return <OwnerContext.Provider value={value}>{children}</OwnerContext.Provider>;
 }

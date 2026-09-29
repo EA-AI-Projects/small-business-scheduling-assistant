@@ -107,7 +107,7 @@ export interface AvailabilityPolicy {
   hold_minutes: number;
   maximum_buffer_minutes: number;
   date_exceptions: Record<string, LocalWindow[]>;
-  holiday_calendar: string | null;
+  holiday_calendar: Schemas["HolidayCalendar"] | null;
 }
 
 export interface PolicyState {
