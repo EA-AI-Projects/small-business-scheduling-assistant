@@ -31,6 +31,37 @@ An SMS-first scheduling assistant for a small home-cleaning business. Clients re
 
 The backend exposes a health endpoint and read-only calendar and availability APIs backed by a synthetic local adapter. The owner-approved pilot policy is encoded as a default for local tests; the DynamoDB adapter requires the owner policy seed before booking. Hold creation, appointment transitions, owner policy edits, blocks, and manual appointments use revision-guarded atomic writes. Provider-independent outbox dispatch and delivery logic includes a scheduled Lambda dispatcher entry point. A Twilio ingress and outbox sender, authenticated owner consent record, delivery-status callback, and 90-day SMS body purge worker are implemented with synthetic tests; queue/API resources and periodic triggers remain to be provisioned in #22. An authenticated owner API, client profile/note storage, and a minimal owner calendar page are implemented but not deployed. No production scheduling service has been deployed or live SMS sent.
 
+## Try the app locally
+
+One backend process and the owner web app share a single fictional, in-memory calendar. Nothing reaches Twilio, AWS, or real phones.
+
+| Process | Start it with | Connects to |
+| --- | --- | --- |
+| Synthetic owner backend, port 8000 | Terminal A, below | Holds the one in-memory calendar. Optionally calls OpenAI for free-form texts. |
+| Owner web app, port 3000 | Terminal B, below | Calls the backend on port 8000. |
+| Text simulator page | Served by the backend at `http://127.0.0.1:8000/local/texts` | The same backend and calendar. |
+
+Terminal A, from the repository root. Omit `source .env` to run without OpenAI; exact commands still work, and free-form texts get the command prompt.
+
+```sh
+(
+  set -a; source .env; set +a
+  export LOCAL_OWNER_TOKEN="$(openssl rand -hex 16)"; echo "$LOCAL_OWNER_TOKEN"
+  backend/.venv/bin/uvicorn scheduling.local_owner:app --app-dir backend --host 127.0.0.1 --port 8000
+)
+```
+
+Terminal B, the first time: `cd frontend && cp .env.example .env.local && npm ci`. Then run `cd frontend && npm run dev`.
+
+Open `http://127.0.0.1:3000` (owner calendar) and `http://127.0.0.1:8000/local/texts` (text simulator), and paste the printed token into each.
+
+- **Client texts:** choose Avery Example or Blake Sample in the simulator and text `Book YYYY-MM-DD` for a weekday within 14 days, then `Book YYYY-MM-DD HH:MM`. Refresh the owner calendar to see the pending request.
+- **Owner decisions:** approve or decline in the owner app, or by texting `Approve REF` as the owner. The simulator shows the notification texts each side would receive, rendered with the production templates.
+- **Cancel and reschedule:** client texts `Cancel REF` or `Reschedule REF to YYYY-MM-DD HH:MM`. Rescheduling needs a confirmed visit; the original stays booked until the owner approves the replacement.
+- **Unverified senders:** Casey Demo is deliberately unverified. Their texts get no reply, as in production.
+
+Everything resets when Terminal A stops. Hold expiry and other scheduled workers do not run locally. STOP/HELP keywords are handled by Twilio in production and are not simulated.
+
 ## Local backend
 
 Python 3.12+ is required locally. From the repository root:

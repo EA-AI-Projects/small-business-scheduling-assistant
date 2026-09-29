@@ -12,6 +12,7 @@ from scheduling.domain.holds import (
     CreateHold,
     HoldCommit,
     IdempotencyRecord,
+    OutboxIntent,
     RevisionConflict,
 )
 from scheduling.domain.lifecycle import AppointmentCommand, TransitionCommit, TransitionRecord
@@ -175,6 +176,12 @@ class InMemoryCalendarRepository:
             for intent in commit.outbox:
                 self._outbox[intent.outbox_id] = intent
             self._revisions[business_id] += 1
+
+    def list_outbox_intents(self) -> tuple[OutboxIntent, ...]:
+        """Committed notification intents in commit order (local harnesses only)."""
+        with self._lock:
+            return tuple(intent for intent in self._outbox.values()
+                         if isinstance(intent, OutboxIntent))
 
     def read_appointment(self, appointment_id: str) -> Appointment | None:
         with self._lock:
