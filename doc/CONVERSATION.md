@@ -18,7 +18,7 @@ The subshell removes the key from the parent shell even if the command is interr
 
 Try a weekday within the next 14 days:
 
-1. As `client`, type `Book YYYY-MM-DD` to see available start times.
+1. As `client`, type `Book YYYY-MM-DD` to see available start times. The reply includes the complete `BOOK YYYY-MM-DD HH:MM` command to use next; each text is interpreted on its own.
 2. Type `Book YYYY-MM-DD HH:MM` using a returned time. The reply says the request is pending owner approval and gives an eight-character reference.
 3. Type `/calendar` to inspect the pending request; `/owner` to switch actors.
 4. Type `Approve REFERENCE` or `Decline REFERENCE`. The exact reference must be the one shown. An ambiguous `Yes` cannot change the request.

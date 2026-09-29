@@ -155,7 +155,8 @@ class ConversationService:
         except (OSError, ValueError, TypeError, KeyError, RuntimeError):
             return ConversationOutcome("I couldn't understand that message. Please try again later.")
         if proposal.needs_clarification or proposal.intent in ("clarify", "unsupported"):
-            return ConversationOutcome(self._clarify(receipt.role, proposal.intent))
+            return ConversationOutcome(self._clarify(
+                receipt.role, proposal.intent, receipt.body or "", targets))
         if proposal.intent == "owner_decision":
             return self._owner_decision(receipt, proposal, targets)
         if proposal.intent == "cancel":
@@ -181,12 +182,25 @@ class ConversationService:
                             key=lambda appointment: appointment.start_at))
 
     @staticmethod
-    def _clarify(role: SenderRole, intent: str) -> str:
+    def _clarify(role: SenderRole, intent: str, body: str = "",
+                 targets: tuple[Appointment, ...] = ()) -> str:
         if role == SenderRole.OWNER:
             return "Reply APPROVE or DECLINE with one exact request reference."
+        if re.search(r"\breschedule\b", body, re.IGNORECASE):
+            match = re.search(rf"\breschedule\s+({REFERENCE})(?=\s|$)",
+                              body, re.IGNORECASE)
+            target = (ConversationService._target(body, match.group(1), targets)
+                      if match is not None else None)
+            if target is not None and target.status != CalendarStatus.CONFIRMED:
+                return "That request is pending owner approval. Rescheduling needs a confirmed visit."
+            reference = target.appointment_id[:8] if target is not None else "REFERENCE"
+            return (f"Reply RESCHEDULE {reference} to YYYY-MM-DD for options, or "
+                    f"RESCHEDULE {reference} to YYYY-MM-DD HH:MM to request a time.")
+        if re.search(r"\bcancel\b", body, re.IGNORECASE):
+            return "Reply CANCEL REFERENCE with one exact confirmed appointment reference."
         if intent == "unsupported":
             return "Please ask for a booking, cancellation, or reschedule."
-        return "Please give an exact YYYY-MM-DD date and, to request a time, HH:MM in local time."
+        return "Reply BOOK YYYY-MM-DD for options, or BOOK YYYY-MM-DD HH:MM to request a time."
 
     @staticmethod
     def _exact_command(body: str, context: MessageContext,
@@ -285,6 +299,8 @@ class ConversationService:
             original = self._target(receipt.body or "", proposal.request_reference, targets)
             if original is None or original.status != CalendarStatus.CONFIRMED:
                 return ConversationOutcome("Please give the exact confirmed visit reference to reschedule.")
+        reply_command = (f"RESCHEDULE {original.appointment_id[:8]} to" if original is not None
+                         else "BOOK")
         body = (receipt.body or "").strip()
         if proposal.intent == "reschedule":
             command = RESCHEDULE_COMMAND.fullmatch(body)
@@ -299,9 +315,11 @@ class ConversationService:
                 return ConversationOutcome("Reply BOOK YYYY-MM-DD HH:MM in local time.")
             date_text = command.group(1)
         if not isinstance(date_text, str):
-            return ConversationOutcome(self._clarify(receipt.role, "clarify"))
+            return ConversationOutcome(self._clarify(
+                receipt.role, "clarify", receipt.body or "", targets))
         if proposal.date_text != date_text:
-            return ConversationOutcome(self._clarify(receipt.role, "clarify"))
+            return ConversationOutcome(self._clarify(
+                receipt.role, "clarify", receipt.body or "", targets))
         if EXPLICIT_DATE.fullmatch(date_text):
             try:
                 day = date.fromisoformat(date_text)
@@ -314,16 +332,20 @@ class ConversationService:
                     starts = available_starts(policy, day, profile.default_duration_minutes,
                                               events, now)
             except (ValueError, InvalidDuration, InvalidPolicy):
-                return ConversationOutcome("That date is unavailable. Please send another YYYY-MM-DD date.")
+                return ConversationOutcome(
+                    f"That date is unavailable. Reply {reply_command} YYYY-MM-DD for options.")
             if not starts:
-                return ConversationOutcome("No openings on that date. Please choose another YYYY-MM-DD date.")
+                return ConversationOutcome(
+                    f"No openings on that date. Reply {reply_command} YYYY-MM-DD for options.")
             zone = ZoneInfo(policy.timezone)
             choices = ", ".join(start.astimezone(zone).strftime("%H:%M") for start in starts[:5])
             return ConversationOutcome(
                 f"Available starts on {day.isoformat()}: {choices}. "
-                "Reply with YYYY-MM-DD HH:MM to request one; owner approval is required.")
+                f"Reply {reply_command} {day.isoformat()} HH:MM to request one; "
+                "owner approval is required.")
         if not EXPLICIT_START.fullmatch(date_text):
-            return ConversationOutcome(self._clarify(receipt.role, "clarify"))
+            return ConversationOutcome(self._clarify(
+                receipt.role, "clarify", receipt.body or "", targets))
         try:
             wall = datetime.fromisoformat(date_text.replace(" ", "T"))
         except ValueError:
