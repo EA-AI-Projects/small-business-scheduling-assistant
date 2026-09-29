@@ -3,8 +3,15 @@
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from scheduling.adapters.dynamodb import _command_sort_key
 from scheduling.adapters.sms_dynamodb import DynamoSmsIngressStore
-from scheduling.domain.sms_ingress import ConsentEvidence, InboundReceipt, Keyword, SenderRole
+from scheduling.domain.sms_ingress import (
+    ConsentEvidence,
+    InboundReceipt,
+    Keyword,
+    SenderRole,
+    SmsCommandInterrupted,
+)
 from scheduling.domain.sms_status import SmsDeliveryStatus
 
 NOW = datetime(2026, 9, 28, 17, tzinfo=UTC)
@@ -35,6 +42,15 @@ class MemoryDynamo:
             elif "ConditionCheck" in action:
                 check = action["ConditionCheck"]
                 key = check["Key"]["SK"]["S"]
+                if check["ConditionExpression"] == "attribute_not_exists(PK)":
+                    if key in items:
+                        raise TransactionCancelled()
+                    continue
+                if "attribute_not_exists(PK) OR attribute_exists(cleared_at)" == check[
+                        "ConditionExpression"]:
+                    if key in items and "cleared_at" not in items[key]:
+                        raise TransactionCancelled()
+                    continue
                 clock = ("last_program_text_at" if "last_program_text_at" in
                          items.get(key, {}) else "last_exchange_at")
                 if (key in items and clock in items[key] and
@@ -58,8 +74,15 @@ class MemoryDynamo:
             else:
                 update = action["Update"]
                 key = update["Key"]["SK"]["S"]
-                if update["UpdateExpression"] == "REMOVE body":
-                    items[key].pop("body")
+                if "processing_token = :token" in update.get("ConditionExpression", ""):
+                    current = items.get(key)
+                    if (current is None or current.get("processing_token") !=
+                            update["ExpressionAttributeValues"][":token"] or
+                            "processed_at" in current or "reply_text" in current):
+                        raise RuntimeError("receipt lease conflict")
+                if update["UpdateExpression"] == "REMOVE body, reply_text":
+                    items[key].pop("body", None)
+                    items[key].pop("reply_text", None)
                 else:
                     current = items.setdefault(key, {"SK": {"S": key}})
                     set_part, _, remove_part = update["UpdateExpression"].partition(" REMOVE ")
@@ -72,13 +95,34 @@ class MemoryDynamo:
                             raise RuntimeError("conditional conflict")
                         current[field] = incoming
                     if remove_part:
-                        current.pop(remove_part, None)
+                        for field in remove_part.split(", "):
+                            current.pop(field, None)
         self.items = items
         return {}
 
     def update_item(self, **kwargs: Any) -> dict[str, Any]:
         key = kwargs["Key"]["SK"]["S"]
         values = kwargs.get("ExpressionAttributeValues", {})
+        expression = kwargs["UpdateExpression"]
+        if "processing_token = :token" in expression:
+            current = self.items.get(key)
+            if (current is None or not current["authorized_for_commands"]["BOOL"] or
+                    "processed_at" in current or
+                    ("processing_lease_until" in current and
+                     current["processing_lease_until"]["S"] >= values[":now"]["S"])):
+                raise RuntimeError("receipt lease conflict")
+            current["processing_token"] = values[":token"]
+            current["processing_lease_until"] = values[":until"]
+            return {}
+        if expression.startswith("SET processed_at = :now"):
+            current = self.items[key]
+            if (current.get("processing_token") != values[":token"] or
+                    "processed_at" in current):
+                raise RuntimeError("receipt lease conflict")
+            current["processed_at"] = values[":now"]
+            current.pop("processing_token", None)
+            current.pop("processing_lease_until", None)
+            return {}
         if "legal_hold_reason" in kwargs["UpdateExpression"]:
             if kwargs["UpdateExpression"].startswith("SET"):
                 self.items[key]["legal_hold_reason"] = values[":reason"]
@@ -164,6 +208,56 @@ def test_outbound_reply_extends_last_exchange_window() -> None:
     assert store.purge_expired_bodies("pilot", outbound + timedelta(days=90)) == 1
     assert "body" not in dynamo.items["SMS#SM-first"]
     assert dynamo.items["SMS_OUT#SM-out"]["recipient"]["S"] == "+14155550101"
+
+
+def test_conversation_reply_is_atomic_idempotent_and_purged_with_sms_body() -> None:
+    dynamo = MemoryDynamo()
+    store = DynamoSmsIngressStore(dynamo, "synthetic")
+    received = _receipt("SM-reply", NOW - timedelta(days=91))
+    assert store.put_received(received)
+    assert store.read_received("pilot", "SM-reply") == received
+    assert store.claim_processing(received, "token-1", received.received_at,
+                                  received.received_at + timedelta(minutes=2))
+    assert store.put_reply(received, "Please send one exact date.", "token-1",
+                           received.received_at)
+    assert not store.put_reply(received, "Changed answer", "token-1",
+                               received.received_at)
+    assert store.read_reply_text("pilot", "SM-reply") == "Please send one exact date."
+    intent = dynamo.items["OUTBOX#sms-reply#SM-reply"]
+    assert intent["recipient"]["S"] == "client"
+    assert intent["template"]["S"] == "conversation-reply"
+    assert intent["entity_id"]["S"] == "SM-reply"
+    assert store.purge_expired_bodies("pilot", NOW) == 1
+    assert store.read_reply_text("pilot", "SM-reply") is None
+    assert store.read_received("pilot", "SM-reply").body is None  # type: ignore[union-attr]
+
+
+def test_committed_command_lookup_uses_the_same_idempotency_key_as_scheduler() -> None:
+    dynamo = MemoryDynamo()
+    store = DynamoSmsIngressStore(dynamo, "synthetic")
+    received = _receipt("SM-book", NOW)
+    assert not store.has_committed_command(received)
+    key = _command_sort_key("client-1", "create_hold", "SM-book")
+    dynamo.items[key] = {"SK": {"S": key}}
+    assert store.has_committed_command(received)
+
+
+def test_stop_before_reply_transaction_prevents_reply_intent() -> None:
+    dynamo = MemoryDynamo()
+    store = DynamoSmsIngressStore(dynamo, "synthetic")
+    received = _receipt("SM-stopped", NOW)
+    assert store.put_received(received)
+    assert store.claim_processing(received, "token-1", NOW, NOW + timedelta(minutes=2))
+    dynamo.items[f"SMS_SUPPRESS#{received.sender}"] = {
+        "SK": {"S": f"SMS_SUPPRESS#{received.sender}"}}
+
+    try:
+        store.put_reply(received, "Please send one exact date.", "token-1", NOW)
+    except SmsCommandInterrupted:
+        pass
+    else:
+        raise AssertionError("STOP must block a newly committed reply")
+    assert "OUTBOX#sms-reply#SM-stopped" not in dynamo.items
 
 
 def test_failed_provider_callback_is_linked_for_owner_follow_up() -> None:

@@ -3,11 +3,15 @@
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
+from scheduling.adapters.dynamodb import _command_sort_key
+from scheduling.adapters.outbox_aws import due_keys
+from scheduling.domain.outbox import DeliveryState
 from scheduling.domain.sms_ingress import (
     ConsentEvidence,
     InboundReceipt,
     Keyword,
     SenderRole,
+    SmsCommandInterrupted,
     SmsIngressStore,
     normalize_phone,
 )
@@ -48,6 +52,150 @@ class DynamoSmsIngressStore(SmsIngressStore):
         return self._client.get_item(TableName=self._table,
                                      Key=self._key(business_id, sort_key),
                                      ConsistentRead=True).get("Item")
+
+    def read_received(self, business_id: str, provider_id: str) -> InboundReceipt | None:
+        item = self._get(business_id, f"SMS#{provider_id}")
+        if item is None:
+            return None
+        return InboundReceipt(
+            business_id, item["provider_id"]["S"], item["sender"]["S"],
+            item["recipient"]["S"], item.get("body", {}).get("S"),
+            datetime.fromisoformat(item["received_at"]["S"]),
+            SenderRole(item["role"]["S"]), item.get("client_id", {}).get("S"),
+            Keyword(item["keyword"]["S"]), item["authorized_for_commands"]["BOOL"],
+        )
+
+    def read_reply_text(self, business_id: str, provider_id: str) -> str | None:
+        item = self._get(business_id, f"SMS#{provider_id}")
+        return item.get("reply_text", {}).get("S") if item is not None else None
+
+    def has_committed_command(self, receipt: InboundReceipt) -> bool:
+        return any(self._get(receipt.business_id, key) is not None
+                   for key in self._command_keys(receipt))
+
+    @staticmethod
+    def _command_keys(receipt: InboundReceipt) -> tuple[str, ...]:
+        actor_id = (receipt.sender if receipt.role == SenderRole.OWNER else
+                    receipt.client_id if receipt.role == SenderRole.CLIENT else None)
+        if actor_id is None:
+            return ()
+        return tuple(_command_sort_key(actor_id, operation, receipt.provider_id)
+                     for operation in ("create_hold", "approve", "decline", "cancel"))
+
+    def claim_processing(self, receipt: InboundReceipt, token: str,
+                         now: datetime, lease_until: datetime) -> bool:
+        if not token or now.tzinfo is None or lease_until <= now:
+            raise ValueError("Receipt lease is invalid")
+        try:
+            self._client.update_item(
+                TableName=self._table,
+                Key=self._key(receipt.business_id, f"SMS#{receipt.provider_id}"),
+                UpdateExpression="SET processing_token = :token, "
+                                 "processing_lease_until = :until",
+                ConditionExpression="attribute_exists(PK) AND "
+                                    "authorized_for_commands = :authorized AND "
+                                    "attribute_not_exists(processed_at) AND "
+                                    "(attribute_not_exists(processing_lease_until) OR "
+                                    "processing_lease_until < :now)",
+                ExpressionAttributeValues={
+                    ":token": {"S": token}, ":until": {"S": _instant(lease_until)},
+                    ":now": {"S": _instant(now)}, ":authorized": {"BOOL": True},
+                },
+            )
+        except Exception:
+            current = self._get(receipt.business_id, f"SMS#{receipt.provider_id}")
+            if current is not None and "processed_at" in current:
+                return False
+            raise
+        return True
+
+    def mark_processed(self, receipt: InboundReceipt, token: str, now: datetime) -> None:
+        self._client.update_item(
+            TableName=self._table,
+            Key=self._key(receipt.business_id, f"SMS#{receipt.provider_id}"),
+            UpdateExpression="SET processed_at = :now "
+                             "REMOVE processing_token, processing_lease_until",
+            ConditionExpression="processing_token = :token AND "
+                                "attribute_not_exists(processed_at)",
+            ExpressionAttributeValues={
+                ":token": {"S": token}, ":now": {"S": _instant(now)},
+            },
+        )
+
+    def put_reply(self, receipt: InboundReceipt, text: str,
+                  token: str, now: datetime) -> bool:
+        """Atomically persist one trusted reply and its delivery intent."""
+        if (not receipt.authorized_for_commands or receipt.body is None
+                or receipt.keyword != Keyword.OTHER or now.tzinfo is None
+                or not text or len(text) > 500 or not token):
+            raise ValueError("Conversation reply is not eligible")
+        outbox_id = f"sms-reply#{receipt.provider_id}"
+        instant = _instant(now)
+        recipient = receipt.role.value
+        if recipient not in {"owner", "client"}:
+            raise ValueError("Conversation recipient is unknown")
+        outbox = {
+            **self._key(receipt.business_id, f"OUTBOX#{outbox_id}"),
+            **due_keys(DeliveryState.PENDING, now, outbox_id),
+            "outbox_id": {"S": outbox_id},
+            "entity_id": {"S": receipt.provider_id},
+            "recipient": {"S": recipient},
+            "template": {"S": "conversation-reply"},
+            "delivery_state": {"S": "PENDING"},
+            "created_at": {"S": instant},
+            "next_attempt_at": {"S": instant},
+            "dispatch_after": {"S": instant},
+            "attempts": {"N": "0"},
+            "event_version": {"N": "0"},
+        }
+        try:
+            self._client.transact_write_items(TransactItems=[
+                {"Update": {
+                    "TableName": self._table,
+                    "Key": self._key(receipt.business_id, f"SMS#{receipt.provider_id}"),
+                    "UpdateExpression": "SET reply_text = :text, processed_at = :now "
+                                        "REMOVE processing_token, processing_lease_until",
+                    "ConditionExpression": "attribute_exists(PK) AND "
+                                           "attribute_not_exists(reply_text) AND "
+                                           "attribute_not_exists(processed_at) AND "
+                                           "processing_token = :token AND "
+                                           "authorized_for_commands = :authorized",
+                    "ExpressionAttributeValues": {
+                        ":text": {"S": text}, ":now": {"S": instant},
+                        ":token": {"S": token}, ":authorized": {"BOOL": True},
+                    },
+                }},
+                {"Put": {
+                    "TableName": self._table, "Item": outbox,
+                    "ConditionExpression": "attribute_not_exists(PK)",
+                }},
+                {"ConditionCheck": {
+                    "TableName": self._table,
+                    "Key": self._key(receipt.business_id, f"SMS_SUPPRESS#{receipt.sender}"),
+                    "ConditionExpression": "attribute_not_exists(PK)",
+                }},
+                {"ConditionCheck": {
+                    "TableName": self._table,
+                    "Key": self._key(receipt.business_id, f"SMS_OPTOUT#{receipt.sender}"),
+                    "ConditionExpression": "attribute_not_exists(PK) OR attribute_exists(cleared_at)",
+                }},
+                *({"ConditionCheck": {
+                    "TableName": self._table,
+                    "Key": self._key(receipt.business_id, key),
+                    "ConditionExpression": "attribute_not_exists(PK)",
+                }} for key in self._command_keys(receipt)),
+            ])
+        except Exception as exc:
+            if self.read_reply_text(receipt.business_id, receipt.provider_id) is not None:
+                return False
+            response = getattr(exc, "response", {})
+            if (isinstance(response, dict) and response.get("Error", {}).get("Code")
+                    == "TransactionCanceledException"):
+                # A STOP or command may have won this transaction. Do not
+                # replay the old text after either state changes again.
+                raise SmsCommandInterrupted from exc
+            raise
+        return True
 
     def put_received(self, receipt: InboundReceipt) -> bool:
         item: dict[str, Any] = {
@@ -459,7 +607,7 @@ class DynamoSmsIngressStore(SmsIngressStore):
                 arguments["ExclusiveStartKey"] = start
             page = self._client.query(**arguments)
             for item in page.get("Items", ()):
-                if "body" not in item or "legal_hold_reason" in item:
+                if ("body" not in item and "reply_text" not in item) or "legal_hold_reason" in item:
                     continue
                 sender = item["sender"]["S"]
                 thread_key = f"SMS_THREAD#{sender}"
@@ -477,8 +625,10 @@ class DynamoSmsIngressStore(SmsIngressStore):
                         {"Update": {
                             "TableName": self._table,
                             "Key": self._key(business_id, item["SK"]["S"]),
-                            "UpdateExpression": "REMOVE body",
-                            "ConditionExpression": "attribute_exists(body) AND received_at = :received",
+                            "UpdateExpression": "REMOVE body, reply_text",
+                            "ConditionExpression": "(attribute_exists(body) OR "
+                                                   "attribute_exists(reply_text)) AND "
+                                                   "received_at = :received",
                             "ExpressionAttributeValues": {
                                 ":received": item["received_at"],
                             },

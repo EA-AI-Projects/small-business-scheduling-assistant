@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from starlette.datastructures import FormData, UploadFile
 from twilio.request_validator import RequestValidator  # type: ignore[import-untyped]
 
-from scheduling.domain.sms_ingress import SmsIngressService, normalize_phone
+from scheduling.domain.sms_ingress import SmsIngressService, SmsReceiptQueue, normalize_phone
 from scheduling.domain.sms_status import SmsDeliveryStatus, SmsStatusStore
 
 
@@ -18,7 +18,8 @@ def create_twilio_ingress_app(service: SmsIngressService, auth_token: str,
                               clock: Callable[[], datetime] | None = None,
                               *, status_url: str | None = None,
                               status_store: SmsStatusStore | None = None,
-                              business_id: str | None = None) -> FastAPI:
+                              business_id: str | None = None,
+                              receipt_queue: SmsReceiptQueue | None = None) -> FastAPI:
     """The configured public URL is trusted; proxy Host headers never define the signed URL."""
     parsed = urlsplit(inbound_url)
     if not auth_token or parsed.scheme != "https" or not parsed.netloc or parsed.query or parsed.fragment:
@@ -41,9 +42,18 @@ def create_twilio_ingress_app(service: SmsIngressService, auth_token: str,
     async def inbound(request: Request) -> Response:
         fields = await _verified_form(request, validator, inbound_url)
         try:
-            service.receive(fields, now())
+            receipt, _duplicate = service.receive(fields, now())
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if receipt_queue is not None and receipt.authorized_for_commands:
+            try:
+                # Enqueue even after a duplicate receipt: a prior handoff may
+                # have failed. The worker reads the persisted receipt by ID.
+                receipt_queue.enqueue(receipt.business_id, receipt.provider_id)
+            except Exception as exc:
+                # Surface handoff failure; provider retry policy must be
+                # configured before enabling live conversation processing.
+                raise HTTPException(status_code=503, detail="SMS handoff unavailable") from exc
         # Advanced Opt-Out owns STOP/HELP replies. A blank response avoids
         # sending duplicate messages or implying any booking state change.
         return Response(status_code=204)

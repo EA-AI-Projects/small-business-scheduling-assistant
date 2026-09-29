@@ -26,6 +26,7 @@ from scheduling.domain.owner_calendar import (
     UnavailableBlock,
 )
 from scheduling.domain.owner_policy import PolicyCommand, PolicyCommit, PolicyRecord, PolicyResult
+from scheduling.domain.sms_ingress import SmsCommandInterrupted
 
 
 class RecordingClient:
@@ -129,6 +130,8 @@ def test_hold_transaction_contains_revision_metadata_event_replay_audit_and_noti
         write["Put"]["Item"] for write in writes[1:]
         if write["Put"]["Item"]["SK"]["S"] == "META"
     )
+
+
     assert metadata["hold_due_pk"] == {"S": "HOLD#PENDING"}
     assert metadata["hold_due_sk"] == {
         "S": f"{hold.hold_expires_at.isoformat(timespec='microseconds')}#hold-1"
@@ -144,6 +147,35 @@ def test_hold_transaction_contains_revision_metadata_event_replay_audit_and_noti
     assert all(item["outbox_due_pk"] == {"S": "OUTBOX#PENDING"} for item in notices)
     assert all(item["dispatch_after"] == item["next_attempt_at"] for item in notices)
     assert all(item["created_at"] == {"S": start.isoformat(timespec="microseconds")} for item in notices)
+
+
+def test_sms_hold_commit_checks_stop_in_the_same_transaction() -> None:
+    client = RecordingClient()
+    repository = DynamoDBCalendarRepository(
+        client, "scheduling", sms_sender_guard="+14155550101")
+    start = datetime(2026, 9, 29, 16, tzinfo=UTC)
+    command = CreateHold("business-1", "client-1", "client-1", "SM-1", start, 60)
+    hold = PendingHold("hold-1", "business-1", "client-1", start,
+                       start.replace(hour=17), start.replace(day=30), 60, 30, 8)
+    commit = HoldCommit(command, command.request_hash(), hold, "audit-1", (), start)
+
+    repository.commit_hold(7, commit)
+
+    checks = [write["ConditionCheck"] for write in
+              client.transactions[0]["TransactItems"] if "ConditionCheck" in write]
+    assert [check["Key"]["SK"]["S"] for check in checks] == [
+        "SMS_SUPPRESS#+14155550101", "SMS_OPTOUT#+14155550101"]
+    assert checks[0]["ConditionExpression"] == "attribute_not_exists(PK)"
+
+    class CancelledClient(RecordingClient):
+        def transact_write_items(self, **kwargs: Any) -> dict[str, Any]:
+            raise ClientError({"Error": {"Code": "TransactionCanceledException"}},
+                              "TransactWriteItems")
+
+    interrupted = DynamoDBCalendarRepository(
+        CancelledClient(), "scheduling", sms_sender_guard="+14155550101")
+    with pytest.raises(SmsCommandInterrupted):
+        interrupted.commit_hold(7, commit)
 
 
 def test_due_hold_index_query_is_bounded_and_paginates() -> None:

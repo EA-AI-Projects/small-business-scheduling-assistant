@@ -15,7 +15,7 @@ from scheduling.domain.outbox import (
     OutboxRecord,
     PermanentDeliveryFailure,
 )
-from scheduling.domain.sms_ingress import ConsentEvidence
+from scheduling.domain.sms_ingress import ConsentEvidence, InboundReceipt, Keyword, SenderRole
 
 NOW = datetime(2026, 9, 28, 17, tzinfo=UTC)
 
@@ -40,6 +40,8 @@ class Consent:
         self.approved = True
         self.opted_out = False
         self.outbound: list[tuple[str, str, str, datetime]] = []
+        self.reply_receipt: InboundReceipt | None = None
+        self.reply_text: str | None = None
 
     def record_outbound(self, business_id: str, phone_e164: str,
                         provider_id: str, sent_at: datetime) -> None:
@@ -53,6 +55,14 @@ class Consent:
 
     def is_opted_out(self, business_id: str, phone_e164: str) -> bool:
         return self.opted_out
+
+    def read_received(self, business_id: str, provider_id: str) -> InboundReceipt | None:
+        if business_id == "pilot" and provider_id == "SM-in":
+            return self.reply_receipt
+        return None
+
+    def read_reply_text(self, business_id: str, provider_id: str) -> str | None:
+        return self.reply_text if business_id == "pilot" and provider_id == "SM-in" else None
 
 
 class Messages:
@@ -142,4 +152,38 @@ def test_owner_stop_blocks_owner_notifications() -> None:
     consent.opted_out = True
     with pytest.raises(PermanentDeliveryFailure, match="OPTED_OUT"):
         sender.deliver(record("owner", "hold-request"))
+    assert messages.calls == []
+
+
+def test_conversation_reply_uses_persisted_verified_receipt_and_current_consent() -> None:
+    sender, messages, consent, _ = setup()
+    consent.reply_receipt = InboundReceipt(
+        "pilot", "SM-in", "+14155550101", "+14155550000",
+        "Book 2026-10-01", NOW, SenderRole.CLIENT, "client-1", Keyword.OTHER, True)
+    consent.reply_text = "Please send one exact date and time."
+    reply = OutboxRecord("pilot", "sms-reply#SM-in", "SM-in", "client",
+                         "conversation-reply", 0, DeliveryState.SENDING, NOW, NOW, NOW)
+    assert sender.deliver(reply) == "SM-synthetic"
+    assert messages.calls[0]["to"] == "+14155550101"
+    assert messages.calls[0]["body"] == consent.reply_text
+    consent.opted_out = True
+    with pytest.raises(PermanentDeliveryFailure, match="OPTED_OUT"):
+        sender.deliver(reply)
+    consent.opted_out = False
+    consent.approved = False
+    with pytest.raises(PermanentDeliveryFailure, match="CONSENT_REQUIRED"):
+        sender.deliver(reply)
+    assert len(messages.calls) == 1
+
+
+def test_conversation_reply_rejects_missing_body_or_forged_destination() -> None:
+    sender, messages, consent, _ = setup()
+    consent.reply_receipt = InboundReceipt(
+        "pilot", "SM-in", "+14155550101", "+14155550000",
+        "Book 2026-10-01", NOW, SenderRole.CLIENT, "client-1", Keyword.OTHER, True)
+    consent.reply_text = "Safe clarification"
+    reply = OutboxRecord("pilot", "sms-reply#SM-in", "SM-in", "owner",
+                         "conversation-reply", 0, DeliveryState.SENDING, NOW, NOW, NOW)
+    with pytest.raises(PermanentDeliveryFailure, match="REPLY_UNAVAILABLE"):
+        sender.deliver(reply)
     assert messages.calls == []

@@ -49,7 +49,7 @@ def main() -> int:
     service = ConversationService(
         store, OpenAIMessageInterpreter(key), HoldService(store),
         LifecycleService(store, lambda: datetime.now(UTC)),
-        SyntheticConsent(), lambda: datetime.now(UTC))
+        SyntheticConsent(), lambda: datetime.now(UTC), OWNER_PHONE)
     actor = SenderRole.CLIENT
     print("Local synthetic scheduling conversation. No live texts or cloud writes.")
     print("Use fictional text only. /client, /owner, /calendar, /quit are available.")

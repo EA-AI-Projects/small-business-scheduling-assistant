@@ -7,6 +7,7 @@ from mangum import Mangum
 
 from scheduling.adapters.dynamodb import DynamoDBCalendarRepository
 from scheduling.adapters.sms_dynamodb import DynamoSmsIngressStore
+from scheduling.adapters.sms_queue import SQSReceiptQueue
 from scheduling.adapters.twilio_secret import load_twilio_auth_token
 from scheduling.domain.sms_ingress import SmsIngressService
 from scheduling.twilio_webhooks import create_twilio_ingress_app
@@ -32,5 +33,8 @@ app = create_twilio_ingress_app(
     status_url=os.environ["TWILIO_STATUS_URL"],
     status_store=_store,
     business_id=_business_id,
+    receipt_queue=(SQSReceiptQueue(
+        boto3.client("sqs"), os.environ["SMS_CONVERSATION_QUEUE_URL"])
+        if os.environ.get("SMS_CONVERSATION_HANDOFF_ENABLED") == "authorized" else None),
 )
 handler = Mangum(app, lifespan="off")

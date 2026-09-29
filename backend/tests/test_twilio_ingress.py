@@ -42,6 +42,10 @@ class MemoryStore:
                 self.opted_out.pop(receipt.sender, None)
         return True
 
+    def read_received(self, business_id: str, provider_id: str) -> InboundReceipt | None:
+        receipt = self.receipts.get(provider_id)
+        return receipt if receipt is not None and receipt.business_id == business_id else None
+
     def is_opted_out(self, business_id: str, phone_e164: str) -> bool:
         return phone_e164 in self.opted_out
 
@@ -157,3 +161,32 @@ def test_status_callback_requires_signature_and_records_provider_result() -> Non
     assert store.statuses["SM-status"].status == "undelivered"
     assert store.statuses["SM-status"].outbox_id == "notice-1"
     assert store.statuses["SM-status"].error_code == "30007"
+
+
+def test_authorized_receipt_handoff_retries_duplicates_without_queueing_unknowns() -> None:
+    _, service, store = setup()
+    service.record_in_person_consent("client-1", "+14155550101", "Synthetic Client",
+                                     "pilot-v1", NOW)
+
+    class Queue:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+            self.fail = True
+
+        def enqueue(self, business_id: str, provider_id: str) -> None:
+            self.calls.append((business_id, provider_id))
+            if self.fail:
+                raise RuntimeError("synthetic handoff failure")
+
+    queue = Queue()
+    with TestClient(create_twilio_ingress_app(service, TOKEN, URL, lambda: NOW,
+                                              receipt_queue=queue)) as handoff_client:
+        assert send(handoff_client, inbound("SM-queued")) == 503
+        assert "SM-queued" in store.receipts
+        queue.fail = False
+        assert send(handoff_client, inbound("SM-queued")) == 204
+        assert queue.calls == [("pilot", "SM-queued"), ("pilot", "SM-queued")]
+        assert send(handoff_client, inbound("SM-unknown", "+14155550102")) == 204
+        assert send(handoff_client, inbound("SM-stop", body="STOP")) == 204
+        assert queue.calls == [("pilot", "SM-queued"), ("pilot", "SM-queued")]
+        assert len(store.receipts) == 3
