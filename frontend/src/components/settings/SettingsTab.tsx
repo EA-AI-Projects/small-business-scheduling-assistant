@@ -1,11 +1,18 @@
-import { SectionHeading } from "../Workspace";
+import { useOwner } from "@/owner/OwnerContext";
 
-// Placeholder until this view is migrated from the backend-served owner page (#50).
+import { SectionHeading } from "../Workspace";
+import { ExceptionForm } from "./ExceptionForm";
+import { PolicySummary } from "./PolicySummary";
+
 export function SettingsTab() {
+  const { data } = useOwner();
   return (
     <>
       <SectionHeading eyebrow="AVAILABILITY" title="Settings" />
-      <p className="card muted">This view is being migrated.</p>
+      <div className="split">
+        <PolicySummary policy={data.policy} />
+        <ExceptionForm />
+      </div>
     </>
   );
 }
