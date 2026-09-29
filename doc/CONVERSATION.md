@@ -2,6 +2,8 @@
 
 Issue [#22](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/issues/22) is in progress. The current local exercise uses a fictional verified client, fictional owner, and an in-memory calendar. It calls OpenAI to interpret other scheduling messages, but state-changing `BOOK`, `RESCHEDULE`, `APPROVE`, `DECLINE`, and `CANCEL` commands require exact affirmative syntax parsed locally. Every proposed action is checked against actor, reference, current appointment state, and the scheduling domain before a write. Writes produce the existing transactional outbox intents in memory. This exercise does not use Twilio, DynamoDB, real customer records, or live SMS.
 
+To use texts together with the owner web app on one shared calendar, use the text simulator described in the [README](../README.md#try-the-app-locally). The terminal exercise below has its own separate calendar.
+
 With the backend dependencies installed as in the [README](../README.md#local-backend) and a local ignored `.env` containing `OPENAI_API_KEY`, run from the repository root:
 
 ```sh

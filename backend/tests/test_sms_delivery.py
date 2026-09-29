@@ -187,3 +187,11 @@ def test_conversation_reply_rejects_missing_body_or_forged_destination() -> None
     with pytest.raises(PermanentDeliveryFailure, match="REPLY_UNAVAILABLE"):
         sender.deliver(reply)
     assert messages.calls == []
+
+
+def test_block_notice_ignores_appointment_version_like_before() -> None:
+    sender, messages, _, _ = setup()
+    assert sender.deliver(record("owner", "block_time", version=2)) == "SM-synthetic"
+    assert messages.calls[0]["body"].startswith("Owner calendar updated (block_time)")
+    with pytest.raises(PermanentDeliveryFailure, match="TEMPLATE_RECIPIENT_MISMATCH"):
+        sender.deliver(record("client", "block_time", version=2))

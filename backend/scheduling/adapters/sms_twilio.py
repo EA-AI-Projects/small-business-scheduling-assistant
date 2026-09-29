@@ -11,6 +11,8 @@ from scheduling.domain.client_records import ClientProfile
 from scheduling.domain.outbox import DeliveryFailure, OutboxRecord, PermanentDeliveryFailure
 from scheduling.domain.sms_ingress import Keyword, SenderRole, SmsIngressStore, normalize_phone
 
+BLOCK_TEMPLATES = frozenset({"block_time", "edit_block", "remove_block"})
+
 
 class SchedulingRecords(Protocol):
     def read_appointment(self, appointment_id: str) -> Appointment | None: ...
@@ -128,49 +130,55 @@ class TwilioSmsSender:
 
     def _render(self, record: OutboxRecord, appointment: Appointment | None,
                 profile: ClientProfile | None) -> str:
-        template = record.template
-        if template in {"block_time", "edit_block", "remove_block"}:
-            if record.recipient != "owner":
-                raise PermanentDeliveryFailure("TEMPLATE_RECIPIENT_MISMATCH")
-            return f"Owner calendar updated ({template}). Check the current calendar."
-        if appointment is None:
-            if record.recipient != "owner":
-                raise PermanentDeliveryFailure("ENTITY_UNAVAILABLE")
-            if template in {"seed_policy", "edit_business_calendar"}:
-                return "Scheduling policy updated. Check the current owner calendar."
-            raise PermanentDeliveryFailure("TEMPLATE_UNKNOWN")
-        if record.event_version != appointment.version:
+        if (record.template not in BLOCK_TEMPLATES and appointment is not None
+                and record.event_version != appointment.version):
             raise PermanentDeliveryFailure("EVENT_SUPERSEDED")
-        if template not in {
-            "hold-request", "hold-pending", "approve", "decline", "expire", "cancel",
-            "edit_appointment", "replacement-approved", "replacement-original-retained",
-            "create_owner_appointment",
-        }:
-            raise PermanentDeliveryFailure("TEMPLATE_UNKNOWN")
-        if template == "hold-request" and record.recipient != "owner":
-            raise PermanentDeliveryFailure("TEMPLATE_RECIPIENT_MISMATCH")
-        if template == "hold-pending" and record.recipient != "client":
-            raise PermanentDeliveryFailure("TEMPLATE_RECIPIENT_MISMATCH")
-        local = appointment.start_at.astimezone(self._timezone)
-        when = _when(local)
-        reference = appointment.appointment_id[:8]
-        if template == "hold-request":
-            name = profile.name if profile else "client"
-            return (f"New cleaning request from {name}: {when}, "
-                    f"{appointment.duration_minutes} min. Ref {reference}. Review before approval.")
-        if template == "hold-pending":
-            return f"Your cleaning request for {when} is pending owner approval. Ref {reference}."
-        # A later state may have superseded this intent before delivery. The
-        # event-version check above prevents a stale status announcement.
-        status = {
-            "approve": "confirmed", "decline": "declined", "expire": "expired",
-            "cancel": "cancelled", "edit_appointment": "updated",
-            "replacement-approved": "confirmed", "replacement-original-retained": "not changed",
-            "create_owner_appointment": "confirmed",
-        }[template]
-        return (f"Cleaning visit {status}: {when}. Ref {reference}. "
-                "Reply to the business number for help.")
+        return render_notification(record.template, record.recipient, appointment, profile,
+                                   self._timezone)
 
+
+def render_notification(template: str, recipient: str, appointment: Appointment | None,
+                        profile: ClientProfile | None, timezone: ZoneInfo) -> str:
+    """Render a notification body from trusted records; callers check event freshness."""
+    if template in BLOCK_TEMPLATES:
+        if recipient != "owner":
+            raise PermanentDeliveryFailure("TEMPLATE_RECIPIENT_MISMATCH")
+        return f"Owner calendar updated ({template}). Check the current calendar."
+    if appointment is None:
+        if recipient != "owner":
+            raise PermanentDeliveryFailure("ENTITY_UNAVAILABLE")
+        if template in {"seed_policy", "edit_business_calendar"}:
+            return "Scheduling policy updated. Check the current owner calendar."
+        raise PermanentDeliveryFailure("TEMPLATE_UNKNOWN")
+    if template not in {
+        "hold-request", "hold-pending", "approve", "decline", "expire", "cancel",
+        "edit_appointment", "replacement-approved", "replacement-original-retained",
+        "create_owner_appointment",
+    }:
+        raise PermanentDeliveryFailure("TEMPLATE_UNKNOWN")
+    if template == "hold-request" and recipient != "owner":
+        raise PermanentDeliveryFailure("TEMPLATE_RECIPIENT_MISMATCH")
+    if template == "hold-pending" and recipient != "client":
+        raise PermanentDeliveryFailure("TEMPLATE_RECIPIENT_MISMATCH")
+    local = appointment.start_at.astimezone(timezone)
+    when = _when(local)
+    reference = appointment.appointment_id[:8]
+    if template == "hold-request":
+        name = profile.name if profile else "client"
+        return (f"New cleaning request from {name}: {when}, "
+                f"{appointment.duration_minutes} min. Ref {reference}. Review before approval.")
+    if template == "hold-pending":
+        return f"Your cleaning request for {when} is pending owner approval. Ref {reference}."
+    # A later state may have superseded this intent before delivery. The
+    # event-version check in the sender prevents a stale status announcement.
+    status = {
+        "approve": "confirmed", "decline": "declined", "expire": "expired",
+        "cancel": "cancelled", "edit_appointment": "updated",
+        "replacement-approved": "confirmed", "replacement-original-retained": "not changed",
+        "create_owner_appointment": "confirmed",
+    }[template]
+    return (f"Cleaning visit {status}: {when}. Ref {reference}. "
+            "Reply to the business number for help.")
 
 def _when(local: datetime) -> str:
     return f"{local.strftime('%a %b')} {local.day} at {local.strftime('%I:%M %p').lstrip('0')}"

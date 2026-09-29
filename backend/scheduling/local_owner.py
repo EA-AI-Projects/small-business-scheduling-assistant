@@ -2,7 +2,9 @@
 
 Not for deployment. Every record is fictional and lives only in this process;
 nothing reaches DynamoDB, Cognito, Twilio or any other cloud service, and no
-SMS routes are mounted. Bearer auth accepts only the token in the
+Twilio SMS routes are mounted. A local text simulator page at ``/local/texts``
+shares this calendar (see ``scheduling.local_texts``); it calls OpenAI only when
+``OPENAI_API_KEY`` is set. Bearer auth accepts only the token in the
 ``LOCAL_OWNER_TOKEN`` environment variable (at least 16 characters). Browser
 access is allowed only from the local Next.js dev origins on port 3000. Bind it to
 127.0.0.1 as shown; nothing here prevents ``--host 0.0.0.0`` from exposing it to the
@@ -23,8 +25,10 @@ from zoneinfo import ZoneInfo
 from fastapi import FastAPI
 
 from scheduling.adapters.memory import InMemoryCalendarRepository
+from scheduling.adapters.openai_messages import OpenAIMessageInterpreter
 from scheduling.domain.availability import AvailabilityService
 from scheduling.domain.client_records import ClientRecordService, HomeSize
+from scheduling.domain.conversation import MessageInterpreter
 from scheduling.domain.holds import CreateHold, HoldService
 from scheduling.domain.lifecycle import Action, ActorRole, AppointmentCommand, LifecycleService
 from scheduling.domain.owner_calendar import (
@@ -33,6 +37,7 @@ from scheduling.domain.owner_calendar import (
     OwnerCalendarService,
 )
 from scheduling.domain.owner_policy import OwnerPolicyService
+from scheduling.local_texts import OfflineInterpreter, TextSimulator, mount_text_simulator
 from scheduling.owner_api import OwnerPrincipal, create_owner_app
 
 BUSINESS_ID = "pilot"
@@ -45,6 +50,8 @@ SYNTHETIC_CLIENTS = (
     ("client-2", "Blake Sample", "+14155550102", "202 Placeholder Ave", HomeSize.MEDIUM, 120),
     ("client-3", "Casey Demo", "+14155550103", "303 Synthetic Court", HomeSize.LARGE, 180),
 )
+# Casey stays unverified to show that production ignores texts without verification.
+VERIFIED_CLIENTS = ("client-1", "client-2")
 
 
 class LocalTokenVerifier:
@@ -87,6 +94,9 @@ def seed_synthetic_data(repository: InMemoryCalendarRepository, now: datetime) -
     for client_id, name, phone, address, size, minutes in SYNTHETIC_CLIENTS:
         clients.save_profile(BUSINESS_ID, client_id, name, phone, address, size,
                              minutes, True, 0, maximum, now)
+        if client_id in VERIFIED_CLIENTS:
+            # Stands in for the trusted verification step; never an owner route.
+            clients.verify_phone(BUSINESS_ID, client_id, phone, now)
 
     zone = ZoneInfo(policy.record.policy.timezone)
     tomorrow = now.astimezone(zone).date() + timedelta(days=1)
@@ -114,17 +124,27 @@ def seed_synthetic_data(repository: InMemoryCalendarRepository, now: datetime) -
                         "local-note-1")
 
 
-def create_local_owner_app(token: str | None, now: datetime | None = None) -> FastAPI:
+def create_local_owner_app(token: str | None, now: datetime | None = None,
+                           interpreter: MessageInterpreter | None = None,
+                           clock: Callable[[], datetime] | None = None) -> FastAPI:
     """Build the synthetic owner API; raises before serving if the token is weak."""
     verifier = LocalTokenVerifier(token)
     repository = InMemoryCalendarRepository()
-    seed_synthetic_data(repository, now or datetime.now(UTC))
-    return create_owner_app(repository, verifier, cors_origins=LOCAL_APP_ORIGINS,
-                            allow_loopback_http=True)
+    current = clock or (lambda: datetime.now(UTC))
+    seed_synthetic_data(repository, now or current())
+    app = create_owner_app(repository, verifier, clock, cors_origins=LOCAL_APP_ORIGINS,
+                           allow_loopback_http=True)
+    simulator = TextSimulator(repository, interpreter or OfflineInterpreter(), BUSINESS_ID,
+                              current)
+    mount_text_simulator(app, simulator, verifier)
+    return app
 
 
 def __getattr__(name: str) -> FastAPI:
     # Build lazily so importing this module (e.g. in tests) needs no environment.
     if name == "app":
-        return create_local_owner_app(os.environ.get(TOKEN_ENV))
+        key = os.environ.get("OPENAI_API_KEY")
+        return create_local_owner_app(
+            os.environ.get(TOKEN_ENV),
+            interpreter=OpenAIMessageInterpreter(key) if key else None)
     raise AttributeError(name)
