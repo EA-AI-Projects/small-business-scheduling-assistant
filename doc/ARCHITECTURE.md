@@ -16,7 +16,7 @@ The goal is low idle cost and low operational overhead—not a large-scale SaaS 
 | Concern | Recommendation | Reason |
 |---|---|---|
 | Owner calendar/admin UI | Next.js + React + TypeScript, static export, hosted on AWS Amplify Hosting | Matches NeuroSpineDx frontend experience; static assets avoid always-on web servers/SSR compute |
-| Backend API | Python 3.13 + FastAPI + Mangum, one AWS Lambda function (ZIP package) | Matches NeuroSpineDx backend language/framework; scales to zero and is inexpensive at pilot traffic |
+| Backend API | Python 3.12+ + FastAPI + Mangum, one AWS Lambda function (ZIP package) | Matches NeuroSpineDx backend language/framework; scales to zero and is inexpensive at pilot traffic |
 | API ingress | Amazon API Gateway **HTTP API** | Managed webhook/API endpoint, lower-cost API Gateway option for this simple REST interface |
 | Primary data store | Amazon DynamoDB, on-demand (PAY_PER_REQUEST) | No provisioned database/idle capacity; suitable for a single small-business calendar |
 | Owner UI authentication | Amazon Cognito User Pool, owner account; no SMS-based Cognito MFA | Avoids custom password/session implementation; keep Cognito SMS charges out of the owner-login path |
@@ -105,7 +105,9 @@ The core calendar, appointment state, approval policy, and availability calculat
 ### 4.1 Owner web application
 
 - Next.js, React, TypeScript; mobile-first because the owner may mostly use a phone.
-- Build with static export and host via Amplify Hosting. No Next.js SSR or server actions in the initial design; all data operations use the API.
+- Build with static export and host via Amplify Hosting (platform `WEB`). No Next.js SSR or server actions in the initial design; all data operations use the API.
+- Implemented in `frontend/` with the Pages Router, whose static export emits no inline scripts, so a build-time CSP `<meta>` tag can allow only self-hosted scripts and connections to the exact API and Cognito origins. Amplify adds `frame-ancestors`, HSTS, and related headers from the repository-root `customHttp.yml`.
+- The owner API is cross-origin from the app. API Gateway CORS allows only the configured app origin, without credentials; owner routes use explicit methods so preflight never reaches the JWT authorizer.
 - Cognito signs in the owner. API Gateway validates the owner access token for admin routes.
 - Screens: day/week schedule, pending approvals, client list/profile, unavailable blocks, and a small settings screen.
 - Client-facing booking portal is not part of the MVP; the client workflow is SMS.

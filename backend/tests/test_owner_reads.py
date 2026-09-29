@@ -1,11 +1,11 @@
-"""The owner page uses protected detail and local-time reads."""
+"""The owner app uses protected detail and local-time reads."""
 
 from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 
 from scheduling.adapters.memory import InMemoryCalendarRepository
-from scheduling.owner_api import OwnerPrincipal, OwnerUiConfig, create_owner_app
+from scheduling.owner_api import OwnerPrincipal, create_owner_app
 
 NOW = datetime(2026, 6, 29, 12, tzinfo=UTC)
 BASE = "/v1/owner/businesses/pilot"
@@ -20,23 +20,13 @@ def app() -> TestClient:
             raise ValueError("Invalid owner")
         return OwnerPrincipal("owner-1", "pilot")
 
-    config = OwnerUiConfig("pilot", "public-client-id",
-                           "https://login.example.test/oauth2/authorize",
-                           "https://login.example.test/oauth2/token",
-                           "https://owner.example.test/owner")
-    return TestClient(create_owner_app(repository, verify, lambda: NOW, config))
+    return TestClient(create_owner_app(repository, verify, lambda: NOW))
 
 
-def test_owner_page_is_static_and_api_reads_remain_authenticated() -> None:
+def test_owner_detail_reads_remain_authenticated_and_business_scoped() -> None:
     client = app()
-    assert client.get("/owner").status_code == 200
-    assert "Scheduling" in client.get("/owner").text
-    assert "script-src 'self'" in client.get("/owner").headers["content-security-policy"]
-    assert "async function signIn" in client.get("/owner/app.js").text
-    assert client.get("/owner/style.css").status_code == 200
-    config = client.get("/owner/config").json()
-    assert config["client_id"] == "public-client-id"
-    assert "owner_sub" not in config
+    for path in ("/owner", "/owner/app.js", "/owner/config"):
+        assert client.get(path).status_code == 404
     assert client.get(f"{BASE}/calendar").status_code == 401
     assert client.get(f"{BASE}/appointments/unknown", headers=AUTH).status_code == 404
     assert client.get(f"{BASE}/blocks/unknown", headers=AUTH).status_code == 404

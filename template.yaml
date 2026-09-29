@@ -16,10 +16,6 @@ Parameters:
   CognitoDomainPrefix:
     Type: String
     Description: Region-unique Cognito hosted-UI domain prefix.
-  OwnerRedirectUri:
-    Type: String
-    AllowedPattern: 'https://.+/owner'
-    Description: Exact HTTPS /owner callback for the deployed HTTP API custom domain.
   OwnerAppOrigin:
     Type: String
     AllowedPattern: 'https://[a-z0-9.-]+(:(?!443$)[0-9]{1,5})?'
@@ -199,9 +195,7 @@ Resources:
       AllowedOAuthFlowsUserPoolClient: true
       AllowedOAuthFlows: [code]
       AllowedOAuthScopes: [openid]
-      CallbackURLs:
-        - !Ref OwnerRedirectUri
-        - !Sub '${OwnerAppOrigin}/'
+      CallbackURLs: [!Sub '${OwnerAppOrigin}/']
       LogoutURLs: [!Sub '${OwnerAppOrigin}/']
       SupportedIdentityProviders: [COGNITO]
       PreventUserExistenceErrors: ENABLED
@@ -236,8 +230,6 @@ Resources:
           COGNITO_ISSUER: !Sub 'https://cognito-idp.${AWS::Region}.amazonaws.com/${OwnerUserPool}'
           COGNITO_CLIENT_ID: !Ref OwnerUserPoolClient
           OWNER_SUB: !Ref OwnerSub
-          COGNITO_UI_DOMAIN: !Sub 'https://${CognitoDomainPrefix}.auth.${AWS::Region}.amazoncognito.com'
-          OWNER_REDIRECT_URI: !Ref OwnerRedirectUri
           OWNER_APP_ORIGIN: !Ref OwnerAppOrigin
       Policies:
         - Statement:
@@ -253,18 +245,6 @@ Resources:
               Action: [dynamodb:Query, dynamodb:Scan]
               Resource: [!GetAtt SchedulingTable.Arn, !Sub '${SchedulingTable.Arn}/index/*']
       Events:
-        OwnerRoot:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref OwnerHttpApi
-            Path: /owner
-            Method: GET
-        OwnerAssets:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref OwnerHttpApi
-            Path: /owner/{proxy+}
-            Method: GET
         OwnerProxyGet:
           Type: HttpApi
           Properties:
@@ -754,7 +734,14 @@ Outputs:
   AccountAndRegion:
     Value: !Sub '${AWS::AccountId}/${AWS::Region}'
   OwnerApiUrl:
+    Description: Owner app NEXT_PUBLIC_API_BASE_URL.
     Value: !Sub 'https://${OwnerHttpApi}.execute-api.${AWS::Region}.amazonaws.com'
+  OwnerCognitoDomain:
+    Description: Owner app NEXT_PUBLIC_COGNITO_DOMAIN.
+    Value: !Sub 'https://${CognitoDomainPrefix}.auth.${AWS::Region}.amazoncognito.com'
+  OwnerAppClientId:
+    Description: Owner app NEXT_PUBLIC_COGNITO_CLIENT_ID (public client, no secret).
+    Value: !Ref OwnerUserPoolClient
   SmsApiUrl:
     Condition: SmsIngressRequested
     Value: !Sub 'https://${SmsHttpApi}.execute-api.${AWS::Region}.amazonaws.com'
