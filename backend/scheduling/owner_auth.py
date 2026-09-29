@@ -63,6 +63,8 @@ def create_cognito_owner_app(
     clock: Callable[[], datetime] | None = None,
     ui_domain: str | None = None,
     ui_redirect_uri: str | None = None,
+    *,
+    cors_origins: tuple[str, ...] = (),
 ) -> FastAPI:
     """Construct the persisted API with a required, validated Cognito owner token."""
     verifier = CognitoOwnerTokenVerifier(issuer, client_id, owner_sub, business_id)
@@ -76,4 +78,5 @@ def create_cognito_owner_app(
         ui_config = OwnerUiConfig(business_id, client_id,
                                   f"{domain}/oauth2/authorize",
                                   f"{domain}/oauth2/token", ui_redirect_uri)
-    return create_persisted_owner_app(client, table_name, verifier, clock, ui_config)
+    return create_persisted_owner_app(client, table_name, verifier, clock, ui_config,
+                                      cors_origins=cors_origins)

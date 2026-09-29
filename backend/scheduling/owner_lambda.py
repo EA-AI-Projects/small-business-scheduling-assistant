@@ -16,5 +16,6 @@ app = create_cognito_owner_app(
     os.environ["BUSINESS_ID"],
     ui_domain=os.environ["COGNITO_UI_DOMAIN"],
     ui_redirect_uri=os.environ["OWNER_REDIRECT_URI"],
+    cors_origins=(os.environ["OWNER_APP_ORIGIN"],),
 )
 handler = Mangum(app, lifespan="off")
