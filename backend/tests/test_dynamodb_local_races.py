@@ -4,6 +4,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from threading import Barrier
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -105,9 +106,14 @@ def _commit(before: Appointment, after: Appointment, action: Action,
 
 def _run_race(repository: DynamoDBCalendarRepository,
               first: TransitionCommit, second: TransitionCommit) -> None:
+    barrier = Barrier(2)
+
+    def attempt(commit: TransitionCommit) -> None:
+        barrier.wait(timeout=5)
+        repository.commit_transition(7, commit)
+
     with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [pool.submit(repository.commit_transition, 7, commit)
-                   for commit in (first, second)]
+        futures = [pool.submit(attempt, commit) for commit in (first, second)]
         failures = 0
         for future in futures:
             try:
@@ -157,7 +163,7 @@ def test_approval_and_expiry_commit_only_one_atomic_result(
     assert _get(client, table, f"BUSINESS#{BUSINESS}", "CALENDAR#REVISION")["revision"]["N"] == "8"
 
 
-def test_replacement_swap_races_original_cancellation_atomically(
+def test_replacement_swap_rejects_adversarial_original_cancellation_atomically(
     local_table: tuple[Any, str],
 ) -> None:
     client, table = local_table
