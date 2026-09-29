@@ -9,6 +9,7 @@ An SMS-first scheduling assistant for a small home-cleaning business. Clients re
 - [Technical Architecture](doc/ARCHITECTURE.md)
 - [Pilot infrastructure plan](doc/PILOT_INFRASTRUCTURE.md)
 - [Local model evaluation and secrets](doc/MODEL_EVAL.md)
+- [Local scheduling conversation exercise](doc/CONVERSATION.md)
 - [Scheduling service contracts](doc/SCHEDULING_CONTRACTS.md)
 - [Human–agent team agreement](doc/TEAM_AGREEMENT.md)
 
@@ -42,6 +43,8 @@ backend/.venv/bin/python -m uvicorn scheduling.api:app --app-dir backend --reloa
 Then open `http://127.0.0.1:8000/docs` or request `GET /health`. `GET /v1/businesses/pilot/calendar` requires timezone-aware `start_at` and `end_at` query parameters. `GET /v1/businesses/pilot/availability` accepts `day` and `duration_minutes`, and returns UTC starts under the owner-approved pilot policy. The in-memory calendar contains no customer data and resets on restart. These read endpoints are a local harness, not authenticated production routes.
 
 To preview how the model interprets your own fictional texts, use the [interactive model preview](doc/MODEL_EVAL.md) with `--interactive`. It proposes an intent and clarification question but cannot book a visit or send an SMS.
+
+To exercise the booking and approval flow with a fictional client, owner, and in-memory calendar, follow the [local conversation exercise](doc/CONVERSATION.md). It can create and change synthetic appointment state in memory without Twilio, AWS, or live texts.
 
 ## Owner command API
 
