@@ -191,6 +191,7 @@ def test_exact_client_booking_creates_pending_hold_and_day_query_only_suggests()
     suggestions = service.handle(receipt("Book 2026-10-01"))
     assert not suggestions.committed
     assert "09:00" in suggestions.text
+    assert "Reply BOOK 2026-10-01 HH:MM" in suggestions.text
     assert store.read_calendar("pilot").events == ()
     model.proposal = MessageProposal("request_booking", None, "2026-10-01 09:00", None, False)
     result = service.handle(receipt("Book 2026-10-01 09:00", provider_id="SM-2"))
@@ -315,3 +316,32 @@ def test_reschedule_suggestions_exclude_the_original_visit() -> None:
     result = service.handle(receipt(f"Reschedule {original_id[:8]} to 2026-10-01"))
     assert not result.committed
     assert "09:00" in result.text
+    assert f"Reply RESCHEDULE {original_id[:8]} to 2026-10-01 HH:MM" in result.text
+
+
+def test_ambiguous_reschedule_asks_for_same_replacement_reference() -> None:
+    service, store, model, _ = setup(MessageProposal("clarify", None, None, None, True))
+    original_id = pending(store)
+    LifecycleService(store, lambda: NOW).apply(AppointmentCommand(
+        "pilot", original_id, "owner", ActorRole.OWNER, Action.APPROVE,
+        "approve-seed", 1))
+    outcome = service.handle(receipt(f"Reschedule {original_id[:8]} to next Thursday"))
+    assert not outcome.committed
+    assert f"RESCHEDULE {original_id[:8]} to YYYY-MM-DD" in outcome.text
+    assert "BOOK " not in outcome.text
+    assert model.calls
+    assert store.read_appointment(original_id).status == CalendarStatus.CONFIRMED  # type: ignore[union-attr]
+    prefixed = service.handle(receipt(
+        f"Can you reschedule {original_id[:8]} to next Thursday?", provider_id="SM-prefixed"))
+    assert not prefixed.committed
+    assert f"RESCHEDULE {original_id[:8]} to YYYY-MM-DD" in prefixed.text
+    assert "BOOK " not in prefixed.text
+
+
+def test_reschedule_clarification_does_not_offer_pending_request_as_target() -> None:
+    service, store, _, _ = setup(MessageProposal("clarify", None, None, None, True))
+    pending_id = pending(store)
+    outcome = service.handle(receipt(f"Could you reschedule {pending_id[:8]} to next week?"))
+    assert not outcome.committed
+    assert "needs a confirmed visit" in outcome.text
+    assert f"RESCHEDULE {pending_id[:8]}" not in outcome.text
