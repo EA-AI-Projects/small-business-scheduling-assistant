@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from threading import Barrier
+from time import monotonic, sleep
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -13,6 +14,7 @@ import boto3
 import pytest
 
 from scheduling.adapters.dynamodb import DynamoDBCalendarRepository
+from scheduling.adapters.outbox_aws import DynamoOutboxStore
 from scheduling.domain.appointments import Appointment
 from scheduling.domain.calendar import CalendarStatus
 from scheduling.domain.holds import OutboxIntent, RevisionConflict
@@ -23,6 +25,7 @@ from scheduling.domain.lifecycle import (
     TransitionCommit,
     TransitionResult,
 )
+from scheduling.domain.outbox import ConsumeOutcome, ConsumeService, DispatchService, OutboxRecord
 
 BUSINESS = "synthetic-business"
 START = datetime(2026, 10, 1, 16, tzinfo=UTC)
@@ -46,10 +49,32 @@ def local_table() -> tuple[Any, str]:
         AttributeDefinitions=[
             {"AttributeName": "PK", "AttributeType": "S"},
             {"AttributeName": "SK", "AttributeType": "S"},
+            {"AttributeName": "hold_due_pk", "AttributeType": "S"},
+            {"AttributeName": "hold_due_sk", "AttributeType": "S"},
+            {"AttributeName": "outbox_due_pk", "AttributeType": "S"},
+            {"AttributeName": "outbox_due_sk", "AttributeType": "S"},
         ],
         KeySchema=[
             {"AttributeName": "PK", "KeyType": "HASH"},
             {"AttributeName": "SK", "KeyType": "RANGE"},
+        ],
+        GlobalSecondaryIndexes=[
+            {
+                "IndexName": "HoldDueIndex",
+                "KeySchema": [
+                    {"AttributeName": "hold_due_pk", "KeyType": "HASH"},
+                    {"AttributeName": "hold_due_sk", "KeyType": "RANGE"},
+                ],
+                "Projection": {"ProjectionType": "KEYS_ONLY"},
+            },
+            {
+                "IndexName": "OutboxDueIndex",
+                "KeySchema": [
+                    {"AttributeName": "outbox_due_pk", "KeyType": "HASH"},
+                    {"AttributeName": "outbox_due_sk", "KeyType": "RANGE"},
+                ],
+                "Projection": {"ProjectionType": "KEYS_ONLY"},
+            },
         ],
     )
     client.get_waiter("table_exists").wait(TableName=name)
@@ -196,3 +221,54 @@ def test_replacement_swap_rejects_adversarial_original_cancellation_atomically(
     assert "replacement" in events
     guard = _get(client, table, f"BUSINESS#{BUSINESS}", "REPLACEMENT#original")
     assert (guard is None) == (replacement_item["status"]["S"] == "CONFIRMED")
+
+
+def test_committed_outbox_dispatches_and_fake_consumer_claims_once(
+    local_table: tuple[Any, str],
+) -> None:
+    client, table = local_table
+    before = _appointment("request", CalendarStatus.PENDING_APPROVAL)
+    _seed(client, table, (before,))
+    decision_at = EXPIRY - timedelta(seconds=1)
+    commit = _commit(
+        before, replace(before, status=CalendarStatus.CONFIRMED, version=2),
+        Action.APPROVE, decision_at,
+    )
+    DynamoDBCalendarRepository(client, table).commit_transition(7, commit)
+
+    class FakeQueue:
+        def __init__(self) -> None:
+            self.messages: list[tuple[str, str]] = []
+
+        def enqueue(self, business_id: str, outbox_id: str) -> None:
+            self.messages.append((business_id, outbox_id))
+
+    class FakeSender:
+        def __init__(self) -> None:
+            self.deliveries: list[str] = []
+
+        def deliver(self, record: OutboxRecord) -> str:
+            self.deliveries.append(record.outbox_id)
+            return "synthetic-provider-id"
+
+    store = DynamoOutboxStore(client, table)
+    deadline = monotonic() + 5
+    while not list(store.due(decision_at, 100)):
+        if monotonic() >= deadline:
+            pytest.fail("Committed outbox item did not appear in the local due index")
+        sleep(0.05)
+    queue = FakeQueue()
+    report = DispatchService(store, queue, lambda: decision_at).run_once()
+    outbox_id = commit.outbox[0].outbox_id
+    assert report.enqueued == 1
+    assert queue.messages == [(BUSINESS, outbox_id)]
+    sender = FakeSender()
+    consumer = ConsumeService(store, sender, lambda: decision_at)
+    assert consumer.consume(*queue.messages[0]) == ConsumeOutcome.SENT
+    assert consumer.consume(*queue.messages[0]) == ConsumeOutcome.SKIPPED
+    assert sender.deliveries == [outbox_id]
+    item = _get(client, table, f"BUSINESS#{BUSINESS}", f"OUTBOX#{outbox_id}")
+    assert item is not None
+    assert item["delivery_state"]["S"] == "SENT"
+    assert item["provider_id"]["S"] == "synthetic-provider-id"
+    assert "outbox_due_pk" not in item
