@@ -1,10 +1,12 @@
-"""Synthetic, in-memory, loopback-only owner API for frontend development.
+"""Synthetic, in-memory owner API for local frontend development.
 
 Not for deployment. Every record is fictional and lives only in this process;
 nothing reaches DynamoDB, Cognito, Twilio or any other cloud service, and no
 SMS routes are mounted. Bearer auth accepts only the token in the
 ``LOCAL_OWNER_TOKEN`` environment variable (at least 16 characters). Browser
-access is allowed only from the local Next.js dev origins on port 3000.
+access is allowed only from the local Next.js dev origins on port 3000. Bind it to
+127.0.0.1 as shown; nothing here prevents ``--host 0.0.0.0`` from exposing it to the
+local network (still behind the token).
 
 Run from the repository root::
 

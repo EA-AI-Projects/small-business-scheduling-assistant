@@ -22,8 +22,8 @@ Parameters:
     Description: Exact HTTPS /owner callback for the deployed HTTP API custom domain.
   OwnerAppOrigin:
     Type: String
-    AllowedPattern: 'https://[^/]+'
-    Description: Exact Amplify owner app origin (https://host[:port]) with no trailing slash.
+    AllowedPattern: 'https://[a-z0-9.-]+(:(?!443$)[0-9]{1,5})?'
+    Description: Exact Amplify owner app origin (lowercase https://host[:port], no default port or trailing slash).
   AlarmEmail:
     Type: String
     AllowedPattern: '[^@ ]+@[^@ ]+\.[^@ ]+'

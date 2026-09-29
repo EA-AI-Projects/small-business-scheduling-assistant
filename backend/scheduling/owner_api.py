@@ -256,6 +256,9 @@ def validate_cors_origin(origin: str, allow_loopback_http: bool = False) -> str:
             or origin != f"{parts.scheme}://{parts.netloc}"
             or parts.netloc != (host if port is None else f"{host}:{port}")):
         raise ValueError(f"CORS origin must be scheme://host[:port] only: {origin!r}")
+    if (parts.scheme, port) in {("https", 443), ("http", 80)}:
+        # Browsers omit a default port from Origin, so this value could never match.
+        raise ValueError(f"CORS origin must omit the default port: {origin!r}")
     if parts.scheme == "https":
         return origin
     if parts.scheme == "http" and allow_loopback_http and host in _LOOPBACK_HOSTS:

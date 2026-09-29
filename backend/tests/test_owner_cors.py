@@ -87,6 +87,8 @@ def test_without_configured_origins_no_cors_headers_are_sent() -> None:
     "http://app.example.com",
     "https://",
     "app.example.com",
+    "https://App.Example.com",
+    "https://app.example.com:443",
 ])
 def test_origin_validation_rejects_non_exact_or_insecure_origins(origin: str) -> None:
     with pytest.raises(ValueError):
@@ -146,7 +148,18 @@ def _resource(text: str, name: str) -> str:
 def test_template_wires_cors_and_owner_app_origin() -> None:
     text = TEMPLATE.read_text(encoding="utf-8")
     parameter = _resource(text, "OwnerAppOrigin")
-    assert "AllowedPattern: 'https://[^/]+'" in parameter
+    match = re.search(r"AllowedPattern: '([^']+)'", parameter)
+    assert match is not None
+    # CloudFormation matches the whole value; keep it no looser than validate_cors_origin.
+    pattern = re.compile(match.group(1))
+    for origin in ("https://main.d1abc.amplifyapp.com", "https://owner.example.com:8443"):
+        assert pattern.fullmatch(origin) and validate_cors_origin(origin) == origin
+    for origin in ("https://App.Example.com", "https://app.example.com:443",
+                   "https://app.example.com/", "https://app.example.com/owner",
+                   "http://app.example.com", "https://*.amplifyapp.com"):
+        assert pattern.fullmatch(origin) is None
+        with pytest.raises(ValueError):
+            validate_cors_origin(origin)
     api_block = _resource(text, "OwnerHttpApi")
     assert "CorsConfiguration:" in api_block
     assert "AllowOrigins: [!Ref OwnerAppOrigin]" in api_block
