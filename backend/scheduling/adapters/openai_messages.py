@@ -99,12 +99,14 @@ class OpenAIMessageInterpreter:
         raw = json.loads(arguments)
         if not isinstance(raw, dict) or set(raw) != set(TOOL["parameters"]["required"]):
             raise ValueError("Model proposal schema mismatch")
+        # The question is discarded below; the response token cap bounds its size.
+        # Keep the strict 128-character limit on fields used for actions.
         if (raw["intent"] not in TOOL["parameters"]["properties"]["intent"]["enum"]
                 or type(raw["needs_clarification"]) is not bool
                 or raw["owner_decision"] not in ("approve", "decline", None)
                 or any(value is not None and (not isinstance(value, str) or len(value) > 128)
-                       for value in (raw["request_reference"], raw["date_text"],
-                                     raw["question"]))):
+                       for value in (raw["request_reference"], raw["date_text"]))
+                or (raw["question"] is not None and not isinstance(raw["question"], str))):
             raise ValueError("Model proposal values are invalid")
         if raw["needs_clarification"] and (raw["intent"] != "clarify"
                                            or raw["request_reference"] is not None
