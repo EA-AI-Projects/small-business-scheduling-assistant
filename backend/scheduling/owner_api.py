@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -236,15 +237,59 @@ def _error(code: str, message: str, status: int, current: object | None = None) 
     return HTTPException(status_code=status, detail=detail)
 
 
+CORS_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
+CORS_HEADERS = ("Authorization", "Content-Type", "Idempotency-Key")
+CORS_MAX_AGE_SECONDS = 600
+_LOOPBACK_HOSTS = ("localhost", "127.0.0.1")
+
+
+def validate_cors_origin(origin: str, allow_loopback_http: bool = False) -> str:
+    """Accept only an exact browser origin: scheme and host, with an optional port."""
+    try:
+        parts = urlsplit(origin)
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError(f"Invalid CORS origin: {origin!r}") from exc
+    host = parts.hostname or ""
+    if (not host or "*" in origin or parts.path or parts.query or parts.fragment
+            or parts.username is not None or parts.password is not None
+            or origin != f"{parts.scheme}://{parts.netloc}"
+            or parts.netloc != (host if port is None else f"{host}:{port}")):
+        raise ValueError(f"CORS origin must be scheme://host[:port] only: {origin!r}")
+    if parts.scheme == "https":
+        return origin
+    if parts.scheme == "http" and allow_loopback_http and host in _LOOPBACK_HOSTS:
+        return origin
+    raise ValueError(f"CORS origin must use HTTPS: {origin!r}")
+
+
 def create_owner_app(
     repository: object,
     verify_token: OwnerTokenVerifier,
     clock: Callable[[], datetime] | None = None,
     ui_config: OwnerUiConfig | None = None,
     sms_store: SmsIngressStore | None = None,
+    *,
+    cors_origins: tuple[str, ...] = (),
+    allow_loopback_http: bool = False,
 ) -> FastAPI:
-    """Mount only authenticated owner routes; local synthetic API stays separate."""
+    """Mount only authenticated owner routes; local synthetic API stays separate.
+
+    ``cors_origins`` lists the exact browser origins (the owner app) allowed to
+    call the API cross-origin. Plain-HTTP loopback origins require
+    ``allow_loopback_http`` and are meant only for the local development server.
+    """
+    origins = tuple(validate_cors_origin(origin, allow_loopback_http) for origin in cors_origins)
     app = FastAPI(title="Scheduling owner API", version="0.1.0")
+    if origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(origins),
+            allow_credentials=False,
+            allow_methods=list(CORS_METHODS),
+            allow_headers=list(CORS_HEADERS),
+            max_age=CORS_MAX_AGE_SECONDS,
+        )
     now = clock or (lambda: datetime.now(UTC))
     security = HTTPBearer(auto_error=False)
 
@@ -601,7 +646,9 @@ def create_owner_app(
 def create_persisted_owner_app(client: DynamoClient, table_name: str,
                                verify_token: OwnerTokenVerifier,
                                clock: Callable[[], datetime] | None = None,
-                               ui_config: OwnerUiConfig | None = None) -> FastAPI:
+                               ui_config: OwnerUiConfig | None = None,
+                               *, cors_origins: tuple[str, ...] = ()) -> FastAPI:
     """Build the non-local owner API with strongly read DynamoDB state."""
     return create_owner_app(DynamoDBCalendarRepository(client, table_name), verify_token,
-                            clock, ui_config, DynamoSmsIngressStore(client, table_name))
+                            clock, ui_config, DynamoSmsIngressStore(client, table_name),
+                            cors_origins=cors_origins)

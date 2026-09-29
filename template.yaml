@@ -20,6 +20,10 @@ Parameters:
     Type: String
     AllowedPattern: 'https://.+/owner'
     Description: Exact HTTPS /owner callback for the deployed HTTP API custom domain.
+  OwnerAppOrigin:
+    Type: String
+    AllowedPattern: 'https://[^/]+'
+    Description: Exact Amplify owner app origin (https://host[:port]) with no trailing slash.
   AlarmEmail:
     Type: String
     AllowedPattern: '[^@ ]+@[^@ ]+\.[^@ ]+'
@@ -195,7 +199,10 @@ Resources:
       AllowedOAuthFlowsUserPoolClient: true
       AllowedOAuthFlows: [code]
       AllowedOAuthScopes: [openid]
-      CallbackURLs: [!Ref OwnerRedirectUri]
+      CallbackURLs:
+        - !Ref OwnerRedirectUri
+        - !Sub '${OwnerAppOrigin}/'
+      LogoutURLs: [!Sub '${OwnerAppOrigin}/']
       SupportedIdentityProviders: [COGNITO]
       PreventUserExistenceErrors: ENABLED
       ExplicitAuthFlows: [ALLOW_REFRESH_TOKEN_AUTH]
@@ -204,6 +211,12 @@ Resources:
     Type: AWS::Serverless::HttpApi
     Properties:
       StageName: '$default'
+      CorsConfiguration:
+        AllowOrigins: [!Ref OwnerAppOrigin]
+        AllowMethods: [GET, POST, PUT, PATCH, DELETE, OPTIONS]
+        AllowHeaders: [authorization, content-type, idempotency-key]
+        MaxAge: 600
+        AllowCredentials: false
       Auth:
         Authorizers:
           OwnerJwt:
@@ -225,6 +238,7 @@ Resources:
           OWNER_SUB: !Ref OwnerSub
           COGNITO_UI_DOMAIN: !Sub 'https://${CognitoDomainPrefix}.auth.${AWS::Region}.amazoncognito.com'
           OWNER_REDIRECT_URI: !Ref OwnerRedirectUri
+          OWNER_APP_ORIGIN: !Ref OwnerAppOrigin
       Policies:
         - Statement:
             - Effect: Allow
