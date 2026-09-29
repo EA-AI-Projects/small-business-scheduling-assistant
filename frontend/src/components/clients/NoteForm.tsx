@@ -7,13 +7,9 @@ import { useOwner } from "@/owner/OwnerContext";
 export function NoteForm({ clientId }: { clientId: string | null }) {
   const { change, notify, noteAppointmentId } = useOwner();
   const [body, setBody] = useState("");
+  // Remounted on every client selection (see ClientsTab), so a visit opened from the
+  // schedule prefills once and never carries over to another client.
   const [appointmentId, setAppointmentId] = useState(noteAppointmentId ?? "");
-  // Opening notes from a schedule visit prefills that visit's ID.
-  const [prefilled, setPrefilled] = useState(noteAppointmentId);
-  if (noteAppointmentId !== prefilled) {
-    setPrefilled(noteAppointmentId);
-    if (noteAppointmentId) setAppointmentId(noteAppointmentId);
-  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();

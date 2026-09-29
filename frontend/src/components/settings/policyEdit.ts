@@ -25,7 +25,7 @@ export function toPolicyBody(policy: AvailabilityPolicy): PolicyBody {
     hold_minutes: policy.hold_minutes,
     maximum_buffer_minutes: policy.maximum_buffer_minutes,
     date_exceptions: copyWindows(policy.date_exceptions ?? {}),
-    holiday_calendar: policy.holiday_calendar as PolicyBody["holiday_calendar"],
+    holiday_calendar: policy.holiday_calendar,
   };
 }
 

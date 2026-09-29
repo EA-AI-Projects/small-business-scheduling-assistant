@@ -9,7 +9,7 @@ import { NoteList } from "./NoteList";
 import { ProfileForm } from "./ProfileForm";
 
 export function ClientsTab() {
-  const { data, stamp, selectedClientId, selectClient } = useOwner();
+  const { data, stamp, selectedClientId, selectClient, selectionVersion } = useOwner();
   const [blank, setBlank] = useState(0);
   const client = data.clients.find((item) => item.client_id === selectedClientId);
   const clientId = client?.client_id ?? null;
@@ -31,7 +31,7 @@ export function ClientsTab() {
             <h3>Notes</h3>
             <p className="hint">Select a client first. Do not enter access codes.</p>
             <NoteList clientId={clientId} />
-            <NoteForm clientId={clientId} />
+            <NoteForm key={`${clientId ?? ""}:${selectionVersion}`} clientId={clientId} />
           </section>
         </div>
       </div>

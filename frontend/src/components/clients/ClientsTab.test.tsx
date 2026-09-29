@@ -219,6 +219,25 @@ describe("ClientsTab", () => {
     expect(within(profile()).getByLabelText("Client ID")).toHaveValue("client-1");
   });
 
+  it("does not carry a schedule visit over to another client", async () => {
+    setup((method, path) => path === "/clients" ? { status: 200, body: [CLIENT, SECOND] }
+      : path.endsWith("/notes") ? { status: 200, body: [] } : undefined);
+    await screen.findByRole("button", { name: "Blake Sample" });
+    await userEvent.click(screen.getByRole("button", { name: "open visit" }));
+    expect(within(noteForm()).getByLabelText("Appointment ID (optional)")).toHaveValue("appt-7");
+    await userEvent.click(screen.getByRole("button", { name: "Blake Sample" }));
+    expect(within(noteForm()).getByLabelText("Appointment ID (optional)")).toHaveValue("");
+  });
+
+  it("prefills the same visit again after the owner cleared it", async () => {
+    setup((method, path) => path === "/clients/client-1/notes" ? { status: 200, body: [] } : undefined);
+    await screen.findByRole("button", { name: "Avery Example" });
+    await userEvent.click(screen.getByRole("button", { name: "open visit" }));
+    await userEvent.clear(within(noteForm()).getByLabelText("Appointment ID (optional)"));
+    await userEvent.click(screen.getByRole("button", { name: "open visit" }));
+    expect(within(noteForm()).getByLabelText("Appointment ID (optional)")).toHaveValue("appt-7");
+  });
+
   it("ignores a notes response for a client that is no longer selected", async () => {
     const { api } = setup((method, path) => path === "/clients" ? { status: 200, body: [CLIENT, SECOND] } : undefined);
     const pending = new Map<string, (notes: ClientNote[]) => void>();
