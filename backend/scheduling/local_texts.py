@@ -27,6 +27,7 @@ from zoneinfo import ZoneInfo
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from starlette.concurrency import run_in_threadpool
 
 from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.adapters.sms_twilio import render_notification
@@ -245,7 +246,8 @@ def mount_text_simulator(app: FastAPI, simulator: TextSimulator,
         # Owner web app changes commit outbox intents; render them at commit time.
         # A harness failure must not turn an already committed write into an error.
         try:
-            simulator.capture_notifications()
+            # Off the event loop: a text in progress holds the simulator lock.
+            await run_in_threadpool(simulator.capture_notifications)
         except Exception:
             logger.exception("Local text simulator could not render a notification")
         return response
