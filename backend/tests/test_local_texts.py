@@ -58,7 +58,7 @@ def test_page_is_public_but_state_and_sending_need_the_local_token() -> None:
 def test_text_booking_appears_in_owner_api_and_owner_app_approval_notifies_client() -> None:
     client = local()
     options = text(client, "client-1", "Book 2026-10-05")
-    assert "09:00" in bodies(options, "reply")[0]
+    assert "1) 8:00 AM" in bodies(options, "reply")[0]
     assert client.get(f"{BASE}/requests", headers=AUTH).json()[0]["client_id"] == "client-2"
 
     booked = text(client, "client-1", "Book 2026-10-05 09:00")
@@ -112,7 +112,10 @@ def test_unverified_client_and_ambiguous_text_change_nothing() -> None:
 def test_offline_mode_prompts_for_commands_and_private_data_is_rejected() -> None:
     client = local()
     reply = text(client, "client-1", "Could you come by sometime next week?")
-    assert "BOOK YYYY-MM-DD" in bodies(reply, "reply")[0]
+    assert "What day" in bodies(reply, "reply")[0]
+    assert "need OPENAI_API_KEY" in bodies(reply, "note")[0]
+    offered = text(client, "client-1", "Book 2026-10-05")
+    assert not bodies(offered, "note")  # Exact commands do not consult the model.
     for body in ("Call me at 415-555-0199", "Gate code is 1234"):
         response = client.post("/local/texts", headers=AUTH,
                                json={"party": "client-1", "body": body})
@@ -152,3 +155,38 @@ def test_owner_policy_change_shows_the_owner_notification() -> None:
         record.version, record.policy))
     assert [message["body"] for message in simulator.messages()] == [
         "Scheduling policy updated. Check the current owner calendar."]
+
+
+class Plain:
+    """Resolves one plain-language question the way the real model would."""
+
+    def propose(self, body: str, context: MessageContext) -> MessageProposal:
+        if body == "Hi. Do you have availability for tomorrow?":
+            return MessageProposal("availability", None, None, None, False,
+                                   "2026-09-30", "2026-09-30")
+        return MessageProposal("clarify", None, None, None, True)
+
+
+def test_plain_language_booking_and_owner_yes_in_the_simulator() -> None:
+    client = local(Plain())  # type: ignore[arg-type]
+    # The seeded request is the only one pending, so a plain yes approves it.
+    seeded = text(client, "owner", "Yes")
+    assert bodies(seeded, "reply")[0].startswith("Approved: Blake Sample, ")
+
+    offer = bodies(text(client, "client-1", "Hi. Do you have availability for tomorrow?"),
+                   "reply")[0]
+    assert offer.startswith("Open times on Wed Sep 30: 1) ")
+    assert not any(request["client_id"] == "client-1"
+                   for request in client.get(f"{BASE}/requests", headers=AUTH).json())
+    first = offer.split("1) ", 1)[1].split(",", 1)[0]  # e.g. "10:00 AM"
+
+    booked = text(client, "client-1", f"{first} works")
+    assert bodies(booked, "reply")[0].startswith(f"Requested Wed Sep 30 at {first} (ref ")
+    assert any(body.startswith("New cleaning request from Avery Example")
+               for body in bodies(booked, "notification"))
+
+    approved = text(client, "owner", "yes")
+    assert bodies(approved, "reply")[0].startswith(f"Approved: Avery Example, Wed Sep 30 at {first}")
+    assert any(f"Cleaning visit confirmed: Wed Sep 30 at {first}" in body
+               for body in bodies(approved, "notification"))
+    assert client.get(f"{BASE}/requests", headers=AUTH).json() == []

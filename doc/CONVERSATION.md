@@ -1,8 +1,42 @@
-# Local conversation exercise and command boundary
+# SMS conversation flow and command boundary
 
-Issue [#22](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/issues/22) is in progress. The current local exercise uses a fictional verified client, fictional owner, and an in-memory calendar. It calls OpenAI to interpret other scheduling messages, but state-changing `BOOK`, `RESCHEDULE`, `APPROVE`, `DECLINE`, and `CANCEL` commands require exact affirmative syntax parsed locally. Every proposed action is checked against actor, reference, current appointment state, and the scheduling domain before a write. Writes produce the existing transactional outbox intents in memory. This exercise does not use Twilio, DynamoDB, real customer records, or live SMS.
+Clients and the owner can text in plain language. The model interprets the text; the calendar changes only when a reply matches something the system itself offered. Issue [#60](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/issues/60) recorded the owner decisions behind this flow. Everything below is exercised with fictional data, an in-memory calendar, and no Twilio, DynamoDB, or live SMS.
 
-To use texts together with the owner web app on one shared calendar, use the text simulator described in the [README](../README.md#try-the-app-locally). The terminal exercise below has its own separate calendar.
+## How a conversation works
+
+| Step | Example text | What happens |
+| --- | --- | --- |
+| Ask | "Hi. Do you have availability for tomorrow?" | The model resolves "tomorrow" to a date. The backend checks the 14-day horizon, holidays, working hours, and existing visits, then offers 3–5 real start times. Nothing is written. |
+| Pick | "10 works", "the 10 o'clock one", "option 2", or "yes" when one time was offered | The reply must map to exactly one offered option. A pending request is created, and the reply states its full date and time and that the owner must approve it. |
+| Approve | Owner: "yes", "approve", or "decline" | Acts only when exactly one request is pending. With several, the reply lists them and asks for `APPROVE REF` or `DECLINE REF`. |
+| Cancel | "I can't make Thursday" | "Cancel your Thu Oct 1 at 9:00 AM visit? Reply YES to confirm." Only a plain yes cancels; "no" keeps the visit. If several visits match, they are listed by number; picking one ("2", "the 11 one") leads to the same YES question. |
+| Reschedule | "Can I move Thursday to Friday morning?" | Replacement times are offered the same way. Picking one creates a pending replacement; the original stays confirmed until the owner approves it. "I need to reschedule" first asks which day. |
+
+An offer or confirmation question stays valid for **30 minutes**. A later answer gets "That offer expired after 30 minutes, so nothing changed" and a prompt to ask again. Any new request replaces the previous offer.
+
+When a specific time is open, the offer is that single time, answered with "yes". When it is not, the three nearest open times are offered instead. Offers prefer on-the-hour starts, then half-hour starts, and spread across the requested days.
+
+## What cannot cause a write
+
+- **Model output never selects a write.** The model proposes an intent, a resolved day range, a time window, and the day of an existing visit. Its output is schema-validated: dates must be `YYYY-MM-DD`, times `HH:MM`, and a clarification carries no action fields. The backend rejects impossible dates, past dates, and days beyond the booking horizon before any offer.
+- **Replies are matched deterministically.** A number, a time ("11", "11am", "2:30 pm", "noon"), an ordinal ("the second one"), "option N", a day name that narrows the offer ("Thursday at 8am"), or a plain "yes" for a single option. A reply containing a negation ("not 10", "can't"), a question mark, an alternative ("10 or 12"), or a change of plan ("next week", "instead") is not treated as a pick; it goes to the model, which can only offer new times or ask a question.
+- **Ambiguous picks ask again.** "2" is ambiguous when option 2 and 2 PM are different offered times; "8am" is ambiguous when 8:00 AM is offered on two days. The reply asks for "option N" or a time with AM or PM, and nothing is booked. A time that was not offered is refused the same way.
+- **Confirmations are rechecked.** A cancellation confirmation is refused if the visit changed after the question. A replacement pick is refused if the original visit is no longer confirmed. Every booking re-checks availability transactionally, so a time taken in the meantime is reported, not double-booked.
+- **The owner has no offer memory.** Only a client's own offer can be answered, and only by the phone it was sent to.
+- **The #24 malformed and ambiguous cases still change nothing**, even when a fake model returns an unsafe proposal for them.
+
+Exact commands keep working and bypass the model: `BOOK YYYY-MM-DD` (offers that day's times), `BOOK YYYY-MM-DD HH:MM`, `RESCHEDULE REF to YYYY-MM-DD[ HH:MM]`, `CANCEL REF`, `APPROVE REF`, and `DECLINE REF`. They accept one complete local date or time with no timezone suffix or alternative; the backend rejects daylight-saving gaps and ambiguous times.
+
+## Conversation memory
+
+The last offer, list of visits, or confirmation question is stored per sender phone. It holds only the offered or listed start instants, or one appointment ID and version, plus its 30-minute expiry. It holds no message text.
+
+- **Local harnesses** keep it in process memory; it resets on restart.
+- **The cloud worker** stores it as one `SMS_STATE#<phone>` item per sender in the business table. Reads use strong consistency and enforce expiry themselves. DynamoDB TTL on `expires_at_epoch` removes stale items later; TTL deletion can lag, so it is cleanup, not the expiry check. Clearing a prompt is conditional on its ID, so an older reply cannot erase a newer offer.
+
+## Try it locally
+
+For texts together with the owner web app on one shared calendar, use the text simulator described in the [README](../README.md#try-the-app-locally). The terminal exercise below has its own separate calendar.
 
 With the backend dependencies installed as in the [README](../README.md#local-backend) and a local ignored `.env` containing `OPENAI_API_KEY`, run from the repository root:
 
@@ -18,19 +52,19 @@ With the backend dependencies installed as in the [README](../README.md#local-ba
 
 The subshell removes the key from the parent shell even if the command is interrupted. Use only invented messages. Recognizable phone numbers and entry/access-code phrases are rejected locally; this filter cannot detect every kind of private data.
 
-Try a weekday within the next 14 days:
+1. As `client`, ask "Do you have anything tomorrow morning?" and reply with one of the offered times.
+2. Type `/calendar` to see the pending request, then `/owner` and `yes`.
+3. Switch back with `/client`, text "I can't make it tomorrow", and reply `yes`.
+4. Type `/quit` to exit. The calendar and conversation memory reset on restart.
 
-1. As `client`, type `Book YYYY-MM-DD` to see available start times. The reply includes the complete `BOOK YYYY-MM-DD HH:MM` command to use next; each text is interpreted on its own.
-2. Type `Book YYYY-MM-DD HH:MM` using a returned time. The reply says the request is pending owner approval and gives an eight-character reference.
-3. Type `/calendar` to inspect the pending request; `/owner` to switch actors.
-4. Type `Approve REFERENCE` or `Decline REFERENCE`. The exact reference must be the one shown. An ambiguous `Yes` cannot change the request.
-5. For a confirmed visit, switch to `/client` and type `Cancel REFERENCE`. For a replacement, type `Reschedule REFERENCE to YYYY-MM-DD HH:MM`; the original remains confirmed until the owner approves the replacement.
-6. Type `/quit` to exit. The entire calendar resets on restart.
+Without `OPENAI_API_KEY`, the simulator answers plain language with a question and a note; exact commands and replies to an existing offer still work.
 
-SMS collects only the visit date and time. The owner enters and verifies client profile fields (name, service address, and home size/duration) in the authenticated calendar. A text from a sender without an active, verified profile and matching consent is not authorized for commands. It gets no scheduling reply by SMS, the model is not called, and no scheduling change occurs. If the profile or consent changes after the text arrives, the conversation service refuses the text, and the sender recheck blocks delivery of its reply. A booking request without a complete date and time gets a `BOOK YYYY-MM-DD` prompt and no write. A date-only `BOOK` returns slot suggestions.
+## Profiles, privacy, and the cloud path
 
-The model receives only the inbound text, actor, current local date, timezone, and up to eight short active references. It receives no profile name, phone, address, notes, or API key in its prompt. The model proposal is schema checked and never executes a write directly. Ambiguous model responses and timeouts return a safe question or retry message. Messages over 1,000 characters are rejected intact. `BOOK` and `RESCHEDULE` accept one complete local `YYYY-MM-DD` date or `YYYY-MM-DD HH:MM` time, with no timezone suffix or alternative; the backend rejects daylight-saving gaps and ambiguous times. `APPROVE`, `DECLINE`, and `CANCEL` require one current eight-character reference or exact full ID. Slot suggestions are advisory; the hold command checks availability again transactionally.
+SMS collects only the visit date and time. The owner enters and verifies client profile fields (name, service address, and home size/duration) in the authenticated calendar. A text from a sender without an active, verified profile and matching consent is not authorized for commands. It gets no scheduling reply by SMS, the model is not called, and no scheduling change occurs. If the profile or consent changes after the text arrives, the conversation service refuses the text, and the sender recheck blocks delivery of its reply.
 
-The signed Twilio ingress can hand off a verified receipt ID to SQS after persisting it. The worker rereads the stored receipt, rechecks current consent and actor state, and uses the same conversation service as this local exercise. Each SMS scheduling transaction checks STOP markers atomically with the calendar write. A cancelled transaction is terminal for that receipt, so a STOP that is later cleared cannot revive an older request. Noncommitted clarifications and slot suggestions are recorded with a stable receipt-based outbox intent; the sender derives the destination from the verified receipt and rechecks consent, opt-out, and the explicit recipient allowlist. Reply bodies are purged with inbound bodies 90 days after the last exchange. Duplicate webhook or queue delivery cannot create a second logical request or reply.
+The model receives only the inbound text, actor, current local date and weekday, timezone, booking horizon, and up to eight short active references. It receives no profile name, phone, address, notes, or API key. Model timeouts and malformed output return a safe retry message. Messages over 1,000 characters are rejected intact.
 
-The AWS handoff is disabled by default. The `EnableSmsConversations` parameter only enables it when signed SMS ingress and SMS sending are also separately authorized; the worker obtains the OpenAI key from a `SecureString` at `/scheduling/<environment>/openai/api-key`. Deploying this code, provisioning that secret, and sending live texts require separate owner authorization. The local exercise above remains entirely synthetic.
+The signed Twilio ingress can hand off a verified receipt ID to SQS after persisting it. The worker rereads the stored receipt, rechecks current consent and actor state, and uses the same conversation service as the local exercise, with the DynamoDB conversation memory above. Each SMS scheduling transaction checks STOP markers atomically with the calendar write. A cancelled transaction is terminal for that receipt, so a STOP that is later cleared cannot revive an older request. Offers, questions, and other noncommitted replies are recorded with a stable receipt-based outbox intent; the sender derives the destination from the verified receipt and rechecks consent, opt-out, and the explicit recipient allowlist. Committed changes are announced by the existing notification texts, which state the full date and time. Reply bodies are purged with inbound bodies 90 days after the last exchange. Duplicate webhook or queue delivery cannot create a second logical request or reply.
+
+The AWS handoff is disabled by default. The `EnableSmsConversations` parameter only enables it when signed SMS ingress and SMS sending are also separately authorized; the worker obtains the OpenAI key from a `SecureString` at `/scheduling/<environment>/openai/api-key`. Enabling TTL on the table is part of the stack template. Deploying this code, provisioning that secret, and sending live texts require separate owner authorization.

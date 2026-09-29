@@ -10,6 +10,7 @@ from scheduling.adapters.openai_messages import OpenAIMessageInterpreter
 from scheduling.domain.calendar import CalendarStatus
 from scheduling.domain.client_records import ACCESS_CODE_PATTERN, ClientProfile, HomeSize
 from scheduling.domain.conversation import ConversationService
+from scheduling.domain.conversation_state import InMemoryConversationStates
 from scheduling.domain.holds import HoldService
 from scheduling.domain.lifecycle import LifecycleService
 from scheduling.domain.sms_ingress import ConsentEvidence, InboundReceipt, Keyword, SenderRole
@@ -49,7 +50,8 @@ def main() -> int:
     service = ConversationService(
         store, OpenAIMessageInterpreter(key), HoldService(store),
         LifecycleService(store, lambda: datetime.now(UTC)),
-        SyntheticConsent(), lambda: datetime.now(UTC), OWNER_PHONE)
+        SyntheticConsent(), lambda: datetime.now(UTC), OWNER_PHONE,
+        InMemoryConversationStates())
     actor = SenderRole.CLIENT
     print("Local synthetic scheduling conversation. No live texts or cloud writes.")
     print("Use fictional text only. /client, /owner, /calendar, /quit are available.")

@@ -9,7 +9,7 @@ An SMS-first scheduling assistant for a small home-cleaning business. Clients re
 - [Technical Architecture](doc/ARCHITECTURE.md)
 - [Pilot infrastructure plan](doc/PILOT_INFRASTRUCTURE.md)
 - [Local model evaluation and secrets](doc/MODEL_EVAL.md)
-- [Local scheduling conversation exercise](doc/CONVERSATION.md)
+- [SMS conversation flow and local exercise](doc/CONVERSATION.md)
 - [Scheduling service contracts](doc/SCHEDULING_CONTRACTS.md)
 - [Human–agent team agreement](doc/TEAM_AGREEMENT.md)
 - [A2P registration notes](doc/A2P_REGISTRATION.md) and [public SMS policy pages](docs/README.md)
@@ -37,11 +37,11 @@ One backend process and the owner web app share a single fictional, in-memory ca
 
 | Process | Start it with | Connects to |
 | --- | --- | --- |
-| Synthetic owner backend, port 8000 | Terminal A, below | Holds the one in-memory calendar. Optionally calls OpenAI for free-form texts. |
+| Synthetic owner backend, port 8000 | Terminal A, below | Holds the one in-memory calendar. Calls OpenAI to interpret plain-language texts when a key is set. |
 | Owner web app, port 3000 | Terminal B, below | Calls the backend on port 8000. |
 | Text simulator page | Served by the backend at `http://127.0.0.1:8000/local/texts` | The same backend and calendar. |
 
-Terminal A, from the repository root. `.env` supplies `OPENAI_API_KEY`. Without that file, `source` prints an error and the backend starts without OpenAI: exact commands still work, and free-form texts get the command prompt.
+Terminal A, from the repository root. `.env` supplies `OPENAI_API_KEY`. Without that file, `source` prints an error and the backend starts without OpenAI: exact commands and replies to an offer still work, and plain-language texts get a question and a note explaining the missing key.
 
 ```sh
 (
@@ -62,9 +62,10 @@ npm run dev
 
 Open `http://127.0.0.1:3000` (owner calendar) and `http://127.0.0.1:8000/local/texts` (text simulator), and paste the printed token into each.
 
-- **Client texts:** choose Avery Example or Blake Sample in the simulator and text `Book YYYY-MM-DD` for a weekday within 14 days that is not a federal holiday, then `Book YYYY-MM-DD HH:MM`. Refresh the owner calendar to see the pending request.
-- **Owner decisions:** approve or decline in the owner app, or by texting `Approve REF` as the owner. The simulator shows the notification texts each side would receive, rendered with the production templates.
-- **Cancel and reschedule:** client texts `Cancel REF` or `Reschedule REF to YYYY-MM-DD HH:MM`. Rescheduling needs a confirmed visit; the original stays booked until the owner approves the replacement.
+- **Client texts:** choose Avery Example or Blake Sample and ask in plain language, for example "Do you have availability for tomorrow?". The reply offers 3–5 open times and writes nothing. Answer with one of them ("10 works", "option 2", or "yes" when one time was offered) within 30 minutes to create a pending request. Refresh the owner calendar to see it. See the [conversation flow](doc/CONVERSATION.md) for what counts as a pick.
+- **Owner decisions:** text `yes` or `decline` as the owner when exactly one request is pending; the seeded data starts with one. With several pending, the reply lists them and asks for `Approve REF` or `Decline REF`. You can also decide in the owner app. The simulator shows the notification texts each side would receive, rendered with the production templates.
+- **Cancel and reschedule:** as a client, text "I can't make Thursday" and confirm with `yes`, or "Can I move my Thursday visit to Friday?" and pick a replacement time. Rescheduling needs a confirmed visit; the original stays booked until the owner approves the replacement.
+- **Exact commands** still work: `Book YYYY-MM-DD`, `Book YYYY-MM-DD HH:MM`, `Cancel REF`, `Reschedule REF to YYYY-MM-DD HH:MM`, `Approve REF`, and `Decline REF`.
 - **Unverified senders:** Casey Demo is deliberately unverified. Their texts get no reply, as in production; the simulator shows a note explaining why.
 
 Everything resets when Terminal A stops. Hold expiry and other scheduled workers do not run locally. STOP/HELP keywords are handled by Twilio in production and are not simulated.
@@ -83,7 +84,7 @@ Then open `http://127.0.0.1:8000/docs` or request `GET /health`. `GET /v1/busine
 
 To preview how the model interprets your own fictional texts, use the [interactive model preview](doc/MODEL_EVAL.md) with `--interactive`. It proposes an intent and clarification question but cannot book a visit or send an SMS.
 
-To exercise the booking and approval flow with a fictional client, owner, and in-memory calendar, follow the [local conversation exercise](doc/CONVERSATION.md). It can create and change synthetic appointment state in memory without Twilio, AWS, or live texts.
+To exercise the plain-language booking, cancellation, rescheduling, and approval flow with a fictional client, owner, and in-memory calendar, follow the [conversation flow and local exercise](doc/CONVERSATION.md). It can create and change synthetic appointment state in memory without Twilio, AWS, or live texts.
 
 ## Owner command API
 
