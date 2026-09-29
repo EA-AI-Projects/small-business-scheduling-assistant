@@ -3,4 +3,5 @@ backend/.venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.aws-sam/
 *.egg-info/
