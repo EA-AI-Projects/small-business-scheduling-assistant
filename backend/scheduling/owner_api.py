@@ -10,14 +10,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 from hashlib import sha256
-from importlib.resources import files
 from typing import Annotated, Protocol, cast
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -76,15 +75,6 @@ from scheduling.domain.sms_ingress import SmsIngressStore, record_in_person_cons
 class OwnerPrincipal:
     actor_id: str
     business_id: str
-
-
-@dataclass(frozen=True)
-class OwnerUiConfig:
-    business_id: str
-    client_id: str
-    authorize_url: str
-    token_url: str
-    redirect_uri: str
 
 
 class OwnerTokenVerifier(Protocol):
@@ -270,7 +260,6 @@ def create_owner_app(
     repository: object,
     verify_token: OwnerTokenVerifier,
     clock: Callable[[], datetime] | None = None,
-    ui_config: OwnerUiConfig | None = None,
     sms_store: SmsIngressStore | None = None,
     *,
     cors_origins: tuple[str, ...] = (),
@@ -295,42 +284,6 @@ def create_owner_app(
         )
     now = clock or (lambda: datetime.now(UTC))
     security = HTTPBearer(auto_error=False)
-
-    if ui_config is not None:
-        def ui_asset(name: str) -> str:
-            return files("scheduling").joinpath("ui", name).read_text(encoding="utf-8")
-
-        @app.get("/owner", response_class=HTMLResponse)
-        def owner_ui() -> HTMLResponse:
-            token_url = urlsplit(ui_config.token_url)
-            token_origin = f"{token_url.scheme}://{token_url.netloc}"
-            return HTMLResponse(ui_asset("index.html"), headers={
-                "Cache-Control": "no-store",
-                "Referrer-Policy": "no-referrer",
-                "Content-Security-Policy": (
-                    "default-src 'none'; script-src 'self'; style-src 'self'; "
-                    f"connect-src 'self' {token_origin}; base-uri 'none'; "
-                    "object-src 'none'; frame-ancestors 'none'"
-                ),
-            })
-
-        @app.get("/owner/app.js")
-        def owner_ui_script() -> Response:
-            return Response(ui_asset("app.js"), media_type="text/javascript")
-
-        @app.get("/owner/style.css")
-        def owner_ui_style() -> Response:
-            return Response(ui_asset("style.css"), media_type="text/css")
-
-        @app.get("/owner/config")
-        def owner_ui_config() -> dict[str, str]:
-            return {
-                "business_id": ui_config.business_id,
-                "client_id": ui_config.client_id,
-                "authorize_url": ui_config.authorize_url,
-                "token_url": ui_config.token_url,
-                "redirect_uri": ui_config.redirect_uri,
-            }
 
     @app.exception_handler(HTTPException)
     def owner_http_error(_request: Request, exc: HTTPException) -> JSONResponse:
@@ -649,9 +602,8 @@ def create_owner_app(
 def create_persisted_owner_app(client: DynamoClient, table_name: str,
                                verify_token: OwnerTokenVerifier,
                                clock: Callable[[], datetime] | None = None,
-                               ui_config: OwnerUiConfig | None = None,
                                *, cors_origins: tuple[str, ...] = ()) -> FastAPI:
     """Build the non-local owner API with strongly read DynamoDB state."""
     return create_owner_app(DynamoDBCalendarRepository(client, table_name), verify_token,
-                            clock, ui_config, DynamoSmsIngressStore(client, table_name),
+                            clock, DynamoSmsIngressStore(client, table_name),
                             cors_origins=cors_origins)

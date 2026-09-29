@@ -15,9 +15,6 @@ dev = ["httpx>=0.27,<1", "pytest>=8,<9", "ruff>=0.7,<1", "mypy>=1.11,<2"]
 where = ["."]
 include = ["scheduling*"]
 
-[tool.setuptools.package-data]
-scheduling = ["ui/*.html", "ui/*.js", "ui/*.css"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

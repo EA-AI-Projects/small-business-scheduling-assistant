@@ -169,8 +169,9 @@ def test_template_wires_cors_and_owner_app_origin() -> None:
     assert "AllowCredentials: false" in api_block
     assert "*" not in api_block.split("CorsConfiguration:")[1].split("Auth:")[0]
     pool_client = _resource(text, "OwnerUserPoolClient")
-    assert "- !Ref OwnerRedirectUri" in pool_client
-    assert "- !Sub '${OwnerAppOrigin}/'" in pool_client
+    assert "CallbackURLs: [!Sub '${OwnerAppOrigin}/']" in pool_client
+    assert "OwnerRedirectUri" not in text
+    assert "Path: /owner\n" not in text and "Path: /owner/{proxy+}" not in text
     assert "LogoutURLs: [!Sub '${OwnerAppOrigin}/']" in pool_client
     function = _resource(text, "OwnerApiFunction")
     assert "OWNER_APP_ORIGIN: !Ref OwnerAppOrigin" in function
