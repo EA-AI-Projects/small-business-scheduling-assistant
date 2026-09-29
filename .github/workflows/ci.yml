@@ -34,7 +34,7 @@ jobs:
           cache-dependency-path: backend/pyproject.toml
 
       - name: Install backend
-        run: python -m pip install -e './backend[dev]' cfn-lint
+        run: python -m pip install -c backend/ci-constraints.txt -e './backend[dev]' cfn-lint
 
       - name: Ruff
         run: python -m ruff check backend
@@ -47,3 +47,53 @@ jobs:
 
       - name: Lint SAM template
         run: cfn-lint template.yaml
+
+      - name: Owner OpenAPI schema is current
+        run: |
+          python -m scheduling.owner_openapi > frontend/openapi/owner.json
+          git diff --exit-code -- frontend/openapi/owner.json
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    env:
+      # Placeholder public build settings; CI never contacts these origins.
+      NEXT_PUBLIC_AUTH_MODE: cognito
+      NEXT_PUBLIC_API_BASE_URL: https://owner-api.example.invalid
+      NEXT_PUBLIC_BUSINESS_ID: pilot
+      NEXT_PUBLIC_COGNITO_DOMAIN: https://owner-login.example.invalid
+      NEXT_PUBLIC_COGNITO_CLIENT_ID: ci-placeholder
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Generated API types are current
+        run: |
+          npm run generate:api
+          git diff --exit-code -- src/api/schema.d.ts
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Static export
+        run: npm run build
+
+      - name: Export has no inline scripts or styles
+        run: npm run check:export

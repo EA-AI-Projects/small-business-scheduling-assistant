@@ -1,0 +1,7 @@
+# CI pins for packages that shape the generated owner OpenAPI schema, so a new upstream
+# release cannot fail the stale-schema check on unrelated PRs. Bump deliberately, then
+# regenerate frontend/openapi/owner.json and frontend/src/api/schema.d.ts.
+fastapi==0.141.1
+pydantic==2.13.5
+pydantic_core==2.46.5
+starlette==1.7.0
