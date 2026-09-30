@@ -15,7 +15,7 @@ import json
 import os
 import re
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from time import monotonic, sleep
 from typing import Any
@@ -58,6 +58,9 @@ DLQ_QUEUE = "scheduling-outbox-dlq-dev"
 SQS_ENDPOINT = "https://sqs.us-west-1.amazonaws.com"
 VISIBILITY = 3  # per-receive override, so no test waits out the queue's 180 second default
 MAX_RECEIVE_LIMIT = 10
+STACK = "scheduling-dev"
+SENDER_MAPPING_LOGICAL_ID = "SmsSenderFunctionOutbox"
+DISPATCH_RULE_LOGICAL_ID = "OutboxDispatchFunctionSweep"  # SAM: <function><event name>
 
 
 def _queue_url_pattern(name: str) -> re.Pattern[str]:
@@ -77,13 +80,45 @@ def dev_queue_name() -> str:
     return name
 
 
+def _physical_id(cloudformation: Any, logical_id: str) -> str:
+    detail = cloudformation.describe_stack_resource(
+        StackName=STACK, LogicalResourceId=logical_id)["StackResourceDetail"]
+    return str(detail["PhysicalResourceId"])
+
+
+def require_consumers_off(cloudformation: Any, lambda_client: Any, events: Any) -> None:
+    """Fail closed unless the real sender's queue mapping and the dispatcher rule are disabled.
+
+    Otherwise the real SmsSenderFunction could consume this run's messages (and build a Twilio
+    client), or the table-wide dispatcher could put other intents on the queue mid-run.
+    Any lookup error also stops the run.
+    """
+    try:
+        mapping_id = _physical_id(cloudformation, SENDER_MAPPING_LOGICAL_ID)
+        mapping = lambda_client.get_event_source_mapping(UUID=mapping_id)
+        rule_name = _physical_id(cloudformation, DISPATCH_RULE_LOGICAL_ID)
+        rule = events.describe_rule(Name=rule_name.rsplit("/", 1)[-1])
+    except Exception as exc:  # noqa: BLE001 - any failure to prove the state must stop the run
+        raise ValueError(f"Could not confirm the sender mapping and dispatcher are off: {exc}") \
+            from exc
+    if not str(mapping.get("EventSourceArn", "")).endswith(f":{OUTBOX_QUEUE}"):
+        raise ValueError("The sender mapping does not read the outbox queue; refusing to run")
+    if mapping.get("State") != "Disabled":
+        raise ValueError(
+            f"SmsSenderFunctionOutbox mapping state is {mapping.get('State')!r}, not 'Disabled'"
+        )
+    if rule.get("State") != "DISABLED":
+        raise ValueError(f"Outbox dispatch rule state is {rule.get('State')!r}, not 'DISABLED'")
+
+
 class FakeSqs:
     """In-memory SQS with visibility timeouts, receive counts and redrive to a DLQ.
 
     Models only what the harness uses. ``advance`` replaces sleeping.
     """
 
-    def __init__(self, max_receive: int = 5) -> None:
+    def __init__(self, max_receive: int = 5, per_call: int = 1) -> None:
+        self.per_call = per_call  # like long polling, one message per poll exercises multi-poll
         self.now = 0.0
         self.max_receive = max_receive
         self._queues: dict[str, list[dict[str, Any]]] = {OUTBOX_QUEUE: [], DLQ_QUEUE: []}
@@ -136,7 +171,7 @@ class FakeSqs:
         name = self._name(QueueUrl)
         received: list[dict[str, Any]] = []
         for message in list(self._queues[name]):
-            if message["visible_at"] > self.now or len(received) >= MaxNumberOfMessages:
+            if message["visible_at"] > self.now or len(received) >= min(MaxNumberOfMessages, self.per_call):
                 continue
             if name == OUTBOX_QUEUE and message["count"] >= self.max_receive:
                 self._queues[name].remove(message)  # redrive instead of another delivery
@@ -168,6 +203,7 @@ class QueueEnv:
     business: str
     sleep: Callable[[float], None]
     monotonic: Callable[[], float]
+    guard: Callable[[], None] = field(default=lambda: None)
 
 
 class Clock:
@@ -282,6 +318,7 @@ def prove_outbox_queue_path(
 
     # 1. Dispatch reaches the real queue; a transient provider failure schedules a retry.
     await_due()
+    q.guard()
     report = DispatchService(dispatch_store, queue, clock).run_once()
     assert (report.examined, report.enqueued) == (1, 1)
     (first,) = _receive_count(q, q.outbox_url, 1)
@@ -298,6 +335,7 @@ def prove_outbox_queue_path(
     # and one delivery is consumed but not deleted (a consumer crash before delete).
     clock.advance(60)
     await_due()
+    q.guard()
     assert DispatchService(dispatch_store, queue, clock).run_once().enqueued == 1
     queue.enqueue(business, outbox_id)
     a, b = _receive_count(q, q.outbox_url, 2)
@@ -308,7 +346,9 @@ def prove_outbox_queue_path(
     q.sleep(VISIBILITY + 1)
     (again,) = _receive_count(q, q.outbox_url, 1)
     assert again["MessageId"] == a["MessageId"]
-    assert again["Attributes"]["ApproximateReceiveCount"] == "2"
+    # The gather may itself outlast a visibility timeout, so compare with a's latest receive.
+    assert int(again["Attributes"]["ApproximateReceiveCount"]) == int(
+        a["Attributes"]["ApproximateReceiveCount"]) + 1
     assert _consume(q, consumer, [again], delete=True) == set()  # redelivery: skipped
     assert consumer.outcomes[-1] == ConsumeOutcome.SKIPPED
     assert sender.deliveries == [outbox_id]  # exactly one logical delivery
@@ -319,6 +359,7 @@ def prove_outbox_queue_path(
     # 3. A poison message is received and never deleted until redrive moves it to the DLQ.
     poison = json.dumps({"business_id": business, "outbox_id": ""},
                         sort_keys=True, separators=(",", ":"))
+    q.guard()
     q.sqs.send_message(QueueUrl=q.outbox_url, MessageBody=poison)
     for count in range(1, q.max_receive + 1):
         (message,) = _receive_count(q, q.outbox_url, 1)
@@ -355,6 +396,8 @@ def cleanup_run_messages(q: QueueEnv) -> None:
     for url in (q.outbox_url, q.dlq_url):
         deadline = q.monotonic() + 120
         while True:
+            if _pending_counts(q, url) == 0:  # never receive from a queue that is already empty
+                break
             response = q.sqs.receive_message(
                 QueueUrl=url, MaxNumberOfMessages=10, VisibilityTimeout=5, WaitTimeSeconds=2,
             )
@@ -388,7 +431,15 @@ def _dev_queues(business: str) -> QueueEnv:
     dlq = require_queue_url(DLQ_QUEUE, sqs.get_queue_url(QueueName=DLQ_QUEUE)["QueueUrl"])
     if outbox.rsplit("/", 2)[-2] != dlq.rsplit("/", 2)[-2]:
         raise ValueError("The outbox queue and DLQ belong to different accounts")
-    q = _checked_queues(QueueEnv(sqs, outbox, dlq, 0, business, sleep, monotonic))
+    cloudformation = boto3.client("cloudformation", region_name=DEV_REGION)
+    lambda_client = boto3.client("lambda", region_name=DEV_REGION)
+    events = boto3.client("events", region_name=DEV_REGION)
+
+    def guard() -> None:
+        require_consumers_off(cloudformation, lambda_client, events)
+
+    guard()  # before anything is sent or received
+    q = _checked_queues(QueueEnv(sqs, outbox, dlq, 0, business, sleep, monotonic, guard))
     print(f"Synthetic outbox queue run: business {business}; queues {OUTBOX_QUEUE}, {DLQ_QUEUE}; "
           f"max receive count {q.max_receive}", flush=True)
     return q
@@ -535,3 +586,99 @@ def test_queue_name_guard_and_nonempty_queue_refusal(monkeypatch: pytest.MonkeyP
     with pytest.raises(ValueError, match="maxReceiveCount"):
         _checked_queues(QueueEnv(wrong, url, dlq, 0, "synthetic-run-a", wrong.advance,
                                  lambda: wrong.now))
+
+
+class FakeAws:
+    """Stands in for the CloudFormation, Lambda and EventBridge read calls."""
+
+    def __init__(self, mapping: str = "Disabled", rule: str = "DISABLED",
+                 queue: str = OUTBOX_QUEUE) -> None:
+        self.mapping, self.rule, self.queue = mapping, rule, queue
+        self.missing: set[str] = set()
+
+    def describe_stack_resource(self, StackName: str, LogicalResourceId: str) -> dict[str, Any]:
+        assert StackName == STACK
+        if LogicalResourceId in self.missing:
+            raise KeyError(LogicalResourceId)
+        return {"StackResourceDetail": {"PhysicalResourceId": f"phys-{LogicalResourceId}"}}
+
+    def get_event_source_mapping(self, UUID: str) -> dict[str, Any]:
+        assert UUID == f"phys-{SENDER_MAPPING_LOGICAL_ID}"
+        return {"State": self.mapping,
+                "EventSourceArn": f"arn:aws:sqs:us-west-1:123456789012:{self.queue}"}
+
+    def describe_rule(self, Name: str) -> dict[str, Any]:
+        assert Name == f"phys-{DISPATCH_RULE_LOGICAL_ID}"
+        return {"State": self.rule}
+
+
+def test_consumer_guard_passes_only_when_mapping_and_dispatcher_are_off() -> None:
+    aws = FakeAws()
+    require_consumers_off(aws, aws, aws)
+    for kwargs, message in (
+        ({"mapping": "Enabled"}, "not 'Disabled'"),
+        ({"mapping": "Enabling"}, "not 'Disabled'"),
+        ({"mapping": "Disabling"}, "not 'Disabled'"),
+        ({"rule": "ENABLED"}, "not 'DISABLED'"),
+        ({"queue": "scheduling-sms-conversation-dev"}, "does not read the outbox queue"),
+    ):
+        bad = FakeAws(**kwargs)
+        with pytest.raises(ValueError, match=message):
+            require_consumers_off(bad, bad, bad)
+    for logical in (SENDER_MAPPING_LOGICAL_ID, DISPATCH_RULE_LOGICAL_ID):
+        lost = FakeAws()
+        lost.missing.add(logical)
+        with pytest.raises(ValueError, match="Could not confirm"):
+            require_consumers_off(lost, lost, lost)
+
+
+def _guarded_run(aws: FakeAws, flip_after: int | None) -> FakeSqs:
+    q = _fake_queue_env(f"synthetic-run-{uuid4().hex[:12]}")
+    calls = 0
+
+    def guard() -> None:
+        nonlocal calls
+        calls += 1
+        if flip_after is not None and calls > flip_after:
+            aws.mapping = "Enabled"
+        require_consumers_off(aws, aws, aws)
+
+    q = replace(q, guard=guard)
+    store = MemoryStore()
+    store.record = replace(store.record, business_id=q.business)
+    now = store.record.next_attempt_at
+    assert now is not None
+    try:
+        prove_outbox_queue_path(q, store, store, store.record.outbox_id, Clock(now),
+                                lambda: None)
+    finally:
+        cleanup_run_messages(q)
+    fake: FakeSqs = q.sqs
+    return fake
+
+
+def test_scenario_refuses_to_send_when_the_mapping_is_enabled() -> None:
+    with pytest.raises(ValueError, match="not 'Disabled'"):
+        _guarded_run(FakeAws(mapping="Enabled"), None)
+
+
+def test_scenario_rechecks_the_mapping_before_the_poison_step() -> None:
+    # The mapping flips after the two dispatch checks; the poison step must still refuse.
+    with pytest.raises(ValueError, match="not 'Disabled'"):
+        _guarded_run(FakeAws(), 2)
+
+
+def test_scenario_survives_gathers_that_outlast_the_visibility_timeout() -> None:
+    fake = FakeSqs(per_call=1)
+    q = _checked_queues(QueueEnv(
+        fake, fake.get_queue_url(QueueName=OUTBOX_QUEUE)["QueueUrl"],
+        fake.get_queue_url(QueueName=DLQ_QUEUE)["QueueUrl"], 0,
+        f"synthetic-run-{uuid4().hex[:12]}",
+        lambda s: fake.advance(2.0 if s < 1 else s), lambda: fake.now,
+    ))
+    store = MemoryStore()
+    store.record = replace(store.record, business_id=q.business)
+    now = store.record.next_attempt_at
+    assert now is not None
+    prove_outbox_queue_path(q, store, store, store.record.outbox_id, Clock(now), lambda: None)
+    cleanup_run_messages(q)
