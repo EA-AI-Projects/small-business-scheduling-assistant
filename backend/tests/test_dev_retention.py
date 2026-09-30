@@ -45,6 +45,8 @@ NOTE_FUNCTION_VAR = "SCHEDULING_DEV_NOTE_RETENTION_FUNCTION"
 SMS_FUNCTION_VAR = "SCHEDULING_DEV_SMS_RETENTION_FUNCTION"
 OLD = datetime(2001, 9, 10, 12, tzinfo=UTC)
 BYSTANDER_PHONE = "+12065550100"
+PHONE_COUNT = 7
+CLOCK_MARGIN = timedelta(days=1)
 EVIDENCE_PREFIXES = ("SMS_CONSENT#", "SMS_CONSENT_CURRENT#", "SMS_OPTOUT#", "SMS_OPTOUT_EVENT#")
 Invoke = Callable[[], dict[str, Any]]
 Item = dict[str, Any]
@@ -126,6 +128,7 @@ class RetentionRun:
     client_id: str
     provider_prefix: str
     phones: list[str] = field(default_factory=list)
+    preexisting: frozenset[Key] = frozenset()
 
     def owns(self, sort_key: str) -> bool:
         client_hash = sha256(self.client_id.encode()).hexdigest()
@@ -156,6 +159,9 @@ class RetentionRun:
         except (BotoCoreError, ClientError) as exc:
             raise RuntimeError(f"Cleanup for {self.client_id} could not list items: {exc}") from exc
         for pk, sk in owned:
+            if (pk, sk) in self.preexisting:  # defense in depth: never delete what predated the run
+                errors.append(f"refused to delete pre-existing {sk}")
+                continue
             try:
                 self.env.client.delete_item(
                     TableName=self.env.table, Key={"PK": {"S": pk}, "SK": {"S": sk}})
@@ -167,12 +173,16 @@ class RetentionRun:
                 + "; ".join(errors))
 
 
-def purge_risks(items: dict[Key, Item], now: datetime,
-                last_visit_end: Callable[[str], datetime | None]) -> list[str]:
+def purge_risks(items: dict[Key, Item], real_now: datetime,
+                last_visit_end: Callable[[str], datetime | None],
+                margin: timedelta = CLOCK_MARGIN) -> list[str]:
     """Name each existing item that a retention run would delete (conservative).
 
+    Expiries are evaluated at ``real_now + margin`` so clock skew between this machine and
+    the Lambda cannot hide an item; ``last_visit_end`` is the caller's read at the real now.
     SMS evidence ignores the thread check, so an item that might survive is still reported.
     """
+    now = real_now + margin
     cutoff = _four_year_cutoff(now)
     body_cutoff = _instant(now - timedelta(days=90))
     risks: list[str] = []
@@ -238,14 +248,25 @@ def _retention_run(function_var: str, handler_path: str, in_process: Invoke,
         yield from _prepared(env, in_process)
 
 
-def _prepared(env: RaceEnv, invoke: Invoke) -> Iterator[RetentionRun]:
+def _choose_run(env: RaceEnv, invoke: Invoke, existing: set[Key]) -> RetentionRun:
+    """Pick run phones that no existing key mentions; fail closed rather than retry forever."""
     hex_id = env.run.removeprefix("run-")
-    run = RetentionRun(env, invoke, f"synthetic-run-{hex_id}", f"SMS#{env.run}-")
     rng = random.Random(hex_id)
-    while len(run.phones) < 6:
-        phone = _phone(rng)
-        if phone not in run.phones and phone != BYSTANDER_PHONE:
-            run.phones.append(phone)
+    for _ in range(50):
+        run = RetentionRun(env, invoke, f"synthetic-run-{hex_id}", f"SMS#{env.run}-",
+                           preexisting=frozenset(existing))
+        while len(run.phones) < PHONE_COUNT:
+            phone = _phone(rng)
+            if phone not in run.phones and phone != BYSTANDER_PHONE:
+                run.phones.append(phone)
+        if not any(run.owns(sk) for _, sk in existing):
+            return run
+    raise ValueError("Could not find run keys that no existing dev-synthetic item uses")
+
+
+def _prepared(env: RaceEnv, invoke: Invoke) -> Iterator[RetentionRun]:
+    # Choose collision-free keys before the try, so a collision can never reach cleanup.
+    run = _choose_run(env, invoke, set(_partition(env.client, env.table)))
     print(f"Synthetic retention run {env.run}: business {BUSINESS} (shared, never scrubbed), "
           f"client {run.client_id}, SMS provider prefix {run.provider_prefix}, "
           f"phones {', '.join(run.phones)}", flush=True)
@@ -317,7 +338,7 @@ def test_sms_retention_worker_purges_expired_bodies_and_keeps_held_or_current_ev
     now = datetime.now(UTC)
     before = _precheck(run, now)
     store = DynamoSmsIngressStore(run.env.client, run.env.table)
-    old_body, new_body, old_evidence, new_evidence, held_evidence = run.phones[1:]
+    old_body, new_body, old_evidence, new_evidence, held_evidence, held_body = run.phones[1:]
     yesterday = now - timedelta(days=1)
 
     def receive(name: str, phone: str, received: datetime) -> str:
@@ -333,6 +354,14 @@ def test_sms_retention_worker_purges_expired_bodies_and_keeps_held_or_current_ev
 
     old_id = receive("body-old", old_body, OLD)
     new_id = receive("body-new", new_body, yesterday)
+    held_id = receive("body-held", held_body, OLD)
+    # The domain has no API to hold a body, but the purge skips a held one, so set it directly.
+    run.env.client.update_item(
+        TableName=run.env.table,
+        Key={"PK": {"S": f"BUSINESS#{BUSINESS}"}, "SK": {"S": f"SMS#{held_id}"}},
+        UpdateExpression="SET legal_hold_reason = :reason",
+        ConditionExpression="attribute_exists(PK)",
+        ExpressionAttributeValues={":reason": {"S": "synthetic legal hold"}})
     consent(old_evidence, OLD)
     consent(new_evidence, yesterday)
     consent(held_evidence, OLD)
@@ -354,6 +383,8 @@ def test_sms_retention_worker_purges_expired_bodies_and_keeps_held_or_current_ev
     assert purged is not None and "body" not in purged and purged["sender"]["S"] == old_body
     kept = read(f"SMS#{new_id}")
     assert kept is not None and kept["body"]["S"] == "Synthetic body-new text"
+    held_body_item = read(f"SMS#{held_id}")
+    assert held_body_item is not None and held_body_item["body"]["S"] == "Synthetic body-held text"
     assert read(history_keys[0]) is None and read(current_keys[0]) is None
     for sort_key in (history_keys[1], current_keys[1]):
         assert read(sort_key) is not None
@@ -396,6 +427,17 @@ def test_precheck_reports_existing_records_a_purge_would_delete() -> None:
         item("SMS_CONSENT#+12065550103#t", agreed_at=_instant(OLD)),
         item("SMS_OPTOUT#+12065550104", opted_out_at=_instant(OLD)),
     ])
+    # Skew: items that expire within the margin after the real now are still reported.
+    edge_note = dict([note("NOTE#CLIENT#x#edge", datetime(2025, 10, 1, 12, tzinfo=UTC))])
+    assert purge_risks(edge_note, now, no_visit, margin=timedelta(0)) == []
+    assert purge_risks(edge_note, now, no_visit) == ["note NOTE#CLIENT#x#edge"]
+    edge_sms = dict([
+        item("SMS#edge", sender="+12065550105", body="b"),
+        item("SMS_THREAD#+12065550105", last_exchange_at=_instant(now - timedelta(days=89, hours=12))),
+        item("SMS_CONSENT#+12065550106#t", agreed_at=_four_year_cutoff(now + timedelta(hours=12))),
+    ])
+    assert purge_risks(edge_sms, now, no_visit, margin=timedelta(0)) == []
+    assert len(purge_risks(edge_sms, now, no_visit)) == 2
     assert sorted(purge_risks(risky, now, no_visit)) == sorted([
         "sms body SMS#old", "sms evidence SMS_CONSENT#+12065550103#t",
         "sms evidence SMS_OPTOUT#+12065550104"])
@@ -446,3 +488,39 @@ def test_function_name_guard(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(NOTE_FUNCTION_VAR, bad)
         with pytest.raises(ValueError, match="function name"):
             _function_name(NOTE_FUNCTION_VAR)
+
+
+class _RecordingClient:
+    def __init__(self, keys: list[Key]) -> None:
+        self.keys = keys
+        self.deleted: list[Key] = []
+
+    def query(self, **_kwargs: Any) -> dict[str, Any]:
+        return {"Items": [{"PK": {"S": pk}, "SK": {"S": sk}} for pk, sk in self.keys]}
+
+    def delete_item(self, **kwargs: Any) -> None:
+        self.deleted.append((kwargs["Key"]["PK"]["S"], kwargs["Key"]["SK"]["S"]))
+
+
+def test_colliding_keys_are_never_chosen_and_never_cleaned_up() -> None:
+    pk = f"BUSINESS#{BUSINESS}"
+    env = RaceEnv(None, "scheduling-dev", "synthetic-x", "run-abc123")
+    first = _choose_run(env, dict, set())
+    # An existing item that uses the first chosen phone forces a different choice.
+    taken = {(pk, f"SMS_THREAD#{first.phones[0]}"), (pk, f"PHONE#{first.phones[3]}")}
+    second = _choose_run(env, dict, taken)
+    assert not set(first.phones[:1] + first.phones[3:4]) & set(second.phones)
+    assert not any(second.owns(sk) for _, sk in taken)
+    # A run whose predicate does match a pre-existing key still never deletes it.
+    colliding = (pk, f"SMS_THREAD#{first.phones[0]}")
+    own = (pk, f"SMS#{env.run}-body-old")
+    client = _RecordingClient([colliding, own])
+    run = RetentionRun(RaceEnv(client, "scheduling-dev", "synthetic-x", env.run), dict,
+                       first.client_id, first.provider_prefix, first.phones,
+                       preexisting=frozenset({colliding}))
+    with pytest.raises(RuntimeError, match="refused to delete pre-existing"):
+        run.cleanup()
+    assert client.deleted == [own]
+    # A client-key collision cannot be fixed by new phones, so the search fails closed.
+    with pytest.raises(ValueError, match="Could not find run keys"):
+        _choose_run(env, dict, {(pk, f"CLIENT#{first.client_id}")})
