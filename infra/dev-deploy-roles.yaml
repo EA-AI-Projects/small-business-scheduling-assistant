@@ -213,6 +213,11 @@ Resources:
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
+          # With --role-arn, CloudFormation expands the SAM transform as this role.
+          - Sid: SamTransform
+            Effect: Allow
+            Action: cloudformation:CreateChangeSet
+            Resource: !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31'
           - Sid: LambdaFunctions
             Effect: Allow
             Action:
