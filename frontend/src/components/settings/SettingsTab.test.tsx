@@ -47,6 +47,41 @@ function policyWrite(route: (body: unknown) => void, current: PolicyState = WITH
 }
 
 describe("SettingsTab", () => {
+  it("offers to load the pilot policy when none is configured, then shows it", async () => {
+    let seeded = false;
+    const { notify, request } = setup((method, path) => {
+      if (path === "/policy/seed" && method === "POST") { seeded = true; return { status: 200, body: {} }; }
+      if (path === "/policy" && method === "GET") {
+        return seeded ? { status: 200, body: POLICY }
+          : { status: 404, body: { error: { code: "POLICY_NOT_CONFIGURED", message: "missing" } } };
+      }
+      return undefined;
+    });
+    expect(await screen.findByText("Policy is not configured")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Load pilot policy" }));
+    expect(await screen.findByText("Timezone: America/Los_Angeles")).toBeInTheDocument();
+    expect(request).toHaveBeenCalledWith("/policy/seed", expect.objectContaining({ method: "POST", idempotent: true }));
+    expect(notify).toHaveBeenCalledWith("Pilot policy loaded", undefined);
+    expect(screen.queryByRole("button", { name: "Load pilot policy" })).not.toBeInTheDocument();
+  });
+
+  it("reports nothing saved when loading the pilot policy fails", async () => {
+    const { notify } = setup((method, path) => {
+      if (path === "/policy/seed") return { status: 500, body: { error: { code: "X", message: "boom" } } };
+      if (path === "/policy") return { status: 404, body: { error: { code: "POLICY_NOT_CONFIGURED", message: "missing" } } };
+      return undefined;
+    });
+    await userEvent.click(await screen.findByRole("button", { name: "Load pilot policy" }));
+    await waitFor(() => expect(notify).toHaveBeenCalledWith("Nothing was saved: boom", true));
+    expect(screen.getByRole("button", { name: "Load pilot policy" })).toBeEnabled();
+  });
+
+  it("does not offer to load the pilot policy once one exists", async () => {
+    setup(() => undefined);
+    await screen.findByText("Timezone: America/Los_Angeles");
+    expect(screen.queryByRole("button", { name: "Load pilot policy" })).not.toBeInTheDocument();
+  });
+
   it("summarizes the policy with date exceptions in date order", async () => {
     setup((method, path) => path === "/policy" ? { status: 200, body: WITH_EXCEPTIONS } : undefined);
     expect(await screen.findByText("Timezone: America/Los_Angeles")).toBeInTheDocument();
