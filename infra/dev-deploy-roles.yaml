@@ -65,25 +65,24 @@ Parameters:
       Optional. After the dev stack exists, update this stack with the user
       pool ID to pin the Cognito admin actions to that one pool. Empty means
       "any pool tagged with this CloudFormation stack".
-  EnforcePermissionsBoundary:
+  TrustCloudFormationSourceArn:
     Type: String
     AllowedValues: ['true', 'false']
     Default: 'true'
     Description: >-
-      When true, the execution role may create or re-boundary roles only with
-      the boundary policy from this stack attached, so the dev stack must be
-      deployed with PermissionsBoundaryArn set to the LambdaRoleBoundaryArn
-      output. Set false only to deploy a template.yaml that predates that parameter.
+      Add the aws:SourceArn (stack) condition to the execution role's trust policy, next to
+      aws:SourceAccount. If CloudFormation rejects the role, the owner updates this stack with
+      false through a separately reviewed change (aws:SourceAccount stays).
 
 Conditions:
   MfaRequired: !Equals [!Ref RequireMfa, 'true']
   HasUserPoolId: !Not [!Equals [!Ref OwnerUserPoolId, '']]
-  BoundaryEnforced: !Equals [!Ref EnforcePermissionsBoundary, 'true']
+  TrustSourceArn: !Equals [!Ref TrustCloudFormationSourceArn, 'true']
 
 Resources:
   # ---------------------------------------------------------------------------
   # Permissions boundary for the Lambda roles created by the dev stack.
-  # Always created (free); enforced only when EnforcePermissionsBoundary.
+  # Always enforced through the execution role's IAM policy (RequireBoundary).
   # It is the ceiling of what template.yaml's function roles legitimately use.
   # ---------------------------------------------------------------------------
   LambdaRoleBoundary:
@@ -144,11 +143,14 @@ Resources:
           - Effect: Allow
             Principal: {Service: cloudformation.amazonaws.com}
             Action: sts:AssumeRole
-            Condition:
-              StringEquals:
-                aws:SourceAccount: !Ref AWS::AccountId
-              ArnLike:
-                aws:SourceArn: !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${StackName}/*'
+            Condition: !If
+              - TrustSourceArn
+              - StringEquals:
+                  aws:SourceAccount: !Ref AWS::AccountId
+                ArnLike:
+                  aws:SourceArn: !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${StackName}/*'
+              - StringEquals:
+                  aws:SourceAccount: !Ref AWS::AccountId
       ManagedPolicyArns:
         - !Ref ExecComputePolicy
         - !Ref ExecDataPolicy
@@ -157,6 +159,7 @@ Resources:
   ExecComputePolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
+      ManagedPolicyName: !Sub 'deploy-${StackName}-exec-compute'
       Description: Execution role, part 1 of 3 - Lambda, API Gateway, EventBridge, Logs, alarms.
       PolicyDocument:
         Version: '2012-10-17'
@@ -179,19 +182,28 @@ Resources:
               - lambda:ListTags
               - lambda:ListVersionsByFunction
             Resource: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${StackName}-*'
-          - Sid: LambdaEventSourceMappings
+          # Create/Update/DeleteEventSourceMapping have no resource type in the IAM
+          # service-authorization data: they are authorized against "*", and the only
+          # scoping AWS documents is the lambda:FunctionArn condition key.
+          - Sid: LambdaEventSourceMappingWrites
             Effect: Allow
             Action:
               - lambda:CreateEventSourceMapping
               - lambda:UpdateEventSourceMapping
               - lambda:DeleteEventSourceMapping
-              - lambda:GetEventSourceMapping
-              - lambda:TagResource
-              - lambda:UntagResource
-            Resource: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:event-source-mapping:*'
+            Resource: '*'
             Condition:
               ArnLike:
                 lambda:FunctionArn: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${StackName}-*'
+          # The lambda:FunctionArn key is not documented for these, so no condition here.
+          - Sid: LambdaEventSourceMappingReadsAndTags
+            Effect: Allow
+            Action:
+              - lambda:GetEventSourceMapping
+              - lambda:ListTags
+              - lambda:TagResource
+              - lambda:UntagResource
+            Resource: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:event-source-mapping:*'
           - Sid: LambdaEventSourceMappingLookups
             Effect: Allow
             Action: lambda:ListEventSourceMappings
@@ -233,12 +245,20 @@ Resources:
               - logs:TagLogGroup
               - logs:UntagLogGroup
               - logs:ListTagsLogGroup
+              - logs:GetDataProtectionPolicy
+              - logs:DeleteDataProtectionPolicy
+              - logs:DescribeIndexPolicies
             Resource:
               - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${StackName}-*'
               - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${StackName}-*:*'
+          # No resource-level scope for these read-only calls (IAM metadata lists no resource type).
           - Sid: LogLookups
             Effect: Allow
-            Action: [logs:DescribeLogGroups, logs:DescribeMetricFilters]
+            Action: [logs:DescribeLogGroups, logs:DescribeResourcePolicies]
+            Resource: '*'
+          - Sid: MetricFilterLookups
+            Effect: Allow
+            Action: logs:DescribeMetricFilters
             Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*'
           - Sid: Alarms
             Effect: Allow
@@ -257,6 +277,7 @@ Resources:
   ExecDataPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
+      ManagedPolicyName: !Sub 'deploy-${StackName}-exec-data'
       Description: Execution role, part 2 of 3 - DynamoDB, SQS, SNS, Cognito, artifact bucket.
       PolicyDocument:
         Version: '2012-10-17'
@@ -273,6 +294,7 @@ Resources:
               - dynamodb:TagResource
               - dynamodb:UntagResource
               - dynamodb:Describe*
+              - dynamodb:GetResourcePolicy
               - dynamodb:ListTagsOfResource
             Resource:
               - !Sub 'arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/scheduling-${Environment}'
@@ -298,6 +320,7 @@ Resources:
               - sns:GetTopicAttributes
               - sns:Subscribe
               - sns:ListSubscriptionsByTopic
+              - sns:GetDataProtectionPolicy
               - sns:TagResource
               - sns:UntagResource
               - sns:ListTagsForResource
@@ -322,6 +345,8 @@ Resources:
               - cognito-idp:UpdateUserPoolClient
               - cognito-idp:DeleteUserPoolClient
               - cognito-idp:DescribeUserPoolClient
+              - cognito-idp:ListUserPoolClientSecrets
+              - cognito-idp:AddCustomAttributes
               - cognito-idp:CreateUserPoolDomain
               - cognito-idp:DeleteUserPoolDomain
               - cognito-idp:UpdateUserPoolDomain
@@ -341,6 +366,7 @@ Resources:
   ExecIamPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
+      ManagedPolicyName: !Sub 'deploy-${StackName}-exec-iam'
       Description: Execution role, part 3 of 3 - IAM, constrained against privilege escalation.
       PolicyDocument:
         Version: '2012-10-17'
@@ -352,7 +378,7 @@ Resources:
               - iam:DeleteRole
               - iam:GetRole
               - iam:UpdateRole
-              - iam:UpdateAssumeRolePolicy
+              - iam:UpdateRoleDescription
               - iam:PutRolePolicy
               - iam:DeleteRolePolicy
               - iam:GetRolePolicy
@@ -379,23 +405,32 @@ Resources:
             Condition:
               StringEquals:
                 iam:PassedToService: lambda.amazonaws.com
-          - !If
-            - BoundaryEnforced
-            - Sid: RequireBoundaryOnCreate
-              Effect: Deny
-              Action: [iam:CreateRole, iam:PutRolePermissionsBoundary]
-              Resource: '*'
-              Condition:
-                StringNotEquals:
-                  iam:PermissionsBoundary: !Ref LambdaRoleBoundary
-            - !Ref AWS::NoValue
-          - !If
-            - BoundaryEnforced
-            - Sid: BoundaryCannotBeRemoved
-              Effect: Deny
-              Action: iam:DeleteRolePermissionsBoundary
-              Resource: '*'
-            - !Ref AWS::NoValue
+          # The boundary is always enforced. Creating a role, or changing its policies, requires the
+          # boundary to be attached. iam:PermissionsBoundary is documented for these actions, so a
+          # pre-existing unbounded scheduling-dev-* role cannot be written to or re-used either.
+          - Sid: RequireBoundary
+            Effect: Deny
+            Action:
+              - iam:CreateRole
+              - iam:PutRolePermissionsBoundary
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+            Resource: '*'
+            Condition:
+              StringNotEquals:
+                iam:PermissionsBoundary: !Ref LambdaRoleBoundary
+          - Sid: BoundaryCannotBeRemoved
+            Effect: Deny
+            Action: iam:DeleteRolePermissionsBoundary
+            Resource: '*'
+          # Trust policies are set by CreateRole (no condition key can constrain their content)
+          # and are never edited afterwards.
+          - Sid: NoTrustPolicyEdits
+            Effect: Deny
+            Action: iam:UpdateAssumeRolePolicy
+            Resource: '*'
           - Sid: NeverAdminPolicies
             Effect: Deny
             Action: [iam:AttachRolePolicy, iam:AttachUserPolicy, iam:AttachGroupPolicy]
@@ -441,6 +476,7 @@ Resources:
   DeployerDeployPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
+      ManagedPolicyName: !Sub 'deploy-${StackName}-deployer-deploy'
       Description: Deployer role, part 1 of 2 - change sets, stack deletion, artifact bucket, PassRole.
       PolicyDocument:
         Version: '2012-10-17'
@@ -508,6 +544,7 @@ Resources:
   DeployerOperatePolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
+      ManagedPolicyName: !Sub 'deploy-${StackName}-deployer-operate'
       Description: Deployer role, part 2 of 2 - post-deploy checkpoint actions on the dev stack resources.
       PolicyDocument:
         Version: '2012-10-17'
@@ -540,24 +577,29 @@ Resources:
             Action: [events:EnableRule, events:DisableRule, events:DescribeRule]
             Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/${StackName}-*'
           # Rollback only (checkpoint step 6): inspect, brake, disable. No code upload.
-          - Sid: LambdaRollbackOnly
+          - Sid: LambdaInspectAndBrake
             Effect: Allow
             Action:
               - lambda:InvokeFunction
               - lambda:GetFunction
               - lambda:GetFunctionConfiguration
-              - lambda:UpdateFunctionConfiguration
               - lambda:PutFunctionConcurrency
               - lambda:DeleteFunctionConcurrency
             Resource: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${StackName}-*'
-          - Sid: SqsMappingsRollbackOnly
+          # The FunctionArn key is documented only for Create/Update/Delete, so reads are unconditioned.
+          - Sid: EventSourceMappingRead
             Effect: Allow
-            Action: [lambda:GetEventSourceMapping, lambda:UpdateEventSourceMapping]
+            Action: lambda:GetEventSourceMapping
             Resource: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:event-source-mapping:*'
+          # Disabling a mapping is rollback step 1. Update has no resource type, so "*" plus the condition.
+          - Sid: EventSourceMappingDisable
+            Effect: Allow
+            Action: lambda:UpdateEventSourceMapping
+            Resource: '*'
             Condition:
               ArnLike:
                 lambda:FunctionArn: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${StackName}-*'
-          # Checkpoint step 4 (synthetic race tests) and teardown steps 3 and 7
+          # Checkpoint step 4 (synthetic race tests) and teardown steps 2 and 6
           # (count, disable PITR, delete the retained table).
           - Sid: DevTableData
             Effect: Allow
@@ -583,12 +625,12 @@ Resources:
               - dynamodb:UpdateContinuousBackups
               - dynamodb:DeleteTable
             Resource: !Sub 'arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/scheduling-${Environment}'
-          # ListBackups (teardown step 7 check) cannot be limited to a table.
+          # ListBackups (teardown step 6 check) cannot be limited to a table.
           - Sid: ListBackupsNoResourceLevel
             Effect: Allow
             Action: dynamodb:ListBackups
             Resource: '*'
-          # Checkpoint steps 4-5: worker logs; teardown step 8: leftover log groups.
+          # Checkpoint steps 4-5: worker logs; teardown step 7: leftover log groups.
           - Sid: StackLogsReadAndCleanup
             Effect: Allow
             Action:
@@ -601,8 +643,18 @@ Resources:
               - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${StackName}-*:*'
           - Sid: LogGroupListing
             Effect: Allow
-            Action: [logs:DescribeLogGroups, logs:DescribeMetricFilters]
+            Action: logs:DescribeLogGroups
+            Resource: '*'
+          - Sid: MetricFilterListing
+            Effect: Allow
+            Action: logs:DescribeMetricFilters
             Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*'
+          # The deployer must not change function code or configuration (environment variables such as
+          # the SMS send switch and recipients): those change only through a reviewed change set.
+          - Sid: DenyFunctionCodeAndConfigurationWrites
+            Effect: Deny
+            Action: [lambda:UpdateFunctionConfiguration, lambda:UpdateFunctionCode]
+            Resource: '*'
           # Checkpoint steps 2 and 5: alarm state, age metrics. No resource-level support.
           - Sid: AlarmsAndMetricsReadOnly
             Effect: Allow

@@ -44,7 +44,7 @@ This is the proposed **separate** authorization boundary, not an instruction to 
 
 `infra/dev-deploy-roles.yaml` is the reviewable, least-privilege pair of roles the checkpoint above calls for. It is a plain CloudFormation template deployed as its **own small stack**, separate from `template.yaml`. Writing it created nothing: creating the role stack is an account change that needs Enrique's separate explicit authorization, like the checkpoint itself. Placeholders below (`<...>`) are supplied at run time and never committed.
 
-Two roles and one managed policy, all named `deploy-<StackName>-*` so they never match the `<StackName>-*` scope the execution role is allowed to manage:
+Two roles and six managed policies (one boundary, five attached to the roles), all named `deploy-<StackName>-*` so they never match the `<StackName>-*` scope the execution role is allowed to manage:
 
 | Role | Assumed by | Purpose |
 | --- | --- | --- |
@@ -56,11 +56,21 @@ Two roles and one managed policy, all named `deploy-<StackName>-*` so they never
 
 Run once as an administrator the owner designates, in `us-west-1` (IAM is global, so create only one role stack per account for a given `StackName`). Do not use these commands until the owner authorizes creating the roles.
 
+**Pre-creation check.** The administrator confirms that no IAM role named `scheduling-dev-*` and none named `deploy-scheduling-dev-*` already exists. The execution role is denied writes to any role without the boundary, so a pre-existing unbounded role would make the first deploy fail rather than be misused, but it should not be there.
+
+Create the change set, review it, then execute it, so the owner sees the final permissions before they exist:
+
 ```sh
 aws cloudformation deploy --stack-name scheduling-dev-roles --region us-west-1 \
   --template-file infra/dev-deploy-roles.yaml --capabilities CAPABILITY_NAMED_IAM \
+  --no-execute-changeset \
   --parameter-overrides TrustedPrincipalArn=<operator user or role ARN> \
     ArtifactBucketName=<artifact bucket> RequireMfa=true
+aws cloudformation describe-change-set --stack-name scheduling-dev-roles --region us-west-1 \
+  --change-set-name <change set name printed by deploy>
+# After the owner reviews the output:
+aws cloudformation execute-change-set --stack-name scheduling-dev-roles --region us-west-1 \
+  --change-set-name <change set name>
 ```
 
 Then deploy the dev stack with `PermissionsBoundaryArn=<LambdaRoleBoundaryArn output>` added to its parameters. After the dev stack exists, optionally tighten Cognito to that one pool by re-running the command with `OwnerUserPoolId=<pool id>` added.
@@ -90,7 +100,7 @@ aws cloudformation delete-stack --stack-name scheduling-dev --role-arn <CloudFor
 
 ### What each role can do
 
-Deployer role, mapped to the checkpoint step that needs it (step numbers refer to the checkpoint list above; "teardown" and "rollback" numbers refer to sections 3.3 and 3.1 of `doc/DEV_STACK_PLAN.md`):
+Deployer role, mapped to the checkpoint step that needs it (step numbers refer to the checkpoint list above; "teardown" and "rollback" numbers refer to sections 3.3 and 3.1 of `doc/DEV_STACK_PLAN.md` as numbered in PR #66):
 
 | Permission (scope) | Step |
 | --- | --- |
@@ -100,10 +110,11 @@ Deployer role, mapped to the checkpoint step that needs it (step numbers refer t
 | Cognito `AdminCreateUser`, `AdminGetUser`, `AdminSetUserPassword`, `AdminDeleteUser` (the stack's pool) | 3, teardown 4 |
 | `sns:Publish`, get attributes, list subscriptions (topic `scheduling-alarms-dev`) | 2 |
 | `events:EnableRule`, `DisableRule`, `DescribeRule` (rules `scheduling-dev-*`) | 5, rollback 1 |
-| Lambda invoke, get function, `UpdateFunctionConfiguration`, put/delete concurrency, and get/update event source mapping (functions `scheduling-dev-*`); rollback use only, no code upload | 6, rollback 1-2 |
+| Lambda invoke, get function and configuration, put/delete reserved concurrency (functions `scheduling-dev-*`); get event source mapping; update event source mapping (to disable one; conditioned on the target function) | 5, rollback 1-2 |
+| **Denied:** `lambda:UpdateFunctionConfiguration` and `lambda:UpdateFunctionCode`. Environment variables (SMS send switch, recipients, owner number) and code change only through a reviewed change set. Rollback brakes with reserved concurrency 0 and redeploys through the change set | none |
 | DynamoDB item read/write and query/scan (table `scheduling-dev` and its indexes) | 4, 5 |
-| DynamoDB describe, `UpdateContinuousBackups`, `DeleteTable` (that table) and `ListBackups` | teardown 3, 7 |
-| Logs `FilterLogEvents`, `GetLogEvents`, describe streams, delete log group (`/aws/lambda/scheduling-dev-*`) | 4, 5, teardown 8 |
+| DynamoDB describe, `UpdateContinuousBackups`, `DeleteTable` (that table) and `ListBackups` | teardown 2, 6 |
+| Logs `FilterLogEvents`, `GetLogEvents`, describe streams, delete log group (`/aws/lambda/scheduling-dev-*`) | 4, 5, teardown 7 |
 | CloudWatch describe alarms and history, get metric data/statistics, list metrics | 2, 5 |
 | SQS `GetQueueAttributes`, `GetQueueUrl` (queues `scheduling-*-dev`) | 5, rollback 3 |
 
@@ -111,32 +122,35 @@ Execution role:
 
 - Lambda functions `scheduling-dev-*`, their event source mappings and permissions; HTTP APIs (API Gateway v2); EventBridge rules `scheduling-dev-*`; log groups `/aws/lambda/scheduling-dev-*` with retention and metric filters; CloudWatch alarms `scheduling-dev-*`; table `scheduling-dev` (create and update, **not** delete: it is `DeletionPolicy: Retain` and is removed by hand); queues `scheduling-*-dev`; topic `scheduling-alarms-dev` and its subscription; Cognito user pool, client and domain; read of the artifact prefix so CloudFormation can fetch the Lambda zips.
 - IAM: create and manage only roles `scheduling-dev-*`; attach only `AWSLambdaBasicExecutionRole` and `AWSLambdaSQSQueueExecutionRole`; pass those roles only to `lambda.amazonaws.com`. Explicit denies cover attaching `AdministratorAccess*`, `PowerUserAccess` or `IAMFullAccess`, and any IAM action on `deploy-*` roles and policies.
+- Read permissions were checked against the published CloudFormation handler permissions for each resource type the SAM output produces (create, read, update, delete, list), limited to the features `template.yaml` uses. Not granted because unused: KMS customer keys, VPC and EFS, table replicas and Kinesis streaming, custom Cognito domains and analytics, and Lambda code signing.
 - **SSM is deliberately omitted.** `template.yaml` only writes the `/scheduling/dev/*` parameter paths into the *Lambda roles'* policies; CloudFormation never reads or creates a parameter. The `/scheduling/dev/*` `ssm:GetParameter` grant lives only in the boundary policy.
 
 ### Privilege-escalation tradeoff
 
-A CloudFormation role that can create IAM roles is an escalation path unless constrained. This template layers **name-prefix scoping, an allowlist of two attachable AWS managed policies, explicit denies on admin policies, and a permissions boundary**. `iam:PutRolePolicy` cannot be filtered by policy content, so without a boundary the execution role could write an arbitrary *inline* policy on a `scheduling-dev-*` role and pass it to a Lambda function it created. The boundary closes that hole: `EnforcePermissionsBoundary` defaults to **true**, so `iam:CreateRole` and `iam:PutRolePermissionsBoundary` are denied unless the role carries the boundary policy from the role stack, `iam:DeleteRolePermissionsBoundary` is always denied, and every IAM action on `deploy-*` roles and policies (including the boundary policy: edit, new version, detach, delete) is denied. Whatever an inline policy grants, the effective permissions of the function roles cannot exceed the boundary (their own log group, the dev table, the `scheduling-*-dev` queues, and `/scheduling/dev/*` SSM reads).
+A CloudFormation role that can create IAM roles is an escalation path unless constrained. This template layers **name-prefix scoping, an allowlist of two attachable AWS managed policies, explicit denies on admin policies, and a permissions boundary that is always enforced** (there is no switch to turn it off). `iam:PutRolePolicy` cannot be filtered by policy content, so without a boundary the execution role could write an arbitrary *inline* policy on a `scheduling-dev-*` role and pass it to a Lambda function it created. The boundary closes that hole: `iam:CreateRole`, `PutRolePermissionsBoundary`, `PutRolePolicy`, `DeleteRolePolicy`, `AttachRolePolicy` and `DetachRolePolicy` are denied unless the target role carries the boundary policy from the role stack (so a pre-existing unbounded `scheduling-dev-*` role cannot be written to), `iam:DeleteRolePermissionsBoundary` and `iam:UpdateAssumeRolePolicy` are always denied, and every IAM action on `deploy-*` roles and policies (including the boundary policy and all five attached policies: edit, new version, detach, delete) is denied. Whatever an inline policy grants, the effective permissions of the function roles cannot exceed the boundary: logs in the stack's `/aws/lambda/scheduling-dev-*` log groups, the dev table, the `scheduling-*-dev` queues, and `/scheduling/dev/*` SSM reads.
 
-`template.yaml` has an optional `PermissionsBoundaryArn` parameter (default empty), applied through `Globals.Function.PermissionsBoundary` under a condition. Empty means unchanged behavior for local, CI and any unscoped deployment; **it must be set when deploying through the scoped execution role**, or role creation is denied. Order of creation: role stack first, then the dev stack with `PermissionsBoundaryArn=<LambdaRoleBoundaryArn output>` (also exported as `<role stack name>-LambdaRoleBoundaryArn`). Setting `EnforcePermissionsBoundary=false` is only for deploying an older `template.yaml` that lacks the parameter.
+The boundary limits **permissions, not who can assume a role**. `CreateRole` accepts any trust policy and no IAM condition key exists for the trust document, so a deliberate template from the deployer could create a bounded role that trusts an external account, which could then use the boundary's permissions (read and write the dev table, read `/scheduling/dev/*` parameters). Editing a trust policy after creation is denied, but the creation-time gap remains and is closed only by change-set review: the owner checks every `AssumeRolePolicyDocument` in the change set for `lambda.amazonaws.com` only.
 
+`template.yaml` has an optional `PermissionsBoundaryArn` parameter (default empty), applied through `Globals.Function.PermissionsBoundary` under a condition. Empty means unchanged behavior for local, CI and any unscoped deployment; **it must be set when deploying through the scoped execution role**, or role creation is denied. Order of creation: role stack first, then the dev stack with `PermissionsBoundaryArn=<LambdaRoleBoundaryArn output>` (also exported as `<role stack name>-LambdaRoleBoundaryArn`).
 | Dev stack parameter | Value at the checkpoint |
 | --- | --- |
 | `PermissionsBoundaryArn` | The role stack's `LambdaRoleBoundaryArn` output (never a real ARN in the repository) |
 
 ### Known limits of the scoping
 
-- **HTTP APIs** (`apigateway:GET/POST/PUT/PATCH/DELETE` on `/apis/*`) and **Cognito user pools** (`userpool/*`) have random IDs, so the execution role can manage every API and pool in the account and region, not just this stack's. `cognito-idp:CreateUserPool` has no resource-level scope at all. This is acceptable only while the account is dedicated to this project; otherwise tag conditions must be added.
-- **Event source mappings** are scoped by the target-function condition, not by name. `lambda:ListEventSourceMappings` needs `*`.
-- **`ListBackups`, `DescribeAlarms`, alarm history and metric reads, `DescribeLogGroups`, and `DescribeUserPoolDomain`** do not support narrower resources. They are read-only.
+- **Account-wide scope for API Gateway and Cognito.** **HTTP APIs** (`apigateway:GET/POST/PUT/PATCH/DELETE` on `/apis/*`) and **Cognito user pools** (`userpool/*`) have random IDs, so the execution role can manage every API and every pool in the account and region, not just this stack's (for example it could rewrite another pool's callback URLs). `cognito-idp:CreateUserPool` has no resource-level scope at all. This is acceptable only while the account is dedicated to this project; otherwise tag conditions must be added.
+- **Event source mappings** have no resource type for create, update and delete, so those use `Resource: "*"` with the `lambda:FunctionArn` condition; get, tag and list-tags on a mapping cannot use that condition and are open to every mapping in the region. `lambda:ListEventSourceMappings` needs `*`.
+- **`ListBackups`, `DescribeAlarms`, alarm history and metric reads, `DescribeLogGroups`, and `DescribeUserPoolDomain`** (and the Logs `DescribeResourcePolicies`) do not support narrower resources. They are read-only.
 - The deployer's Cognito admin actions use the `aws:ResourceTag/aws:cloudformation:stack-name` condition until `OwnerUserPoolId` is set. That relies on CloudFormation tagging the pool with its stack name, which could not be verified because nothing may be created. If step 3 is denied, set `OwnerUserPoolId`. The confused-deputy `aws:SourceArn` condition on the execution role's trust policy likewise could not be exercised offline.
 - Name-prefix scoping depends on CloudFormation's auto-naming (`<stack>-<LogicalId>-<random>`). Adding a resource with an explicit name in `template.yaml` (for example a queue outside `scheduling-*-dev`) needs a matching change to the execution role.
 - A stack stuck in `UPDATE_ROLLBACK_FAILED` needs `ContinueUpdateRollback`, which is not granted; the administrator handles that case.
 - **Not covered:** creating the artifact bucket, the Amplify app, and the AWS Budget. Those one-time owner actions are done with the owner's own credentials under the existing authorization (the packet already lists them as separate steps). Amplify and Budgets have limited resource-level support and are used once, so a scoped role would add review cost for little safety. A narrow add-on can be proposed separately if Enrique prefers.
+- If CloudFormation rejects the execution role's trust conditions (`aws:SourceAccount` and `aws:SourceArn` are unverified with CloudFormation; the symptom is a change-set failure saying the role cannot be assumed), the fallback is for the owner to update the role stack with `TrustCloudFormationSourceArn=false`, which keeps only `aws:SourceAccount`, through a separately reviewed change. If `aws:SourceAccount` is also rejected, the trust policy has to be reviewed again.
 - Nothing here has been evaluated against a real account. The template passes `cfn-lint` offline; run IAM Access Analyzer policy validation and a change-set review on the first authorized run.
 
 ### Teardown order
 
-1. Finish the dev stack teardown in `doc/DEV_STACK_PLAN.md` section 3.3 first: stack deleted (with `--role-arn`), retained table deleted, leftover log groups deleted, artifact bucket emptied and deleted.
+1. Finish the dev stack teardown in `doc/DEV_STACK_PLAN.md` section 3.3 first: stack deleted (with `--role-arn`, step 5), retained table deleted (step 6), leftover log groups deleted (step 7), artifact bucket emptied and deleted (step 10).
 2. Delete the role stack **last**, as the administrator, not through the deployer role: `aws cloudformation delete-stack --stack-name scheduling-dev-roles --region us-west-1`. The roles must outlive the dev stack because CloudFormation needs the execution role to delete the stack's resources; deleting the roles first strands the stack in `DELETE_FAILED`.
 3. Remove the operator's AWS CLI profile and confirm no role named `deploy-scheduling-dev-*` remains.
 
