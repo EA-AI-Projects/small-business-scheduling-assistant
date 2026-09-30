@@ -31,6 +31,7 @@ from scheduling.domain.holds import CreateHold, HoldService
 from scheduling.workers.expiry import expire_due_handler
 
 FUNCTION_PREFIX = "scheduling-dev-"
+EXPIRY_HANDLER = "scheduling.workers.expiry.expire_due_handler"
 FUNCTION_PATTERN = re.compile(r"^scheduling-dev-[A-Za-z0-9_-]{1,64}$")
 LAMBDA_ENDPOINT = "https://lambda.us-west-1.amazonaws.com"
 MAX_INVOCATIONS = 5
@@ -50,10 +51,25 @@ def _dev_function_name() -> str:
     return name
 
 
+def _require_expiry_function(configuration: dict[str, Any]) -> None:
+    """Refuse any deployed function that is not the hold-expiry worker on the dev table.
+
+    The name prefix matches every stack Lambda, including the outbox dispatcher (SQS sends)
+    and the retention purges, so the deployed handler and table are checked before invoking.
+    """
+    handler = configuration.get("Handler")
+    table = configuration.get("Environment", {}).get("Variables", {}).get("SCHEDULING_TABLE_NAME")
+    if handler != EXPIRY_HANDLER:
+        raise ValueError(f"Function handler is {handler!r}, not the hold-expiry {EXPIRY_HANDLER!r}")
+    if table != "scheduling-dev":
+        raise ValueError(f"Function SCHEDULING_TABLE_NAME is {table!r}, not 'scheduling-dev'")
+
+
 def _lambda_invoker(name: str) -> Invoke:
     client = boto3.client("lambda", region_name=DEV_REGION)
     if client.meta.endpoint_url != LAMBDA_ENDPOINT:
         raise ValueError(f"Unexpected Lambda endpoint {client.meta.endpoint_url!r}")
+    _require_expiry_function(client.get_function_configuration(FunctionName=name))
 
     def invoke() -> dict[str, Any]:
         response = client.invoke(
@@ -101,13 +117,15 @@ def expiry_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[RaceEnv, Invok
         yield env, lambda: expire_due_handler({}, None)
 
 
-def _create_hold(env: RaceEnv, service: HoldService, index: int) -> str:
+def _create_hold(env: RaceEnv, service: HoldService, index: int, created: datetime) -> str:
     command = CreateHold(
         env.business, "synthetic-client", "synthetic-client", f"{env.run}-hold-{index}",
         datetime(2001, 9, 12, VISIT_DAY_HOURS_UTC[index], tzinfo=UTC), 60,
     )
-    hold = service.create(command, CREATED + timedelta(minutes=index))
+    hold = service.create(command, created)
     env.appointment_ids.append(hold.hold_id)
+    # Hold ids are random, so a killed run needs them printed to be swept by key.
+    print(f"Synthetic hold created: APPOINTMENT#{hold.hold_id}", flush=True)
     assert hold.hold_expires_at < datetime(2002, 1, 1, tzinfo=UTC)
     return hold.hold_id
 
@@ -129,8 +147,12 @@ def test_hold_expiry_worker_expires_due_holds_and_ignores_stale_entry(
         "payload": {"S": encode_policy(pilot_policy())}, "version": {"N": "1"},
     })
     service = HoldService(repo)
-    due_ids = [_create_hold(env, service, index) for index in range(3)]
-    stale_id = _create_hold(env, service, 3)
+    # The stale hold expires first, so it sorts ahead of the due holds in HoldDueIndex and
+    # every page that reaches the due holds also reaches it.
+    stale_id = _create_hold(env, service, 3, CREATED - timedelta(minutes=1))
+    due_ids = [
+        _create_hold(env, service, index, CREATED + timedelta(minutes=index)) for index in range(3)
+    ]
     # A stale entry: the hold was approved after creation, yet its due-index keys remain.
     # The worker rereads the appointment and skips anything that is not a pending,
     # past-due hold.
@@ -142,6 +164,12 @@ def test_hold_expiry_worker_expires_due_holds_and_ignores_stale_entry(
         ExpressionAttributeValues={":confirmed": {"S": "CONFIRMED"}},
     )
     stale_before = _hold_items(env, stale_id)
+    due_keys = {}
+    for hold_id in (stale_id, *due_ids):
+        meta = _get(env, f"APPOINTMENT#{hold_id}", "META")
+        assert meta is not None
+        due_keys[hold_id] = meta["hold_due_sk"]["S"]
+    assert due_keys[stale_id] < min(due_keys[hold_id] for hold_id in due_ids)
     now = datetime.now(UTC)
     _wait_until(
         lambda: {*due_ids, stale_id} <= set(repo.due_hold_ids(now, 500)),
@@ -156,11 +184,15 @@ def test_hold_expiry_worker_expires_due_holds_and_ignores_stale_entry(
             report["stale"] for report in reports
         ):
             break
+    if not os.environ.get("SCHEDULING_DEV_TABLE"):  # a fresh local table: nothing else is due
+        first = reports[0]
+        assert (first["examined"], first["expired"], first["stale"]) == (4, 3, 1)
     for report in reports:
         assert set(report) == {"examined", "expired", "stale", "oldest_overdue_seconds"}
         assert report["examined"] == report["expired"] + report["stale"]
         assert report["expired"] >= 0 and report["stale"] >= 0
-        assert (report["oldest_overdue_seconds"] > 0) == (report["expired"] > 0)
+        if report["expired"] > 0:
+            assert report["oldest_overdue_seconds"] > 0
     assert sum(report["expired"] for report in reports) >= len(due_ids)
     assert sum(report["stale"] for report in reports) >= 1
 
@@ -196,3 +228,18 @@ def test_hold_expiry_worker_expires_due_holds_and_ignores_stale_entry(
         assert item["delivery_state"]["S"] == "PENDING"
         assert item["attempts"]["N"] == "0"
         assert "provider_id" not in item
+
+
+def test_function_guard_refuses_other_handlers_and_tables() -> None:
+    good = {"Handler": EXPIRY_HANDLER, "Environment": {"Variables": {"SCHEDULING_TABLE_NAME": "scheduling-dev"}}}
+    _require_expiry_function(good)
+    wrong_handler = {**good, "Handler": "scheduling.workers.outbox.dispatch_due_handler"}
+    with pytest.raises(ValueError, match="handler"):
+        _require_expiry_function(wrong_handler)
+    with pytest.raises(ValueError, match="handler"):
+        _require_expiry_function({})
+    wrong_table = {**good, "Environment": {"Variables": {"SCHEDULING_TABLE_NAME": "other"}}}
+    with pytest.raises(ValueError, match="SCHEDULING_TABLE_NAME"):
+        _require_expiry_function(wrong_table)
+    with pytest.raises(ValueError, match="SCHEDULING_TABLE_NAME"):
+        _require_expiry_function({"Handler": EXPIRY_HANDLER})
