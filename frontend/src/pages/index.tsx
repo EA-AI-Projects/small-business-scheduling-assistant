@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Workspace } from "@/components/Workspace";
 import { OwnerApi } from "@/lib/api";
-import { authorizeUrl, clearPendingSignIn, completeSignIn, logoutUrl, tokenExpiry } from "@/lib/auth";
+import { authorizeUrl, clearPendingSignIn, completeSignIn, logoutUrl, markSessionRejected, takeSessionRejected, tokenExpiry } from "@/lib/auth";
 import { ConfigError, parseConfig, rawConfigFromEnv, type OwnerConfig } from "@/lib/config";
 import { OwnerProvider, errorMessage } from "@/owner/OwnerContext";
 
@@ -44,7 +44,9 @@ function OwnerSession({ config }: { config: OwnerConfig }) {
   useEffect(() => {
     const url = new URL(window.location.href);
     if (url.search) window.history.replaceState(null, "", url.pathname);
+    const rejected = takeSessionRejected();
     completeSignIn(config, url)
+      .then((accessToken) => { if (rejected) notify(rejected, true); return accessToken; })
       .then((accessToken) => { if (accessToken) setToken(accessToken); })
       .catch((error: unknown) => notify(errorMessage(error), true))
       .finally(() => setCompleting(false));
@@ -60,9 +62,21 @@ function OwnerSession({ config }: { config: OwnerConfig }) {
     return () => window.clearTimeout(timer);
   }, [token, endSession]);
 
-  const api = useMemo(() => token
-    ? new OwnerApi(config, token, () => endSession("Your session ended. Sign in again."))
-    : null, [config, token, endSession]);
+  // A 401 means an expired token or a Cognito user who is not the owner. The hosted UI
+  // cookie would silently sign that same user in again, so end it through hosted UI logout
+  // and return here; the next Sign in then asks for credentials.
+  const rejectSession = useCallback(() => {
+    const message = "Your session ended. Sign in again.";
+    endSession(message);
+    const url = logoutUrl(config, window.location.origin);
+    if (url) {
+      markSessionRejected(message);
+      window.location.assign(url);
+    }
+  }, [config, endSession]);
+
+  const api = useMemo(() => token ? new OwnerApi(config, token, rejectSession) : null,
+    [config, token, rejectSession]);
 
   const signIn = useCallback(() => {
     authorizeUrl(config, window.location.origin)

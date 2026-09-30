@@ -8,6 +8,7 @@ import type { OwnerConfig } from "./config";
 
 const VERIFIER_KEY = "owner-pkce-verifier";
 const STATE_KEY = "owner-oauth-state";
+const ENDED_KEY = "owner-session-ended";
 
 export class SignInError extends Error {}
 
@@ -115,4 +116,19 @@ export function logoutUrl(config: OwnerConfig, origin: string): string | null {
   const url = new URL("/logout", config.cognitoDomain);
   url.search = new URLSearchParams({ client_id: config.clientId, logout_uri: redirectUri(origin) }).toString();
   return url.toString();
+}
+
+/**
+ * Remember, across the hosted UI logout redirect, that the API rejected the session (401).
+ * Only this flag is stored, never the token.
+ */
+export function markSessionRejected(message: string, storage: Storage = sessionStorage): void {
+  storage.setItem(ENDED_KEY, message);
+}
+
+/** Read and clear the message left by markSessionRejected, or null. */
+export function takeSessionRejected(storage: Storage = sessionStorage): string | null {
+  const message = storage.getItem(ENDED_KEY);
+  storage.removeItem(ENDED_KEY);
+  return message;
 }
