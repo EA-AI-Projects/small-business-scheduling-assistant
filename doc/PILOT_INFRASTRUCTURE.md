@@ -11,6 +11,87 @@ Issue [#23](https://github.com/EA-AI-Projects/small-business-scheduling-assistan
 - The Twilio webhook API is conditional and off by default. When enabled, it verifies the exact signed inbound/status URLs and retrieves the auth token from the environment-specific SSM SecureString path `/scheduling/{dev|pilot}/twilio/auth-token` at cold start; a plaintext `String` parameter is rejected. The SQS sender uses the same scoped parameter and refuses to send unless the active ingress API base and both exact callback URLs agree. The token is never in the template or Lambda environment. CloudFormation cannot create the SecureString value. A customer-managed KMS key would need a separately scoped decrypt grant. No token, real phone number, or recipient list belongs in this repository.
 - SMS evidence legal-hold management and a GitHub OIDC deploy role remain to be integrated. The SMS conversation layer is in the template (a receipt queue, its dead-letter queue, and a worker) but stays inert: it runs only when SMS ingress is on, `SmsSendEnabled=authorized`, and `EnableSmsConversations=authorized`, and it reads an OpenAI key from a SecureString that CloudFormation cannot create. This foundation does not authorize real messaging.
 
+## Design diagrams
+
+The diagrams show the intended deployed topology and the operational gates around it. They are not evidence that any resource has been provisioned. A dashed line is a path that is conditional or disabled in the initial stack; the labels on those lines name the relevant gate.
+
+### Runtime topology
+
+```mermaid
+flowchart LR
+    Owner[Business owner] --> App[Amplify static owner app]
+    App -->|authorization code + PKCE| Cognito[Cognito hosted UI and user pool]
+    App -->|access token| OwnerApi[Owner HTTP API<br/>JWT authorizer]
+    OwnerApi -->|GET / POST / PUT / PATCH / DELETE| OwnerFn[Owner API Lambda]
+    OwnerFn --> Table[(DynamoDB scheduling table<br/>PK / SK + due indexes + PITR)]
+
+    Customer[Approved SMS recipient] -.->|EnableSmsIngress=true| Twilio[Twilio]
+    Twilio -.->|signed inbound and status webhooks| SmsApi[Conditional SMS HTTP API]
+    SmsApi -.-> IngressFn[SMS ingress Lambda]
+    IngressFn -.-> ReceiptQ[[SMS conversation queue]]
+    ReceiptQ -.->|three authorization gates| ConversationFn[SMS conversation Lambda]
+    ConversationFn -.-> Table
+    ConversationFn -.-> OpenAISecret[SSM SecureString<br/>OpenAI key]
+
+    HoldSchedule[Hold-expiry schedule] -.->|disabled initially| HoldFn[Hold-expiry Lambda]
+    HoldFn -->|HoldDueIndex| Table
+    OutboxSchedule[Outbox-dispatch schedule] -.->|disabled initially| DispatchFn[Outbox-dispatch Lambda]
+    DispatchFn -->|OutboxDueIndex| Table
+    DispatchFn --> OutboxQ[[Outbox queue]]
+    OutboxQ -.->|event source disabled + send authorization| SenderFn[SMS sender Lambda]
+    SenderFn -.-> Twilio
+
+    NoteSchedule[Note-retention schedule] -.->|disabled initially| NoteFn[Note-retention Lambda]
+    SmsSchedule[SMS-retention schedule] -.->|disabled initially| SmsRetentionFn[SMS-retention Lambda]
+    NoteFn --> Table
+    SmsRetentionFn --> Table
+
+    ReceiptQ --> ReceiptDlq[[Conversation DLQ]]
+    OutboxQ --> OutboxDlq[[Outbox DLQ]]
+    Secrets[SSM SecureString<br/>Twilio auth token] -.-> IngressFn
+    Secrets -.-> SenderFn
+
+    Observability[CloudWatch logs, metrics,<br/>error and age alarms] --> AlarmTopic[SNS alarm topic]
+    AlarmTopic -->|subscription must be confirmed| Mailbox[Owner-monitored mailbox]
+    OwnerFn --> Observability
+    IngressFn -.-> Observability
+    ConversationFn -.-> Observability
+    SenderFn -.-> Observability
+    HoldFn --> Observability
+    DispatchFn --> Observability
+    NoteFn --> Observability
+    SmsRetentionFn --> Observability
+    ReceiptDlq --> Observability
+    OutboxDlq --> Observability
+```
+
+The table is the system of record; SQS carries work rather than owning scheduling state. Both queues redrive failed messages to their own DLQ. The diagram groups CloudWatch components to keep the topology readable: each Lambda has an error alarm, each DLQ has a depth alarm, and the hold-expiry and outbox-dispatch logs also feed oldest-due-age metric alarms.
+
+### Deployment and enablement gates
+
+```mermaid
+flowchart TD
+    Code[Reviewed code only] --> Validate[Validate and build locally]
+    Validate --> Identity{Correct account and<br/>us-west-1?}
+    Identity -->|no| Stop[Stop: make no account changes]
+    Identity -->|yes| Authorization{Explicit provisioning<br/>authorization?}
+    Authorization -->|no| Stop
+    Authorization -->|yes| Roles[Create and review role-stack change set]
+    Roles --> DevChangeSet[Create dev-stack change set<br/>with synthetic-only parameters]
+    DevChangeSet --> Review{Owner reviews resources,<br/>cost, mailbox, and rollback}
+    Review -->|not approved| Stop
+    Review -->|approved| Dev[Execute synthetic dev stack<br/>all schedules and SMS sending off]
+    Dev --> OwnerBootstrap[Bootstrap owner callback and subject;<br/>confirm SNS subscription]
+    OwnerBootstrap --> Proof[Run authentication, transaction-race,<br/>IAM, alarm, and retention proofs]
+    Proof --> Gate{All applicable gates pass?}
+    Gate -->|no| Brake[Disable affected trigger,<br/>inspect, and roll back code separately]
+    Gate -->|yes| PilotReview[Separate pilot-account,<br/>real-data, and live-SMS reviews]
+    PilotReview -->|not separately authorized| DevOnly[Remain synthetic and disconnected]
+    PilotReview -->|each action authorized| Incremental[Enable one reviewed capability at a time<br/>and monitor it]
+```
+
+Provisioning, real-data onboarding, SMS ingress, conversation processing, and SMS sending are separate decisions. Passing the synthetic `dev` checkpoint does not imply authorization for the `pilot` account or live traffic. In particular, the initial deployment keeps all four schedules and the SMS sender event source disabled; SMS conversation processing additionally requires ingress, sending, and conversation authorization.
+
 ## Build and preflight
 
 From the repository root, run `sam validate --lint --template-file template.yaml --region us-west-1` and `sam build --template-file template.yaml`. These commands only validate and build local artifacts. Before any separately authorized deployment, run `aws sts get-caller-identity` and reject any account other than the target for that stack (`214965372605` for `dev`; `pilot` has no account yet, so it is rejected until one is recorded); check the CLI region is `us-west-1`. Use separate `dev` and `pilot` stack names, a unique Cognito domain prefix, and an owner-monitored `AlarmEmail` mailbox. `OwnerAppOrigin` is the exact Amplify owner app origin (`https://host[:port]`, no path or trailing slash). The owner HTTP API's CORS configuration allows only that origin, the owner route methods, and the `Authorization`, `Content-Type`, and `Idempotency-Key` headers, without credentials; API Gateway answers preflight requests itself. The same origin plus `/` is the Cognito callback and logout URL, and the origin reaches the Lambda as `OWNER_APP_ORIGIN`. Until the Amplify app exists, use an inert value such as `https://example.invalid`.
