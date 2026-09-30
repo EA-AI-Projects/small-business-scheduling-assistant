@@ -65,7 +65,8 @@ def test_text_booking_appears_in_owner_api_and_owner_app_approval_notifies_clien
     assert client.get(f"{BASE}/requests", headers=AUTH).json()[0]["client_id"] == "client-2"
 
     booked = text(client, "client-1", "Book 2026-10-05 09:00")
-    assert "pending owner approval" in bodies(booked, "reply")[0]
+    assert not bodies(booked, "reply")  # Production texts only the notifications.
+    assert bodies(booked, "note")[0].startswith("Not texted: Requested Mon Oct 5 at 9:00 AM")
     notifications = bodies(booked, "notification")
     assert any(body.startswith("New cleaning request from Avery Example") for body in notifications)
     assert any("is pending owner approval" in body for body in notifications)
@@ -89,7 +90,7 @@ def test_owner_text_approval_updates_the_owner_api_calendar() -> None:
     client = local()
     request = client.get(f"{BASE}/requests", headers=AUTH).json()[0]
     reply = text(client, "owner", f"Approve {request['appointment_id'][:8]}")
-    assert "confirmed" in bodies(reply, "reply")[0]
+    assert "confirmed" in bodies(reply, "note")[0]
     appointment = client.get(f"{BASE}/appointments/{request['appointment_id']}",
                              headers=AUTH).json()
     assert appointment["status"] == "CONFIRMED"
@@ -174,7 +175,7 @@ def test_plain_language_booking_and_owner_yes_in_the_simulator() -> None:
     client = local(Plain())  # type: ignore[arg-type]
     # The seeded request is the only one pending, so a plain yes approves it.
     seeded = text(client, "owner", "Yes")
-    assert bodies(seeded, "reply")[0].startswith("Approved: Blake Sample, ")
+    assert bodies(seeded, "note")[0].startswith("Not texted: Approved: Blake Sample, ")
 
     offer = bodies(text(client, "client-1", "Hi. Do you have availability for tomorrow?"),
                    "reply")[0]
@@ -184,12 +185,14 @@ def test_plain_language_booking_and_owner_yes_in_the_simulator() -> None:
     first = offer.split("1) ", 1)[1].split(",", 1)[0]  # e.g. "10:00 AM"
 
     booked = text(client, "client-1", f"{first} works")
-    assert bodies(booked, "reply")[0].startswith(f"Requested Wed Sep 30 at {first} (ref ")
+    assert bodies(booked, "note")[0].startswith(f"Not texted: Requested Wed Sep 30 at {first}")
+    assert not bodies(booked, "reply")
     assert any(body.startswith("New cleaning request from Avery Example")
                for body in bodies(booked, "notification"))
 
     approved = text(client, "owner", "yes")
-    assert bodies(approved, "reply")[0].startswith(f"Approved: Avery Example, Wed Sep 30 at {first}")
+    assert bodies(approved, "note")[0].startswith(
+        f"Not texted: Approved: Avery Example, Wed Sep 30 at {first}")
     assert any(f"Cleaning visit confirmed: Wed Sep 30 at {first}" in body
                for body in bodies(approved, "notification"))
     assert client.get(f"{BASE}/requests", headers=AUTH).json() == []
