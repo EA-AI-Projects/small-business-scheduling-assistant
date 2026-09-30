@@ -1,0 +1,629 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Least-privilege deployer and CloudFormation execution roles for the synthetic
+  scheduling dev stack (issue #43). Review material: creating this stack needs
+  separate owner authorization. See doc/PILOT_INFRASTRUCTURE.md
+  ("Dev deployment roles").
+
+# Deploy this stack on its own, in the same region as the dev stack, with
+# --capabilities CAPABILITY_NAMED_IAM. Delete it only AFTER the dev stack and
+# after the retained DynamoDB table, logs and artifact bucket are handled.
+#
+# Name scoping relies on what the SAM stack really produces:
+#   - Lambda functions, IAM roles, EventBridge rules, CloudWatch alarms, log
+#     groups: CloudFormation auto-names them "<StackName>-<LogicalId>-<random>".
+#   - Table, queues, topic: named from the Environment parameter
+#     (scheduling-<env>, scheduling-*-<env>, scheduling-alarms-<env>).
+#   - HTTP APIs, Cognito user pools and event source mappings get random IDs;
+#     they cannot be scoped by name (see the doc, "Known limits of the scoping").
+# The roles created here are named "deploy-<StackName>-*" on purpose: that
+# prefix does not overlap "<StackName>-*", so the execution role cannot touch
+# either of them through its own IAM permissions (and it is also denied).
+#
+# Amplify app creation and AWS Budget creation are NOT covered; the owner does
+# those two one-time actions with their own credentials.
+
+Parameters:
+  TrustedPrincipalArn:
+    Type: String
+    AllowedPattern: 'arn:aws:iam::[0-9]{12}:(user|role)/[A-Za-z0-9+=,.@_/-]+'
+    Description: >-
+      ARN of the single IAM user or role allowed to assume the deployer role.
+      Supplied at deploy time; never committed.
+  RequireMfa:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'true'
+    Description: >-
+      Require MFA in the session that assumes the deployer role. Practical for
+      the CLI (see the doc); set false only for a federated/SSO session that
+      does not carry the MFA flag.
+  StackName:
+    Type: String
+    Default: scheduling-dev
+    AllowedPattern: '[a-z][a-z0-9-]{2,29}'
+    Description: Name of the scheduling stack the roles are scoped to.
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev]
+    Description: Environment parameter of the scheduling stack. Only dev is supported.
+  ArtifactBucketName:
+    Type: String
+    AllowedPattern: '[a-z0-9][a-z0-9.-]{2,62}'
+    Description: Dedicated SAM artifact bucket, created by the owner beforehand.
+  ArtifactPrefix:
+    Type: String
+    Default: scheduling-dev
+    AllowedPattern: '[A-Za-z0-9._-]+'
+    Description: Key prefix used by sam deploy --s3-prefix.
+  OwnerUserPoolId:
+    Type: String
+    Default: ''
+    AllowedPattern: '|[a-z0-9-]+_[A-Za-z0-9]+'
+    Description: >-
+      Optional. After the dev stack exists, update this stack with the user
+      pool ID to pin the Cognito admin actions to that one pool. Empty means
+      "any pool tagged with this CloudFormation stack".
+  EnforcePermissionsBoundary:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'false'
+    Description: >-
+      When true, the execution role may create roles only with the boundary
+      policy from this stack attached. template.yaml must first set
+      PermissionsBoundary on its functions (proposed follow-up), otherwise
+      the dev stack creation will fail.
+
+Conditions:
+  MfaRequired: !Equals [!Ref RequireMfa, 'true']
+  HasUserPoolId: !Not [!Equals [!Ref OwnerUserPoolId, '']]
+  BoundaryEnforced: !Equals [!Ref EnforcePermissionsBoundary, 'true']
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # Permissions boundary for the Lambda roles created by the dev stack.
+  # Always created (free); enforced only when EnforcePermissionsBoundary.
+  # It is the ceiling of what template.yaml's function roles legitimately use.
+  # ---------------------------------------------------------------------------
+  LambdaRoleBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub 'deploy-${StackName}-lambda-boundary'
+      Description: Ceiling for Lambda roles created by the scheduling dev stack.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: LogGroups
+            Effect: Allow
+            Action: logs:CreateLogGroup
+            Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${StackName}-*'
+          - Sid: LogStreams
+            Effect: Allow
+            Action: [logs:CreateLogStream, logs:PutLogEvents]
+            Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${StackName}-*:*'
+          - Sid: Table
+            Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:UpdateItem
+              - dynamodb:DeleteItem
+              - dynamodb:ConditionCheckItem
+              - dynamodb:Query
+              - dynamodb:Scan
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/scheduling-${Environment}'
+              - !Sub 'arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/scheduling-${Environment}/index/*'
+          - Sid: Queues
+            Effect: Allow
+            Action:
+              - sqs:SendMessage
+              - sqs:ReceiveMessage
+              - sqs:DeleteMessage
+              - sqs:GetQueueAttributes
+              - sqs:ChangeMessageVisibility
+            Resource: !Sub 'arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:scheduling-*-${Environment}'
+          - Sid: RuntimeSecrets
+            Effect: Allow
+            Action: ssm:GetParameter
+            Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/scheduling/${Environment}/*'
+
+  # ---------------------------------------------------------------------------
+  # CloudFormation execution role
+  # ---------------------------------------------------------------------------
+  CloudFormationExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'deploy-${StackName}-cfn-exec'
+      Description: Assumed by CloudFormation to create the scheduling dev stack resources.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: cloudformation.amazonaws.com}
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${StackName}/*'
+      ManagedPolicyArns:
+        - !Ref ExecComputePolicy
+        - !Ref ExecDataPolicy
+        - !Ref ExecIamPolicy
+
+  ExecComputePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Execution role, part 1 of 3 - Lambda, API Gateway, EventBridge, Logs, alarms.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: LambdaFunctions
+            Effect: Allow
+            Action:
+              - lambda:CreateFunction
+              - lambda:DeleteFunction
+              - lambda:UpdateFunctionCode
+              - lambda:UpdateFunctionConfiguration
+              - lambda:PublishVersion
+              - lambda:AddPermission
+              - lambda:RemovePermission
+              - lambda:TagResource
+              - lambda:UntagResource
+              - lambda:PutFunctionConcurrency
+              - lambda:DeleteFunctionConcurrency
+              - lambda:Get*
+              - lambda:ListTags
+              - lambda:ListVersionsByFunction
+            Resource: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${StackName}-*'
+          - Sid: LambdaEventSourceMappings
+            Effect: Allow
+            Action:
+              - lambda:CreateEventSourceMapping
+              - lambda:UpdateEventSourceMapping
+              - lambda:DeleteEventSourceMapping
+              - lambda:GetEventSourceMapping
+              - lambda:TagResource
+              - lambda:UntagResource
+            Resource: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:event-source-mapping:*'
+            Condition:
+              ArnLike:
+                lambda:FunctionArn: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${StackName}-*'
+          - Sid: LambdaEventSourceMappingLookups
+            Effect: Allow
+            Action: lambda:ListEventSourceMappings
+            Resource: '*'
+          - Sid: HttpApiManagement
+            Effect: Allow
+            Action: [apigateway:GET, apigateway:POST, apigateway:PUT, apigateway:PATCH, apigateway:DELETE]
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis'
+              - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis/*'
+              - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/tags/*'
+          - Sid: ScheduleRules
+            Effect: Allow
+            Action:
+              - events:PutRule
+              - events:DeleteRule
+              - events:DescribeRule
+              - events:EnableRule
+              - events:DisableRule
+              - events:PutTargets
+              - events:RemoveTargets
+              - events:ListTargetsByRule
+              - events:TagResource
+              - events:UntagResource
+              - events:ListTagsForResource
+            Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/${StackName}-*'
+          - Sid: LogGroupsAndMetricFilters
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:DeleteLogGroup
+              - logs:PutRetentionPolicy
+              - logs:DeleteRetentionPolicy
+              - logs:PutMetricFilter
+              - logs:DeleteMetricFilter
+              - logs:TagResource
+              - logs:UntagResource
+              - logs:ListTagsForResource
+              - logs:TagLogGroup
+              - logs:UntagLogGroup
+              - logs:ListTagsLogGroup
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${StackName}-*'
+              - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${StackName}-*:*'
+          - Sid: LogLookups
+            Effect: Allow
+            Action: [logs:DescribeLogGroups, logs:DescribeMetricFilters]
+            Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*'
+          - Sid: Alarms
+            Effect: Allow
+            Action:
+              - cloudwatch:PutMetricAlarm
+              - cloudwatch:DeleteAlarms
+              - cloudwatch:TagResource
+              - cloudwatch:UntagResource
+              - cloudwatch:ListTagsForResource
+            Resource: !Sub 'arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${StackName}-*'
+          - Sid: AlarmLookups
+            Effect: Allow
+            Action: cloudwatch:DescribeAlarms
+            Resource: '*'
+
+  ExecDataPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Execution role, part 2 of 3 - DynamoDB, SQS, SNS, Cognito, artifact bucket.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # DeleteTable is deliberately absent: the table is DeletionPolicy Retain and
+          # is removed by hand at teardown by the deployer role.
+          - Sid: Table
+            Effect: Allow
+            Action:
+              - dynamodb:CreateTable
+              - dynamodb:UpdateTable
+              - dynamodb:UpdateContinuousBackups
+              - dynamodb:UpdateTimeToLive
+              - dynamodb:TagResource
+              - dynamodb:UntagResource
+              - dynamodb:Describe*
+              - dynamodb:ListTagsOfResource
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/scheduling-${Environment}'
+              - !Sub 'arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/scheduling-${Environment}/index/*'
+          - Sid: Queues
+            Effect: Allow
+            Action:
+              - sqs:CreateQueue
+              - sqs:DeleteQueue
+              - sqs:SetQueueAttributes
+              - sqs:GetQueueAttributes
+              - sqs:GetQueueUrl
+              - sqs:TagQueue
+              - sqs:UntagQueue
+              - sqs:ListQueueTags
+            Resource: !Sub 'arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:scheduling-*-${Environment}'
+          - Sid: AlarmTopic
+            Effect: Allow
+            Action:
+              - sns:CreateTopic
+              - sns:DeleteTopic
+              - sns:SetTopicAttributes
+              - sns:GetTopicAttributes
+              - sns:Subscribe
+              - sns:ListSubscriptionsByTopic
+              - sns:TagResource
+              - sns:UntagResource
+              - sns:ListTagsForResource
+            Resource: !Sub 'arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:scheduling-alarms-${Environment}'
+          - Sid: AlarmSubscription
+            Effect: Allow
+            Action: [sns:Unsubscribe, sns:GetSubscriptionAttributes, sns:SetSubscriptionAttributes]
+            Resource: !Sub 'arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:scheduling-alarms-${Environment}:*'
+          - Sid: UserPoolCreate
+            Effect: Allow
+            Action: cognito-idp:CreateUserPool
+            Resource: '*'
+          - Sid: UserPoolManage
+            Effect: Allow
+            Action:
+              - cognito-idp:UpdateUserPool
+              - cognito-idp:DeleteUserPool
+              - cognito-idp:DescribeUserPool
+              - cognito-idp:SetUserPoolMfaConfig
+              - cognito-idp:GetUserPoolMfaConfig
+              - cognito-idp:CreateUserPoolClient
+              - cognito-idp:UpdateUserPoolClient
+              - cognito-idp:DeleteUserPoolClient
+              - cognito-idp:DescribeUserPoolClient
+              - cognito-idp:CreateUserPoolDomain
+              - cognito-idp:DeleteUserPoolDomain
+              - cognito-idp:UpdateUserPoolDomain
+              - cognito-idp:TagResource
+              - cognito-idp:UntagResource
+              - cognito-idp:ListTagsForResource
+            Resource: !Sub 'arn:${AWS::Partition}:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/*'
+          - Sid: UserPoolDomainLookup
+            Effect: Allow
+            Action: cognito-idp:DescribeUserPoolDomain
+            Resource: '*'
+          - Sid: ReadLambdaArtifacts
+            Effect: Allow
+            Action: [s3:GetObject, s3:GetObjectVersion]
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucketName}/${ArtifactPrefix}/*'
+
+  ExecIamPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Execution role, part 3 of 3 - IAM, constrained against privilege escalation.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ManageStackRoles
+            Effect: Allow
+            Action:
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:GetRole
+              - iam:UpdateRole
+              - iam:UpdateAssumeRolePolicy
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:GetRolePolicy
+              - iam:ListRolePolicies
+              - iam:ListAttachedRolePolicies
+              - iam:ListInstanceProfilesForRole
+              - iam:TagRole
+              - iam:UntagRole
+            Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${StackName}-*'
+          # Only the two AWS managed policies SAM attaches for these functions.
+          - Sid: AttachOnlyLambdaManagedPolicies
+            Effect: Allow
+            Action: [iam:AttachRolePolicy, iam:DetachRolePolicy]
+            Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${StackName}-*'
+            Condition:
+              ArnEquals:
+                iam:PolicyARN:
+                  - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+                  - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaSQSQueueExecutionRole'
+          - Sid: PassStackRolesToLambda
+            Effect: Allow
+            Action: iam:PassRole
+            Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${StackName}-*'
+            Condition:
+              StringEquals:
+                iam:PassedToService: lambda.amazonaws.com
+          - !If
+            - BoundaryEnforced
+            - Sid: RequireBoundaryOnCreate
+              Effect: Deny
+              Action: [iam:CreateRole, iam:PutRolePermissionsBoundary]
+              Resource: '*'
+              Condition:
+                StringNotEquals:
+                  iam:PermissionsBoundary: !Ref LambdaRoleBoundary
+            - !Ref AWS::NoValue
+          - !If
+            - BoundaryEnforced
+            - Sid: BoundaryCannotBeRemoved
+              Effect: Deny
+              Action: iam:DeleteRolePermissionsBoundary
+              Resource: '*'
+            - !Ref AWS::NoValue
+          - Sid: NeverAdminPolicies
+            Effect: Deny
+            Action: [iam:AttachRolePolicy, iam:AttachUserPolicy, iam:AttachGroupPolicy]
+            Resource: '*'
+            Condition:
+              ArnLike:
+                iam:PolicyARN:
+                  - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AdministratorAccess*'
+                  - !Sub 'arn:${AWS::Partition}:iam::aws:policy/PowerUserAccess'
+                  - !Sub 'arn:${AWS::Partition}:iam::aws:policy/IAMFullAccess'
+          - Sid: NeverTouchDeployRoles
+            Effect: Deny
+            Action: 'iam:*'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/deploy-*'
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/deploy-*'
+
+  # ---------------------------------------------------------------------------
+  # Deployer role (assumed by the human operator)
+  # ---------------------------------------------------------------------------
+  DeployerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'deploy-${StackName}-deployer'
+      Description: Human operator role for the synthetic scheduling dev checkpoint.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {AWS: !Ref TrustedPrincipalArn}
+            Action: sts:AssumeRole
+            Condition: !If
+              - MfaRequired
+              - Bool: {'aws:MultiFactorAuthPresent': 'true'}
+              - !Ref AWS::NoValue
+      ManagedPolicyArns:
+        - !Ref DeployerDeployPolicy
+        - !Ref DeployerOperatePolicy
+
+  DeployerDeployPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Deployer role, part 1 of 2 - change sets, stack deletion, artifact bucket, PassRole.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # sam deploy --no-execute-changeset, review, execute (checkpoint step 2).
+          - Sid: ChangeSetsAndStackForNamedStackOnly
+            Effect: Allow
+            Action:
+              - cloudformation:CreateChangeSet
+              - cloudformation:DescribeChangeSet
+              - cloudformation:ExecuteChangeSet
+              - cloudformation:DeleteChangeSet
+              - cloudformation:ListChangeSets
+              - cloudformation:DescribeStacks
+              - cloudformation:DescribeStackEvents
+              - cloudformation:DescribeStackResource
+              - cloudformation:DescribeStackResources
+              - cloudformation:ListStackResources
+              - cloudformation:GetTemplate
+              - cloudformation:GetTemplateSummary
+              - cloudformation:DeleteStack
+            Resource: !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${StackName}/*'
+          # The SAM transform is evaluated at change-set creation.
+          - Sid: SamTransform
+            Effect: Allow
+            Action: cloudformation:CreateChangeSet
+            Resource: !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31'
+          # Change-set creation and stack deletion must name the execution role, so
+          # the stack can never be built or torn down with any other identity.
+          - Sid: DenyChangeSetOrDeleteWithoutExecutionRole
+            Effect: Deny
+            Action: [cloudformation:CreateChangeSet, cloudformation:DeleteStack]
+            Resource: !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${StackName}/*'
+            Condition:
+              StringNotEquals:
+                cloudformation:RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+          - Sid: PassOnlyExecutionRoleToCloudFormation
+            Effect: Allow
+            Action: iam:PassRole
+            Resource: !GetAtt CloudFormationExecutionRole.Arn
+            Condition:
+              StringEquals:
+                iam:PassedToService: cloudformation.amazonaws.com
+          # Upload the build, CloudFormation reads it, and teardown step 10 empties
+          # and deletes the versioned bucket.
+          - Sid: ArtifactBucketObjects
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:DeleteObjectVersion
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucketName}/*'
+          - Sid: ArtifactBucketLevel
+            Effect: Allow
+            Action:
+              - s3:ListBucket
+              - s3:ListBucketVersions
+              - s3:GetBucketLocation
+              - s3:GetBucketVersioning
+              - s3:DeleteBucket
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucketName}'
+
+  DeployerOperatePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Deployer role, part 2 of 2 - post-deploy checkpoint actions on the dev stack resources.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Checkpoint step 3 and teardown step 4: owner test user.
+          - Sid: OwnerTestUser
+            Effect: Allow
+            Action:
+              - cognito-idp:AdminCreateUser
+              - cognito-idp:AdminGetUser
+              - cognito-idp:AdminSetUserPassword
+              - cognito-idp:AdminDeleteUser
+            Resource: !If
+              - HasUserPoolId
+              - !Sub 'arn:${AWS::Partition}:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${OwnerUserPoolId}'
+              - !Sub 'arn:${AWS::Partition}:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/*'
+            Condition: !If
+              - HasUserPoolId
+              - !Ref AWS::NoValue
+              - StringEquals:
+                  'aws:ResourceTag/aws:cloudformation:stack-name': !Ref StackName
+          # Checkpoint step 2: publish a synthetic notification, confirm the subscription.
+          - Sid: AlarmTopic
+            Effect: Allow
+            Action: [sns:Publish, sns:GetTopicAttributes, sns:ListSubscriptionsByTopic]
+            Resource: !Sub 'arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:scheduling-alarms-${Environment}'
+          # Checkpoint step 5 (enable hold expiry, later retention) and rollback step 1.
+          - Sid: ScheduleRules
+            Effect: Allow
+            Action: [events:EnableRule, events:DisableRule, events:DescribeRule]
+            Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/${StackName}-*'
+          # Rollback only (checkpoint step 6): inspect, brake, disable. No code upload.
+          - Sid: LambdaRollbackOnly
+            Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+              - lambda:GetFunction
+              - lambda:GetFunctionConfiguration
+              - lambda:UpdateFunctionConfiguration
+              - lambda:PutFunctionConcurrency
+              - lambda:DeleteFunctionConcurrency
+            Resource: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${StackName}-*'
+          - Sid: SqsMappingsRollbackOnly
+            Effect: Allow
+            Action: [lambda:GetEventSourceMapping, lambda:UpdateEventSourceMapping]
+            Resource: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:event-source-mapping:*'
+            Condition:
+              ArnLike:
+                lambda:FunctionArn: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${StackName}-*'
+          # Checkpoint step 4 (synthetic race tests) and teardown steps 3 and 7
+          # (count, disable PITR, delete the retained table).
+          - Sid: DevTableData
+            Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:BatchGetItem
+              - dynamodb:PutItem
+              - dynamodb:UpdateItem
+              - dynamodb:DeleteItem
+              - dynamodb:BatchWriteItem
+              - dynamodb:ConditionCheckItem
+              - dynamodb:Query
+              - dynamodb:Scan
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/scheduling-${Environment}'
+              - !Sub 'arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/scheduling-${Environment}/index/*'
+          - Sid: DevTableAdminForTeardown
+            Effect: Allow
+            Action:
+              - dynamodb:DescribeTable
+              - dynamodb:DescribeContinuousBackups
+              - dynamodb:DescribeTimeToLive
+              - dynamodb:UpdateContinuousBackups
+              - dynamodb:DeleteTable
+            Resource: !Sub 'arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/scheduling-${Environment}'
+          # ListBackups (teardown step 7 check) cannot be limited to a table.
+          - Sid: ListBackupsNoResourceLevel
+            Effect: Allow
+            Action: dynamodb:ListBackups
+            Resource: '*'
+          # Checkpoint steps 4-5: worker logs; teardown step 8: leftover log groups.
+          - Sid: StackLogsReadAndCleanup
+            Effect: Allow
+            Action:
+              - logs:FilterLogEvents
+              - logs:GetLogEvents
+              - logs:DescribeLogStreams
+              - logs:DeleteLogGroup
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${StackName}-*'
+              - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${StackName}-*:*'
+          - Sid: LogGroupListing
+            Effect: Allow
+            Action: [logs:DescribeLogGroups, logs:DescribeMetricFilters]
+            Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*'
+          # Checkpoint steps 2 and 5: alarm state, age metrics. No resource-level support.
+          - Sid: AlarmsAndMetricsReadOnly
+            Effect: Allow
+            Action:
+              - cloudwatch:DescribeAlarms
+              - cloudwatch:DescribeAlarmHistory
+              - cloudwatch:GetMetricData
+              - cloudwatch:GetMetricStatistics
+              - cloudwatch:ListMetrics
+            Resource: '*'
+          # Checkpoint step 5 and rollback step 3: queue and DLQ depth.
+          - Sid: QueueAttributesReadOnly
+            Effect: Allow
+            Action: [sqs:GetQueueAttributes, sqs:GetQueueUrl]
+            Resource: !Sub 'arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:scheduling-*-${Environment}'
+
+Outputs:
+  DeployerRoleArn:
+    Description: Assume this role for the dev checkpoint.
+    Value: !GetAtt DeployerRole.Arn
+  CloudFormationExecutionRoleArn:
+    Description: Pass as --role-arn to sam deploy and aws cloudformation delete-stack.
+    Value: !GetAtt CloudFormationExecutionRole.Arn
+  LambdaRoleBoundaryArn:
+    Description: Permissions boundary for function roles once template.yaml sets it.
+    Value: !Ref LambdaRoleBoundary

@@ -31,7 +31,7 @@ Keep the previous Lambda artifact/version for a code rollback. Disable schedules
 
 ## Synthetic dev deployment checkpoint
 
-This is the proposed **separate** authorization boundary, not an instruction to deploy now. The first change set is a `dev` stack in account `339713090487`, region `us-west-1`, using synthetic records and one owner test account. Show the CloudFormation change set, monthly cost estimate, intended alarm mailbox, and rollback steps to Enrique before executing it. Use a role scoped to the named stack, its resources, and the CloudFormation execution role; a GitHub OIDC deploy role is not present in this repository. Do not use broad personal administrator credentials as a substitute for the scoped role. Do not put real credentials or customer records in parameters or change-set output.
+This is the proposed **separate** authorization boundary, not an instruction to deploy now. The first change set is a `dev` stack in account `339713090487`, region `us-west-1`, using synthetic records and one owner test account. Show the CloudFormation change set, monthly cost estimate, intended alarm mailbox, and rollback steps to Enrique before executing it. Use a role scoped to the named stack, its resources, and the CloudFormation execution role; a GitHub OIDC deploy role is not present in this repository, but [Dev deployment roles](#dev-deployment-roles) defines a scoped operator role and CloudFormation execution role for review. Do not use broad personal administrator credentials as a substitute for the scoped role. Do not put real credentials or customer records in parameters or change-set output.
 
 1. Confirm account and region, the approved spend limit, and that `AlarmEmail` is an owner-monitored mailbox. Build and lint the exact commit. Use `Environment=dev`, `EnableSmsIngress=false`, `SmsSendEnabled=disabled`, an empty recipient allowlist, and inert Twilio and owner redirect placeholders. Keep every EventBridge schedule and the SQS sender mapping disabled.
 2. Create and inspect the change set; execute only after explicit provisioning authorization. Record stack ID, commit, parameter names (not secret values), resource ARNs, and the observed monthly cost baseline. Confirm the SNS email subscription, publish a synthetic notification, and verify receipt before using the alarms as a safety gate.
@@ -39,6 +39,100 @@ This is the proposed **separate** authorization boundary, not an instruction to 
 4. Run conditional transaction races against the dev table: two approvals for one slot, approval versus expiry, and replacement swap versus a stale competing write. Inspect the base records, audit entries, and outbox after each attempt; a losing transaction must leave no partial changes. Confirm the due GSIs and IAM grants work in the deployed environment.
 5. Before enabling hold expiry, load synthetic due holds. Enable that schedule alone, watch its report, age metric, and Lambda errors, and verify due work completes while stale index entries are harmless. Keep the outbox dispatch schedule **disabled**: the stack has no fake SQS consumer, so enabling it would accumulate messages. Test `DispatchService` against the dev table through an integration harness with a fake `IntentQueue` that records handoffs without touching SQS. A later, separately reviewed harness must consume synthetic SQS messages without Twilio and exercise a controlled DLQ record before outbox dispatch can be enabled; do not claim that queue/DLQ gate passed until then. Turn on note and SMS retention schedules only after synthetic expiration and legal-hold checks. Keep the live SMS sender and Twilio number disconnected.
 6. If a gate fails, disable the affected schedule or event source, revert the Lambda artifact, and keep the retained table for inspection. Record the failure on #23 or the deployment issue. Tear down only after confirming how retained records, logs, and the Cognito test user will be handled; stack deletion alone does not remove retained data.
+
+## Dev deployment roles
+
+`infra/dev-deploy-roles.yaml` is the reviewable, least-privilege pair of roles the checkpoint above calls for. It is a plain CloudFormation template deployed as its **own small stack**, separate from `template.yaml`. Writing it created nothing: creating the role stack is an account change that needs Enrique's separate explicit authorization, like the checkpoint itself. Placeholders below (`<...>`) are supplied at run time and never committed.
+
+Two roles and one managed policy, all named `deploy-<StackName>-*` so they never match the `<StackName>-*` scope the execution role is allowed to manage:
+
+| Role | Assumed by | Purpose |
+| --- | --- | --- |
+| `deploy-scheduling-dev-deployer` | The one operator principal in `TrustedPrincipalArn` | Create, review, execute and delete the dev stack's change sets and stack; run the post-deploy checkpoint actions |
+| `deploy-scheduling-dev-cfn-exec` | `cloudformation.amazonaws.com` only, for stack `scheduling-dev` in this account | Create the `template.yaml` resources |
+| `deploy-scheduling-dev-lambda-boundary` (managed policy) | Not assumable | Optional ceiling for the Lambda roles the stack creates |
+
+### Create the role stack
+
+Run once as an administrator the owner designates, in `us-west-1` (IAM is global, so create only one role stack per account for a given `StackName`). Do not use these commands until the owner authorizes creating the roles.
+
+```sh
+aws cloudformation deploy --stack-name scheduling-dev-roles --region us-west-1 \
+  --template-file infra/dev-deploy-roles.yaml --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides TrustedPrincipalArn=<operator user or role ARN> \
+    ArtifactBucketName=<artifact bucket> RequireMfa=true
+```
+
+After the dev stack exists, optionally tighten Cognito to that one pool by re-running the command with `OwnerUserPoolId=<pool id>` added.
+
+### Assume the deployer role
+
+The deployer role's ARN is in the role stack's `DeployerRoleArn` output. It requires MFA by default (`RequireMfa=true`). MFA is practical for a CLI session: an IAM user with a virtual MFA device assumes the role with a token code, and the temporary credentials last one hour, so a stolen long-term key alone cannot deploy. Example `~/.aws/config` profile (fill in from the outputs; keep it out of the repository):
+
+```ini
+[profile scheduling-dev-deployer]
+role_arn = <DeployerRoleArn>
+source_profile = <operator profile>
+mfa_serial = <operator MFA device ARN>
+region = us-west-1
+```
+
+If the operator signs in through IAM Identity Center, the session may not carry the MFA flag; deploy the role stack with `RequireMfa=false` and rely on the identity provider's MFA instead.
+
+Every change-set creation and stack deletion must pass the execution role, or the deployer role's own deny statement rejects it:
+
+```sh
+sam deploy --profile scheduling-dev-deployer --stack-name scheduling-dev --region us-west-1 \
+  --role-arn <CloudFormationExecutionRoleArn> --s3-bucket <artifact bucket> --s3-prefix scheduling-dev \
+  --capabilities CAPABILITY_IAM --no-execute-changeset ...
+aws cloudformation delete-stack --stack-name scheduling-dev --role-arn <CloudFormationExecutionRoleArn> ...
+```
+
+### What each role can do
+
+Deployer role, mapped to the checkpoint step that needs it (step numbers refer to the checkpoint list above; "teardown" and "rollback" numbers refer to sections 3.3 and 3.1 of `doc/DEV_STACK_PLAN.md`):
+
+| Permission (scope) | Step |
+| --- | --- |
+| Create, describe, execute, delete change sets; describe stack, events and resources; get template; delete stack (only stack `scheduling-dev`; must name the execution role; plus the SAM transform) | 2, teardown 5 |
+| `iam:PassRole` for the execution role only, only to `cloudformation.amazonaws.com` | 2 |
+| Get/put/delete objects and versions, list, delete bucket (only the artifact bucket) | 2, teardown 10 |
+| Cognito `AdminCreateUser`, `AdminGetUser`, `AdminSetUserPassword`, `AdminDeleteUser` (the stack's pool) | 3, teardown 4 |
+| `sns:Publish`, get attributes, list subscriptions (topic `scheduling-alarms-dev`) | 2 |
+| `events:EnableRule`, `DisableRule`, `DescribeRule` (rules `scheduling-dev-*`) | 5, rollback 1 |
+| Lambda invoke, get function, `UpdateFunctionConfiguration`, put/delete concurrency, and get/update event source mapping (functions `scheduling-dev-*`); rollback use only, no code upload | 6, rollback 1-2 |
+| DynamoDB item read/write and query/scan (table `scheduling-dev` and its indexes) | 4, 5 |
+| DynamoDB describe, `UpdateContinuousBackups`, `DeleteTable` (that table) and `ListBackups` | teardown 3, 7 |
+| Logs `FilterLogEvents`, `GetLogEvents`, describe streams, delete log group (`/aws/lambda/scheduling-dev-*`) | 4, 5, teardown 8 |
+| CloudWatch describe alarms and history, get metric data/statistics, list metrics | 2, 5 |
+| SQS `GetQueueAttributes`, `GetQueueUrl` (queues `scheduling-*-dev`) | 5, rollback 3 |
+
+Execution role:
+
+- Lambda functions `scheduling-dev-*`, their event source mappings and permissions; HTTP APIs (API Gateway v2); EventBridge rules `scheduling-dev-*`; log groups `/aws/lambda/scheduling-dev-*` with retention and metric filters; CloudWatch alarms `scheduling-dev-*`; table `scheduling-dev` (create and update, **not** delete: it is `DeletionPolicy: Retain` and is removed by hand); queues `scheduling-*-dev`; topic `scheduling-alarms-dev` and its subscription; Cognito user pool, client and domain; read of the artifact prefix so CloudFormation can fetch the Lambda zips.
+- IAM: create and manage only roles `scheduling-dev-*`; attach only `AWSLambdaBasicExecutionRole` and `AWSLambdaSQSQueueExecutionRole`; pass those roles only to `lambda.amazonaws.com`. Explicit denies cover attaching `AdministratorAccess*`, `PowerUserAccess` or `IAMFullAccess`, and any IAM action on `deploy-*` roles and policies.
+- **SSM is deliberately omitted.** `template.yaml` only writes the `/scheduling/dev/*` parameter paths into the *Lambda roles'* policies; CloudFormation never reads or creates a parameter. The `/scheduling/dev/*` `ssm:GetParameter` grant lives only in the optional boundary policy.
+
+### Privilege-escalation tradeoff
+
+A CloudFormation role that can create IAM roles is an escalation path unless constrained. By default this template uses **name-prefix scoping, an allowlist of two attachable AWS managed policies, and explicit denies on admin policies**. That does not stop the execution role from writing an arbitrary *inline* policy on a `scheduling-dev-*` role (`iam:PutRolePolicy` cannot be filtered by policy content) and passing it to a Lambda function it created. A permissions boundary closes that hole, so the template also creates one and can enforce it (`EnforcePermissionsBoundary=true`: `iam:CreateRole` is denied unless the boundary is attached, and the boundary cannot be removed). It is **off by default** because it needs a one-line follow-up to `template.yaml` (`PermissionsBoundary` under `Globals.Function`, taking the boundary ARN as a parameter), which this change does not make; enforcing it first would make the dev stack creation fail. Recommendation: make that follow-up before authorizing the role stack, and deploy with the boundary enforced. In the default mode the residual risk is bounded because only a reviewed, owner-authorized change set can use the execution role, and only the deployer can start one.
+
+### Known limits of the scoping
+
+- **HTTP APIs** (`apigateway:GET/POST/PUT/PATCH/DELETE` on `/apis/*`) and **Cognito user pools** (`userpool/*`) have random IDs, so the execution role can manage every API and pool in the account and region, not just this stack's. `cognito-idp:CreateUserPool` has no resource-level scope at all. This is acceptable only while the account is dedicated to this project; otherwise tag conditions must be added.
+- **Event source mappings** are scoped by the target-function condition, not by name. `lambda:ListEventSourceMappings` needs `*`.
+- **`ListBackups`, `DescribeAlarms`, alarm history and metric reads, `DescribeLogGroups`, and `DescribeUserPoolDomain`** do not support narrower resources. They are read-only.
+- The deployer's Cognito admin actions use the `aws:ResourceTag/aws:cloudformation:stack-name` condition until `OwnerUserPoolId` is set. That relies on CloudFormation tagging the pool with its stack name, which could not be verified because nothing may be created. If step 3 is denied, set `OwnerUserPoolId`. The confused-deputy `aws:SourceArn` condition on the execution role's trust policy likewise could not be exercised offline.
+- Name-prefix scoping depends on CloudFormation's auto-naming (`<stack>-<LogicalId>-<random>`). Adding a resource with an explicit name in `template.yaml` (for example a queue outside `scheduling-*-dev`) needs a matching change to the execution role.
+- A stack stuck in `UPDATE_ROLLBACK_FAILED` needs `ContinueUpdateRollback`, which is not granted; the administrator handles that case.
+- **Not covered:** creating the artifact bucket, the Amplify app, and the AWS Budget. Those one-time owner actions are done with the owner's own credentials under the existing authorization (the packet already lists them as separate steps). Amplify and Budgets have limited resource-level support and are used once, so a scoped role would add review cost for little safety. A narrow add-on can be proposed separately if Enrique prefers.
+- Nothing here has been evaluated against a real account. The template passes `cfn-lint` offline; run IAM Access Analyzer policy validation and a change-set review on the first authorized run.
+
+### Teardown order
+
+1. Finish the dev stack teardown in `doc/DEV_STACK_PLAN.md` section 3.3 first: stack deleted (with `--role-arn`), retained table deleted, leftover log groups deleted, artifact bucket emptied and deleted.
+2. Delete the role stack **last**, as the administrator, not through the deployer role: `aws cloudformation delete-stack --stack-name scheduling-dev-roles --region us-west-1`. The roles must outlive the dev stack because CloudFormation needs the execution role to delete the stack's resources; deleting the roles first strands the stack in `DELETE_FAILED`.
+3. Remove the operator's AWS CLI profile and confirm no role named `deploy-scheduling-dev-*` remains.
 
 ## Expected running costs before deployment
 
