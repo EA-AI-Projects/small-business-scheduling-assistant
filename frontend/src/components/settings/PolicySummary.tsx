@@ -1,4 +1,7 @@
+import { useState } from "react";
+
 import type { PolicyState } from "@/api/types";
+import { useOwner } from "@/owner/OwnerContext";
 
 import { shortTime } from "./policyEdit";
 
@@ -6,7 +9,7 @@ export function PolicySummary({ policy }: { policy: PolicyState | null }) {
   return (
     <section className="card">
       <h3>Current policy</h3>
-      <div>{policy ? <Summary state={policy} /> : <p className="empty">Policy is not configured</p>}</div>
+      <div>{policy ? <Summary state={policy} /> : <SeedPolicy />}</div>
     </section>
   );
 }
@@ -28,6 +31,31 @@ function Summary({ state }: { state: PolicyState }) {
             : "Closed"}`}
         </p>
       ))}
+    </>
+  );
+}
+
+function SeedPolicy() {
+  const { change } = useOwner();
+  const [busy, setBusy] = useState(false);
+
+  async function load() {
+    setBusy(true);
+    try {
+      await change("/policy/seed", "POST", undefined, "Pilot policy loaded");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <p className="empty">Policy is not configured</p>
+      <p className="hint">
+        Scheduling writes stay blocked until a policy is saved. Loading the pilot policy saves the
+        documented default hours and limits; you can adjust date exceptions afterwards.
+      </p>
+      <button className="primary" type="button" disabled={busy} onClick={load}>Load pilot policy</button>
     </>
   );
 }
