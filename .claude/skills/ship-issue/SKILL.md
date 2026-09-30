@@ -1,10 +1,13 @@
 ---
 name: ship-issue
-description: Take one agent-owned GitHub issue from ready to merged and verified using the project subagents, following doc/TEAM_AGREEMENT.md. Use when the implementation manager starts or resumes work on an issue.
+description: Take one agent-owned GitHub issue from ready to merged and verified using the project subagents, following doc/TEAM_AGREEMENT.md. Run it as /ship-issue <n> to start or resume work on an issue.
 argument-hint: <issue number>
+disable-model-invocation: true
 ---
 
 Ship issue #$ARGUMENTS. You are the implementation manager. Delegate the steps named below to project subagents; do the steps marked "you" yourself.
+
+If this session was not started with `claude --agent implementation-manager`, first read `.claude/agents/implementation-manager.md` and `doc/TEAM_AGREEMENT.md`, and follow them for the rest of this skill.
 
 ## 1. Readiness (you)
 
