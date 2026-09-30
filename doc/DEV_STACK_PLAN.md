@@ -150,10 +150,10 @@ Reading the table:
 - **Alerts, sent to the owner-monitored mailbox:**
   - Actual spend at 50 percent ($5.00), 80 percent ($8.00), and 100 percent ($10.00).
   - Forecasted spend at 100 percent ($10.00).
-- **Placement: the management account, with a linked-account filter on `214965372605`.** Both placements are valid: AWS lets a management account create a budget that tracks one member account's cost, and a member account can create its own. The management account is chosen because the owner already has billing access there, the member account's root user then needs no billing setup (a new member account has no root credentials to begin with), the budget survives the member account's closure or teardown, and it fits that account's billing-and-organization role. Every cost in the filtered account belongs to this project, so no tag is involved and there is nothing to activate.
-- **Who creates it:** the owner, in the AWS Billing console signed in to the management account, as the **first** provisioning step ([section 2.3](#23-stack-parameters), order of creation). Neither the deployer role nor the execution role can create budgets, and agents do not hold management-account credentials. It belongs to the account-changing steps already authorized under decision 3.
+- **Placement: the dedicated member account `214965372605`, scope all services (the whole account).** This is an accepted deviation from the earlier plan, which placed the budget in the management account `339713090487` with a linked-account filter on `214965372605`. A brand-new member account does not appear in the management account's linked-account filter until it has billing data, so the budget was created in the member account instead. The budget is named `scheduling-dev`, a monthly cost budget of $10.00 USD; the amounts and alerts are unchanged. Every cost in the account belongs to this project, so no tag is involved and there is nothing to activate.
+- **Who creates it:** the owner, signed in to the member account through IAM Identity Center (AdministratorAccess), as the **first** provisioning step ([section 2.3](#23-stack-parameters), order of creation). It was created this way on 2026-09-30 (issue #43). Neither the deployer role nor the execution role can create budgets, and agents do not hold these credentials. It belongs to the account-changing steps already authorized under decision 3.
 - **Schedules stay off until it exists.** No schedule or event source mapping is enabled before the budget exists. That is satisfied by construction because the budget is created before the stack.
-- **Limits.** A budget alerts; it does not stop spending. Cost data lags by hours, so an alert can arrive after money is spent. The budget lives outside the account, so closing or emptying the member account does not delete it: delete it by hand at teardown (section 3.3, step 9).
+- **Limits.** A budget alerts; it does not stop spending. Cost data lags by hours, so an alert can arrive after money is spent. The budget lives in the member account, so it is removed with the account's content at permanent closure. There is no management-account budget to delete at teardown; before closing the account, delete it with `delete-budget` in the member account (section 3.3, step 9).
 
 ### 1.7 Reproducing this in the Pricing Calculator
 
@@ -287,7 +287,7 @@ Placeholders are inert. A real value for `AlarmEmail` is supplied on the command
 **Order of creation** (every step needs the owner's authorization for that specific action; nothing here is authorized by this document):
 
 1. **Identity Center access.** Done by the owner: the `AdministratorAccess` permission set is assigned to the owner's user for account `214965372605`, with MFA at every sign-in.
-2. **Budget.** The owner creates the $10 budget in the management account ([section 1.6](#16-approved-aws-budget-scoped-to-the-dedicated-account)).
+2. **Budget.** The owner creates the $10 budget in the member account `214965372605`, signed in through Identity Center ([section 1.6](#16-approved-aws-budget-scoped-to-the-dedicated-account)). Done 2026-09-30.
 3. **Role stack.** An administrator session creates `infra/dev-deploy-roles.yaml` as its own stack with `--no-execute-changeset`, the owner reviews the change set, then it is executed. See [Dev deployment roles](PILOT_INFRASTRUCTURE.md#create-the-role-stack). The role stack must exist before the dev stack because the dev stack is deployed *through* its roles.
 4. **Artifact bucket.** Created by hand (below). The role stack names the bucket, so decide its name before step 3. Create it with the admin session; the deployer role can then use it.
 5. **Change set.** `sam deploy --no-execute-changeset` through the deployer role, with `--role-arn` set to the execution role. The owner reviews it.
@@ -334,7 +334,7 @@ This packet uses a **dedicated artifact bucket** that is created by hand first. 
 | --- | --- | --- | --- |
 | Cognito owner test user | Admin create in the user pool, then set a password and read its `sub` | No (1 MAU) | Deleted with the pool; see section 3.3 |
 | Amplify app (platform `WEB`, `AMPLIFY_MONOREPO_APP_ROOT=frontend`, build variables from stack outputs plus `NEXT_PUBLIC_BUSINESS_ID`) | Console or CLI | Yes: build minutes, storage, served data | `delete-app` |
-| AWS Budget (management account, linked-account filter) and its notification mailbox | The owner, in the Billing console or CLI, first | No for a plain cost budget | `delete-budget` in the management account |
+| AWS Budget `scheduling-dev` (member account `214965372605`, scope all services) and its notification mailbox | The owner, signed in to the member account, first (done 2026-09-30) | No for a plain cost budget | `delete-budget` in the member account |
 | SNS subscription confirmation | The `AlarmEmail` recipient clicks the confirmation link | No | Removed with the topic |
 | Dedicated artifact bucket (private, versioned, encrypted), created by hand | `aws s3api create-bucket` and related calls | Yes: S3 storage, tiny | Delete all versions and delete markers, then the bucket |
 | Uploaded Lambda zips and the `REVIEW_IN_PROGRESS` stack from the change set | `sam deploy --no-execute-changeset` | Yes (storage, tiny) | Removed with the bucket; see the never-executed case in section 3.3 |
@@ -443,10 +443,10 @@ aws cloudformation delete-stack --stack-name scheduling-dev --region us-west-1 \
 
    The `Scheduling/dev` custom metrics cannot be deleted; they stop being billed when nothing publishes to them. Confirm on the first bill after teardown.
 8. **SNS subscription.** Nothing to do in AWS: the subscription goes with the topic. The mailbox can remove the confirmation email.
-9. **Delete the budget** unless Enrique wants it to persist (management account, signed in as the owner; the budget is not inside the dev account, so closing that account does not remove it):
+9. **Delete the budget** unless Enrique wants it to persist (member account `214965372605`, signed in through Identity Center; it is deleted here before the account is closed, or is removed with the account's content at permanent closure):
 
    ```sh
-   aws budgets delete-budget --account-id <management account id> --budget-name <budget name>
+   aws budgets delete-budget --account-id 214965372605 --budget-name scheduling-dev
    ```
 
 10. **Delete the artifact bucket, including every version.** The bucket is versioned, so `aws s3 rm` alone leaves object versions and delete markers behind and the bucket cannot be deleted. List them, delete them in batches (`delete-objects` accepts up to 1,000 keys per call), then delete the bucket:
@@ -466,7 +466,7 @@ aws cloudformation delete-stack --stack-name scheduling-dev --region us-west-1 \
 11. **SSM parameters** (admin: the deployer role has no SSM access). None exist for this checkpoint. If any were created later: `aws ssm delete-parameter --name /scheduling/dev/twilio/auth-token --region us-west-1`.
 12. **Delete the role stack last**, from the admin session, not through the deployer role: `aws cloudformation delete-stack --stack-name scheduling-dev-roles --region us-west-1`. CloudFormation needs the execution role to delete the dev stack's resources, so deleting the roles earlier strands the dev stack in `DELETE_FAILED`. Then remove the deployer profile from `~/.aws/config` and confirm no role named `deploy-scheduling-dev-*` remains.
 
-**Ultimate cleanup: closing the member account.** Because `dev` has its own account, closing account `214965372605` eventually removes everything in it, including anything a step above missed, but not immediately. It is the owner's decision and is not part of this plan's authorization. Per the AWS Organizations documentation (checked when this was written), a closed member account shows as CLOSED for up to 90 days, can be reopened during that time, and its content persists until it is permanently closed; re-check the current rules before deciding. Do not treat closure as instant data deletion. Closing does not delete the budget, which lives in the management account (step 9). Prefer the step-by-step teardown while the account will be reused for later checkpoints.
+**Ultimate cleanup: closing the member account.** Because `dev` has its own account, closing account `214965372605` eventually removes everything in it, including anything a step above missed, but not immediately. It is the owner's decision and is not part of this plan's authorization. Per the AWS Organizations documentation (checked when this was written), a closed member account shows as CLOSED for up to 90 days, can be reopened during that time, and its content persists until it is permanently closed; re-check the current rules before deciding. Do not treat closure as instant data deletion. The budget lives in the member account and is removed with the account's content at permanent closure (step 9); there is no management-account budget. Prefer the step-by-step teardown while the account will be reused for later checkpoints.
 
 ### 3.4 Nothing-billable-remains checklist
 
@@ -490,10 +490,10 @@ Run after teardown. Each check should show nothing for `scheduling-dev`. The dep
 - [ ] `aws dynamodb list-tables` has no `scheduling-dev`.
 - [ ] No SSM parameter under `/scheduling/dev/`.
 - [ ] After step 12: `aws iam list-roles` shows no role starting `deploy-scheduling-dev-` or `scheduling-dev-`, and `aws cloudformation describe-stacks --stack-name scheduling-dev-roles` reports the stack does not exist.
+- [ ] Before the account is closed: `aws budgets describe-budgets --account-id 214965372605` no longer lists the checkpoint budget (or it is kept on purpose).
 
 **Management account** (the owner):
 
-- [ ] `aws budgets describe-budgets --account-id <management account id>` no longer lists the checkpoint budget (or it is kept on purpose).
 - [ ] The next month's Cost Explorer or bill, filtered to account `214965372605`, shows no line from these services. This catches anything missed above.
 
 ## 4. What this packet does not do
