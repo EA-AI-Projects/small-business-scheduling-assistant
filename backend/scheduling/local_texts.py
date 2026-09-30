@@ -177,7 +177,14 @@ class TextSimulator:
                 if self._offline is not None:
                     self._offline.consulted = False
                 outcome = self._service.handle(receipt)
-                self._append(party, label, "out", "reply", outcome.text)
+                if outcome.committed:
+                    # Production texts only the notifications for a committed change
+                    # (see ReceiptProcessor); the reply itself is never sent.
+                    self._append(party, label, "note", "note",
+                                 f"Not texted: {outcome.text} The notification "
+                                 "below is what the phone receives.")
+                else:
+                    self._append(party, label, "out", "reply", outcome.text)
                 if self._offline is not None and self._offline.consulted:
                     self._append(party, label, "note", "note",
                                  "Plain-language texts need OPENAI_API_KEY. Without it, use "
@@ -339,7 +346,8 @@ PAGE = """<!doctype html>
     <em>decline</em> acts when exactly one request is pending. Exact commands still work:
     <code>Book YYYY-MM-DD</code>, <code>Cancel REF</code>, <code>Approve REF</code>.
     Plain language needs <code>OPENAI_API_KEY</code>.
-    Green-bordered messages are notifications that would be texted.</p>
+    Green-bordered messages are notifications that would be texted. Grey notes are
+    not texted; after a change, only its notifications are.</p>
     <div id="log" aria-live="polite"></div>
   </section>
 </main>
