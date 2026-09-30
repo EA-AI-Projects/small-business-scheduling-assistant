@@ -25,13 +25,13 @@ Requires Node 22 (see `.nvmrc`).
 
 The same backend serves a text simulator at `http://127.0.0.1:8000/local/texts` that shares this calendar. Unless `OPENAI_API_KEY` is set in your shell, it accepts only exact commands; see [Try the app locally](../README.md#try-the-app-locally).
 
-Local mode exists only for the synthetic local API. Amplify builds use Cognito mode.
+Local mode exists only for the synthetic local API. Amplify deployments use Cognito mode.
 
 ## Configuration
 
 All settings are public `NEXT_PUBLIC_*` build variables that ship in the bundle. Never put a secret, owner subject, or customer data in them.
 
-| Variable | Cognito (Amplify) | Local |
+| Variable | Cognito (Amplify; set in the local build for a manual deploy) | Local |
 | --- | --- | --- |
 | `NEXT_PUBLIC_AUTH_MODE` | `cognito` (default) | `local` |
 | `NEXT_PUBLIC_API_BASE_URL` | Owner HTTP API URL, HTTPS, no trailing slash | `http://127.0.0.1:8000` |
@@ -64,4 +64,4 @@ CI fails if either generated file is stale. The owner routes do not declare resp
 
 ## Amplify Hosting
 
-`amplify.yml` at the repository root builds this directory as the monorepo app root. `customHttp.yml`, also at the root, uses the monorepo `applications`/`appRoot` format; `src/hosting.test.ts` checks both files. Create the Amplify app with platform `WEB` (static hosting). Amplify may detect Next.js and default to `WEB_COMPUTE`, which expects a server build rather than `out/`. On the Amplify app, set `AMPLIFY_MONOREPO_APP_ROOT=frontend` and the Cognito-mode variables above. Creating the Amplify app or connecting the repository is a deployment step that needs separate authorization (#43).
+`amplify.yml` at the repository root builds this directory as the monorepo app root. `customHttp.yml`, also at the root, uses the monorepo `applications`/`appRoot` format; `src/hosting.test.ts` checks both files. Create the Amplify app with platform `WEB` (static hosting). Amplify may detect Next.js and default to `WEB_COMPUTE`, which expects a server build rather than `out/`. For a future Git-connected app, set `AMPLIFY_MONOREPO_APP_ROOT=frontend` and the Cognito-mode variables above on the Amplify app. For `dev`, the owner app is a manual deploy with no Git connection (owner decision, 2026-09-30, #43): AWS gets no repository access, pushes trigger no builds (no build minutes), and each update is an explicit upload. Create the app with `aws amplify create-app --name scheduling-owner-dev --platform WEB --custom-headers <customHeaders YAML> --region us-west-1`, then `aws amplify create-branch --app-id <app id> --branch-name main --region us-west-1`. Build locally from `frontend/` with `NEXT_PUBLIC_API_BASE_URL` (`OwnerApiUrl`, no trailing slash), `NEXT_PUBLIC_COGNITO_DOMAIN` (`OwnerCognitoDomain`), `NEXT_PUBLIC_COGNITO_CLIENT_ID` (`OwnerAppClientId`), `NEXT_PUBLIC_BUSINESS_ID=dev-synthetic`, and `NEXT_PUBLIC_AUTH_MODE=cognito`, run `npm run check:export`, and zip the contents of `frontend/out`. Deploy with `aws amplify create-deployment --app-id <app id> --branch-name main --region us-west-1` (returns `jobId` and `zipUploadUrl`), upload the zip to `zipUploadUrl` with an HTTP PUT, then `aws amplify start-deployment --app-id <app id> --branch-name main --job-id <job id> --region us-west-1`. A manual app cannot read `customHttp.yml` from a repository, so its headers are applied with `--custom-headers` in the non-monorepo `customHeaders:` format (the `pattern`/`headers` entries of `customHttp.yml` without the `applications`/`appRoot` wrapper); `customHttp.yml` is the source of that value, and their presence is verified after deploy. The origin is `https://main.<app id>.amplifyapp.com`. `amplify.yml` and `customHttp.yml` remain the source for a future Git-connected app, which would be a new Amplify app with a new origin followed by one reviewed `OwnerAppOrigin` change set. Creating the Amplify app, uploading a deployment, or connecting a repository is a deployment step that needs separate authorization (#43).
