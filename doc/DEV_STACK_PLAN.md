@@ -153,7 +153,7 @@ Reading the table:
 - **Placement: the dedicated member account `214965372605`, scope all services (the whole account).** This is an accepted deviation from the earlier plan, which placed the budget in the management account `339713090487` with a linked-account filter on `214965372605`. A brand-new member account does not appear in the management account's linked-account filter until it has billing data, so the budget was created in the member account instead. The budget is named `scheduling-dev`, a monthly cost budget of $10.00 USD; the amounts and alerts are unchanged. Every cost in the account belongs to this project, so no tag is involved and there is nothing to activate.
 - **Who creates it:** the owner, signed in to the member account through IAM Identity Center (AdministratorAccess), as the **first** provisioning step ([section 2.3](#23-stack-parameters), order of creation). It was created this way on 2026-09-30 (issue #43). Neither the deployer role nor the execution role can create budgets, and agents do not hold these credentials. It belongs to the account-changing steps already authorized under decision 3.
 - **Schedules stay off until it exists.** No schedule or event source mapping is enabled before the budget exists. That is satisfied by construction because the budget is created before the stack.
-- **Limits.** A budget alerts; it does not stop spending. Cost data lags by hours, so an alert can arrive after money is spent. The budget lives in the member account, so closing the account deletes it. There is no management-account budget to delete at teardown; before closing the account, delete it with `delete-budget` in the member account (section 3.3, step 9).
+- **Limits.** A budget alerts; it does not stop spending. Cost data lags by hours, so an alert can arrive after money is spent. The budget lives in the member account, so it is removed with the account's content at permanent closure. There is no management-account budget to delete at teardown; before closing the account, delete it with `delete-budget` in the member account (section 3.3, step 9).
 
 ### 1.7 Reproducing this in the Pricing Calculator
 
@@ -443,7 +443,7 @@ aws cloudformation delete-stack --stack-name scheduling-dev --region us-west-1 \
 
    The `Scheduling/dev` custom metrics cannot be deleted; they stop being billed when nothing publishes to them. Confirm on the first bill after teardown.
 8. **SNS subscription.** Nothing to do in AWS: the subscription goes with the topic. The mailbox can remove the confirmation email.
-9. **Delete the budget** unless Enrique wants it to persist (member account `214965372605`, signed in through Identity Center; it is deleted here before the account is closed, or disappears when the account is closed):
+9. **Delete the budget** unless Enrique wants it to persist (member account `214965372605`, signed in through Identity Center; it is deleted here before the account is closed, or is removed with the account's content at permanent closure):
 
    ```sh
    aws budgets delete-budget --account-id 214965372605 --budget-name scheduling-dev
@@ -466,7 +466,7 @@ aws cloudformation delete-stack --stack-name scheduling-dev --region us-west-1 \
 11. **SSM parameters** (admin: the deployer role has no SSM access). None exist for this checkpoint. If any were created later: `aws ssm delete-parameter --name /scheduling/dev/twilio/auth-token --region us-west-1`.
 12. **Delete the role stack last**, from the admin session, not through the deployer role: `aws cloudformation delete-stack --stack-name scheduling-dev-roles --region us-west-1`. CloudFormation needs the execution role to delete the dev stack's resources, so deleting the roles earlier strands the dev stack in `DELETE_FAILED`. Then remove the deployer profile from `~/.aws/config` and confirm no role named `deploy-scheduling-dev-*` remains.
 
-**Ultimate cleanup: closing the member account.** Because `dev` has its own account, closing account `214965372605` eventually removes everything in it, including anything a step above missed, but not immediately. It is the owner's decision and is not part of this plan's authorization. Per the AWS Organizations documentation (checked when this was written), a closed member account shows as CLOSED for up to 90 days, can be reopened during that time, and its content persists until it is permanently closed; re-check the current rules before deciding. Do not treat closure as instant data deletion. Closing deletes the budget, which lives in the member account (step 9); there is no management-account budget. Prefer the step-by-step teardown while the account will be reused for later checkpoints.
+**Ultimate cleanup: closing the member account.** Because `dev` has its own account, closing account `214965372605` eventually removes everything in it, including anything a step above missed, but not immediately. It is the owner's decision and is not part of this plan's authorization. Per the AWS Organizations documentation (checked when this was written), a closed member account shows as CLOSED for up to 90 days, can be reopened during that time, and its content persists until it is permanently closed; re-check the current rules before deciding. Do not treat closure as instant data deletion. The budget lives in the member account and is removed with the account's content at permanent closure (step 9); there is no management-account budget. Prefer the step-by-step teardown while the account will be reused for later checkpoints.
 
 ### 3.4 Nothing-billable-remains checklist
 
@@ -490,10 +490,10 @@ Run after teardown. Each check should show nothing for `scheduling-dev`. The dep
 - [ ] `aws dynamodb list-tables` has no `scheduling-dev`.
 - [ ] No SSM parameter under `/scheduling/dev/`.
 - [ ] After step 12: `aws iam list-roles` shows no role starting `deploy-scheduling-dev-` or `scheduling-dev-`, and `aws cloudformation describe-stacks --stack-name scheduling-dev-roles` reports the stack does not exist.
+- [ ] Before the account is closed: `aws budgets describe-budgets --account-id 214965372605` no longer lists the checkpoint budget (or it is kept on purpose).
 
 **Management account** (the owner):
 
-- [ ] `aws budgets describe-budgets --account-id 214965372605` no longer lists the checkpoint budget (or it is kept on purpose).
 - [ ] The next month's Cost Explorer or bill, filtered to account `214965372605`, shows no line from these services. This catches anything missed above.
 
 ## 4. What this packet does not do
