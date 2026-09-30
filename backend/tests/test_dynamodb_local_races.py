@@ -13,6 +13,7 @@ from uuid import uuid4
 
 import boto3
 import pytest
+from botocore.exceptions import BotoCoreError, ClientError
 
 from scheduling.adapters.dynamodb import DynamoDBCalendarRepository
 from scheduling.adapters.outbox_aws import DynamoOutboxStore
@@ -30,8 +31,11 @@ from scheduling.domain.outbox import ConsumeOutcome, ConsumeService, DispatchSer
 
 DEV_TABLE = "scheduling-dev"
 DEV_REGION = "us-west-1"
-START = datetime(2026, 10, 1, 16, tzinfo=UTC)
-EXPIRY = datetime(2026, 9, 30, 16, tzinfo=UTC)
+DEV_ENDPOINT = "https://dynamodb.us-west-1.amazonaws.com"
+# Far in the past so this run's keys sort first in the table-wide due indexes and
+# other synthetic records on a shared table cannot crowd them out of bounded queries.
+START = datetime(2001, 10, 1, 16, tzinfo=UTC)
+EXPIRY = datetime(2001, 9, 30, 16, tzinfo=UTC)
 
 
 @dataclass
@@ -54,6 +58,7 @@ class RaceEnv:
         """Delete only the items this run created (its business and appointment keys)."""
         partitions = [f"BUSINESS#{self.business}"]
         partitions += [f"APPOINTMENT#{identifier}" for identifier in self.appointment_ids]
+        errors: list[str] = []
         for pk in partitions:
             last_key: dict[str, Any] | None = None
             while True:
@@ -64,14 +69,26 @@ class RaceEnv:
                 }
                 if last_key:
                     arguments["ExclusiveStartKey"] = last_key
-                page = self.client.query(**arguments)
+                try:
+                    page = self.client.query(**arguments)
+                except (BotoCoreError, ClientError) as exc:
+                    errors.append(f"query {pk}: {exc}")
+                    break
                 for item in page["Items"]:
-                    self.client.delete_item(
-                        TableName=self.table, Key={"PK": item["PK"], "SK": item["SK"]},
-                    )
+                    try:
+                        self.client.delete_item(
+                            TableName=self.table, Key={"PK": item["PK"], "SK": item["SK"]},
+                        )
+                    except (BotoCoreError, ClientError) as exc:
+                        errors.append(f"delete {pk} {item['SK']['S']}: {exc}")
                 last_key = page.get("LastEvaluatedKey")
                 if not last_key:
                     break
+        if errors:
+            raise RuntimeError(
+                f"Cleanup for run {self.run} left items behind; sweep them by prefix: "
+                + "; ".join(errors)
+            )
 
 
 def _dev_env() -> Iterator[RaceEnv]:
@@ -87,7 +104,12 @@ def _dev_env() -> Iterator[RaceEnv]:
         pytest.skip("The deployed dev table mode never runs in CI")
     # Standard credential chain (for example AWS_PROFILE=scheduling-dev-deployer).
     client = boto3.client("dynamodb", region_name=DEV_REGION)
+    # Also catches AWS_ENDPOINT_URL_DYNAMODB and a profile-level endpoint_url.
+    if client.meta.endpoint_url != DEV_ENDPOINT:
+        raise ValueError(f"Unexpected DynamoDB endpoint {client.meta.endpoint_url!r}")
     run = f"run-{uuid4().hex[:12]}"
+    print(f"\nSynthetic dev race run id: {run} "
+          f"(keys BUSINESS#synthetic-{run}, APPOINTMENT#{run}-*)", flush=True)
     env = RaceEnv(client, table, f"synthetic-{run}", run)  # never "dev-synthetic"
     try:
         yield env
@@ -206,8 +228,9 @@ def _commit(env: RaceEnv, before: Appointment, after: Appointment, action: Actio
     )
 
 
-def _run_race(repository: DynamoDBCalendarRepository,
-              first: TransitionCommit, second: TransitionCommit) -> None:
+def _run_race(env: RaceEnv, repository: DynamoDBCalendarRepository,
+              first: TransitionCommit, second: TransitionCommit) -> bool:
+    """Return True when exactly one transaction committed."""
     barrier = Barrier(2)
 
     def attempt(commit: TransitionCommit) -> None:
@@ -222,7 +245,16 @@ def _run_race(repository: DynamoDBCalendarRepository,
                 future.result()
             except RevisionConflict:
                 failures += 1
-    assert failures == 1
+    # One loser is the usual outcome. On a real table both transactions can be
+    # cancelled by an overlapping-transaction conflict; then nothing may commit.
+    assert failures in {1, 2}
+    if failures == 2:
+        items = _business_items(env)
+        assert not [item for item in items
+                    if item["SK"]["S"].startswith(("AUDIT#", "OUTBOX#"))]
+        revision = _get(env, f"BUSINESS#{env.business}", "CALENDAR#REVISION")
+        assert revision is not None and revision["revision"]["N"] == "7"
+    return failures == 1
 
 
 def _get(env: RaceEnv, pk: str, sk: str) -> dict[str, Any] | None:
@@ -261,7 +293,9 @@ def test_two_approvals_for_one_slot_commit_at_most_one(race_env: RaceEnv) -> Non
                 Action.APPROVE, decision_at)
         for request in (first, second)
     ]
-    _run_race(DynamoDBCalendarRepository(env.client, env.table), approvals[0], approvals[1])
+    repo = DynamoDBCalendarRepository(env.client, env.table)
+    if not _run_race(env, repo, approvals[0], approvals[1]):
+        return  # both cancelled: the helper already proved nothing committed
 
     statuses = {}
     for request in (first, second):
@@ -287,7 +321,8 @@ def test_approval_and_expiry_commit_only_one_atomic_result(race_env: RaceEnv) ->
                       Action.APPROVE, EXPIRY - timedelta(seconds=1))
     expire = _commit(env, before, replace(before, status=CalendarStatus.EXPIRED, version=2),
                      Action.EXPIRE, EXPIRY + timedelta(seconds=1))
-    _run_race(repo, approve, expire)
+    if not _run_race(env, repo, approve, expire):
+        return  # both cancelled: the helper already proved nothing committed
 
     metadata = _get(env, f"APPOINTMENT#{before.appointment_id}", "META")
     assert metadata is not None
@@ -318,7 +353,8 @@ def test_replacement_swap_rejects_adversarial_original_cancellation_atomically(
     )
     cancellation = _commit(env, original, swapped_original, Action.CANCEL,
                            EXPIRY - timedelta(seconds=1))
-    _run_race(repo, approval, cancellation)
+    if not _run_race(env, repo, approval, cancellation):
+        return  # both cancelled: the helper already proved nothing committed
 
     original_item = _get(env, f"APPOINTMENT#{original.appointment_id}", "META")
     replacement_item = _get(env, f"APPOINTMENT#{replacement.appointment_id}", "META")
