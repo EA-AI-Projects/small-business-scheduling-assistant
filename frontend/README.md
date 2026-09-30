@@ -43,8 +43,8 @@ The Cognito callback and sign-out URL is the app origin followed by `/` (the sta
 
 ## Security model
 
-- Sign-in uses the Cognito hosted UI authorization-code flow with PKCE (`openid` scope). Only the one-time PKCE verifier and OAuth state are held in `sessionStorage`, and only across the redirect.
-- The access token is held in React state only. It is never written to storage, cookies, or the URL, and it is sent only to `NEXT_PUBLIC_API_BASE_URL`. Reloading the page requires signing in again. Sign-out also ends the hosted UI session.
+- Sign-in uses the Cognito hosted UI authorization-code flow with PKCE (`openid` scope). Only the one-time PKCE verifier and OAuth state, plus the fixed "Your session ended" notice text after a 401, are held in `sessionStorage`, and only across a redirect.
+- The access token is held in React state only. It is never written to storage, cookies, or the URL, and it is sent only to `NEXT_PUBLIC_API_BASE_URL`. Reloading the page requires signing in again. Sign-out also ends the hosted UI session, and so does a 401 from the API (expired token or a Cognito user who is not the owner), so the next Sign in asks for credentials.
 - `_document.tsx` renders a build-time Content-Security-Policy `<meta>` tag that allows scripts and styles only from the app itself and connections only to the API and Cognito origins. The repository-root `customHttp.yml` adds `frame-ancestors 'none'`, HSTS, `nosniff`, and `no-referrer` response headers on Amplify. `npm run check:export` fails the build if the export contains inline scripts or styles.
 
 ## Checks

@@ -1,4 +1,4 @@
-import { authorizeUrl, completeSignIn, logoutUrl, tokenExpiry } from "./auth";
+import { authorizeUrl, completeSignIn, logoutUrl, markSessionRejected, takeSessionRejected, tokenExpiry } from "./auth";
 import { parseConfig } from "./config";
 
 const config = parseConfig({
@@ -90,5 +90,20 @@ describe("tokenExpiry", () => {
     expect(tokenExpiry("local-dev-token-0123456789")).toBeNull();
     expect(tokenExpiry("a.!!!.b")).toBeNull();
     expect(tokenExpiry(jwt({ exp: "soon" }))).toBeNull();
+  });
+});
+
+describe("rejected session notice", () => {
+  it("survives the logout redirect once and is then cleared", () => {
+    const store = new Map<string, string>();
+    const storage = {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+    } as unknown as Storage;
+    expect(takeSessionRejected(storage)).toBeNull();
+    markSessionRejected("Your session ended. Sign in again.", storage);
+    expect(takeSessionRejected(storage)).toBe("Your session ended. Sign in again.");
+    expect(takeSessionRejected(storage)).toBeNull();
   });
 });

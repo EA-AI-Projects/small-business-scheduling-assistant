@@ -1,13 +1,15 @@
 /**
  * Cognito hosted UI authorization-code flow with PKCE.
  *
- * Only the one-time PKCE verifier and OAuth state are kept in sessionStorage, and only
- * across the redirect. The access token is returned to the caller and must stay in memory.
+ * Only the one-time PKCE verifier and OAuth state, and the fixed "session ended" notice text
+ * left by a 401 (which ends the hosted UI session like Sign out), are kept in sessionStorage,
+ * and only across a redirect. The access token is returned to the caller and must stay in memory.
  */
 import type { OwnerConfig } from "./config";
 
 const VERIFIER_KEY = "owner-pkce-verifier";
 const STATE_KEY = "owner-oauth-state";
+const ENDED_KEY = "owner-session-ended";
 
 export class SignInError extends Error {}
 
@@ -115,4 +117,19 @@ export function logoutUrl(config: OwnerConfig, origin: string): string | null {
   const url = new URL("/logout", config.cognitoDomain);
   url.search = new URLSearchParams({ client_id: config.clientId, logout_uri: redirectUri(origin) }).toString();
   return url.toString();
+}
+
+/**
+ * Remember, across the hosted UI logout redirect, the notice message shown after the API
+ * rejected the session (401). Only this message is stored, never the token.
+ */
+export function markSessionRejected(message: string, storage: Storage = sessionStorage): void {
+  storage.setItem(ENDED_KEY, message);
+}
+
+/** Read and clear the message left by markSessionRejected, or null. */
+export function takeSessionRejected(storage: Storage = sessionStorage): string | null {
+  const message = storage.getItem(ENDED_KEY);
+  storage.removeItem(ENDED_KEY);
+  return message;
 }
