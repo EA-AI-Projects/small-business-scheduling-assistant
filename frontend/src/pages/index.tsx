@@ -25,7 +25,7 @@ export default function OwnerPage() {
   return <OwnerSession config={config} />;
 }
 
-function OwnerSession({ config }: { config: OwnerConfig }) {
+export function OwnerSession({ config }: { config: OwnerConfig }) {
   // The access token lives only in React state: never in storage, cookies, or the URL.
   const [token, setToken] = useState<string | null>(null);
   const [session, setSession] = useState(0);
@@ -44,9 +44,9 @@ function OwnerSession({ config }: { config: OwnerConfig }) {
   useEffect(() => {
     const url = new URL(window.location.href);
     if (url.search) window.history.replaceState(null, "", url.pathname);
-    const rejected = takeSessionRejected();
+    const pendingNotice = takeSessionRejected();
     completeSignIn(config, url)
-      .then((accessToken) => { if (rejected) notify(rejected, true); return accessToken; })
+      .then((accessToken) => { if (pendingNotice) notify(pendingNotice, true); return accessToken; })
       .then((accessToken) => { if (accessToken) setToken(accessToken); })
       .catch((error: unknown) => notify(errorMessage(error), true))
       .finally(() => setCompleting(false));
@@ -75,8 +75,17 @@ function OwnerSession({ config }: { config: OwnerConfig }) {
     }
   }, [config, endSession]);
 
-  const api = useMemo(() => token ? new OwnerApi(config, token, rejectSession) : null,
-    [config, token, rejectSession]);
+  // Parallel reads can all return 401; only the first one per token acts. The guard lives
+  // with the api object, so a new token gets a fresh guard.
+  const api = useMemo(() => {
+    if (!token) return null;
+    let acted = false;
+    return new OwnerApi(config, token, () => {
+      if (acted) return;
+      acted = true;
+      rejectSession();
+    });
+  }, [config, token, rejectSession]);
 
   const signIn = useCallback(() => {
     authorizeUrl(config, window.location.origin)
