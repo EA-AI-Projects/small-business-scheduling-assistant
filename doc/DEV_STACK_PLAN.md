@@ -4,15 +4,26 @@ Prepared 2026-09-29 for issue [#43](https://github.com/EA-AI-Projects/small-busi
 
 Target if authorized: AWS account `339713090487`, region `us-west-1`, stack name `scheduling-dev`, `Environment=dev`, synthetic data only.
 
+## Summary for Enrique
+
+**Nothing is authorized yet.** This document only lays out what a "yes" would mean. No deployment, spending, owner account creation, or live text has happened or will happen without your separate approval.
+
+- **What it would cost per month** (us-west-1, list price, 12-month free tier not assumed): about **$1.14** idle, **$2.43** in an active test month, and **$3.20** in a worst case where every scheduled job ran all month. After the allowances AWS always gives away for free, those become about $0.11, $0.69, and $0.75. Twilio, OpenAI, and taxes are not included.
+- **Recommended budget (your call):** a **$10 per month** AWS budget, with email alerts when actual spend reaches $5, $8, and $10 and when AWS forecasts $10. A budget warns; it does not stop spending.
+- **What saying yes to the dev checkpoint would authorize:** (1) creating a private, versioned, encrypted S3 bucket for build artifacts and uploading the build; (2) creating a *change set* (below); (3) executing it, which creates the 61 resources listed in section 2, all with SMS off and every schedule off; (4) creating one owner test user, one Amplify app, and the budget; (5) the checkpoint tests on synthetic data, including switching on the hold-expiry schedule and later the two retention schedules; and (6) the teardown in section 3 afterward.
+- **What it would not authorize:** SMS ingress or sending, Twilio, OpenAI, outbox dispatch, any real client data, the `pilot` stack, or rollback redeploys unless you approve those in decision 4.
+
+Two terms, once. A **change set** is CloudFormation's preview of what a deployment would create; nothing exists until it is executed, but creating it still needs AWS credentials, uploads the build to S3, and leaves an empty stack in `REVIEW_IN_PROGRESS`. **PITR** (point-in-time recovery) is DynamoDB's continuous backup that can restore the table to any second in the last 35 days.
+
 ## Decisions Enrique must make (open, not decided here)
 
 1. **Monthly budget amount and alert thresholds.** A recommendation is in [section 1.6](#16-recommended-aws-budget-needs-approval). It is not approved.
 2. **The owner-monitored alarm mailbox** (`AlarmEmail`). No address is recorded in the repository.
-3. **Provisioning authorization** to execute the change set, create the owner test user, create the Amplify app, and create the budget. Each is a separate billable or account-changing step.
+3. **Provisioning authorization.** It covers, each a separate billable or account-changing step: creating the artifact bucket (private, versioned, encrypted) and uploading the build; **creating the change set** (uses credentials, uploads billable artifacts, and leaves the stack in `REVIEW_IN_PROGRESS`); executing the change set; creating the owner test user, the Amplify app, and the budget.
 4. **Whether rollback redeploys are pre-authorized** as part of this checkpoint, or each one needs a fresh yes (see [section 3.1](#31-stop-on-a-failed-safety-gate)).
 5. **How schedules get enabled** (see [section 2.5](#25-technical-question-for-review-enabling-schedules)). The template hard-codes them off and has no parameter to turn one on.
 6. **The scoped deployment role.** No GitHub OIDC or other scoped deploy role exists in the repository; the checkpoint forbids broad personal administrator credentials.
-7. **Whether the synthetic dev table is deleted at teardown or kept for inspection** (see [section 3.3](#33-full-teardown-in-order)).
+7. **Whether the synthetic dev table is deleted at teardown or kept for inspection.** The recommendation is to delete it; the decision is Enrique's (see [section 3.3](#33-full-teardown-in-order)).
 
 ## 1. Cost estimate for `us-west-1`
 
@@ -42,7 +53,7 @@ Target if authorized: AWS account `339713090487`, region `us-west-1`, stack name
 | CloudWatch | Standard-resolution alarm | $0.10 per alarm-month | `8JFRJZU4SGUUHYGZ` / `USW1-CW:AlarmMonitorUsage` |
 | CloudWatch | Custom metric (first 10,000; includes metric-filter metrics) | $0.30 per metric-month | `P8WWN4FPGA3H5CMY` / `USW1-CW:MetricMonitorUsage` |
 | Cognito | Essentials MAU | $0.015 per MAU | `5J74Y3YBXDR26WXU` / `USW1-CognitoEssentialsMAU` |
-| EventBridge | Scheduled invocations: first 14 million free, then $1.15 per million | $0 at this volume | `XAWTXSQRCY6JTPGR` / `USW1-ScheduledInvocation` |
+| EventBridge | Scheduled rules (SAM `Schedule` events create EventBridge rules, not EventBridge Scheduler schedules): no charge for the rule or its target invocations. The Scheduler SKU (`XAWTXSQRCY6JTPGR` / `USW1-ScheduledInvocation`) and its 14 million free invocations do not apply. | $0 | Lambda invocations they trigger bill as Lambda |
 | SSM Parameter Store | Standard parameter (incl. SecureString): no per-parameter charge; advanced tier $0.05 per parameter-month | $0 (none created) | `S4ET88YAD97RYGDK` / `USW1-PS-Advanced-Param-Tier1` (advanced only) |
 | KMS | Requests (customer-managed key: $1 per key-month, not used) | $0.03 per 10,000 | `H4VQ25AJP5STBY2V` / `us-west-1-KMS-Requests`; key `NUYE54EYMNVW49QE` |
 | Amplify Hosting | Build minutes (standard build instance) | $0.01 per minute | `HW5PZSXXESDDX6HZ` / `USW1-BuildDuration` |
@@ -67,7 +78,6 @@ Two totals are shown for each scenario. **List** applies no allowance at all. **
 | Cognito user pools: 10,000 MAU (direct sign-in) | Always free | Cognito pricing page |
 | DynamoDB: 25 GB storage | Always free | Price List (`MQQYCYRA3HGBZJBA`) |
 | KMS: 20,000 requests per month | Always free | Price List (`VTFSAGP364M6QE4A`) |
-| EventBridge: 14 million scheduled invocations | Always free | Price List (`XAWTXSQRCY6JTPGR`) |
 | Data transfer out: 100 GB per month aggregate | Always free | Data transfer pricing (Price List text says "beyond the global free tier") |
 | API Gateway HTTP API 1 million requests, Amplify build/storage/serving | **12-month free tier only** | Not applied |
 | DynamoDB requests, PITR, and CloudWatch alarms beyond 10 | No allowance | Billed |
@@ -78,18 +88,21 @@ The pricing pages were fetched as HTML for the allowance rows; those pages are n
 
 **(a) Idle baseline.** Stack deployed; every EventBridge rule disabled; both SQS mappings disabled; `EnableSmsIngress=false`; Amplify app created, no builds. Traffic: 100 owner API requests (300 ms each), 1,000 read and 200 write request units, 0 monthly active users, 1 MB of logs. No worker emits data, so the two log-derived custom metrics do not exist. The 11 alarms still bill.
 
-**(b) Active verification month.** The checkpoint steps 1 to 6 in the pilot plan, with generous headroom. Table size 0.05 GB of synthetic data with PITR on.
+**(b) Active verification month.** The checkpoint steps 1 to 6 in the pilot plan, with generous headroom. Synthetic dev table of 5 MB (0.005 GB) with PITR on, and 5 synthetic clients with notes.
 - 5,000 owner API requests (the pilot-plan scenario), 300 ms average, 256 MB.
-- 200,000 read and 100,000 write request units in total. This covers the API calls, three transaction-race families run repeatedly (two approvals for one slot, approval versus expiry, replacement swap versus stale write), and the fake-queue `DispatchService` harness. Transactions cost twice the units of ordinary writes, and each write to an indexed item also writes the GSIs.
-- Hold expiry enabled for 7 days at `rate(5 minutes)`: 2,016 runs at 1 s. Note and SMS retention enabled for 7 days after the expiry and legal-hold checks: 14 runs at 5 s. Outbox dispatch stays **disabled**, as in the pilot plan. 1,000 extra manual or harness invocations at 1 s.
+- 200,000 read and 100,000 write request units in total, plus the note scans below. This covers the API calls, three transaction-race families run repeatedly (two approvals for one slot, approval versus expiry, replacement swap versus stale write), and the fake-queue `DispatchService` harness. Transactions cost twice the units of ordinary writes, and each write to an indexed item also writes the GSIs.
+- Hold expiry enabled for 7 days at `rate(5 minutes)`: 2,016 runs at 1 s. Note and SMS retention enabled for 7 days after the expiry and legal-hold checks: 14 runs at 5 s (7 of them note retention). Outbox dispatch stays **disabled**, as in the pilot plan. 1,000 extra manual or harness invocations at 1 s.
+- **Note scans:** 5 clients with notes x 7 note-retention runs, plus 300 owner note-list or note-create calls = 335 scans. Each scan of a 5 MB table reads about 1,280 read units (5 MB / 4 KB), so 335 x 1,280 = 428,800 read units. See the formula below.
 - 10,000 SQS requests (300 synthetic intents through a fake consumer, plus the DLQ exercise; the stack has no consumer and the sender mapping stays disabled).
 - 0.1 GB of logs ingested. Both metric filters emit at least once (the alarm-transition checks), so 2 custom metrics bill.
 - 1 owner monthly active user. 10 Amplify builds of 4 minutes, 0.05 GB stored, 0.1 GB served. 0.1 GB of API responses out. 10,000 KMS requests for the DynamoDB managed key (an assumption). 0.25 GB in the SAM artifact bucket (several build versions of a Lambda zip, which is a small package: `backend/` is under 1 MB before dependencies).
 
-**(c) Worst case: all four schedules run all month.** As (b), but 30 days of every schedule, using the invocation counts in the pilot plan: hold expiry 8,640, outbox dispatch 43,200, note retention 30 and SMS retention 30. Table 1 GB with 1 GB of PITR data and 1 GB of logs (the pilot-plan planning scenario).
+**(c) Worst case: all four schedules run all month.** As (b), but 30 days of every schedule, using the invocation counts in the pilot plan: hold expiry 8,640, outbox dispatch 43,200, note retention 30 and SMS retention 30. Synthetic dev table of 5 MB with 5 synthetic clients with notes, and 1 GB of logs (deliberate headroom).
 - Runs: hold expiry 1 s, outbox dispatch 0.5 s, retention 5 s.
 - Each hold-expiry run reads 1 read unit, each outbox run 0.5.
-- **Note retention performs a strongly consistent full-table `Scan` in `last_visit_end`** (`backend/scheduling/adapters/dynamodb.py`). As an upper bound this assumes one scan per daily run over the whole 1 GB table: 262,144 read units per scan, 7.86 million per month. That single line is the largest cost driver and scales with table size. SMS retention uses queries and is assumed to cost about 100 read units per run.
+- **Note scans.** 5 clients x 30 note-retention runs + 300 note-list or note-create calls = 450 scans x 1,280 read units = 576,000 read units. SMS retention uses queries and is assumed to cost about 100 read units per run.
+- **Cost formula for note retention.** `last_visit_end` (`backend/scheduling/adapters/dynamodb.py`) is a strongly consistent, full-table `Scan`. It runs once per client with notes on every daily note-retention run, and once per owner note list and per note create. Read units per month = (clients with notes x runs + note API calls) x table size / 4 KB. At $0.1395 per million read units, one scan of a 1 GB table (262,144 units) costs about $0.037. The scan bills every item in the table, not only notes, so cost grows with the table.
+- **Tracked for a code fix in #67.** That fix must land before real client records go into the `pilot` stack. It does not block the synthetic dev stack, whose table is a few megabytes.
 - The outbox queue mapping stays disabled, so messages produced by outbox dispatch would accumulate. Enabling either SQS event source mapping adds continuous long-poll receive requests billed as SQS requests. That is not included. A rough upper bound is about $0.26 per queue-month (about five pollers polling every 20 seconds at the $0.40/million price), which is an estimate to be measured, not a quote.
 
 ### 1.5 Monthly totals
@@ -98,9 +111,9 @@ The pricing pages were fetched as HTML for the allowance rows; those pages are n
 | --- | ---: | ---: | ---: |
 | Lambda (requests and duration) | $0.00 | $0.02 | $0.12 |
 | API Gateway HTTP API | $0.00 | $0.01 | $0.01 |
-| DynamoDB request units | $0.00 | $0.10 | $1.20 |
-| DynamoDB storage | $0.00 | $0.01 | $0.28 |
-| DynamoDB PITR | $0.00 | $0.01 | $0.22 |
+| DynamoDB request units | $0.00 | $0.16 | $0.18 |
+| DynamoDB storage | $0.00 | $0.00 | $0.00 |
+| DynamoDB PITR | $0.00 | $0.00 | $0.00 |
 | SQS | $0.00 | $0.00 | $0.00 |
 | SNS email | $0.00 | $0.00 | $0.00 |
 | CloudWatch alarms (11) | $1.10 | $1.10 | $1.10 |
@@ -114,8 +127,8 @@ The pricing pages were fetched as HTML for the allowance rows; those pages are n
 | AWS Budgets | $0.00 | $0.00 | $0.00 |
 | Data transfer out | $0.00 | $0.01 | $0.01 |
 | S3 SAM artifacts | $0.01 | $0.01 | $0.01 |
-| **Total at list price (no allowances)** | **$1.14** | **$2.40** | **$4.71** |
-| **Total after always-free allowances** | **$0.11** | **$0.64** | **$1.98** |
+| **Total at list price (no allowances)** | **$1.14** | **$2.43** | **$3.20** |
+| **Total after always-free allowances** | **$0.11** | **$0.69** | **$0.75** |
 
 Rows are rounded to the cent, so they may not add exactly to the totals, which are computed from unrounded values (for example, (a) also includes about $0.001 of Amplify storage and a few hundredths of a cent of requests).
 
@@ -123,14 +136,14 @@ Reading the table:
 - The dominant fixed cost is the **11 CloudWatch alarms** ($1.10 at list; $0.10 after the 10-alarm allowance). Enabling SMS ingress adds a 12th ($0.10).
 - The idle stack costs about $1 per month at list price. It is not zero because alarms, the DynamoDB PITR/storage, and Amplify storage bill while idle.
 - Log ingestion is $0.67 per GB in `us-west-1`, which is more than the widely quoted `us-east-1` price. Log volume growth is the most likely source of surprise; every extra GB of ingested logs adds $0.67 before the 5 GB allowance.
-- Sensitivity: a table 10 times larger (10 GB) adds about $2.2 per month of PITR and storage before the 25 GB allowance, and each daily note-retention full scan of it would use about 2.6 million read units, or about $0.37.
+- Sensitivity, per scan: one full scan of a 10 GB table uses about 2.6 million read units, or about $0.37 **per scan**, and one of a 1 GB table about $0.037. **Pilot scale** with the current code: 20 clients with notes on a 1 GB table means 20 x 30 = 600 scans a month, or about **$22 a month** for daily retention alone, plus $0.037 for every owner note list or note create. That is why #67 must land before the `pilot` stack holds real records. A 10 GB table also adds about $2.2 a month of PITR before the 25 GB storage allowance.
 - This estimate sits well below the earlier provisional $10 to $30 planning envelope, which the pilot plan no longer carries.
 
 ### 1.6 Recommended AWS Budget (needs approval)
 
 **This is a recommendation for Enrique to approve or change. It is not decided.**
 
-- **Recommended monthly budget: $10.00.** It is about twice the worst-case list-price total ($4.71) and leaves room for log growth or a mistaken schedule, while still tripping quickly on anything unexpected.
+- **Recommended monthly budget: $10.00.** It is about three times the worst-case dev list-price total ($3.20), which is enough headroom for log growth or a mistaken schedule, and the first alert ($5) already sits above that worst case, so any alert signals something unexpected. Lowering it to $5 would put the 100 percent alert barely above the worst case and the 50 percent alert inside normal variation, so $10 is kept. **This is a dev-only figure.** The `pilot` stack needs its own budget after #67 lands, because at pilot scale the current scan costs about $22 a month.
 - **Type:** monthly cost budget with no budget actions (actions cost $0.10 per budget-day after 62 days and would need extra IAM). Scope it to the account, or to a cost-allocation tag if one is agreed. Tags would need to be added to the template, which this packet does not do.
 - **Recommended alerts, sent to the owner-monitored mailbox:**
   - Actual spend at 50 percent ($5.00), 80 percent ($8.00), and 100 percent ($10.00).
@@ -148,7 +161,7 @@ Set the region to US West (N. California) and add one estimate group with these 
 - **SNS:** email, 20 notifications.
 - **CloudWatch:** 11 standard alarms, 2 custom metrics, 0.1 GB (b) or 1 GB (c) of log ingestion, 30-day retention.
 - **Cognito:** Essentials tier, 1 MAU, direct sign-in.
-- **EventBridge:** rules with 2,016 scheduled invocations (b) or 51,900 (c).
+- **EventBridge:** scheduled rules, no charge (the Lambda invocations they trigger are in the Lambda input).
 - **SSM Parameter Store:** none.
 - **KMS:** AWS managed key, 10,000 requests (calculator shows zero key cost).
 - **Amplify Hosting:** 40 build minutes, 0.05 GB stored, 0.1 GB served.
@@ -268,6 +281,15 @@ Placeholders are inert. A real value for `AlarmEmail` is supplied on the command
 Documentation-only shape of the deploy step (do not run without authorization):
 
 ```sh
+# One-time, by hand: create a private, versioned, encrypted artifact bucket (decision 3).
+aws s3api create-bucket --bucket <artifact bucket> --region us-west-1 \
+  --create-bucket-configuration LocationConstraint=us-west-1
+aws s3api put-public-access-block --bucket <artifact bucket> \
+  --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+aws s3api put-bucket-versioning --bucket <artifact bucket> --versioning-configuration Status=Enabled
+aws s3api put-bucket-encryption --bucket <artifact bucket> \
+  --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+
 sam build --template-file template.yaml
 sam deploy --stack-name scheduling-dev --region us-west-1 \
   --capabilities CAPABILITY_IAM --no-execute-changeset \
@@ -278,7 +300,9 @@ sam deploy --stack-name scheduling-dev --region us-west-1 \
     AlarmEmail=<owner-monitored mailbox>
 ```
 
-`--no-execute-changeset` creates the change set for review. Executing it is the separately authorized act. A dedicated artifact bucket keeps teardown simple; `--resolve-s3` would instead use the shared `aws-sam-cli-managed-default` stack.
+This packet uses a **dedicated artifact bucket** that is created by hand first. `sam deploy --s3-bucket` uploads to an existing bucket and does not create one. The alternative, `--resolve-s3`, would create the shared `aws-sam-cli-managed-default` stack and bucket; it is not used here so that teardown touches only what this checkpoint created.
+
+`--no-execute-changeset` creates the change set for review, but **creating it is not free of side effects**: it needs AWS credentials, it uploads the packaged Lambda code to S3 (a billable, if tiny, artifact), and it creates the stack `scheduling-dev` in `REVIEW_IN_PROGRESS` with no resources. Creating the change set is therefore part of the authorization request (decision 3), not a preliminary step. Executing it is a further authorized act.
 
 ### 2.4 Created outside the stack at the checkpoint
 
@@ -288,7 +312,8 @@ sam deploy --stack-name scheduling-dev --region us-west-1 \
 | Amplify app (platform `WEB`, `AMPLIFY_MONOREPO_APP_ROOT=frontend`, build variables from stack outputs plus `NEXT_PUBLIC_BUSINESS_ID`) | Console or CLI | Yes: build minutes, storage, served data | `delete-app` |
 | AWS Budget and its notification mailbox | Console or CLI | No for a plain cost budget | `delete-budget` |
 | SNS subscription confirmation | The `AlarmEmail` recipient clicks the confirmation link | No | Removed with the topic |
-| Artifact bucket or `aws-sam-cli-managed-default` stack, and uploaded Lambda zips | `sam deploy` | Yes: S3 storage, tiny | Empty (including versions) and delete |
+| Dedicated artifact bucket (private, versioned, encrypted), created by hand | `aws s3api create-bucket` and related calls | Yes: S3 storage, tiny | Delete all versions and delete markers, then the bucket |
+| Uploaded Lambda zips and the `REVIEW_IN_PROGRESS` stack from the change set | `sam deploy --no-execute-changeset` | Yes (storage, tiny) | Removed with the bucket; see the never-executed case in section 3.3 |
 | Scoped deployment role | Enrique or an administrator, outside this repository | No | Not part of this plan |
 | SSM SecureString `/scheduling/dev/twilio/auth-token` (and `.../openai/api-key`) | Would be created by hand | Not at the checkpoint | **Not created for this checkpoint.** Ingress stays off and no token exists |
 
@@ -338,6 +363,12 @@ Use the same steps 1 and 4 to 5. Roll back code and data independently, and keep
 
 Read first: **CloudFormation deleting the stack does not delete the table**, and the table name `scheduling-dev` is fixed. A retained table with that name blocks a later create of the same stack. Queue and topic names are also fixed.
 
+**If the change set was created but never executed**, the stack is empty in `REVIEW_IN_PROGRESS`. Delete the stack (this also removes its change sets), then continue at step 10 for the bucket:
+
+```sh
+aws cloudformation delete-stack --stack-name scheduling-dev --region us-west-1
+```
+
 1. **Stop everything.** Run the section 3.1 step 1 commands. Confirm no schedule is enabled and no queue message is in flight.
 2. **Decide about the table's contents.** Confirm it holds only synthetic records:
 
@@ -345,7 +376,7 @@ Read first: **CloudFormation deleting the stack does not delete the table**, and
    aws dynamodb scan --table-name scheduling-dev --select COUNT --region us-west-1
    ```
 
-   Keep it (evidence for #43) or delete it. Keeping costs PITR and storage: about $0.22 per GB-month plus $0.28 per GB beyond 25 GB. Deleting is the default. Get Enrique's decision recorded on #43.
+   Keep it (evidence for #43) or delete it. Keeping costs PITR and storage: about $0.22 per GB-month plus $0.28 per GB beyond 25 GB. Recommendation: delete. This is Enrique's decision (item 7); record it on #43.
 3. **Delete the Amplify app** so it stops building and stops serving:
 
    ```sh
@@ -373,10 +404,10 @@ Read first: **CloudFormation deleting the stack does not delete the table**, and
    aws dynamodb update-continuous-backups --table-name scheduling-dev \
      --point-in-time-recovery-specification PointInTimeRecoveryEnabled=false --region us-west-1
    aws dynamodb delete-table --table-name scheduling-dev --region us-west-1
-   aws dynamodb list-backups --table-name scheduling-dev --region us-west-1
+   aws dynamodb list-backups --table-name scheduling-dev --backup-type ALL --region us-west-1
    ```
 
-   AWS may keep a deletion-time system backup for a table that had PITR; the `list-backups` check confirms whether any exists. This plan does not rely on that behavior; verify it in the current DynamoDB documentation before authorizing.
+   AWS may keep a deletion-time system backup for a table that had PITR; the `list-backups --backup-type ALL` check (which includes system backups) confirms whether any exists. This plan does not rely on that behavior; verify it in the current DynamoDB documentation before authorizing.
 7. **Check for stray log groups.** The template's log groups are deleted with the stack. A function invoked after its log group is deleted can recreate one, so check and delete any that remain:
 
    ```sh
@@ -392,14 +423,20 @@ Read first: **CloudFormation deleting the stack does not delete the table**, and
    aws budgets delete-budget --account-id <account id> --budget-name <budget name>
    ```
 
-10. **Empty and remove the artifact bucket.** The SAM-managed bucket is versioned, so delete versions and delete markers as well as objects:
+10. **Delete the artifact bucket, including every version.** The bucket is versioned, so `aws s3 rm` alone leaves object versions and delete markers behind and the bucket cannot be deleted. List them, delete them in batches (`delete-objects` accepts up to 1,000 keys per call), then delete the bucket:
 
     ```sh
-    aws s3 rm s3://<artifact bucket>/scheduling-dev/ --recursive --region us-west-1
-    aws s3api list-object-versions --bucket <artifact bucket> --prefix scheduling-dev/
+    aws s3api list-object-versions --bucket <artifact bucket> --output json \
+      --query '{Objects: Versions[].{Key:Key,VersionId:VersionId}}' > versions.json
+    aws s3api delete-objects --bucket <artifact bucket> --delete file://versions.json
+    aws s3api list-object-versions --bucket <artifact bucket> --output json \
+      --query '{Objects: DeleteMarkers[].{Key:Key,VersionId:VersionId}}' > markers.json
+    aws s3api delete-objects --bucket <artifact bucket> --delete file://markers.json
+    aws s3api list-object-versions --bucket <artifact bucket>
+    aws s3api delete-bucket --bucket <artifact bucket> --region us-west-1
     ```
 
-    Delete the bucket only if it is the dedicated one. If `--resolve-s3` was used, delete the `aws-sam-cli-managed-default` stack only after confirming no other SAM project uses it.
+    Repeat the list and delete pair until the final `list-object-versions` returns nothing (a `null` query result means there is nothing left of that kind). Keep `versions.json` and `markers.json` out of the repository; they contain only synthetic object keys. Only this dedicated bucket is deleted; no shared SAM-managed bucket is involved.
 11. **SSM parameters.** None exist for this checkpoint. If any were created later: `aws ssm delete-parameter --name /scheduling/dev/twilio/auth-token --region us-west-1`.
 12. **Remove the scoped deployment role or its stack access** as Enrique directs. This is outside the repository.
 
@@ -407,8 +444,8 @@ Read first: **CloudFormation deleting the stack does not delete the table**, and
 
 Run after teardown; each should return nothing for `scheduling-dev`.
 
-- [ ] `aws cloudformation describe-stacks --stack-name scheduling-dev` reports the stack does not exist.
-- [ ] `aws dynamodb list-tables` has no `scheduling-dev`, and `list-backups` shows none (unless kept on purpose).
+- [ ] `aws cloudformation describe-stacks --stack-name scheduling-dev` reports the stack does not exist (this includes a stack left in `REVIEW_IN_PROGRESS`).
+- [ ] `aws dynamodb list-tables` has no `scheduling-dev`, and `aws dynamodb list-backups --table-name scheduling-dev --backup-type ALL` shows none (unless kept on purpose).
 - [ ] `aws lambda list-functions` has no `scheduling-dev-` function; `aws events list-rules` has no rule from the stack.
 - [ ] `aws sqs list-queues --queue-name-prefix scheduling-` is empty.
 - [ ] `aws sns list-topics` has no `scheduling-alarms-dev`.
@@ -417,7 +454,7 @@ Run after teardown; each should return nothing for `scheduling-dev`.
 - [ ] `aws cloudwatch describe-alarms --alarm-name-prefix scheduling-dev` is empty and `aws logs describe-log-groups --log-group-name-prefix /aws/lambda/scheduling-dev-` is empty.
 - [ ] `aws amplify list-apps` has no owner app.
 - [ ] `aws budgets describe-budgets` no longer lists the checkpoint budget (or it is kept on purpose).
-- [ ] The artifact bucket or prefix is empty and its versions are gone.
+- [ ] `aws s3api head-bucket --bucket <artifact bucket>` reports the bucket does not exist, and `aws s3api list-object-versions` on it fails for the same reason (no versions or delete markers remain).
 - [ ] No SSM parameter under `/scheduling/dev/`.
 - [ ] The next month's Cost Explorer or bill shows no line from these services for the stack. This catches anything missed above.
 
