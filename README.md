@@ -8,6 +8,7 @@ An SMS-first scheduling assistant for a small home-cleaning business. Clients re
 - [High-Level Design (HLD)](doc/HLD.md)
 - [Technical Architecture](doc/ARCHITECTURE.md)
 - [Pilot infrastructure plan](doc/PILOT_INFRASTRUCTURE.md)
+- [Synthetic dev stack: cost, resources, and rollback packet](doc/DEV_STACK_PLAN.md)
 - [Local model evaluation and secrets](doc/MODEL_EVAL.md)
 - [SMS conversation flow and local exercise](doc/CONVERSATION.md)
 - [Scheduling service contracts](doc/SCHEDULING_CONTRACTS.md)
