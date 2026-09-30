@@ -98,7 +98,7 @@ def require_consumers_off(cloudformation: Any, lambda_client: Any, events: Any) 
         mapping = lambda_client.get_event_source_mapping(UUID=mapping_id)
         rule_name = _physical_id(cloudformation, DISPATCH_RULE_LOGICAL_ID)
         rule = events.describe_rule(Name=rule_name.rsplit("/", 1)[-1])
-    except Exception as exc:  # noqa: BLE001 - any failure to prove the state must stop the run
+    except Exception as exc:  # any failure to prove the state must stop the run
         raise ValueError(f"Could not confirm the sender mapping and dispatcher are off: {exc}") \
             from exc
     if not str(mapping.get("EventSourceArn", "")).endswith(f":{OUTBOX_QUEUE}"):
