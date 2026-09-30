@@ -377,7 +377,7 @@ Any failed gate in the checkpoint (a losing transaction that left partial data, 
 6. **Do not roll data back automatically.** The table is retained. PITR is a last-resort recovery tool: restoring writes a new table, billed for the restored size, and must be planned rather than run reflexively.
 7. **Do not replay a DLQ message blindly.** Inspect it first; the outbox record is authoritative.
 
-Open decision (item 4 above): whether step 4 counts as pre-authorized for this checkpoint.
+Decision 4 (answered 2026-09-30): a redeploy of a previously deployed version of the dev stack (step 4) is pre-authorized for this checkpoint. It covers nothing else.
 
 ### 3.2 Code rollback without a gate failure
 
@@ -401,7 +401,7 @@ aws cloudformation delete-stack --stack-name scheduling-dev --region us-west-1 \
    aws dynamodb scan --table-name scheduling-dev --select COUNT --region us-west-1
    ```
 
-   Keep it (evidence for #43) or delete it. Keeping costs PITR and storage: about $0.22 per GB-month plus $0.28 per GB beyond 25 GB. Recommendation: delete. This is Enrique's decision (item 7); record it on #43.
+   Keep it (evidence for #43) or delete it. Keeping costs PITR and storage: about $0.22 per GB-month plus $0.28 per GB beyond 25 GB. Decision 7 (answered 2026-09-30): delete the retained synthetic dev table after the results are recorded on #43.
 3. **Delete the Amplify app** (admin: the deployer role has no Amplify access) so it stops building and stops serving:
 
    ```sh
@@ -466,7 +466,7 @@ aws cloudformation delete-stack --stack-name scheduling-dev --region us-west-1 \
 11. **SSM parameters** (admin: the deployer role has no SSM access). None exist for this checkpoint. If any were created later: `aws ssm delete-parameter --name /scheduling/dev/twilio/auth-token --region us-west-1`.
 12. **Delete the role stack last**, from the admin session, not through the deployer role: `aws cloudformation delete-stack --stack-name scheduling-dev-roles --region us-west-1`. CloudFormation needs the execution role to delete the dev stack's resources, so deleting the roles earlier strands the dev stack in `DELETE_FAILED`. Then remove the deployer profile from `~/.aws/config` and confirm no role named `deploy-scheduling-dev-*` remains.
 
-**Ultimate cleanup: closing the member account.** Because `dev` has its own account, closing account `214965372605` removes everything in it at once, including anything a step above missed. It is the owner's decision and is not part of this plan's authorization. Per the AWS Organizations documentation (checked when this was written), a closed member account shows as CLOSED for up to 90 days and is then permanently closed; re-check the current rules before deciding. Closing does not delete the budget, which lives in the management account (step 9). Prefer the step-by-step teardown while the account will be reused for later checkpoints.
+**Ultimate cleanup: closing the member account.** Because `dev` has its own account, closing account `214965372605` eventually removes everything in it, including anything a step above missed, but not immediately. It is the owner's decision and is not part of this plan's authorization. Per the AWS Organizations documentation (checked when this was written), a closed member account shows as CLOSED for up to 90 days, can be reopened during that time, and its content persists until it is permanently closed; re-check the current rules before deciding. Do not treat closure as instant data deletion. Closing does not delete the budget, which lives in the management account (step 9). Prefer the step-by-step teardown while the account will be reused for later checkpoints.
 
 ### 3.4 Nothing-billable-remains checklist
 

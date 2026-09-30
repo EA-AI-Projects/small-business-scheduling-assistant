@@ -71,7 +71,7 @@ Parameters:
     Default: 'false'
     Description: >-
       Require aws:MultiFactorAuthPresent in the session that assumes the deployer
-      role. Default false because an Identity Center session does not carry that
+      role. Only valid together with TrustedPrincipalArn (a Rules assertion rejects it otherwise). Default false because an Identity Center session does not carry that
       flag; MFA is enforced at Identity Center sign-in instead. Set true for an
       IAM-user operator (TrustedPrincipalArn) who signs in with an MFA device.
   StackName:
@@ -109,6 +109,18 @@ Parameters:
       Add the aws:SourceArn (stack) condition to the execution role's trust policy, next to
       aws:SourceAccount. If CloudFormation rejects the role, the owner updates this stack with
       false through a separately reviewed change (aws:SourceAccount stays).
+
+Rules:
+  # An Identity Center session never carries aws:MultiFactorAuthPresent, so this combination
+  # would create a deployer role nobody can assume. Fail at role-stack creation instead.
+  MfaRequiresExplicitPrincipal:
+    RuleCondition: !Equals [!Ref RequireMfa, 'true']
+    Assertions:
+      - Assert: !Not [!Equals [!Ref TrustedPrincipalArn, '']]
+        AssertDescription: >-
+          RequireMfa=true needs TrustedPrincipalArn (an IAM user or role whose session carries
+          MFA). Identity Center sessions do not carry the MFA flag; MFA is enforced at Identity
+          Center sign-in, so leave RequireMfa=false for the Identity Center path.
 
 Conditions:
   MfaRequired: !Equals [!Ref RequireMfa, 'true']
@@ -514,13 +526,9 @@ Resources:
                 - MfaRequired
                 - Bool: {'aws:MultiFactorAuthPresent': 'true'}
                 - !Ref AWS::NoValue
-              - !If
-                - MfaRequired
-                - Bool: {'aws:MultiFactorAuthPresent': 'true'}
-                  ArnLike:
-                    aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-reserved/sso.amazonaws.com/${IdentityCenterRegion}/AWSReservedSSO_${IdentityCenterPermissionSetName}_*'
-                - ArnLike:
-                    aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-reserved/sso.amazonaws.com/${IdentityCenterRegion}/AWSReservedSSO_${IdentityCenterPermissionSetName}_*'
+              # Identity Center path: no MFA condition (RequireMfa=true is rejected by Rules).
+              - ArnLike:
+                  aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-reserved/sso.amazonaws.com/${IdentityCenterRegion}/AWSReservedSSO_${IdentityCenterPermissionSetName}_*'
       ManagedPolicyArns:
         - !Ref DeployerDeployPolicy
         - !Ref DeployerOperatePolicy
