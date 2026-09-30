@@ -27,7 +27,7 @@ The goal is low idle cost and low operational overhead—not a large-scale SaaS 
 | Hold expiry | EventBridge scheduled rule invokes a small expiry handler periodically; status is also checked synchronously on every read/write | No server is left running; overdue holds cannot remain bookable merely because a scheduled job is delayed |
 | Logs/metrics | Amazon CloudWatch Logs and basic metrics/alarms | Native AWS operations; explicitly set retention to bound log cost and avoid sensitive message logging |
 | Infrastructure/deploy | AWS SAM template + GitHub Actions OIDC; Amplify GitHub integration for frontend | Declarative repeatable AWS resources; avoids long-lived AWS keys in GitHub |
-| AWS region | `us-west-1` in the owner's authenticated AWS account `339713090487` | Owner-confirmed pilot target in issue #17; no resources are provisioned by this decision |
+| AWS region and accounts | `us-west-1`. The synthetic `dev` stack targets the dedicated member account `214965372605`; the management account `339713090487` is for billing and organization administration only; `pilot` will get its own separate account | Region confirmed in issue #17; the dev account decision (issue #43) supersedes #17's single shared account. No resources are provisioned by this decision |
 
 ### Stack continuity with NeuroSpineDx
 
@@ -217,7 +217,7 @@ Approval also checks `hold_expires_at > decision_at` against the scheduling serv
 - Do not log raw SMS body, access code, full address, or model prompt by default. Use message/request IDs and redacted structured metadata for diagnostics.
 - Implement the issue #16 consent, opt-out, and retention decisions and define deletion/export handling before onboarding real customers.
 - Use separate client-level and booking-level notes. Do not let model extraction silently create permanent notes; use owner-reviewable drafts. Do not collect or store entry/access codes in this MVP.
-- Single AWS account is acceptable for a pilot only with separate dev/prod naming, restricted IAM, budgets/alerts, and no real customer data in development.
+- Accounts are separated by environment inside one AWS Organization: a dedicated `dev` member account (`214965372605`, synthetic data only, operator access through IAM Identity Center with MFA) and, when real clients are onboarded, a separate `pilot` account. The management account (`339713090487`) holds billing and organization administration only and runs no workload. Each environment gets its own budget and alerts.
 
 ## 8. Infrastructure and delivery
 
@@ -239,8 +239,8 @@ Approval also checks `hold_expires_at > decision_at` against the scheduling serv
 ### 8.3 Environments
 
 - `local`: FastAPI + DynamoDB Local or a lightweight local adapter; mocked Twilio/OpenAI by default.
-- `dev`: synthetic client data, SMS sandbox/test number where available, low-cost AWS stack.
-- `pilot`: actual approved Twilio business number and explicitly authorized California clients; human approval always enabled. Do not send live SMS until number/campaign approval, consent records, STOP/HELP handling, and separate test-number authorization are in place.
+- `dev`: synthetic client data, SMS sandbox/test number where available, low-cost AWS stack in the dedicated member account `214965372605`.
+- `pilot`: in its own future account (not yet created); actual approved Twilio business number and explicitly authorized California clients; human approval always enabled. Do not send live SMS until number/campaign approval, consent records, STOP/HELP handling, and separate test-number authorization are in place.
 - No need for Kubernetes, ECS/Fargate, RDS/Aurora, NAT Gateway, ElastiCache, or always-on EC2 in the MVP.
 
 ## 9. Cost strategy and tradeoffs
@@ -298,7 +298,7 @@ Cognito is preferred for password and token management. Do not use SMS OTP as th
 
 ## 12. Pilot decisions and remaining gates
 
-1. AWS account `339713090487` and region `us-west-1` are confirmed for the pilot. Resource provisioning and deployment need separate authorization.
+1. Region `us-west-1` is confirmed. `dev` targets the dedicated member account `214965372605` (issue #43); `pilot` will use a separate account to be recorded when it is created. Resource provisioning and deployment need separate authorization.
 2. `America/Los_Angeles` with daylight saving, Monday–Friday 8:00 a.m.–5:00 p.m., and editable observed US federal holiday closures are confirmed.
 3. Twilio and California-only pilot messaging are confirmed. The in-person consent process and private yes/no evidence record are documented on the `a2p-policy-pages` branch. Business-number/campaign approval, STOP/HELP behavior, and explicit test-number authorization remain before live SMS.
 4. OpenAI is confirmed, and `gpt-6-luna` is the initial pilot interpretation model ID after the synthetic malformed/ambiguous-message evaluation in #24 passed twice with the final clarification prompt. The model only proposes an interpretation; the backend must validate actors, request references, dates, and permissions before any write. The owner specified no additional data-handling or budget constraints. No live SMS is authorized by this model selection.

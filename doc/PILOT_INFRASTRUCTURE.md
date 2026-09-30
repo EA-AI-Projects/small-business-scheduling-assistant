@@ -1,6 +1,6 @@
 # Pilot infrastructure plan (code only)
 
-Issue [#23](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/issues/23) targets AWS account `339713090487` in `us-west-1`. The `template.yaml` stack is a reviewable foundation for the authenticated owner calendar. It has **not** been deployed; provisioning, owner account creation, live SMS, and customer data onboarding each need a separate authorized step.
+Issue [#23](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/issues/23) targets `us-west-1`. The synthetic `dev` stack goes in the dedicated member account `214965372605`; the `pilot` stack, which will hold real client data, is planned for its own separate account (see [ARCHITECTURE.md](ARCHITECTURE.md)). The `template.yaml` stack is a reviewable foundation for the authenticated owner calendar. It has **not** been deployed; provisioning, owner account creation, live SMS, and customer data onboarding each need a separate authorized step.
 
 ## Current stack boundary
 
@@ -13,7 +13,7 @@ Issue [#23](https://github.com/EA-AI-Projects/small-business-scheduling-assistan
 
 ## Build and preflight
 
-From the repository root, run `sam validate --lint --template-file template.yaml --region us-west-1` and `sam build --template-file template.yaml`. These commands only validate and build local artifacts. Before any separately authorized deployment, run `aws sts get-caller-identity` and reject any account other than `339713090487`; check the CLI region is `us-west-1`. Use separate `dev` and `pilot` stack names, a unique Cognito domain prefix, and an owner-monitored `AlarmEmail` mailbox. `OwnerAppOrigin` is the exact Amplify owner app origin (`https://host[:port]`, no path or trailing slash). The owner HTTP API's CORS configuration allows only that origin, the owner route methods, and the `Authorization`, `Content-Type`, and `Idempotency-Key` headers, without credentials; API Gateway answers preflight requests itself. The same origin plus `/` is the Cognito callback and logout URL, and the origin reaches the Lambda as `OWNER_APP_ORIGIN`. Until the Amplify app exists, use an inert value such as `https://example.invalid`.
+From the repository root, run `sam validate --lint --template-file template.yaml --region us-west-1` and `sam build --template-file template.yaml`. These commands only validate and build local artifacts. Before any separately authorized deployment, run `aws sts get-caller-identity` and reject any account other than the target for that stack (`214965372605` for `dev`; `pilot` has no account yet, so it is rejected until one is recorded); check the CLI region is `us-west-1`. Use separate `dev` and `pilot` stack names, a unique Cognito domain prefix, and an owner-monitored `AlarmEmail` mailbox. `OwnerAppOrigin` is the exact Amplify owner app origin (`https://host[:port]`, no path or trailing slash). The owner HTTP API's CORS configuration allows only that origin, the owner route methods, and the `Authorization`, `Content-Type`, and `Idempotency-Key` headers, without credentials; API Gateway answers preflight requests itself. The same origin plus `/` is the Cognito callback and logout URL, and the origin reaches the Lambda as `OWNER_APP_ORIGIN`. Until the Amplify app exists, use an inert value such as `https://example.invalid`.
 
 The first stack creation needs placeholders for `OwnerSub` and `OwnerAppOrigin`: the owner subject and the Amplify app origin do not yet exist. Use an inert origin such as `https://example.invalid`, and do not sign in or send any owner API traffic. Create the single owner user. Create the Amplify app with platform `WEB`, `AMPLIFY_MONOREPO_APP_ROOT=frontend`, and the build variables from the stack outputs `OwnerApiUrl`, `OwnerCognitoDomain`, and `OwnerAppClientId`, plus `NEXT_PUBLIC_BUSINESS_ID` equal to the stack's `BusinessId` parameter (see `frontend/README.md`). Then update `OwnerAppOrigin` to the exact Amplify origin and `OwnerSub` to that user's Cognito `sub`. Only after this update should the owner sign in through the hosted UI with authorization code and PKCE. Verify that the Amplify response headers from `customHttp.yml` are present, that a browser preflight is answered by API Gateway, that an unauthenticated owner API call fails and whether that 401 carries `Access-Control-Allow-Origin`, and that only that exact subject can read the pilot business calendar. Seed the documented owner policy through the authenticated API before any booking writes. Do not use a broadly shared owner account.
 
@@ -31,7 +31,7 @@ Keep the previous Lambda artifact/version for a code rollback. Disable schedules
 
 ## Synthetic dev deployment checkpoint
 
-This is the proposed **separate** authorization boundary, not an instruction to deploy now. The first change set is a `dev` stack in account `339713090487`, region `us-west-1`, using synthetic records and one owner test account. Show the CloudFormation change set, monthly cost estimate, intended alarm mailbox, and rollback steps to Enrique before executing it. The estimate, the exact resource list and parameters, and the rollback and cleanup plan are in [Synthetic dev stack: pre-authorization packet](DEV_STACK_PLAN.md). Use a role scoped to the named stack, its resources, and the CloudFormation execution role; a GitHub OIDC deploy role is not present in this repository, but [Dev deployment roles](#dev-deployment-roles) defines a scoped operator role and CloudFormation execution role for review. Do not use broad personal administrator credentials as a substitute for the scoped role. Do not put real credentials or customer records in parameters or change-set output.
+This is the proposed **separate** authorization boundary, not an instruction to deploy now. The first change set is a `dev` stack in account `214965372605`, region `us-west-1`, using synthetic records and one owner test account. Show the CloudFormation change set, monthly cost estimate, intended alarm mailbox, and rollback steps to Enrique before executing it. The estimate, the exact resource list and parameters, and the rollback and cleanup plan are in [Synthetic dev stack: pre-authorization packet](DEV_STACK_PLAN.md). Use a role scoped to the named stack, its resources, and the CloudFormation execution role; a GitHub OIDC deploy role is not present in this repository, but [Dev deployment roles](#dev-deployment-roles) defines a scoped operator role and CloudFormation execution role for review. Do not use broad personal administrator credentials as a substitute for the scoped role. Do not put real credentials or customer records in parameters or change-set output.
 
 1. Confirm account and region, the approved spend limit, and that `AlarmEmail` is an owner-monitored mailbox. Build and lint the exact commit. Use `Environment=dev`, `EnableSmsIngress=false`, `SmsSendEnabled=disabled`, an empty recipient allowlist, and inert Twilio and owner redirect placeholders. Keep every EventBridge schedule and the SQS sender mapping disabled.
 2. Create and inspect the change set; execute only after explicit provisioning authorization. Record stack ID, commit, parameter names (not secret values), resource ARNs, and the observed monthly cost baseline. Confirm the SNS email subscription, publish a synthetic notification, and verify receipt before using the alarms as a safety gate.
@@ -44,63 +44,77 @@ This is the proposed **separate** authorization boundary, not an instruction to 
 
 `infra/dev-deploy-roles.yaml` is the reviewable, least-privilege pair of roles the checkpoint above calls for. It is a plain CloudFormation template deployed as its **own small stack**, separate from `template.yaml`. Writing it created nothing: creating the role stack is an account change that needs Enrique's separate explicit authorization, like the checkpoint itself. Placeholders below (`<...>`) are supplied at run time and never committed.
 
+**Account boundary.** The `dev` stack lives in a dedicated member account, so nothing else in the account belongs to another project and the account, not tags, isolates this project. Inside the account the roles still follow least privilege (names scoped to the stack, a Lambda permissions boundary, PassRole limits, escalation denies), which also protects the account's own administrator and deploy roles.
+
 Two roles and six managed policies (one boundary, five attached to the roles), all named `deploy-<StackName>-*` so they never match the `<StackName>-*` scope the execution role is allowed to manage:
 
 | Role | Assumed by | Purpose |
 | --- | --- | --- |
-| `deploy-scheduling-dev-deployer` | The one operator principal in `TrustedPrincipalArn` | Create, review, execute and delete the dev stack's change sets and stack; run the post-deploy checkpoint actions |
+| `deploy-scheduling-dev-deployer` | The operator's Identity Center `AdministratorAccess` role in this account (or one explicit IAM principal, see below) | Create, review, execute and delete the dev stack's change sets and stack; run the post-deploy checkpoint actions |
 | `deploy-scheduling-dev-cfn-exec` | `cloudformation.amazonaws.com` only, for stack `scheduling-dev` in this account | Create the `template.yaml` resources |
 | `deploy-scheduling-dev-lambda-boundary` (managed policy) | Not assumable | Enforced ceiling for the Lambda roles the stack creates (see the tradeoff section) |
 
 ### Create the role stack
 
-Run once as an administrator the owner designates, in `us-west-1` (IAM is global, so create only one role stack per account for a given `StackName`). Do not use these commands until the owner authorizes creating the roles.
+Run once, from an administrator session in account `214965372605` (Identity Center `AdministratorAccess`, signed in with MFA), in `us-west-1`. IAM is global, so create only one role stack per account for a given `StackName`. Do not run these commands until the owner authorizes creating the roles. The budget is created first ([section 1.6 of the packet](DEV_STACK_PLAN.md#16-approved-aws-budget-scoped-to-the-dedicated-account)), and the artifact bucket must already have its final name.
 
-**Pre-creation check.** The administrator confirms that no IAM role named `scheduling-dev-*` and none named `deploy-scheduling-dev-*` already exists. The execution role is denied writes to any role without the boundary, so a pre-existing unbounded role would make the first deploy fail rather than be misused, but it should not be there.
+**Pre-creation check.** The administrator confirms that no IAM role named `scheduling-dev-*` and none named `deploy-scheduling-dev-*` already exists. The execution role is denied writes to any role without the boundary, so a pre-existing unbounded role would make the first deploy fail rather than be misused, but it should not be there. In a fresh dedicated account there should be none.
 
 Create the change set, review it, then execute it, so the owner sees the final permissions before they exist:
 
 ```sh
-aws cloudformation deploy --stack-name scheduling-dev-roles --region us-west-1 \
+aws cloudformation deploy --profile <admin profile> --stack-name scheduling-dev-roles --region us-west-1 \
   --template-file infra/dev-deploy-roles.yaml --capabilities CAPABILITY_NAMED_IAM \
   --no-execute-changeset \
-  --parameter-overrides TrustedPrincipalArn=<operator user or role ARN> \
-    ArtifactBucketName=<artifact bucket> RequireMfa=true
-aws cloudformation describe-change-set --stack-name scheduling-dev-roles --region us-west-1 \
+  --parameter-overrides ArtifactBucketName=<artifact bucket>
+aws cloudformation describe-change-set --profile <admin profile> --stack-name scheduling-dev-roles --region us-west-1 \
   --change-set-name <change set name printed by deploy>
 # After the owner reviews the output:
-aws cloudformation execute-change-set --stack-name scheduling-dev-roles --region us-west-1 \
+aws cloudformation execute-change-set --profile <admin profile> --stack-name scheduling-dev-roles --region us-west-1 \
   --change-set-name <change set name>
 ```
 
-Then deploy the dev stack with `PermissionsBoundaryArn=<LambdaRoleBoundaryArn output>` added to its parameters. After the dev stack exists, optionally tighten Cognito to that one pool by re-running the command with `OwnerUserPoolId=<pool id>` added.
+The Identity Center defaults (`IdentityCenterPermissionSetName=AdministratorAccess`, `IdentityCenterRegion=us-west-1`, `RequireMfa=false`) are what the owner's setup needs, so no trust parameter is passed. Then deploy the dev stack with `PermissionsBoundaryArn=<LambdaRoleBoundaryArn output>` added to its parameters. After the dev stack exists, optionally tighten Cognito to that one pool by re-running the role-stack command with `OwnerUserPoolId=<pool id>` added.
+
+### Who can assume the deployer role (trust design)
+
+The operator does not sign in as an IAM user. They sign in through IAM Identity Center, which places them in a role named `AWSReservedSSO_AdministratorAccess_<random suffix>` at the path `/aws-reserved/sso.amazonaws.com/<region>/`. The suffix is random and changes if the permission set is ever removed and re-assigned, so the deployer role cannot name it in advance. Its trust policy therefore trusts the **account root** with a condition: `ArnLike` on `aws:PrincipalArn` matching `arn:aws:iam::<account>:role/aws-reserved/sso.amazonaws.com/<IdentityCenterRegion>/AWSReservedSSO_<IdentityCenterPermissionSetName>_*`. This is the pattern the AWS IAM Identity Center documentation gives for a role trusting a permission set (an `ArnLike` condition with a wildcard in place of the unique suffix), where the role ARN carries the Identity Center region unless the instance is in `us-east-1`. Trusting the root does not open the role to the whole account: the condition limits it to that one permission-set role, and the caller also needs `sts:AssumeRole` permission, which `AdministratorAccess` has.
+
+- **MFA.** Identity Center sessions do not carry `aws:MultiFactorAuthPresent`, so requiring it would lock the operator out. `RequireMfa` therefore defaults to `false`, and a template rule rejects `RequireMfa=true` unless `TrustedPrincipalArn` is set, so that mistake fails at role-stack creation instead of creating an unassumable role. MFA is enforced at Identity Center sign-in, which the owner configured to be required on every sign-in. MFA is proved once per Identity Center session, so the session duration (default 8 hours) is the effective MFA window: the owner should shorten the permission-set and portal session duration in Identity Center settings, for example to 1 to 4 hours. The cached SSO token in `~/.aws/sso/cache` is sensitive while it is valid; do not copy or share it.
+- **Name-prefix warning.** The `AWSReservedSSO_<PermissionSetName>_*` pattern also matches any permission set whose name begins with that name plus an underscore (for example `AdministratorAccess_x`). Do not create such permission sets in this account, or narrow `IdentityCenterPermissionSetName`.
+- **Alternative operator.** Setting `TrustedPrincipalArn` to one IAM user or role ARN replaces the Identity Center pattern with that exact principal, and `RequireMfa=true` then requires an MFA-authenticated session, for an IAM-user operator with a virtual MFA device.
+- **Not verified in an account.** The `aws:PrincipalArn` pattern is checked against the AWS documentation and `cfn-lint` only. The first authorized assume-role call confirms it; if it is denied, compare the role ARN in `aws sts get-caller-identity` (admin session) with the pattern.
 
 ### Assume the deployer role
 
-The deployer role's ARN is in the role stack's `DeployerRoleArn` output. It requires MFA by default (`RequireMfa=true`). MFA is practical for a CLI session: an IAM user with a virtual MFA device assumes the role with a token code, and the temporary credentials last one hour, so a stolen long-term key alone cannot deploy. Example `~/.aws/config` profile (fill in from the outputs; keep it out of the repository):
+The deployer role's ARN is in the role stack's `DeployerRoleArn` output. Keep the profiles in `~/.aws/config` and out of the repository.
+
+1. Configure the administrator session once with `aws configure sso` (choose the account, the `AdministratorAccess` permission set, and region `us-west-1`) and sign in with `aws sso login --profile <admin profile>`. The browser sign-in asks for MFA. This profile is used only for one-time and administrator steps.
+2. Add the deployer profile that assumes the role from the admin profile:
 
 ```ini
 [profile scheduling-dev-deployer]
 role_arn = <DeployerRoleArn>
-source_profile = <operator profile>
-mfa_serial = <operator MFA device ARN>
+source_profile = <admin profile>
 region = us-west-1
 ```
 
-The operator is an IAM user, so keep `RequireMfa=true`. The user needs an MFA device registered and its ARN as `mfa_serial`; the CLI then prompts for a token code when the profile first assumes the role. Until a device exists the role cannot be assumed. (`RequireMfa=false` exists only for a federated session that does not carry the MFA flag.)
+No `mfa_serial` is set: MFA already happened at Identity Center sign-in. The temporary credentials of the assumed role last at most one hour (`MaxSessionDuration`), after which the CLI assumes it again from the still-valid SSO session.
 
-Every change-set creation and stack deletion must pass the execution role, or the deployer role's own deny statement rejects it:
+AWS documents `source_profile` as naming another profile that supplies the credentials for `role_arn`. Using an Identity Center profile as that source is standard in AWS CLI v2 (the SDK's source-profile chain includes the SSO provider); the CLI page's wording about "long-term credentials" does not spell the SSO case out, and it was not run here because no AWS calls are allowed while writing this. Confirm with `aws sts get-caller-identity --profile scheduling-dev-deployer` on first use. As a backup only, if credentials do not resolve, make the source profile a `credential_process` profile that runs `aws configure export-credentials --profile <admin profile> --format process`. `sam deploy` uses the same profile chain, and needs `--profile scheduling-dev-deployer` explicitly.
+
+Every change-set creation and stack deletion must pass the execution role, or the deployer role's own deny statement rejects it. The deployer role also denies resource-import change sets (`cloudformation:ImportResourceTypes`) as defense in depth; import is never needed here.
 
 ```sh
 sam deploy --profile scheduling-dev-deployer --stack-name scheduling-dev --region us-west-1 \
   --role-arn <CloudFormationExecutionRoleArn> --s3-bucket <artifact bucket> --s3-prefix scheduling-dev \
   --capabilities CAPABILITY_IAM --no-execute-changeset ...
-aws cloudformation delete-stack --stack-name scheduling-dev --role-arn <CloudFormationExecutionRoleArn> ...
+aws cloudformation delete-stack --profile scheduling-dev-deployer --stack-name scheduling-dev --role-arn <CloudFormationExecutionRoleArn> ...
 ```
 
 ### What each role can do
 
-Deployer role, mapped to the checkpoint step that needs it (step numbers refer to the checkpoint list above; "teardown" and "rollback" numbers refer to sections 3.3 and 3.1 of `doc/DEV_STACK_PLAN.md` as numbered in PR #66):
+Deployer role, mapped to the checkpoint step that needs it (step numbers refer to the checkpoint list above; "teardown" and "rollback" numbers refer to sections 3.3 and 3.1 of `doc/DEV_STACK_PLAN.md`):
 
 | Permission (scope) | Step |
 | --- | --- |
@@ -138,13 +152,13 @@ The boundary limits **permissions, not who can assume a role**. `CreateRole` acc
 
 ### Known limits of the scoping
 
-- **Account-wide scope for API Gateway and Cognito.** **HTTP APIs** (`apigateway:GET/POST/PUT/PATCH/DELETE` on `/apis/*`) and **Cognito user pools** (`userpool/*`) have random IDs, so the execution role can manage every API and every pool in the account and region, not just this stack's (for example it could rewrite another pool's callback URLs). `cognito-idp:CreateUserPool` has no resource-level scope at all. This is acceptable only while the account is dedicated to this project; otherwise tag conditions must be added.
+- **Account-wide scope for API Gateway and Cognito.** **HTTP APIs** (`apigateway:GET/POST/PUT/PATCH/DELETE` on `/apis/*`) and **Cognito user pools** (`userpool/*`) have random IDs, so the execution role can manage every API and every pool in the account and region, not just this stack's. `cognito-idp:CreateUserPool` has no resource-level scope at all. This is acceptable because the account is dedicated to this project: nothing else in it can be reached. If other workloads are ever placed in the account, this scope must be tightened first.
 - **Event source mappings** have no resource type for create, and update and delete match on `*` too, so all three use `Resource: "*"` with the `lambda:FunctionArn` condition; get, tag and list-tags on a mapping cannot use that condition and are open to every mapping in the region. `lambda:ListEventSourceMappings` needs `*`.
 - **`ListBackups`, `DescribeAlarms`, alarm history and metric reads, `DescribeLogGroups`, and `DescribeUserPoolDomain`** (and the Logs `DescribeResourcePolicies`) do not support narrower resources. They are read-only.
 - The deployer's Cognito admin actions use the `aws:ResourceTag/aws:cloudformation:stack-name` condition until `OwnerUserPoolId` is set. That relies on CloudFormation tagging the pool with its stack name, which could not be verified because nothing may be created. If step 3 is denied, set `OwnerUserPoolId`. The confused-deputy `aws:SourceArn` condition on the execution role's trust policy likewise could not be exercised offline.
 - Name-prefix scoping depends on CloudFormation's auto-naming (`<stack>-<LogicalId>-<random>`). Adding a resource with an explicit name in `template.yaml` (for example a queue outside `scheduling-*-dev`) needs a matching change to the execution role.
 - A stack stuck in `UPDATE_ROLLBACK_FAILED` needs `ContinueUpdateRollback`, which is not granted; the administrator handles that case.
-- **Not covered:** creating the artifact bucket, the Amplify app, and the AWS Budget. Those one-time owner actions are done with the owner's own credentials under the existing authorization (the packet already lists them as separate steps). Amplify and Budgets have limited resource-level support and are used once, so a scoped role would add review cost for little safety. A narrow add-on can be proposed separately if Enrique prefers.
+- **Not covered:** creating the artifact bucket, the Amplify app, and the AWS Budget. The bucket and the Amplify app are one-time steps done from the Identity Center administrator session under the existing authorization. The budget is created by the owner in the management account (see the packet's section 1.6). Amplify and Budgets have limited resource-level support and are used once, so a scoped role would add review cost for little safety. A narrow add-on can be proposed separately if Enrique prefers.
 - If CloudFormation rejects the execution role's trust conditions (`aws:SourceAccount` and `aws:SourceArn` are unverified with CloudFormation; the symptom is a change-set failure saying the role cannot be assumed), the fallback is for the owner to update the role stack with `TrustCloudFormationSourceArn=false`, which keeps only `aws:SourceAccount`, through a separately reviewed change. If `aws:SourceAccount` is also rejected, the trust policy has to be reviewed again.
 - **A pre-existing unbounded `scheduling-dev-*` role can still be passed to a function.** `iam:PassRole` has no `iam:PermissionsBoundary` key, so the boundary deny cannot stop it (it does stop writes to such a role). Repeat the pre-creation role check (no `scheduling-dev-*` roles exist) before every deploy, and during change-set review confirm that every function's `Role` refers to a role created by the stack.
 - **Verify on the first authorized run** whether `lambda:FunctionArn` is populated for `DeleteEventSourceMapping`. Create, update and delete are conditioned on it; if delete is denied, stack deletion fails on the two mappings (see the teardown note).
@@ -152,10 +166,11 @@ The boundary limits **permissions, not who can assume a role**. `CreateRole` acc
 
 ### Teardown order
 
-1. Finish the dev stack teardown in `doc/DEV_STACK_PLAN.md` section 3.3 first: stack deleted (with `--role-arn`, step 5), retained table deleted (step 6), leftover log groups deleted (step 7), artifact bucket emptied and deleted (step 10).
-2. Delete the role stack **last**, as the administrator, not through the deployer role: `aws cloudformation delete-stack --stack-name scheduling-dev-roles --region us-west-1`. The roles must outlive the dev stack because CloudFormation needs the execution role to delete the stack's resources; deleting the roles first strands the stack in `DELETE_FAILED`.
+1. Finish the dev stack teardown in `doc/DEV_STACK_PLAN.md` section 3.3 first: stack deleted (with `--role-arn`, step 5), retained table deleted (step 6), leftover log groups deleted (step 7), artifact bucket emptied and deleted (step 10). Run the deployer part of the nothing-billable-remains checklist (section 3.4) before the next step, because it needs the deployer role.
+2. Delete the role stack **last**, as the administrator, not through the deployer role: `aws cloudformation delete-stack --profile <admin profile> --stack-name scheduling-dev-roles --region us-west-1`. The roles must outlive the dev stack because CloudFormation needs the execution role to delete the stack's resources; deleting the roles first strands the stack in `DELETE_FAILED`.
    If stack deletion fails on the event source mappings (an AccessDenied on `DeleteEventSourceMapping`), the fix is a reviewed change to the role stack (for example dropping the `lambda:FunctionArn` condition on delete), applied by the administrator before retrying. Do not work around it with broader credentials.
-3. Remove the operator's AWS CLI profile and confirm no role named `deploy-scheduling-dev-*` remains.
+3. Remove the deployer profile from the AWS CLI config and confirm no role named `deploy-scheduling-dev-*` remains.
+4. Optional, the owner's decision: close the member account for a complete cleanup (packet section 3.3, "Ultimate cleanup"). Closing removes the account's content only at permanent closure (up to 90 days later, and it can be reopened before then), and never the budget in the management account.
 
 ## Expected running costs before deployment
 

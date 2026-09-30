@@ -1,13 +1,29 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
   Least-privilege deployer and CloudFormation execution roles for the synthetic
-  scheduling dev stack (issue #43). Review material: creating this stack needs
-  separate owner authorization. See doc/PILOT_INFRASTRUCTURE.md
-  ("Dev deployment roles").
+  scheduling dev stack (issue #43), for the dedicated dev member account.
+  Review material: creating this stack needs separate owner authorization. See
+  doc/PILOT_INFRASTRUCTURE.md ("Dev deployment roles").
 
 # Deploy this stack on its own, in the same region as the dev stack, with
 # --capabilities CAPABILITY_NAMED_IAM. Delete it only AFTER the dev stack and
 # after the retained DynamoDB table, logs and artifact bucket are handled.
+#
+# Account boundary: the dev stack lives in its own AWS member account, so nothing
+# else in the account belongs to another project. That is why account-wide
+# API Gateway and Cognito scope is acceptable below. Least privilege still
+# applies inside the account: names are scoped to the stack, the Lambda roles
+# are bounded, and the account's own administrator and deploy roles are
+# protected by explicit denies.
+#
+# Operator sign-in: the operator arrives through IAM Identity Center as the
+# permission-set role AWSReservedSSO_<PermissionSet>_<random suffix> under the
+# path /aws-reserved/sso.amazonaws.com/<region>/. The suffix changes if the
+# permission set is ever re-assigned, so the deployer role trusts the account
+# root with an aws:PrincipalArn ArnLike condition on the permission-set name
+# (AWS documents this pattern for Identity Center roles). Identity Center
+# sessions do not carry aws:MultiFactorAuthPresent; MFA is enforced at Identity
+# Center sign-in, so RequireMfa defaults to false.
 #
 # Name scoping relies on what the SAM stack really produces:
 #   - Lambda functions, IAM roles, EventBridge rules, CloudWatch alarms, log
@@ -15,7 +31,8 @@ Description: >-
 #   - Table, queues, topic: named from the Environment parameter
 #     (scheduling-<env>, scheduling-*-<env>, scheduling-alarms-<env>).
 #   - HTTP APIs, Cognito user pools and event source mappings get random IDs;
-#     they cannot be scoped by name (see the doc, "Known limits of the scoping").
+#     they cannot be scoped by name; the dedicated account is the boundary for
+#     them (see the doc, "Known limits of the scoping").
 # The roles created here are named "deploy-<StackName>-*" on purpose: that
 # prefix does not overlap "<StackName>-*", so the execution role cannot touch
 # either of them through its own IAM permissions (and it is also denied).
@@ -24,20 +41,39 @@ Description: >-
 # those two one-time actions with their own credentials.
 
 Parameters:
+  IdentityCenterPermissionSetName:
+    Type: String
+    Default: AdministratorAccess
+    AllowedPattern: '[A-Za-z0-9+=,.@-]{1,32}'
+    Description: >-
+      Name of the IAM Identity Center permission set whose role in this account may
+      assume the deployer role (the role is AWSReservedSSO_<name>_<suffix>).
+      Used only when TrustedPrincipalArn is empty.
+  IdentityCenterRegion:
+    Type: String
+    Default: us-west-1
+    AllowedPattern: '[a-z]{2}(-[a-z]+)+-[0-9]'
+    Description: >-
+      Region of the IAM Identity Center instance. It is part of the role path. Used
+      only when TrustedPrincipalArn is empty.
   TrustedPrincipalArn:
     Type: String
-    AllowedPattern: 'arn:aws:iam::[0-9]{12}:(user|role)/[A-Za-z0-9+=,.@_/-]+'
+    Default: ''
+    AllowedPattern: '|arn:aws:iam::[0-9]{12}:(user|role)/[A-Za-z0-9+=,.@_/-]+'
     Description: >-
-      ARN of the single IAM user or role allowed to assume the deployer role.
-      Supplied at deploy time; never committed.
+      Optional. Leave empty to trust the Identity Center permission-set role above.
+      Set to the ARN of one IAM user or role to trust that principal exactly instead
+      (for example an IAM-user operator, together with RequireMfa=true). Supplied at
+      deploy time; never committed.
   RequireMfa:
     Type: String
     AllowedValues: ['true', 'false']
-    Default: 'true'
+    Default: 'false'
     Description: >-
-      Require MFA in the session that assumes the deployer role. Practical for
-      the CLI (see the doc); set false only for a federated/SSO session that
-      does not carry the MFA flag.
+      Require aws:MultiFactorAuthPresent in the session that assumes the deployer
+      role. Only valid together with TrustedPrincipalArn (a Rules assertion rejects it otherwise). Default false because an Identity Center session does not carry that
+      flag; MFA is enforced at Identity Center sign-in instead. Set true for an
+      IAM-user operator (TrustedPrincipalArn) who signs in with an MFA device.
   StackName:
     Type: String
     Default: scheduling-dev
@@ -74,8 +110,21 @@ Parameters:
       aws:SourceAccount. If CloudFormation rejects the role, the owner updates this stack with
       false through a separately reviewed change (aws:SourceAccount stays).
 
+Rules:
+  # An Identity Center session never carries aws:MultiFactorAuthPresent, so this combination
+  # would create a deployer role nobody can assume. Fail at role-stack creation instead.
+  MfaRequiresExplicitPrincipal:
+    RuleCondition: !Equals [!Ref RequireMfa, 'true']
+    Assertions:
+      - Assert: !Not [!Equals [!Ref TrustedPrincipalArn, '']]
+        AssertDescription: >-
+          RequireMfa=true needs TrustedPrincipalArn (an IAM user or role whose session carries
+          MFA). Identity Center sessions do not carry the MFA flag; MFA is enforced at Identity
+          Center sign-in, so leave RequireMfa=false for the Identity Center path.
+
 Conditions:
   MfaRequired: !Equals [!Ref RequireMfa, 'true']
+  UseExplicitPrincipal: !Not [!Equals [!Ref TrustedPrincipalArn, '']]
   HasUserPoolId: !Not [!Equals [!Ref OwnerUserPoolId, '']]
   TrustSourceArn: !Equals [!Ref TrustCloudFormationSourceArn, 'true']
 
@@ -464,12 +513,22 @@ Resources:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
-            Principal: {AWS: !Ref TrustedPrincipalArn}
+            Principal: !If
+              - UseExplicitPrincipal
+              - {AWS: !Ref TrustedPrincipalArn}
+              # Account root plus the PrincipalArn condition below: the permission-set role's
+              # random suffix cannot be known before it exists.
+              - {AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'}
             Action: sts:AssumeRole
             Condition: !If
-              - MfaRequired
-              - Bool: {'aws:MultiFactorAuthPresent': 'true'}
-              - !Ref AWS::NoValue
+              - UseExplicitPrincipal
+              - !If
+                - MfaRequired
+                - Bool: {'aws:MultiFactorAuthPresent': 'true'}
+                - !Ref AWS::NoValue
+              # Identity Center path: no MFA condition (RequireMfa=true is rejected by Rules).
+              - ArnLike:
+                  aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-reserved/sso.amazonaws.com/${IdentityCenterRegion}/AWSReservedSSO_${IdentityCenterPermissionSetName}_*'
       ManagedPolicyArns:
         - !Ref DeployerDeployPolicy
         - !Ref DeployerOperatePolicy
@@ -500,6 +559,14 @@ Resources:
               - cloudformation:GetTemplateSummary
               - cloudformation:DeleteStack
             Resource: !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${StackName}/*'
+          # Defense in depth: resource import (change-set type IMPORT) is never needed here.
+          - Sid: DenyResourceImport
+            Effect: Deny
+            Action: cloudformation:CreateChangeSet
+            Resource: !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${StackName}/*'
+            Condition:
+              'Null':
+                'cloudformation:ImportResourceTypes': 'false'
           # The SAM transform is evaluated at change-set creation.
           - Sid: SamTransform
             Effect: Allow
