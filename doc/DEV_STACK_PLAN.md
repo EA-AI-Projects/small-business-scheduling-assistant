@@ -372,7 +372,7 @@ Any failed gate in the checkpoint (a losing transaction that left partial data, 
    ```
 
 3. **Capture evidence before changing anything.** Save the failing invocation logs (`aws logs filter-log-events`), the DLQ depth, the alarm history, and the relevant table items (synthetic only). Record the failure on #43.
-4. **Revert the Lambda artifact.** The stack has no alias, so redeploy the last known-good commit: check out that commit, `sam build`, `sam deploy --no-execute-changeset --role-arn <CloudFormationExecutionRoleArn>` (with `PermissionsBoundaryArn` unchanged), review the change set, then execute it. If a stack update itself fails, CloudFormation rolls it back automatically (`UPDATE_ROLLBACK_COMPLETE`). If the **first** creation fails, the stack ends in `ROLLBACK_COMPLETE` and must be deleted before a retry, and a table already created survives (see the collision note in 3.3). Keep the previous zip in the artifact bucket until teardown.
+4. **Revert the Lambda artifact.** The stack has no alias, so redeploy the last known-good commit: check out that commit, `sam build`, `sam deploy --no-execute-changeset --role-arn <CloudFormationExecutionRoleArn>` (with `PermissionsBoundaryArn` unchanged), review the change set, then execute it. If a stack update itself fails, CloudFormation rolls it back automatically (`UPDATE_ROLLBACK_COMPLETE`). If the **first** creation fails, the stack ends in `ROLLBACK_COMPLETE` (or `ROLLBACK_FAILED`, for example after an interrupted event source mapping; see 3.3 step 5) and must be deleted before a retry, and a table already created survives (see the collision note in 3.3). Keep the previous zip in the artifact bucket until teardown.
 5. **Roll back the owner app separately** (admin: the deployer role has no Amplify access). In the Amplify console redeploy the previous successful build, or disconnect the branch.
 6. **Do not roll data back automatically.** The table is retained. PITR is a last-resort recovery tool: restoring writes a new table, billed for the restored size, and must be planned rather than run reflexively.
 7. **Do not replay a DLQ message blindly.** Inspect it first; the outbox record is authoritative.
@@ -424,6 +424,13 @@ aws cloudformation delete-stack --stack-name scheduling-dev --region us-west-1 \
    ```
 
    If it ends in `DELETE_FAILED`, read the failing resource, fix it, and retry; do not use `--retain-resources` blindly.
+
+   One verified case justifies `--retain-resources` (seen 2026-09-30 after a first creation ended `ROLLBACK_FAILED`): an `AWS::Lambda::EventSourceMapping` reported as `DELETE_FAILED` with an access-denied error for `lambda:DeleteEventSourceMapping` on `*`, because its creation was interrupted and the mapping never existed. Before retaining, confirm both that `aws lambda get-event-source-mapping --uuid <physical-id> --region us-west-1` returns `ResourceNotFoundException` and that `aws lambda list-event-source-mappings --function-name <function-name> --region us-west-1` returns no mappings. Then retry with the same role and do not widen it:
+
+   ```sh
+   aws cloudformation delete-stack --stack-name scheduling-dev --region us-west-1 \
+     --role-arn <CloudFormationExecutionRoleArn> --retain-resources <LogicalResourceId>
+   ```
 6. **Delete the retained table, if step 2 said so.** PITR recovery data is removed when PITR is disabled. Disable it first if you want no recovery data left at all, accepting that this is irreversible. The template sets no deletion protection on the table, so it can be deleted directly:
 
    ```sh
