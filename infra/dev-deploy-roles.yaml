@@ -182,9 +182,9 @@ Resources:
               - lambda:ListTags
               - lambda:ListVersionsByFunction
             Resource: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${StackName}-*'
-          # Create/Update/DeleteEventSourceMapping have no resource type in the IAM
-          # service-authorization data: they are authorized against "*", and the only
-          # scoping AWS documents is the lambda:FunctionArn condition key.
+          # CreateEventSourceMapping has no resource type, so it is authorized against "*".
+          # Update and Delete have the eventSourceMapping resource type, which "*" also matches.
+          # The scoping is the lambda:FunctionArn condition key.
           - Sid: LambdaEventSourceMappingWrites
             Effect: Allow
             Action:
@@ -407,7 +407,8 @@ Resources:
                 iam:PassedToService: lambda.amazonaws.com
           # The boundary is always enforced. Creating a role, or changing its policies, requires the
           # boundary to be attached. iam:PermissionsBoundary is documented for these actions, so a
-          # pre-existing unbounded scheduling-dev-* role cannot be written to or re-used either.
+          # pre-existing unbounded scheduling-dev-* role cannot be written to. It can still be
+          # PASSED to a function (iam:PassRole has no boundary key): see the doc's known limits.
           - Sid: RequireBoundary
             Effect: Deny
             Action:
@@ -591,7 +592,7 @@ Resources:
             Effect: Allow
             Action: lambda:GetEventSourceMapping
             Resource: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:event-source-mapping:*'
-          # Disabling a mapping is rollback step 1. Update has no resource type, so "*" plus the condition.
+          # Disabling a mapping is rollback step 1. "*" matches the eventSourceMapping resource type, with the condition.
           - Sid: EventSourceMappingDisable
             Effect: Allow
             Action: lambda:UpdateEventSourceMapping
