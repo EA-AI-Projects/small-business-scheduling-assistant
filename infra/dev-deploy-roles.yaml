@@ -230,9 +230,13 @@ Resources:
               StringEquals:
                 'aws:RequestTag/Project': !Ref StackName
           # ImportApi is PUT /apis. SAM emits the API as an OpenAPI body, so this is the call
-          # CloudFormation really makes. ImportApi has no tags parameter, so aws:RequestTag cannot
-          # be required: this one action can create an API without the tag (a new, empty API;
-          # it cannot touch an existing one). Every later change needs the tag (next statement).
+          # CloudFormation really makes. The reference lists aws:RequestTag for it, but ImportApi
+          # has no tags parameter (tags come from the body's x-amazon-apigateway-tag-value), and
+          # it is not known whether IAM evaluates the body tags. Requiring the key could deny every
+          # create, so it stays unconditioned: it can create an API without the tag (a new API; it
+          # cannot touch an existing one). The execution role then cannot delete that untagged API
+          # (next statement needs the tag), so stack deletion would end in DELETE_FAILED and the
+          # administrator cleans it up.
           - Sid: HttpApiImportUntagged
             Effect: Allow
             Action: apigateway:PUT
@@ -260,7 +264,11 @@ Resources:
               - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/tags/*'
           # Tag calls take the target ARN in the path (/tags/{arn}); the Tags resource type has no
           # aws:ResourceTag, so the target cannot be checked. Setting the tag therefore requires the
-          # right value in the request, and removing or changing it is denied below.
+          # right value in the request, and removing or changing it is denied below. CloudFormation
+          # tags by diff, so changing a stack tag other than Project later sends a tag call without
+          # Project and is denied: that needs a reviewed role-stack change first. Overwriting a
+          # foreign API's tag would need a resource-import change set, which the deployer role
+          # denies (DenyResourceImport).
           - Sid: HttpApiTagWrites
             Effect: Allow
             Action: [apigateway:POST, apigateway:PUT]
@@ -413,8 +421,9 @@ Resources:
             Condition:
               StringEquals:
                 'aws:RequestTag/Project': !Ref StackName
-          # UpdateUserPool and TagResource must also carry the tag in the request. UpdateUserPool
-          # resets omitted settings, tags included, and template.yaml always sends them.
+          # Update and tag need only the resource tag (the isolation). CloudFormation tags a pool by
+          # diff, so a request that changes another tag carries no Project tag; requiring one
+          # would wrongly deny it. Setting Project to another value is denied below.
           - Sid: UserPoolUpdateAndTagTaggedOnly
             Effect: Allow
             Action: [cognito-idp:UpdateUserPool, cognito-idp:TagResource]
@@ -422,6 +431,14 @@ Resources:
             Condition:
               StringEquals:
                 'aws:ResourceTag/Project': !Ref StackName
+          - Sid: UserPoolDenyProjectTagChange
+            Effect: Deny
+            Action: [cognito-idp:TagResource, cognito-idp:UpdateUserPool]
+            Resource: '*'
+            Condition:
+              ForAnyValue:StringEquals:
+                'aws:TagKeys': Project
+              StringNotEquals:
                 'aws:RequestTag/Project': !Ref StackName
           - Sid: UserPoolDenyProjectUntag
             Effect: Deny
@@ -604,6 +621,8 @@ Resources:
           # Project tag on every taggable resource. Creating and executing the change set call
           # TagResource and UntagResource on the stack, so they are allowed on the named stack
           # only. The Project tag itself can be set only to the stack name and never removed.
+          # Change-set ARNs are "changeSet/<name>/<id>" and carry no stack name, so they cannot be
+          # narrowed to this stack; the extra reach is tagging other change sets, trivial impact.
           - Sid: StackTags
             Effect: Allow
             Action: [cloudformation:TagResource, cloudformation:UntagResource]
@@ -626,6 +645,15 @@ Resources:
                 'aws:TagKeys': Project
               StringNotEquals:
                 'aws:RequestTag/Project': !Ref StackName
+          # Resource import (change-set type IMPORT) could adopt another project's HTTP API into
+          # the stack and then overwrite its Project tag. Import is never needed here.
+          - Sid: DenyResourceImport
+            Effect: Deny
+            Action: cloudformation:CreateChangeSet
+            Resource: !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${StackName}/*'
+            Condition:
+              'Null':
+                'cloudformation:ImportResourceTypes': 'false'
           # A change set without the Project tag is refused, so the tag always reaches the resources.
           - Sid: DenyChangeSetWithoutProjectTag
             Effect: Deny
