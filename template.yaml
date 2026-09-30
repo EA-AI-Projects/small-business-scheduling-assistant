@@ -194,6 +194,12 @@ Resources:
           RequireSymbols: true
           RequireUppercase: true
       AdminCreateUserConfig: {AllowAdminCreateUserOnly: true}
+      # Project tag: the scoped dev roles (infra/dev-deploy-roles.yaml) only manage user pools and
+      # HTTP APIs that carry it, because they have random IDs and cannot be scoped by name. The
+      # value is the stack name, which is what the roles are scoped to. Explicit here rather than
+      # relying on CloudFormation stack-tag propagation.
+      UserPoolTags:
+        Project: !Ref AWS::StackName
   OwnerUserPoolDomain:
     Type: AWS::Cognito::UserPoolDomain
     Properties:
@@ -217,6 +223,8 @@ Resources:
     Type: AWS::Serverless::HttpApi
     Properties:
       StageName: '$default'
+      Tags:
+        Project: !Ref AWS::StackName
       CorsConfiguration:
         AllowOrigins: [!Ref OwnerAppOrigin]
         AllowMethods: [GET, POST, PUT, PATCH, DELETE, OPTIONS]
@@ -303,6 +311,8 @@ Resources:
     Condition: SmsIngressRequested
     Properties:
       StageName: '$default'
+      Tags:
+        Project: !Ref AWS::StackName
   SmsIngressFunction:
     Type: AWS::Serverless::Function
     Condition: SmsIngressRequested

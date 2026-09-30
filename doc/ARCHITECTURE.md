@@ -217,7 +217,7 @@ Approval also checks `hold_expires_at > decision_at` against the scheduling serv
 - Do not log raw SMS body, access code, full address, or model prompt by default. Use message/request IDs and redacted structured metadata for diagnostics.
 - Implement the issue #16 consent, opt-out, and retention decisions and define deletion/export handling before onboarding real customers.
 - Use separate client-level and booking-level notes. Do not let model extraction silently create permanent notes; use owner-reviewable drafts. Do not collect or store entry/access codes in this MVP.
-- Single AWS account is acceptable for a pilot only with separate dev/prod naming, restricted IAM, budgets/alerts, and no real customer data in development.
+- Single AWS account is acceptable for a pilot only with separate dev/prod naming, restricted IAM, budgets/alerts, and no real customer data in development. The account is shared with other proof-of-concept projects (owner-confirmed 2026-09-30), so deployment roles and budgets are scoped to this project by name and by the `Project` resource tag, not by account.
 
 ## 8. Infrastructure and delivery
 
@@ -298,7 +298,7 @@ Cognito is preferred for password and token management. Do not use SMS OTP as th
 
 ## 12. Pilot decisions and remaining gates
 
-1. AWS account `339713090487` and region `us-west-1` are confirmed for the pilot. Resource provisioning and deployment need separate authorization.
+1. AWS account `339713090487` and region `us-west-1` are confirmed for the pilot. The account is **shared with other proof-of-concept projects**; it is not dedicated to this project. Resource provisioning and deployment need separate authorization.
 2. `America/Los_Angeles` with daylight saving, Monday–Friday 8:00 a.m.–5:00 p.m., and editable observed US federal holiday closures are confirmed.
 3. Twilio and California-only pilot messaging are confirmed. The in-person consent process and private yes/no evidence record are documented on the `a2p-policy-pages` branch. Business-number/campaign approval, STOP/HELP behavior, and explicit test-number authorization remain before live SMS.
 4. OpenAI is confirmed, and `gpt-6-luna` is the initial pilot interpretation model ID after the synthetic malformed/ambiguous-message evaluation in #24 passed twice with the final clarification prompt. The model only proposes an interpretation; the backend must validate actors, request references, dates, and permissions before any write. The owner specified no additional data-handling or budget constraints. No live SMS is authorized by this model selection.

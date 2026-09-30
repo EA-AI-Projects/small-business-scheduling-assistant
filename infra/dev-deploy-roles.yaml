@@ -14,8 +14,14 @@ Description: >-
 #     groups: CloudFormation auto-names them "<StackName>-<LogicalId>-<random>".
 #   - Table, queues, topic: named from the Environment parameter
 #     (scheduling-<env>, scheduling-*-<env>, scheduling-alarms-<env>).
-#   - HTTP APIs, Cognito user pools and event source mappings get random IDs;
-#     they cannot be scoped by name (see the doc, "Known limits of the scoping").
+#   - HTTP APIs and Cognito user pools get random IDs. They are scoped by TAG instead: the
+#     account is shared with other proof-of-concept projects, so the roles only create
+#     resources tagged Project=<StackName> and only change or delete resources that carry
+#     that tag, and the tag cannot be removed or changed. The tag key "Project" is literal in
+#     the policies (a condition key cannot be a template parameter); its value is the StackName
+#     parameter. template.yaml tags the API and user pool explicitly, and the deployer must
+#     pass --tags Project=<StackName> to sam deploy (enforced on CreateChangeSet below).
+#   - Event source mappings get random IDs too; they are scoped by the lambda:FunctionArn key.
 # The roles created here are named "deploy-<StackName>-*" on purpose: that
 # prefix does not overlap "<StackName>-*", so the execution role cannot touch
 # either of them through its own IAM permissions (and it is also denied).
@@ -64,7 +70,7 @@ Parameters:
     Description: >-
       Optional. After the dev stack exists, update this stack with the user
       pool ID to pin the Cognito admin actions to that one pool. Empty means
-      "any pool tagged with this CloudFormation stack".
+      "any pool tagged Project=<StackName>" (the tag is required either way).
   TrustCloudFormationSourceArn:
     Type: String
     AllowedValues: ['true', 'false']
@@ -183,23 +189,26 @@ Resources:
               - lambda:ListVersionsByFunction
             Resource: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${StackName}-*'
           # CreateEventSourceMapping has no resource type, so it is authorized against "*".
-          # Update and Delete have the eventSourceMapping resource type, which "*" also matches.
-          # The scoping is the lambda:FunctionArn condition key.
+          # Get, Update and Delete have the eventSourceMapping resource type, which "*" also matches.
+          # The scoping is the lambda:FunctionArn condition key (listed for all four in the AWS
+          # service authorization reference).
           - Sid: LambdaEventSourceMappingWrites
             Effect: Allow
             Action:
               - lambda:CreateEventSourceMapping
+              - lambda:GetEventSourceMapping
               - lambda:UpdateEventSourceMapping
               - lambda:DeleteEventSourceMapping
             Resource: '*'
             Condition:
               ArnLike:
                 lambda:FunctionArn: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${StackName}-*'
-          # The lambda:FunctionArn key is not documented for these, so no condition here.
-          - Sid: LambdaEventSourceMappingReadsAndTags
+          # The lambda:FunctionArn key is not listed for these, so no condition here. Tagging a
+          # mapping of another project would not let this role update or delete it (the writes
+          # above are conditioned on the function).
+          - Sid: LambdaEventSourceMappingTags
             Effect: Allow
             Action:
-              - lambda:GetEventSourceMapping
               - lambda:ListTags
               - lambda:TagResource
               - lambda:UntagResource
@@ -208,13 +217,77 @@ Resources:
             Effect: Allow
             Action: lambda:ListEventSourceMappings
             Resource: '*'
-          - Sid: HttpApiManagement
+          # HTTP APIs (API Gateway v2) have random IDs, so they are scoped by the Project tag.
+          # Every action below is listed with the condition key it uses in the AWS service
+          # authorization reference (apigateway). See the doc, "Known limits of the scoping".
+          #
+          # CreateApi is POST /apis and carries the tags in the request.
+          - Sid: HttpApiCreateTagged
             Effect: Allow
-            Action: [apigateway:GET, apigateway:POST, apigateway:PUT, apigateway:PATCH, apigateway:DELETE]
+            Action: apigateway:POST
+            Resource: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis'
+            Condition:
+              StringEquals:
+                'aws:RequestTag/Project': !Ref StackName
+          # ImportApi is PUT /apis. SAM emits the API as an OpenAPI body, so this is the call
+          # CloudFormation really makes. ImportApi has no tags parameter, so aws:RequestTag cannot
+          # be required: this one action can create an API without the tag (a new, empty API;
+          # it cannot touch an existing one). Every later change needs the tag (next statement).
+          - Sid: HttpApiImportUntagged
+            Effect: Allow
+            Action: apigateway:PUT
+            Resource: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis'
+          # The API and its sub-resources (routes, integrations, authorizers, stages, deployments,
+          # CORS) are paths under /apis/{id}. Routes, Integrations, Authorizers and Stages list
+          # aws:ResourceTag in the reference, but whether it resolves to the PARENT API's tag is
+          # not documented. If it does not, the first deploy fails closed (AccessDenied) rather
+          # than open. See the doc.
+          - Sid: HttpApiChangeTaggedOnly
+            Effect: Allow
+            Action: [apigateway:PUT, apigateway:PATCH, apigateway:POST, apigateway:DELETE]
+            Resource: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis/*'
+            Condition:
+              StringEquals:
+                'aws:ResourceTag/Project': !Ref StackName
+          # Read-only. Cannot be tag-conditioned safely: CloudFormation reads the API right after
+          # creation, and list has no single resource. Other projects' API metadata is readable.
+          - Sid: HttpApiReads
+            Effect: Allow
+            Action: apigateway:GET
             Resource:
               - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis'
               - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis/*'
               - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/tags/*'
+          # Tag calls take the target ARN in the path (/tags/{arn}); the Tags resource type has no
+          # aws:ResourceTag, so the target cannot be checked. Setting the tag therefore requires the
+          # right value in the request, and removing or changing it is denied below.
+          - Sid: HttpApiTagWrites
+            Effect: Allow
+            Action: [apigateway:POST, apigateway:PUT]
+            Resource: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/tags/*'
+            Condition:
+              StringEquals:
+                'aws:RequestTag/Project': !Ref StackName
+          - Sid: HttpApiUntagOtherKeys
+            Effect: Allow
+            Action: apigateway:DELETE
+            Resource: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/tags/*'
+          - Sid: HttpApiDenyProjectTagRemoval
+            Effect: Deny
+            Action: [apigateway:DELETE, apigateway:PATCH]
+            Resource: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/tags/*'
+            Condition:
+              ForAnyValue:StringEquals:
+                'aws:TagKeys': Project
+          - Sid: HttpApiDenyProjectTagChange
+            Effect: Deny
+            Action: [apigateway:POST, apigateway:PUT, apigateway:PATCH]
+            Resource: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/tags/*'
+            Condition:
+              ForAnyValue:StringEquals:
+                'aws:TagKeys': Project
+              StringNotEquals:
+                'aws:RequestTag/Project': !Ref StackName
           - Sid: ScheduleRules
             Effect: Allow
             Action:
@@ -329,14 +402,37 @@ Resources:
             Effect: Allow
             Action: [sns:Unsubscribe, sns:GetSubscriptionAttributes, sns:SetSubscriptionAttributes]
             Resource: !Sub 'arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:scheduling-alarms-${Environment}:*'
-          - Sid: UserPoolCreate
+          # User pools have random IDs, so they are scoped by the Project tag. In the AWS service
+          # authorization reference, CreateUserPool, TagResource and UpdateUserPool list
+          # aws:RequestTag, and the userpool resource type (also the resource of the client and
+          # domain actions) lists aws:ResourceTag.
+          - Sid: UserPoolCreateTagged
             Effect: Allow
             Action: cognito-idp:CreateUserPool
             Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:RequestTag/Project': !Ref StackName
+          # UpdateUserPool and TagResource must also carry the tag in the request. UpdateUserPool
+          # resets omitted settings, tags included, and template.yaml always sends them.
+          - Sid: UserPoolUpdateAndTagTaggedOnly
+            Effect: Allow
+            Action: [cognito-idp:UpdateUserPool, cognito-idp:TagResource]
+            Resource: !Sub 'arn:${AWS::Partition}:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/*'
+            Condition:
+              StringEquals:
+                'aws:ResourceTag/Project': !Ref StackName
+                'aws:RequestTag/Project': !Ref StackName
+          - Sid: UserPoolDenyProjectUntag
+            Effect: Deny
+            Action: cognito-idp:UntagResource
+            Resource: '*'
+            Condition:
+              ForAnyValue:StringEquals:
+                'aws:TagKeys': Project
           - Sid: UserPoolManage
             Effect: Allow
             Action:
-              - cognito-idp:UpdateUserPool
               - cognito-idp:DeleteUserPool
               - cognito-idp:DescribeUserPool
               - cognito-idp:SetUserPoolMfaConfig
@@ -350,10 +446,14 @@ Resources:
               - cognito-idp:CreateUserPoolDomain
               - cognito-idp:DeleteUserPoolDomain
               - cognito-idp:UpdateUserPoolDomain
-              - cognito-idp:TagResource
               - cognito-idp:UntagResource
               - cognito-idp:ListTagsForResource
             Resource: !Sub 'arn:${AWS::Partition}:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/*'
+            Condition:
+              StringEquals:
+                'aws:ResourceTag/Project': !Ref StackName
+          # DescribeUserPoolDomain has no resource type in the reference, so it cannot be scoped.
+          # Read-only: it only reveals whether a domain prefix is taken.
           - Sid: UserPoolDomainLookup
             Effect: Allow
             Action: cognito-idp:DescribeUserPoolDomain
@@ -500,6 +600,40 @@ Resources:
               - cloudformation:GetTemplateSummary
               - cloudformation:DeleteStack
             Resource: !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${StackName}/*'
+          # Stack-level tags: sam deploy --tags Project=<StackName> makes CloudFormation put the
+          # Project tag on every taggable resource. Creating and executing the change set call
+          # TagResource and UntagResource on the stack, so they are allowed on the named stack
+          # only. The Project tag itself can be set only to the stack name and never removed.
+          - Sid: StackTags
+            Effect: Allow
+            Action: [cloudformation:TagResource, cloudformation:UntagResource]
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${StackName}/*'
+              - !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:changeSet/*'
+          - Sid: DenyProjectStackTagRemoval
+            Effect: Deny
+            Action: cloudformation:UntagResource
+            Resource: '*'
+            Condition:
+              ForAnyValue:StringEquals:
+                'aws:TagKeys': Project
+          - Sid: DenyProjectStackTagChange
+            Effect: Deny
+            Action: cloudformation:TagResource
+            Resource: '*'
+            Condition:
+              ForAnyValue:StringEquals:
+                'aws:TagKeys': Project
+              StringNotEquals:
+                'aws:RequestTag/Project': !Ref StackName
+          # A change set without the Project tag is refused, so the tag always reaches the resources.
+          - Sid: DenyChangeSetWithoutProjectTag
+            Effect: Deny
+            Action: cloudformation:CreateChangeSet
+            Resource: !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${StackName}/*'
+            Condition:
+              StringNotEquals:
+                'aws:RequestTag/Project': !Ref StackName
           # The SAM transform is evaluated at change-set creation.
           - Sid: SamTransform
             Effect: Allow
@@ -562,11 +696,11 @@ Resources:
               - HasUserPoolId
               - !Sub 'arn:${AWS::Partition}:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${OwnerUserPoolId}'
               - !Sub 'arn:${AWS::Partition}:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/*'
-            Condition: !If
-              - HasUserPoolId
-              - !Ref AWS::NoValue
-              - StringEquals:
-                  'aws:ResourceTag/aws:cloudformation:stack-name': !Ref StackName
+            # The Project tag is required even when the pool is pinned by ID, so a mistyped
+            # OwnerUserPoolId cannot point these actions at another project's pool.
+            Condition:
+              StringEquals:
+                'aws:ResourceTag/Project': !Ref StackName
           # Checkpoint step 2: publish a synthetic notification, confirm the subscription.
           - Sid: AlarmTopic
             Effect: Allow
@@ -587,15 +721,11 @@ Resources:
               - lambda:PutFunctionConcurrency
               - lambda:DeleteFunctionConcurrency
             Resource: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${StackName}-*'
-          # The FunctionArn key is documented only for Create/Update/Delete, so reads are unconditioned.
-          - Sid: EventSourceMappingRead
+          # Disabling a mapping is rollback step 1. "*" matches the eventSourceMapping resource type,
+          # with the condition. The reference lists lambda:FunctionArn for Get as well as Update.
+          - Sid: EventSourceMappingReadAndDisable
             Effect: Allow
-            Action: lambda:GetEventSourceMapping
-            Resource: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:event-source-mapping:*'
-          # Disabling a mapping is rollback step 1. "*" matches the eventSourceMapping resource type, with the condition.
-          - Sid: EventSourceMappingDisable
-            Effect: Allow
-            Action: lambda:UpdateEventSourceMapping
+            Action: [lambda:GetEventSourceMapping, lambda:UpdateEventSourceMapping]
             Resource: '*'
             Condition:
               ArnLike:

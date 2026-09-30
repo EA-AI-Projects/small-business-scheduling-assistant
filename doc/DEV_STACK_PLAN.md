@@ -9,20 +9,22 @@ Target if authorized: AWS account `339713090487`, region `us-west-1`, stack name
 **Nothing is authorized yet.** This document only lays out what a "yes" would mean. No deployment, spending, owner account creation, or live text has happened or will happen without your separate approval.
 
 - **What it would cost per month** (us-west-1, list price, 12-month free tier not assumed): about **$1.14** idle, **$2.43** in an active test month, and **$3.20** in a worst case where every scheduled job ran all month. After the allowances AWS always gives away for free, those become about $0.11, $0.69, and $0.75. Twilio, OpenAI, and taxes are not included.
-- **Recommended budget (your call):** a **$10 per month** AWS budget, with email alerts when actual spend reaches $5, $8, and $10 and when AWS forecasts $10. A budget warns; it does not stop spending.
+- **Approved budget (2026-09-30):** a **$10 per month** AWS budget, with email alerts when actual spend reaches $5, $8, and $10 and when AWS forecasts $10. Because the account is shared with other proof-of-concept projects, it is filtered to this project's `Project=scheduling-dev` cost-allocation tag ([section 1.6](#16-approved-aws-budget-scoped-to-this-project)). A budget warns; it does not stop spending.
 - **What saying yes to the dev checkpoint would authorize:** (1) creating a private, versioned, encrypted S3 bucket for build artifacts and uploading the build; (2) creating a *change set* (below); (3) executing it, which creates the 61 resources listed in section 2, all with SMS off and every schedule off; (4) creating one owner test user, one Amplify app, and the budget; (5) the checkpoint tests on synthetic data, including switching on the hold-expiry schedule and later the two retention schedules; and (6) the teardown in section 3 afterward.
-- **What it would not authorize:** SMS ingress or sending, Twilio, OpenAI, outbox dispatch, any real client data, the `pilot` stack, or rollback redeploys unless you approve those in decision 4.
+- **What it would not authorize:** SMS ingress or sending, Twilio, OpenAI, outbox dispatch, any real client data, the `pilot` stack, or rollback redeploys unless you approve those in decision 4. The 2026-09-30 provisioning authorization also does **not** cover creating the deployment role stack (an IAM change that needs its own authorization and comes first, see [section 2.6](#26-order-of-creation)).
 
 Two terms, once. A **change set** is CloudFormation's preview of what a deployment would create; nothing exists until it is executed, but creating it still needs AWS credentials, uploads the build to S3, and leaves an empty stack in `REVIEW_IN_PROGRESS`. **PITR** (point-in-time recovery) is DynamoDB's continuous backup that can restore the table to any second in the last 35 days.
 
-## Decisions Enrique must make (open, not decided here)
+## Decisions Enrique must make
 
-1. **Monthly budget amount and alert thresholds.** A recommendation is in [section 1.6](#16-recommended-aws-budget-needs-approval). It is not approved.
+Status, 2026-09-30 (issue #43): decisions 1 to 4 and 7 were answered by the owner; the account was confirmed as **shared with other proof-of-concept projects**; the operator IAM user has **no MFA device yet**. Decision 5 is still open. Decision 6 is answered by `infra/dev-deploy-roles.yaml` in this repository, which still needs the owner's separate authorization to create.
+
+1. **Monthly budget amount and alert thresholds.** Approved: $10 per month, see [section 1.6](#16-approved-aws-budget-scoped-to-this-project).
 2. **The owner-monitored alarm mailbox** (`AlarmEmail`). No address is recorded in the repository.
 3. **Provisioning authorization.** It covers, each a separate billable or account-changing step: creating the artifact bucket (private, versioned, encrypted) and uploading the build; **creating the change set** (uses credentials, uploads billable artifacts, and leaves the stack in `REVIEW_IN_PROGRESS`); executing the change set; creating the owner test user, the Amplify app, and the budget.
 4. **Whether rollback redeploys are pre-authorized** as part of this checkpoint, or each one needs a fresh yes (see [section 3.1](#31-stop-on-a-failed-safety-gate)).
 5. **How schedules get enabled** (see [section 2.5](#25-technical-question-for-review-enabling-schedules)). The template hard-codes them off and has no parameter to turn one on.
-6. **The scoped deployment role.** No GitHub OIDC or other scoped deploy role exists in the repository; the checkpoint forbids broad personal administrator credentials.
+6. **The scoped deployment role.** The checkpoint forbids broad personal administrator credentials. The scoped roles are defined in `infra/dev-deploy-roles.yaml` (see [Dev deployment roles](PILOT_INFRASTRUCTURE.md#dev-deployment-roles)); creating them is a separate IAM authorization, and the deployer role needs an MFA device on the operator IAM user, which does not exist yet.
 7. **Whether the synthetic dev table is deleted at teardown or kept for inspection.** The recommendation is to delete it; the decision is Enrique's (see [section 3.3](#33-full-teardown-in-order)).
 
 ## 1. Cost estimate for `us-west-1`
@@ -139,16 +141,17 @@ Reading the table:
 - Sensitivity, per scan: one full scan of a 10 GB table uses about 2.6 million read units, or about $0.37 **per scan**, and one of a 1 GB table about $0.037. **Pilot scale** with the current code: 20 clients with notes on a 1 GB table means 20 x 30 = 600 scans a month, or about **$22 a month** for daily retention alone, plus $0.037 for every owner note list or note create. That is why #67 must land before the `pilot` stack holds real records. A 10 GB table also adds about $2.2 a month of PITR before the 25 GB storage allowance.
 - This estimate sits well below the earlier provisional $10 to $30 planning envelope, which the pilot plan no longer carries.
 
-### 1.6 Recommended AWS Budget (needs approval)
+### 1.6 Approved AWS Budget, scoped to this project
 
-**This is a recommendation for Enrique to approve or change. It is not decided.**
+**Approved by Enrique on 2026-09-30 (issue #43): $10.00 per month, actual-spend alerts at $5.00, $8.00 and $10.00, and a forecast alert at $10.00.** These amounts and thresholds are the owner's decision; this section only says how the budget is scoped. It applies to the synthetic `dev` checkpoint. The `pilot` stack needs its own budget after #67 lands, because at pilot scale the current scan costs about $22 a month.
 
-- **Recommended monthly budget: $10.00.** It is about three times the worst-case dev list-price total ($3.20), which is enough headroom for log growth or a mistaken schedule, and the first alert ($5) already sits above that worst case, so any alert signals something unexpected. Lowering it to $5 would put the 100 percent alert barely above the worst case and the 50 percent alert inside normal variation, so $10 is kept. **This is a dev-only figure.** The `pilot` stack needs its own budget after #67 lands, because at pilot scale the current scan costs about $22 a month.
-- **Type:** monthly cost budget with no budget actions (actions cost $0.10 per budget-day after 62 days and would need extra IAM). Scope it to the account, or to a cost-allocation tag if one is agreed. Tags would need to be added to the template, which this packet does not do.
-- **Recommended alerts, sent to the owner-monitored mailbox:**
-  - Actual spend at 50 percent ($5.00), 80 percent ($8.00), and 100 percent ($10.00).
-  - Forecasted spend at 100 percent ($10.00).
-- **Limits.** A budget alerts; it does not stop spending. Cost data lags by hours, so an alert can arrive after money is spent. The budget counts everything in the account, not just this stack. Whether other resources exist in the account is unknown to this packet.
+- **Why it is filtered.** Account `339713090487` is **shared with other proof-of-concept projects** (owner answer, 2026-09-30). An unfiltered budget counts the whole account, so other projects' spend would trigger these alerts and hide this stack's. The budget is therefore filtered to this project's cost-allocation tag: **`Project` = `scheduling-dev`** (a user-defined tag; in the Budgets filter it appears as `user:Project$scheduling-dev`). The same tag drives the IAM scoping of HTTP APIs and user pools ([Tag scoping](PILOT_INFRASTRUCTURE.md#tag-scoping-in-a-shared-account)); `template.yaml` sets it on the API and user pool and `sam deploy --tags Project=scheduling-dev` puts it on every other taggable stack resource.
+- **Type:** monthly cost budget with no budget actions (actions cost $0.10 per budget-day after 62 days and would need extra IAM).
+- **Alerts, sent to the owner-monitored mailbox:** actual spend at 50 percent ($5.00), 80 percent ($8.00) and 100 percent ($10.00); forecasted spend at 100 percent ($10.00).
+- **One-time activation, by the owner or administrator, with billing access.** In Billing and Cost Management, Cost allocation tags, activate the user-defined tag key `Project`. A tag key is listed only after at least one resource carrying it exists and has produced usage data, and AWS documents that it can take up to about 24 hours for a new key to appear and up to about 24 hours after activation before it is active; cost data also lags by hours. If the account belongs to an AWS Organization, only the management account can activate it. Re-check these timings in the current AWS documentation when activating. Tag the Amplify app and the artifact bucket `Project=scheduling-dev` when creating them, since they are not created by the stack.
+- **Order and the gap.** The tag filter can only be chosen after the key is active, so the sequence is: create the stack (tagged), wait for the key to appear, activate it, wait for it to become active, then create the budget. **For up to about two days after the first deploy there is no budget alert at all.** During that gap nothing is alerted on: the tag-filtered budget does not exist yet, and even once it does, spend before activation may not be attributed to the tag. What limits the exposure is that the stack is created idle (every schedule and mapping disabled, no SMS): the list-price idle cost is about $1.14 per month, roughly $0.04 per day, and the always-on alarms and metric filters are the bulk of it. Recommendation: do not enable any schedule (checkpoint step 5) until the budget exists and the first tagged cost data appears. Whether to also create a temporary account-wide budget for the gap (it would count other projects' spend and could alert falsely) is an open question for Enrique.
+- **What the tag filter does not see.** Charges that cannot carry the tag fall outside it: data transfer out, some CloudWatch charges (for example metric-filter custom metrics and log ingestion, depending on how AWS attributes them), and anything else AWS reports without resource tags. For this stack they are small (data transfer about $0.01, metrics $0.60 in scenarios (b) and (c) in section 1.5). A complementary filter by service or region is **not** sound here: other projects in the account use the same services and region, so it would alert on their spend. Instead, after the first full month, compare Cost Explorer grouped by the `Project` tag with the untagged remainder ("No tag key") and confirm the untagged part is small; treat any unexplained untagged spend as something to raise with the owner, not something the budget covers.
+- **Limits.** A budget alerts; it does not stop spending. Cost data lags by hours, so an alert can arrive after money is spent. The tag filter narrows the budget to this project's tagged resources; it does not protect the account's other spend.
 
 ### 1.7 Reproducing this in the Pricing Calculator
 
@@ -277,27 +280,34 @@ Placeholders are inert. A real value for `AlarmEmail` is supplied on the command
 | `AuthorizedSmsRecipients` | `` (empty) | Would be personal data | Empty allowlist at the checkpoint |
 | `SmsSendEnabled` | `disabled` | No | Default |
 | `EnableSmsConversations` | `disabled` | No | Default |
+| `PermissionsBoundaryArn` | The role stack's `LambdaRoleBoundaryArn` output | No (an ARN; never committed) | Required when deploying through the scoped execution role; without it role creation is denied. Empty (the default) means unbounded Lambda roles |
+| Stack tag `Project` (not a template parameter; passed as `sam deploy --tags`) | `scheduling-dev` (the stack name) | No | Required: the deployer role's `CreateChangeSet` is denied without it. It is what the scoped roles and the cost budget key on. `template.yaml` also sets it on the HTTP APIs and the user pool from `AWS::StackName`, so the value must equal the stack name |
 
-Documentation-only shape of the deploy step (do not run without authorization):
+Documentation-only shape of the deploy step (do not run without authorization). The role stack from [Dev deployment roles](PILOT_INFRASTRUCTURE.md#dev-deployment-roles) exists first ([section 2.6](#26-order-of-creation)). The bucket is created by the owner's own credentials; the deployer role has no `CreateBucket`. Everything from `sam build` on uses the deployer profile (MFA) and passes the execution role:
 
 ```sh
-# One-time, by hand: create a private, versioned, encrypted artifact bucket (decision 3).
+# One-time, by hand, owner credentials: create a private, versioned, encrypted artifact bucket
+# (decision 3), tagged for the cost budget.
 aws s3api create-bucket --bucket <artifact bucket> --region us-west-1 \
   --create-bucket-configuration LocationConstraint=us-west-1
+aws s3api put-bucket-tagging --bucket <artifact bucket> \
+  --tagging 'TagSet=[{Key=Project,Value=scheduling-dev}]'
 aws s3api put-public-access-block --bucket <artifact bucket> \
   --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
 aws s3api put-bucket-versioning --bucket <artifact bucket> --versioning-configuration Status=Enabled
 aws s3api put-bucket-encryption --bucket <artifact bucket> \
   --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
 
+# Deployer profile (assumes the deployer role with MFA).
 sam build --template-file template.yaml
-sam deploy --stack-name scheduling-dev --region us-west-1 \
+sam deploy --profile scheduling-dev-deployer --stack-name scheduling-dev --region us-west-1 \
+  --role-arn <CloudFormationExecutionRoleArn> --tags Project=scheduling-dev \
   --capabilities CAPABILITY_IAM --no-execute-changeset \
   --s3-bucket <dedicated artifact bucket> --s3-prefix scheduling-dev \
   --parameter-overrides Environment=dev BusinessId=dev-synthetic \
     OwnerSub=00000000-0000-0000-0000-000000000000 \
     CognitoDomainPrefix=<unique prefix> OwnerAppOrigin=https://example.invalid \
-    AlarmEmail=<owner-monitored mailbox>
+    AlarmEmail=<owner-monitored mailbox> PermissionsBoundaryArn=<LambdaRoleBoundaryArn>
 ```
 
 This packet uses a **dedicated artifact bucket** that is created by hand first. `sam deploy --s3-bucket` uploads to an existing bucket and does not create one. The alternative, `--resolve-s3`, would create the shared `aws-sam-cli-managed-default` stack and bucket; it is not used here so that teardown touches only what this checkpoint created.
@@ -309,12 +319,13 @@ This packet uses a **dedicated artifact bucket** that is created by hand first. 
 | Item | Created by | Billable | Cleanup |
 | --- | --- | --- | --- |
 | Cognito owner test user | Admin create in the user pool, then set a password and read its `sub` | No (1 MAU) | Deleted with the pool; see section 3.3 |
-| Amplify app (platform `WEB`, `AMPLIFY_MONOREPO_APP_ROOT=frontend`, build variables from stack outputs plus `NEXT_PUBLIC_BUSINESS_ID`) | Console or CLI | Yes: build minutes, storage, served data | `delete-app` |
-| AWS Budget and its notification mailbox | Console or CLI | No for a plain cost budget | `delete-budget` |
+| Amplify app (platform `WEB`, `AMPLIFY_MONOREPO_APP_ROOT=frontend`, build variables from stack outputs plus `NEXT_PUBLIC_BUSINESS_ID`), tagged `Project=scheduling-dev` | Console or CLI, owner credentials (the deployer role has no Amplify access) | Yes: build minutes, storage, served data | `delete-app` |
+| AWS Budget ($10, tag-filtered) and its notification mailbox, plus the one-time activation of the `Project` cost-allocation tag in Billing | Console or CLI, owner or administrator with billing access; the budget can be created only after the tag is active (section 1.6) | No for a plain cost budget | `delete-budget`; the tag activation can stay |
 | SNS subscription confirmation | The `AlarmEmail` recipient clicks the confirmation link | No | Removed with the topic |
-| Dedicated artifact bucket (private, versioned, encrypted), created by hand | `aws s3api create-bucket` and related calls | Yes: S3 storage, tiny | Delete all versions and delete markers, then the bucket |
+| Dedicated artifact bucket (private, versioned, encrypted, tagged `Project=scheduling-dev`), created by hand | `aws s3api create-bucket` and related calls, owner credentials (the deployer role can use and delete the bucket but not create it) | Yes: S3 storage, tiny | Delete all versions and delete markers, then the bucket |
 | Uploaded Lambda zips and the `REVIEW_IN_PROGRESS` stack from the change set | `sam deploy --no-execute-changeset` | Yes (storage, tiny) | Removed with the bucket; see the never-executed case in section 3.3 |
-| Scoped deployment role | Enrique or an administrator, outside this repository | No | Not part of this plan |
+| Role stack `scheduling-dev-roles` (deployer role, CloudFormation execution role, Lambda permissions boundary), defined in `infra/dev-deploy-roles.yaml` in this repository | The owner's operator IAM user, first, with `--no-execute-changeset`; the owner reviews the change set, then executes it. Needs the owner's separate IAM authorization | No | Deleted **last**, after everything else (section 3.3 step 12) |
+| MFA device on the operator IAM user | The owner, in the IAM console | No | Needed because the deployer role requires MFA. **It does not exist yet.** The owner has been asked to add a virtual MFA device; until then the deployer role cannot be assumed |
 | SSM SecureString `/scheduling/dev/twilio/auth-token` (and `.../openai/api-key`) | Would be created by hand | Not at the checkpoint | **Not created for this checkpoint.** Ingress stays off and no token exists |
 
 ### 2.5 Technical question for review: enabling schedules
@@ -325,9 +336,22 @@ The template hard-codes `Enabled: false` on every schedule and the sender mappin
 
 This packet assumes the out-of-band toggle for the dev checkpoint only, and flags it for review. It is not a business rule, but it changes how the deployed stack differs from the template.
 
+### 2.6 Order of creation
+
+Each step needs the authorization that covers it; nothing here is authorized by this document.
+
+1. **MFA device** on the operator IAM user (owner, IAM console).
+2. **Role stack** `scheduling-dev-roles`, by the owner's operator IAM user: create the change set with `--no-execute-changeset`, review the permissions, then execute. This step needs the owner's separate IAM authorization.
+3. **Deployer profile** configured with the role stack's outputs; confirm it assumes the role with an MFA code.
+4. **Artifact bucket**, tagged, by the owner's credentials.
+5. **Dev stack change set** with the deployer profile (`--role-arn`, `--tags Project=scheduling-dev`, `PermissionsBoundaryArn`); review, including every `AssumeRolePolicyDocument` (only `lambda.amazonaws.com`) and that every function's role is one the stack creates; execute with `aws cloudformation execute-change-set --profile scheduling-dev-deployer`.
+6. **Cost-allocation tag activation and the tag-filtered budget** (section 1.6), once the tag key appears; then the Amplify app (tagged), the owner test user and the `OwnerSub` / origin update. Keep every schedule disabled until the budget exists.
+
+Teardown reverses this and ends with the role stack (section 3.3).
+
 ## 3. Rollback and data cleanup
 
-All commands below are documentation. `<...>` values are placeholders. Every command touches the AWS account and needs the same authorization as the deployment.
+All commands below are documentation. `<...>` values are placeholders. Every command touches the AWS account and needs the same authorization as the deployment. Unless a step says **owner credentials**, run it with the deployer profile (`--profile scheduling-dev-deployer`), which is what the deployer role's permissions were written for. Stack deletion always passes `--role-arn <CloudFormationExecutionRoleArn>`; the deployer role denies it otherwise.
 
 ### 3.1 Stop on a failed safety gate
 
@@ -348,7 +372,7 @@ Any failed gate in the checkpoint (a losing transaction that left partial data, 
    ```
 
 3. **Capture evidence before changing anything.** Save the failing invocation logs (`aws logs filter-log-events`), the DLQ depth, the alarm history, and the relevant table items (synthetic only). Record the failure on #43.
-4. **Revert the Lambda artifact.** The stack has no alias, so redeploy the last known-good commit: check out that commit, `sam build`, `sam deploy --no-execute-changeset`, review the change set, then execute it. If a stack update itself fails, CloudFormation rolls it back automatically (`UPDATE_ROLLBACK_COMPLETE`). If the **first** creation fails, the stack ends in `ROLLBACK_COMPLETE` and must be deleted before a retry, and a table already created survives (see the collision note in 3.3). Keep the previous zip in the artifact bucket until teardown.
+4. **Revert the Lambda artifact.** The stack has no alias, so redeploy the last known-good commit: check out that commit, `sam build`, `sam deploy --profile scheduling-dev-deployer --role-arn <CloudFormationExecutionRoleArn> --tags Project=scheduling-dev --no-execute-changeset` (same parameters as the original deploy), review the change set, then execute it. If a stack update itself fails, CloudFormation rolls it back automatically (`UPDATE_ROLLBACK_COMPLETE`). If the **first** creation fails, the stack ends in `ROLLBACK_COMPLETE` and must be deleted before a retry, and a table already created survives (see the collision note in 3.3). Keep the previous zip in the artifact bucket until teardown.
 5. **Roll back the owner app separately.** In the Amplify console redeploy the previous successful build, or disconnect the branch.
 6. **Do not roll data back automatically.** The table is retained. PITR is a last-resort recovery tool: restoring writes a new table, billed for the restored size, and must be planned rather than run reflexively.
 7. **Do not replay a DLQ message blindly.** Inspect it first; the outbox record is authoritative.
@@ -366,7 +390,8 @@ Read first: **CloudFormation deleting the stack does not delete the table**, and
 **If the change set was created but never executed**, the stack is empty in `REVIEW_IN_PROGRESS`. Delete the stack (this also removes its change sets), then continue at step 10 for the bucket:
 
 ```sh
-aws cloudformation delete-stack --stack-name scheduling-dev --region us-west-1
+aws cloudformation delete-stack --stack-name scheduling-dev --region us-west-1 \
+  --role-arn <CloudFormationExecutionRoleArn> --profile scheduling-dev-deployer
 ```
 
 1. **Stop everything.** Run the section 3.1 step 1 commands. Confirm no schedule is enabled and no queue message is in flight.
@@ -377,7 +402,7 @@ aws cloudformation delete-stack --stack-name scheduling-dev --region us-west-1
    ```
 
    Keep it (evidence for #43) or delete it. Keeping costs PITR and storage: about $0.22 per GB-month plus $0.28 per GB beyond 25 GB. Recommendation: delete. This is Enrique's decision (item 7); record it on #43.
-3. **Delete the Amplify app** so it stops building and stops serving:
+3. **Delete the Amplify app** (owner credentials; the deployer role has no Amplify access) so it stops building and stops serving:
 
    ```sh
    aws amplify list-apps --region us-west-1
@@ -393,8 +418,10 @@ aws cloudformation delete-stack --stack-name scheduling-dev --region us-west-1
 5. **Delete the stack.** This removes the functions, roles, queues, topic and its subscription, pool, domain, client, API, rules, mappings, alarms, metric filters, and the log groups the template declares. It leaves the table.
 
    ```sh
-   aws cloudformation delete-stack --stack-name scheduling-dev --region us-west-1
-   aws cloudformation wait stack-delete-complete --stack-name scheduling-dev --region us-west-1
+   aws cloudformation delete-stack --stack-name scheduling-dev --region us-west-1 \
+     --role-arn <CloudFormationExecutionRoleArn> --profile scheduling-dev-deployer
+   aws cloudformation wait stack-delete-complete --stack-name scheduling-dev --region us-west-1 \
+     --profile scheduling-dev-deployer
    ```
 
    If it ends in `DELETE_FAILED`, read the failing resource, fix it, and retry; do not use `--retain-resources` blindly.
@@ -417,13 +444,13 @@ aws cloudformation delete-stack --stack-name scheduling-dev --region us-west-1
 
    The `Scheduling/dev` custom metrics cannot be deleted; they stop being billed when nothing publishes to them. Confirm on the first bill after teardown.
 8. **SNS subscription.** Nothing to do in AWS: the subscription goes with the topic. The mailbox can remove the confirmation email.
-9. **Delete the budget** unless Enrique wants it to persist:
+9. **Delete the budget** (owner credentials) unless Enrique wants it to persist:
 
    ```sh
    aws budgets delete-budget --account-id <account id> --budget-name <budget name>
    ```
 
-10. **Delete the artifact bucket, including every version.** The bucket is versioned, so `aws s3 rm` alone leaves object versions and delete markers behind and the bucket cannot be deleted. List them, delete them in batches (`delete-objects` accepts up to 1,000 keys per call), then delete the bucket:
+10. **Delete the artifact bucket, including every version** (deployer profile; it has the object, version and bucket delete permissions for this bucket only). The bucket is versioned, so `aws s3 rm` alone leaves object versions and delete markers behind and the bucket cannot be deleted. List them, delete them in batches (`delete-objects` accepts up to 1,000 keys per call), then delete the bucket:
 
     ```sh
     aws s3api list-object-versions --bucket <artifact bucket> --output json \
@@ -437,26 +464,33 @@ aws cloudformation delete-stack --stack-name scheduling-dev --region us-west-1
     ```
 
     Repeat the list and delete pair until the final `list-object-versions` returns nothing (a `null` query result means there is nothing left of that kind). Keep `versions.json` and `markers.json` out of the repository; they contain only synthetic object keys. Only this dedicated bucket is deleted; no shared SAM-managed bucket is involved.
-11. **SSM parameters.** None exist for this checkpoint. If any were created later: `aws ssm delete-parameter --name /scheduling/dev/twilio/auth-token --region us-west-1`.
-12. **Remove the scoped deployment role or its stack access** as Enrique directs. This is outside the repository.
+11. **SSM parameters.** None exist for this checkpoint. If any were created later (owner credentials; the roles have no SSM access): `aws ssm delete-parameter --name /scheduling/dev/twilio/auth-token --region us-west-1`.
+12. **Delete the role stack last.** Only after steps 1 to 11 (the execution role must exist to delete the dev stack, and the deployer role to empty the bucket). With the owner's operator IAM user, not the deployer role: `aws cloudformation delete-stack --stack-name scheduling-dev-roles --region us-west-1`. Then remove the operator's `scheduling-dev-deployer` CLI profile and confirm no role named `deploy-scheduling-dev-*` remains. The details, including what to do if the event source mapping delete is denied, are in [Teardown order](PILOT_INFRASTRUCTURE.md#teardown-order). The `Project` cost-allocation tag activation can stay; it is not a resource.
 
 ### 3.4 Nothing-billable-remains checklist
 
-Run after teardown; each should return nothing for `scheduling-dev`.
+Run after teardown steps 1 to 11, before the role stack is deleted (step 12), so the deployer profile still works. The deployer role cannot make list calls (`ListTables`, `ListFunctions`, `ListRules`, `ListQueues`, `ListTopics`, `ListUserPools`, `GET /apis`), so the checks are split by who can run them. Each should return nothing, or "not found", for `scheduling-dev`.
 
-- [ ] `aws cloudformation describe-stacks --stack-name scheduling-dev` reports the stack does not exist (this includes a stack left in `REVIEW_IN_PROGRESS`).
-- [ ] `aws dynamodb list-tables` has no `scheduling-dev`, and `aws dynamodb list-backups --table-name scheduling-dev --backup-type ALL` shows none (unless kept on purpose).
-- [ ] `aws lambda list-functions` has no `scheduling-dev-` function; `aws events list-rules` has no rule from the stack.
-- [ ] `aws sqs list-queues --queue-name-prefix scheduling-` is empty.
-- [ ] `aws sns list-topics` has no `scheduling-alarms-dev`.
-- [ ] `aws cognito-idp list-user-pools --max-results 60` has no `scheduling-owner-dev`, and the domain prefix is released.
-- [ ] `aws apigatewayv2 get-apis` has no owner API.
-- [ ] `aws cloudwatch describe-alarms --alarm-name-prefix scheduling-dev` is empty and `aws logs describe-log-groups --log-group-name-prefix /aws/lambda/scheduling-dev-` is empty.
+**With the deployer profile** (`--profile scheduling-dev-deployer`; calls it can make):
+
+- [ ] `aws cloudformation describe-stacks --stack-name scheduling-dev` reports the stack does not exist (this includes a stack left in `REVIEW_IN_PROGRESS`). If it answers AccessDenied instead of "does not exist", the owner runs it.
+- [ ] `aws dynamodb describe-table --table-name scheduling-dev` reports the table not found (unless kept on purpose), and `aws dynamodb list-backups --table-name scheduling-dev --backup-type ALL` shows none.
+- [ ] `aws sqs get-queue-url --queue-name <name>` reports the queue does not exist for each of `scheduling-outbox-dev`, `scheduling-outbox-dlq-dev`, `scheduling-sms-conversation-dev` and `scheduling-sms-conversation-dlq-dev`.
+- [ ] `aws sns get-topic-attributes --topic-arn <AlarmTopicArn>` reports the topic not found.
+- [ ] `aws cloudwatch describe-alarms --alarm-name-prefix scheduling-dev` is empty, and `aws logs describe-log-groups --log-group-name-prefix /aws/lambda/scheduling-dev-` is empty.
+- [ ] `aws s3api head-bucket --bucket <artifact bucket>` reports the bucket does not exist (no versions or delete markers remain).
+- [ ] The stack's delete events (`aws cloudformation describe-stack-events`, before the stack disappears from the list, or the `wait stack-delete-complete` result) show every function, rule, event source mapping, pool, domain, client and API as `DELETE_COMPLETE`. This stands in for the function and rule list calls, which need names the deployer cannot list.
+
+**With the owner's or an administrator's credentials** (the deployer role has no permission for these):
+
+- [ ] `aws resourcegroupstaggingapi get-resources --tag-filters Key=Project,Values=scheduling-dev --region us-west-1` returns no resource (or only what was kept on purpose). This one sweep covers every taggable resource that carries the project tag, including anything created outside the stack, such as the Amplify app and the bucket.
+- [ ] `aws lambda list-functions` has no `scheduling-dev-` function; `aws events list-rules --name-prefix scheduling-dev` has no rule from the stack.
+- [ ] `aws cognito-idp list-user-pools --max-results 60` has no `scheduling-owner-dev`, and `aws cognito-idp describe-user-pool-domain --domain <prefix>` shows the domain prefix is released. Filter by name: the account has other projects' pools.
+- [ ] `aws apigatewayv2 get-apis` has no owner API (again, only this project's; other projects' APIs are expected).
 - [ ] `aws amplify list-apps` has no owner app.
-- [ ] `aws budgets describe-budgets` no longer lists the checkpoint budget (or it is kept on purpose).
-- [ ] `aws s3api head-bucket --bucket <artifact bucket>` reports the bucket does not exist, and `aws s3api list-object-versions` on it fails for the same reason (no versions or delete markers remain).
+- [ ] `aws budgets describe-budgets --account-id <account id>` no longer lists the checkpoint budget (or it is kept on purpose).
 - [ ] No SSM parameter under `/scheduling/dev/`.
-- [ ] The next month's Cost Explorer or bill shows no line from these services for the stack. This catches anything missed above.
+- [ ] The next month's Cost Explorer, grouped by the `Project` tag, shows no line for `scheduling-dev`, and the untagged remainder shows nothing attributable to this stack. This catches anything missed above.
 
 ## 4. What this packet does not do
 
