@@ -113,6 +113,18 @@ AWS_PROFILE=scheduling-dev-deployer SCHEDULING_DEV_TABLE=scheduling-dev \
 
 The `-s` flag shows the run ID the fixture prints first. The fixture refuses any table other than `scheduling-dev` and any region other than `us-west-1` (`SCHEDULING_DEV_REGION`, if set), fails closed unless the built client's resolved endpoint is exactly `https://dynamodb.us-west-1.amazonaws.com` (this also catches `AWS_ENDPOINT_URL_DYNAMODB` and a profile `endpoint_url`; it does not inspect which account the credentials belong to), never creates or deletes a table, and uses standard AWS credential resolution. Each run uses a unique synthetic business ID and appointment IDs (never `dev-synthetic`) and deletes only the items under those keys afterwards, continuing past per-item errors and failing at the end with the list. Test timestamps are in 2001 so this run's entries sort first in the table-wide due indexes and other records cannot crowd them out of bounded queries. A race where both transactions are cancelled is accepted only if no audit or outbox item exists and the revision is unchanged. It adds two-approvals-for-one-slot and hold-due-index checks, polls the due GSIs for up to 30 seconds for eventual consistency, and runs `DispatchService` through a fake `IntentQueue` scoped to the run's business, so nothing touches SQS, Twilio, or other records. It needs only the `DevTableData` actions (Get, Put, Update, Delete, Query, and the transaction item actions), no `DescribeTable`. A passing run proves IAM, transactions, and GSI visibility on the deployed table, not SQS/DLQ or Lambda behavior.
 
+### Deployed hold-expiry proof
+
+`backend/tests/test_dev_hold_expiry.py` is checkpoint step 5's proof, run before the hold-expiry schedule is enabled. It reuses the guards and run-scoped cleanup above and invokes the deployed hold-expiry Lambda, so it also needs `lambda:InvokeFunction` on `function:scheduling-dev-*` (the deployer has it). Take the function name from the stack, never an ARN:
+
+```sh
+AWS_PROFILE=scheduling-dev-deployer SCHEDULING_DEV_TABLE=scheduling-dev \
+  SCHEDULING_DEV_HOLD_EXPIRY_FUNCTION=scheduling-dev-<hold-expiry-function-name> \
+  backend/.venv/bin/python -m pytest -s backend/tests/test_dev_hold_expiry.py
+```
+
+The function name must start with `scheduling-dev-`, and the Lambda client must resolve to `https://lambda.us-west-1.amazonaws.com`. Because that prefix matches every stack Lambda (the outbox dispatcher sends to SQS, and the retention workers purge data), the test first calls `lambda:GetFunctionConfiguration` and refuses to invoke unless the handler is `scheduling.workers.expiry.expire_due_handler` and its `SCHEDULING_TABLE_NAME` is `scheduling-dev`. The test creates four pending holds for the unique synthetic run business through the real `HoldService` (so the `HoldDueIndex` keys are production-shaped, with 2001 expiry times), then makes one of them stale by marking its appointment `CONFIRMED` while its due-index keys remain. It invokes the function, up to five times because each invocation handles one bounded page, and asserts: the three due holds are `EXPIRED` (version 2, due keys removed) with one `expire` audit record and one `PENDING` client outbox intent each; the stale hold and its items are unchanged; every report has `examined == expired + stale`; and every outbox item of the run is still `PENDING` with zero attempts, so nothing dispatched. The test does not read SQS or Twilio; it relies on outbox dispatch staying disabled, which this checkpoint requires. **Side effect:** the worker expires every due hold in the table, not only this run's, including any `dev-synthetic` holds, and each one leaves a `PENDING` client `expire` intent for later outbox dispatch. List due `dev-synthetic` holds first if that matters. The test creates the stale hold first so it sorts ahead of the due holds in `HoldDueIndex`, and each hold ID is printed as `Synthetic hold created: APPOINTMENT#<uuid>` (visible with `-s`). The function role's Get, Put, Update, Delete, ConditionCheck and Query grants are enough; the test needs no other IAM. Without `SCHEDULING_DEV_TABLE`, the same assertions run the handler in-process against DynamoDB Local when `DYNAMODB_LOCAL_URL` is set. Cleanup removes only the run's keys; the sweep below applies.
+
 If a run is killed or cleanup reports errors, sweep leftovers with the deployer profile. Keys are `BUSINESS#synthetic-run-<id>` and `APPOINTMENT#run-<id>-*`; the printed run ID narrows it. List first, then delete each listed key with `delete-item`:
 
 ```sh
@@ -121,6 +133,17 @@ AWS_PROFILE=scheduling-dev-deployer aws dynamodb scan --table-name scheduling-de
   --filter-expression "begins_with(PK, :b) OR begins_with(PK, :a)" \
   --expression-attribute-values '{":b":{"S":"BUSINESS#synthetic-run-"},":a":{"S":"APPOINTMENT#run-"}}'
 ```
+
+Hold items created by `test_dev_hold_expiry.py` live at `APPOINTMENT#<uuid>` (random IDs), so the scan above misses their META items, which still carry `hold_due_pk = HOLD#PENDING` and a 2001 `hold_due_sk`. After a killed run, find them by business, list first, then delete each META key with `delete-item` (the printed hold IDs narrow it):
+
+```sh
+AWS_PROFILE=scheduling-dev-deployer aws dynamodb scan --table-name scheduling-dev --region us-west-1 \
+  --projection-expression "PK, SK, business_id" \
+  --filter-expression "begins_with(business_id, :b) AND SK = :m" \
+  --expression-attribute-values '{":b":{"S":"synthetic-run-"},":m":{"S":"META"}}'
+```
+
+Delete these leftovers before enabling the hold-expiry schedule: a leftover stale entry would be counted by every sweep, and a leftover pending hold would be expired into an already swept partition.
 
 Use a synthetic `dev` stack after separate provisioning authorization. Repeat the transaction races in AWS, including two simultaneous approvals for one slot; the expected result is at most one committed reservation, with a conflict or current terminal state and no partial outbox event for losing commands. Check SQS duplicate delivery, worker retry and DLQ redrive with a fake sender, then attach an explicitly authorized SMS test number only after Twilio campaign/number approval and the consent/STOP gates. Verify scheduled note and SMS purge with synthetic expired records and legal holds before onboarding real records. No live AWS integration results are claimed by this document.
 
