@@ -145,6 +145,35 @@ AWS_PROFILE=scheduling-dev-deployer aws dynamodb scan --table-name scheduling-de
 
 Delete these leftovers before enabling the hold-expiry schedule: a leftover stale entry would be counted by every sweep, and a leftover pending hold would be expired into an already swept partition.
 
+### Deployed retention proof
+
+`backend/tests/test_dev_retention.py` is the synthetic expiration and legal-hold check that checkpoint step 5 requires before the note and SMS retention schedules are enabled. It invokes both deployed retention Lambdas (needing `lambda:InvokeFunction` and `lambda:GetFunctionConfiguration`, which the deployer has on `function:scheduling-dev-*`, plus the `DevTableData` Query, Scan, Get, Put, Update and Delete grants (Scan is used by the client's last-visit lookup); no IAM change is needed). Take the function names from the stack, never ARNs:
+
+```sh
+AWS_PROFILE=scheduling-dev-deployer SCHEDULING_DEV_TABLE=scheduling-dev \
+  SCHEDULING_DEV_NOTE_RETENTION_FUNCTION=scheduling-dev-<note-retention-function-name> \
+  SCHEDULING_DEV_SMS_RETENTION_FUNCTION=scheduling-dev-<sms-retention-function-name> \
+  backend/.venv/bin/python -m pytest -s backend/tests/test_dev_retention.py
+```
+
+It applies the same table, region, endpoint and CI guards as the race tests, and before any invoke it calls `GetFunctionConfiguration` and refuses unless the handler is exactly `scheduling.workers.note_retention.handler` or `scheduling.workers.sms_retention.handler` (matching the variable), `SCHEDULING_TABLE_NAME` is `scheduling-dev` and `BUSINESS_ID` is `dev-synthetic`. Nothing touches SQS or Twilio.
+
+**Shared business.** Both workers purge the whole `BUSINESS_ID` partition, which is `dev-synthetic`, the owner's live test business. The test therefore never scrubs that partition. It seeds only under a run-specific client `synthetic-run-<id>`, SMS provider IDs `run-<id>-*`, and seven fictional `+1…555 01xx` phone numbers (all printed with `-s`), and its cleanup deletes only those keys, continuing past errors. Before seeding it reads every item in `BUSINESS#dev-synthetic` and **stops without seeding or invoking** if any existing record would be purged: an unheld note past its 12-month clock (using the client's last completed visit, as the worker does), an SMS body whose thread's last exchange is over 90 days old, or unheld consent/STOP evidence over four years old. If it stops, the owner's test data has aged out; hold or refresh those records first. Expiries in this precheck are evaluated one day ahead of the local clock, so clock skew cannot hide an item. The run keys (phones, client) are chosen only if no existing item uses them, else the run fails closed, and cleanup refuses to delete any key that existed before the run. After the run it asserts every pre-existing item is unchanged. **Do not use the dev owner app or text the dev number during a run.** The precheck is a point-in-time read: removing a legal hold from an owner note mid-run could get that note deleted, and the snapshot check would only report it afterwards.
+
+**Seeded records and expected results.** Notes (clocks follow `doc/PRD.md` and `note_expired`; the run client has no completed visit, so the clock is the creation date): an expired ordinary note is deleted, an expired note under legal hold is kept, a note created yesterday is kept; the invocation returns `{"deleted_notes": 1}`. SMS: a body whose last exchange was in 2001 has its body removed (receipt metadata stays), a recent body stays, consent evidence recorded in 2001 is deleted (a history row plus the current row), recent evidence and 2001 evidence under a legal hold stay; the invocation returns `{"deleted_sms_bodies": 1, "deleted_sms_evidence": 2}`. Legal hold is exercised for notes, consent evidence, and an SMS body (the domain has no API to hold a body, so the test sets the hold attribute the purge checks). STOP/opt-out evidence is not seeded. Without `SCHEDULING_DEV_TABLE`, the same assertions run the handlers in-process against DynamoDB Local (`DYNAMODB_LOCAL_URL`), with stand-in owner records that must survive.
+
+**Leftover sweep.** If a run is killed or cleanup reports errors, list, then delete each key with `delete-item`, using the printed client ID, provider prefix and phones. Never delete other keys in this partition:
+
+```sh
+AWS_PROFILE=scheduling-dev-deployer aws dynamodb query --table-name scheduling-dev --region us-west-1 \
+  --projection-expression "PK, SK" --consistent-read \
+  --key-condition-expression "PK = :pk" \
+  --filter-expression "contains(SK, :c) OR contains(SK, :p) OR contains(SK, :ph)" \
+  --expression-attribute-values '{":pk":{"S":"BUSINESS#dev-synthetic"},":c":{"S":"synthetic-run-<id>"},":p":{"S":"SMS#run-<id>-"},":ph":{"S":"<printed phone>"}}'
+```
+
+Repeat the filter for each printed phone (`SMS_THREAD#`, `SMS_CONSENT#`, `SMS_CONSENT_CURRENT#`, `PHONE#` keys) and delete the client's `NOTE#CLIENT#<sha256 of the client ID>#*` notes, which carry the client ID only in an attribute: add `client_id = :c` to a filter on the `NOTE#` prefix. Clear leftovers before enabling the retention schedules, because a leftover expired record is otherwise counted or deleted by the first scheduled run.
+
 Use a synthetic `dev` stack after separate provisioning authorization. Repeat the transaction races in AWS, including two simultaneous approvals for one slot; the expected result is at most one committed reservation, with a conflict or current terminal state and no partial outbox event for losing commands. Check SQS duplicate delivery, worker retry and DLQ redrive with a fake sender, then attach an explicitly authorized SMS test number only after Twilio campaign/number approval and the consent/STOP gates. Verify scheduled note and SMS purge with synthetic expired records and legal holds before onboarding real records. No live AWS integration results are claimed by this document.
 
 ## Rollback and monitoring
