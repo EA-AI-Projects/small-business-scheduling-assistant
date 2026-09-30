@@ -88,7 +88,7 @@ The pricing pages were fetched as HTML for the allowance rows; those pages are n
 
 ### 1.4 Scenarios and assumptions
 
-**(a) Idle baseline.** Stack deployed; every EventBridge rule disabled; both SQS mappings disabled; `EnableSmsIngress=false`; Amplify app created, no builds. Traffic: 100 owner API requests (300 ms each), 1,000 read and 200 write request units, 0 monthly active users, 1 MB of logs. No worker emits data, so the two log-derived custom metrics do not exist. The 11 alarms still bill.
+**(a) Idle baseline.** Stack deployed; every EventBridge rule disabled; both SQS mappings disabled; `EnableSmsIngress=false`; Amplify app created with one manual deployment, no builds. Traffic: 100 owner API requests (300 ms each), 1,000 read and 200 write request units, 0 monthly active users, 1 MB of logs. No worker emits data, so the two log-derived custom metrics do not exist. The 11 alarms still bill.
 
 **(b) Active verification month.** The checkpoint steps 1 to 6 in the pilot plan, with generous headroom. Synthetic dev table of 5 MB (0.005 GB) with PITR on, and 5 synthetic clients with notes.
 - 5,000 owner API requests (the pilot-plan scenario), 300 ms average, 256 MB.
@@ -97,7 +97,7 @@ The pricing pages were fetched as HTML for the allowance rows; those pages are n
 - **Note scans:** 5 clients with notes x 7 note-retention runs, plus 300 owner note-list or note-create calls = 335 scans. Each scan of a 5 MB table reads about 1,280 read units (5 MB / 4 KB), so 335 x 1,280 = 428,800 read units. See the formula below.
 - 10,000 SQS requests (300 synthetic intents through a fake consumer, plus the DLQ exercise; the stack has no consumer and the sender mapping stays disabled).
 - 0.1 GB of logs ingested. Both metric filters emit at least once (the alarm-transition checks), so 2 custom metrics bill.
-- 1 owner monthly active user. 10 Amplify builds of 4 minutes, 0.05 GB stored, 0.1 GB served. 0.1 GB of API responses out. 10,000 KMS requests for the DynamoDB managed key (an assumption). 0.25 GB in the SAM artifact bucket (several build versions of a Lambda zip, which is a small package: `backend/` is under 1 MB before dependencies).
+- 1 owner monthly active user. 10 Amplify builds of 4 minutes (manual deploy uses no build minutes; the figure is kept unchanged), 0.05 GB stored, 0.1 GB served. 0.1 GB of API responses out. 10,000 KMS requests for the DynamoDB managed key (an assumption). 0.25 GB in the SAM artifact bucket (several build versions of a Lambda zip, which is a small package: `backend/` is under 1 MB before dependencies).
 
 **(c) Worst case: all four schedules run all month.** As (b), but 30 days of every schedule, using the invocation counts in the pilot plan: hold expiry 8,640, outbox dispatch 43,200, note retention 30 and SMS retention 30. Synthetic dev table of 5 MB with 5 synthetic clients with notes, and 1 GB of logs (deliberate headroom).
 - Runs: hold expiry 1 s, outbox dispatch 0.5 s, retention 5 s.
@@ -169,7 +169,7 @@ Set the region to US West (N. California) and add one estimate group with these 
 - **EventBridge:** scheduled rules, no charge (the Lambda invocations they trigger are in the Lambda input).
 - **SSM Parameter Store:** none.
 - **KMS:** AWS managed key, 10,000 requests (calculator shows zero key cost).
-- **Amplify Hosting:** 40 build minutes, 0.05 GB stored, 0.1 GB served.
+- **Amplify Hosting:** 40 build minutes (unchanged; manual deploy uses none), 0.05 GB stored, 0.1 GB served.
 - **AWS Budgets:** 1 cost budget.
 - **S3:** 0.25 GB standard.
 - **Data transfer:** 0.1 GB out.
@@ -333,13 +333,15 @@ This packet uses a **dedicated artifact bucket** that is created by hand first. 
 | Item | Created by | Billable | Cleanup |
 | --- | --- | --- | --- |
 | Cognito owner test user | Admin create in the user pool, then set a password and read its `sub` | No (1 MAU) | Deleted with the pool; see section 3.3 |
-| Amplify app (platform `WEB`, `AMPLIFY_MONOREPO_APP_ROOT=frontend`, build variables from stack outputs plus `NEXT_PUBLIC_BUSINESS_ID`) | Console or CLI | Yes: build minutes, storage, served data | `delete-app` |
+| Amplify app `scheduling-owner-dev` (platform `WEB`, branch `main`, manual deploy with no Git connection, custom headers from `customHttp.yml`; `NEXT_PUBLIC_*` values from stack outputs plus `NEXT_PUBLIC_BUSINESS_ID=dev-synthetic` are set in the local build, not on the app) | CLI, from the admin session; see the manual deploy note below | Yes: storage and served data (manual deploy uses no build minutes) | `delete-app` |
 | AWS Budget `scheduling-dev` (member account `214965372605`, scope all services) and its notification mailbox | The owner, signed in to the member account, first (done 2026-09-30) | No for a plain cost budget | `delete-budget` in the member account |
 | SNS subscription confirmation | The `AlarmEmail` recipient clicks the confirmation link | No | Removed with the topic |
 | Dedicated artifact bucket (private, versioned, encrypted), created by hand | `aws s3api create-bucket` and related calls | Yes: S3 storage, tiny | Delete all versions and delete markers, then the bucket |
 | Uploaded Lambda zips and the `REVIEW_IN_PROGRESS` stack from the change set | `sam deploy --no-execute-changeset` | Yes (storage, tiny) | Removed with the bucket; see the never-executed case in section 3.3 |
 | Role stack `scheduling-dev-roles` (deployer role, CloudFormation execution role, Lambda permissions boundary) | An administrator session (Identity Center `AdministratorAccess`), from `infra/dev-deploy-roles.yaml` | No | Deleted last, after everything else (section 3.3, step 12) |
 | SSM SecureString `/scheduling/dev/twilio/auth-token` (and `.../openai/api-key`) | Would be created by hand | Not at the checkpoint | **Not created for this checkpoint.** Ingress stays off and no token exists |
+
+**Manual deploy for the `dev` owner app (owner decision, 2026-09-30, #43).** The `dev` owner app is a manual deploy with no Git connection. AWS gets no repository access, pushes trigger no builds (no build minutes), and each update is an explicit upload. Create the app with `aws amplify create-app --name scheduling-owner-dev --platform WEB --custom-headers <customHeaders YAML> --region us-west-1`, then `aws amplify create-branch --app-id <app id> --branch-name main --region us-west-1`. Build locally from `frontend/` with `NEXT_PUBLIC_API_BASE_URL` (`OwnerApiUrl`, no trailing slash), `NEXT_PUBLIC_COGNITO_DOMAIN` (`OwnerCognitoDomain`), `NEXT_PUBLIC_COGNITO_CLIENT_ID` (`OwnerAppClientId`), `NEXT_PUBLIC_BUSINESS_ID=dev-synthetic`, and `NEXT_PUBLIC_AUTH_MODE=cognito`, run `npm run check:export`, and zip the contents of `frontend/out`. Deploy with `aws amplify create-deployment --app-id <app id> --branch-name main --region us-west-1` (returns `jobId` and `zipUploadUrl`), upload the zip to `zipUploadUrl` with an HTTP PUT, then `aws amplify start-deployment --app-id <app id> --branch-name main --job-id <job id> --region us-west-1`. Keep every uploaded zip until teardown, named by the commit it was built from, at `s3://<artifact bucket>/owner-app/<commit>.zip` (admin; the bucket is versioned, private, and emptied at teardown), so a rollback does not depend on rebuilding. A manual app cannot read `customHttp.yml` from a repository, so its headers are applied with `--custom-headers` in the non-monorepo `customHeaders:` format (the `pattern`/`headers` entries of `customHttp.yml` without the `applications`/`appRoot` wrapper); `customHttp.yml` is the source of that value, and their presence is verified after deploy. The origin is `https://main.<app id>.amplifyapp.com`. `amplify.yml` and `customHttp.yml` remain the source for a future Git-connected app, which would be a new Amplify app with a new origin followed by one reviewed `OwnerAppOrigin` change set.
 
 ### 2.5 Technical question for review: enabling schedules
 
@@ -373,7 +375,7 @@ Any failed gate in the checkpoint (a losing transaction that left partial data, 
 
 3. **Capture evidence before changing anything.** Save the failing invocation logs (`aws logs filter-log-events`), the DLQ depth, the alarm history, and the relevant table items (synthetic only). Record the failure on #43.
 4. **Revert the Lambda artifact.** The stack has no alias, so redeploy the last known-good commit: check out that commit, `sam build`, `sam deploy --no-execute-changeset --role-arn <CloudFormationExecutionRoleArn>` (with `PermissionsBoundaryArn` unchanged), review the change set, then execute it. If a stack update itself fails, CloudFormation rolls it back automatically (`UPDATE_ROLLBACK_COMPLETE`). If the **first** creation fails, the stack ends in `ROLLBACK_COMPLETE` (or `ROLLBACK_FAILED`, for example after an interrupted event source mapping; see 3.3 step 5) and must be deleted before a retry, and a table already created survives (see the collision note in 3.3). Keep the previous zip in the artifact bucket until teardown.
-5. **Roll back the owner app separately** (admin: the deployer role has no Amplify access). In the Amplify console redeploy the previous successful build, or disconnect the branch.
+5. **Roll back the owner app separately** (admin: the deployer role has no Amplify access). Re-upload the last known-good zip from `s3://<artifact bucket>/owner-app/<commit>.zip` (or, if it is missing, rebuild that commit with the same `NEXT_PUBLIC_*` values) with `aws amplify create-deployment --app-id <app id> --branch-name main --region us-west-1`, an HTTP PUT of the zip to `zipUploadUrl`, and `aws amplify start-deployment --app-id <app id> --branch-name main --job-id <job id> --region us-west-1`. The kept zips are removed with the bucket at teardown.
 6. **Do not roll data back automatically.** The table is retained. PITR is a last-resort recovery tool: restoring writes a new table, billed for the restored size, and must be planned rather than run reflexively.
 7. **Do not replay a DLQ message blindly.** Inspect it first; the outbox record is authoritative.
 
@@ -402,7 +404,7 @@ aws cloudformation delete-stack --stack-name scheduling-dev --region us-west-1 \
    ```
 
    Keep it (evidence for #43) or delete it. Keeping costs PITR and storage: about $0.22 per GB-month plus $0.28 per GB beyond 25 GB. Decision 7 (answered 2026-09-30): delete the retained synthetic dev table after the results are recorded on #43.
-3. **Delete the Amplify app** (admin: the deployer role has no Amplify access) so it stops building and stops serving:
+3. **Delete the Amplify app** (admin: the deployer role has no Amplify access) so it stops serving:
 
    ```sh
    aws amplify list-apps --region us-west-1

@@ -233,7 +233,7 @@ Approval also checks `hold_expires_at > decision_at` against the scheduling serv
 - GitHub Actions runs lint/type checks, unit/integration tests, and SAM validation/build.
 - GitHub Actions assumes a narrowly scoped AWS deployment role via OIDC; no static AWS access keys in repository secrets.
 - Require review before deploying production stack. Separate deployment role from Lambda runtime role.
-- Amplify deploys the static frontend from GitHub. Backend SAM deploy is triggered after tests and/or a manually approved release.
+- Amplify deploys the static frontend from GitHub. Exception: the synthetic `dev` app is a manual deploy with no Git connection (owner decision, 2026-09-30, #43; see [DEV_STACK_PLAN.md](DEV_STACK_PLAN.md)), so a `customHttp.yml` change reaches `dev` only when the app's custom headers are updated too. Backend SAM deploy is triggered after tests and/or a manually approved release.
 - Roll back using previous Lambda version/alias and prior frontend deployment; keep database changes backward-compatible.
 
 ### 8.3 Environments
