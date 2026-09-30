@@ -344,7 +344,7 @@ Each step needs the authorization that covers it; nothing here is authorized by 
 2. **Role stack** `scheduling-dev-roles`, by the owner's operator IAM user: create the change set with `--no-execute-changeset`, review the permissions, then execute. This step needs the owner's separate IAM authorization.
 3. **Deployer profile** configured with the role stack's outputs; confirm it assumes the role with an MFA code.
 4. **Artifact bucket**, tagged, by the owner's credentials.
-5. **Dev stack change set** with the deployer profile (`--role-arn`, `--tags Project=scheduling-dev`, `PermissionsBoundaryArn`); review, including every `AssumeRolePolicyDocument` (only `lambda.amazonaws.com`) and that every function's role is one the stack creates; execute with `aws cloudformation execute-change-set --profile scheduling-dev-deployer`.
+5. **Dev stack change set** with the deployer profile (`--role-arn`, `--tags Project=scheduling-dev`, `PermissionsBoundaryArn`); review, including every `AssumeRolePolicyDocument` (only `lambda.amazonaws.com`) and that the change set does not set `ImportExistingResources` and that every function's role is one the stack creates; execute with `aws cloudformation execute-change-set --profile scheduling-dev-deployer`.
 6. **Cost-allocation tag activation and the tag-filtered budget** (section 1.6), once the tag key appears; then the Amplify app (tagged), the owner test user and the `OwnerSub` / origin update. Keep every schedule disabled until the budget exists.
 
 Teardown reverses this and ends with the role stack (section 3.3).

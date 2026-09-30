@@ -263,19 +263,17 @@ Resources:
               - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis/*'
               - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/tags/*'
           # Tag calls take the target ARN in the path (/tags/{arn}); the Tags resource type has no
-          # aws:ResourceTag, so the target cannot be checked. Setting the tag therefore requires the
-          # right value in the request, and removing or changing it is denied below. CloudFormation
-          # tags by diff, so changing a stack tag other than Project later sends a tag call without
-          # Project and is denied: that needs a reviewed role-stack change first. Overwriting a
-          # foreign API's tag would need a resource-import change set, which the deployer role
-          # denies (DenyResourceImport).
-          - Sid: HttpApiTagWrites
+          # aws:ResourceTag, so the target cannot be checked. Writes of any key EXCEPT Project are
+          # allowed (CloudFormation tags by diff); writing or removing Project is denied below. So
+          # Project reaches a resource only inline at creation. If CloudFormation instead tags a
+          # new API or stage with Project through a follow-up call, the first deploy fails closed.
+          # Resource-type import (ResourcesToImport) is denied for the deployer; auto-import
+          # (ImportExistingResources) has no condition key, but an adopted foreign resource cannot
+          # be tagged Project, so every write and delete on it stays denied.
+          - Sid: HttpApiTagWritesOtherKeys
             Effect: Allow
             Action: [apigateway:POST, apigateway:PUT]
             Resource: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/tags/*'
-            Condition:
-              StringEquals:
-                'aws:RequestTag/Project': !Ref StackName
           - Sid: HttpApiUntagOtherKeys
             Effect: Allow
             Action: apigateway:DELETE
@@ -287,15 +285,16 @@ Resources:
             Condition:
               ForAnyValue:StringEquals:
                 'aws:TagKeys': Project
-          - Sid: HttpApiDenyProjectTagChange
+          # Project can be set only inline at creation (ImportApi body, CreateStage Tags), never
+          # added to an existing resource: an adopted foreign resource (CloudFormation
+          # ImportExistingResources has no condition key) can then never carry the tag.
+          - Sid: HttpApiDenyProjectTagWrites
             Effect: Deny
             Action: [apigateway:POST, apigateway:PUT, apigateway:PATCH]
             Resource: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/tags/*'
             Condition:
               ForAnyValue:StringEquals:
                 'aws:TagKeys': Project
-              StringNotEquals:
-                'aws:RequestTag/Project': !Ref StackName
           - Sid: ScheduleRules
             Effect: Allow
             Action:
