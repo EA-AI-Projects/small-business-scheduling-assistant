@@ -209,7 +209,8 @@ Resources:
     Type: AWS::IAM::ManagedPolicy
     # cfn-lint's IAM action list lacks apigateway:TagResource/UntagResource, which
     # AWS requires for HTTP API stage tags (issue #43 deploy error and the
-    # AWS::ApiGatewayV2::Stage handler schema). Only W3037 is ignored, only here.
+    # AWS::ApiGatewayV2::Stage handler schema). Only W3037 is ignored, only here, but
+    # it covers every action name in this policy: check spelling here by hand.
     Metadata:
       cfn-lint:
         config:
