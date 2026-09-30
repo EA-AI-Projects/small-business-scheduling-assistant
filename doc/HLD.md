@@ -243,7 +243,7 @@ All timestamps should be stored in UTC and rendered in the configured business t
 
 ## 10. Deployment and operations (initial direction)
 
-For the pilot, use AWS account `339713090487` in `us-west-1` with the proposed Lambda, DynamoDB on-demand, and SQS architecture. The first proof of concept includes the authenticated owner calendar. Use Twilio for the California-only SMS pilot; business-number and campaign approval are pending. Keep a staging environment and test with synthetic contacts before enabling real client traffic. This choice does not authorize resource provisioning, deployment, or live SMS.
+For the pilot, use `us-west-1` (the synthetic `dev` stack in the dedicated member account `214965372605`; `pilot` in its own separate account, see [ARCHITECTURE.md](ARCHITECTURE.md)) with the proposed Lambda, DynamoDB on-demand, and SQS architecture. The first proof of concept includes the authenticated owner calendar. Use Twilio for the California-only SMS pilot; business-number and campaign approval are pending. Keep a staging environment and test with synthetic contacts before enabling real client traffic. This choice does not authorize resource provisioning, deployment, or live SMS.
 
 Operational essentials:
 - Health/readiness endpoint and structured, redacted logs.
