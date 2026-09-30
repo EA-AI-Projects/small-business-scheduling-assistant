@@ -753,6 +753,19 @@ Resources:
             Effect: Allow
             Action: [sqs:GetQueueAttributes, sqs:GetQueueUrl]
             Resource: !Sub 'arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:scheduling-*-${Environment}'
+          # Outbox SQS/DLQ proof (issue #87), before outbox dispatch is enabled. Exactly the
+          # two outbox queues: no purge, no SetQueueAttributes, no redrive start, and never the
+          # SMS conversation queues. The harness sends run-scoped intents, receives and deletes
+          # only its own messages (with a per-receive VisibilityTimeout, so no
+          # ChangeMessageVisibility), and inspects then deletes its one DLQ record.
+          - Sid: OutboxQueueHarness
+            Effect: Allow
+            Action: [sqs:SendMessage, sqs:ReceiveMessage, sqs:DeleteMessage]
+            Resource: !Sub 'arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:scheduling-outbox-${Environment}'
+          - Sid: OutboxDeadLetterQueueHarness
+            Effect: Allow
+            Action: [sqs:ReceiveMessage, sqs:DeleteMessage]
+            Resource: !Sub 'arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:scheduling-outbox-dlq-${Environment}'
 
 Outputs:
   DeployerRoleArn:

@@ -508,5 +508,5 @@ Run after teardown. Each check should show nothing for `scheduling-dev`. The dep
 ## 4. What this packet does not do
 
 - It does not deploy, and it did not contact the AWS account. The resource list came from an offline translator run and the prices came from anonymous public HTTP requests.
-- It does not claim the fake SQS consumer and DLQ harness exists. That is a separate reviewed piece of work that must land before outbox dispatch is enabled.
+- It does not claim the fake SQS consumer and DLQ harness has passed. The harness is `backend/tests/test_dev_outbox_queue.py` (issue #87); it needs the deployer role's outbox queue grants from a role-stack change set, and a recorded deployed run, before outbox dispatch is enabled.
 - It does not include Twilio, OpenAI, or custom-domain costs.
