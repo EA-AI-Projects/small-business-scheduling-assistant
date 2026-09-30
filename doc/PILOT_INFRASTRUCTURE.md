@@ -50,7 +50,7 @@ Two roles and one managed policy, all named `deploy-<StackName>-*` so they never
 | --- | --- | --- |
 | `deploy-scheduling-dev-deployer` | The one operator principal in `TrustedPrincipalArn` | Create, review, execute and delete the dev stack's change sets and stack; run the post-deploy checkpoint actions |
 | `deploy-scheduling-dev-cfn-exec` | `cloudformation.amazonaws.com` only, for stack `scheduling-dev` in this account | Create the `template.yaml` resources |
-| `deploy-scheduling-dev-lambda-boundary` (managed policy) | Not assumable | Optional ceiling for the Lambda roles the stack creates |
+| `deploy-scheduling-dev-lambda-boundary` (managed policy) | Not assumable | Enforced ceiling for the Lambda roles the stack creates (see the tradeoff section) |
 
 ### Create the role stack
 
@@ -63,7 +63,7 @@ aws cloudformation deploy --stack-name scheduling-dev-roles --region us-west-1 \
     ArtifactBucketName=<artifact bucket> RequireMfa=true
 ```
 
-After the dev stack exists, optionally tighten Cognito to that one pool by re-running the command with `OwnerUserPoolId=<pool id>` added.
+Then deploy the dev stack with `PermissionsBoundaryArn=<LambdaRoleBoundaryArn output>` added to its parameters. After the dev stack exists, optionally tighten Cognito to that one pool by re-running the command with `OwnerUserPoolId=<pool id>` added.
 
 ### Assume the deployer role
 
@@ -77,7 +77,7 @@ mfa_serial = <operator MFA device ARN>
 region = us-west-1
 ```
 
-If the operator signs in through IAM Identity Center, the session may not carry the MFA flag; deploy the role stack with `RequireMfa=false` and rely on the identity provider's MFA instead.
+The operator is an IAM user, so keep `RequireMfa=true`. The user needs an MFA device registered and its ARN as `mfa_serial`; the CLI then prompts for a token code when the profile first assumes the role. Until a device exists the role cannot be assumed. (`RequireMfa=false` exists only for a federated session that does not carry the MFA flag.)
 
 Every change-set creation and stack deletion must pass the execution role, or the deployer role's own deny statement rejects it:
 
@@ -111,11 +111,17 @@ Execution role:
 
 - Lambda functions `scheduling-dev-*`, their event source mappings and permissions; HTTP APIs (API Gateway v2); EventBridge rules `scheduling-dev-*`; log groups `/aws/lambda/scheduling-dev-*` with retention and metric filters; CloudWatch alarms `scheduling-dev-*`; table `scheduling-dev` (create and update, **not** delete: it is `DeletionPolicy: Retain` and is removed by hand); queues `scheduling-*-dev`; topic `scheduling-alarms-dev` and its subscription; Cognito user pool, client and domain; read of the artifact prefix so CloudFormation can fetch the Lambda zips.
 - IAM: create and manage only roles `scheduling-dev-*`; attach only `AWSLambdaBasicExecutionRole` and `AWSLambdaSQSQueueExecutionRole`; pass those roles only to `lambda.amazonaws.com`. Explicit denies cover attaching `AdministratorAccess*`, `PowerUserAccess` or `IAMFullAccess`, and any IAM action on `deploy-*` roles and policies.
-- **SSM is deliberately omitted.** `template.yaml` only writes the `/scheduling/dev/*` parameter paths into the *Lambda roles'* policies; CloudFormation never reads or creates a parameter. The `/scheduling/dev/*` `ssm:GetParameter` grant lives only in the optional boundary policy.
+- **SSM is deliberately omitted.** `template.yaml` only writes the `/scheduling/dev/*` parameter paths into the *Lambda roles'* policies; CloudFormation never reads or creates a parameter. The `/scheduling/dev/*` `ssm:GetParameter` grant lives only in the boundary policy.
 
 ### Privilege-escalation tradeoff
 
-A CloudFormation role that can create IAM roles is an escalation path unless constrained. By default this template uses **name-prefix scoping, an allowlist of two attachable AWS managed policies, and explicit denies on admin policies**. That does not stop the execution role from writing an arbitrary *inline* policy on a `scheduling-dev-*` role (`iam:PutRolePolicy` cannot be filtered by policy content) and passing it to a Lambda function it created. A permissions boundary closes that hole, so the template also creates one and can enforce it (`EnforcePermissionsBoundary=true`: `iam:CreateRole` is denied unless the boundary is attached, and the boundary cannot be removed). It is **off by default** because it needs a one-line follow-up to `template.yaml` (`PermissionsBoundary` under `Globals.Function`, taking the boundary ARN as a parameter), which this change does not make; enforcing it first would make the dev stack creation fail. Recommendation: make that follow-up before authorizing the role stack, and deploy with the boundary enforced. In the default mode the residual risk is bounded because only a reviewed, owner-authorized change set can use the execution role, and only the deployer can start one.
+A CloudFormation role that can create IAM roles is an escalation path unless constrained. This template layers **name-prefix scoping, an allowlist of two attachable AWS managed policies, explicit denies on admin policies, and a permissions boundary**. `iam:PutRolePolicy` cannot be filtered by policy content, so without a boundary the execution role could write an arbitrary *inline* policy on a `scheduling-dev-*` role and pass it to a Lambda function it created. The boundary closes that hole: `EnforcePermissionsBoundary` defaults to **true**, so `iam:CreateRole` and `iam:PutRolePermissionsBoundary` are denied unless the role carries the boundary policy from the role stack, `iam:DeleteRolePermissionsBoundary` is always denied, and every IAM action on `deploy-*` roles and policies (including the boundary policy: edit, new version, detach, delete) is denied. Whatever an inline policy grants, the effective permissions of the function roles cannot exceed the boundary (their own log group, the dev table, the `scheduling-*-dev` queues, and `/scheduling/dev/*` SSM reads).
+
+`template.yaml` has an optional `PermissionsBoundaryArn` parameter (default empty), applied through `Globals.Function.PermissionsBoundary` under a condition. Empty means unchanged behavior for local, CI and any unscoped deployment; **it must be set when deploying through the scoped execution role**, or role creation is denied. Order of creation: role stack first, then the dev stack with `PermissionsBoundaryArn=<LambdaRoleBoundaryArn output>` (also exported as `<role stack name>-LambdaRoleBoundaryArn`). Setting `EnforcePermissionsBoundary=false` is only for deploying an older `template.yaml` that lacks the parameter.
+
+| Dev stack parameter | Value at the checkpoint |
+| --- | --- |
+| `PermissionsBoundaryArn` | The role stack's `LambdaRoleBoundaryArn` output (never a real ARN in the repository) |
 
 ### Known limits of the scoping
 

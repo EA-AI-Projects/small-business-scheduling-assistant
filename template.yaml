@@ -57,8 +57,17 @@ Parameters:
     AllowedValues: [disabled, authorized]
     Default: disabled
     Description: Enable receipt handoff only with separately authorized SMS ingress and sending.
+  PermissionsBoundaryArn:
+    Type: String
+    Default: ''
+    AllowedPattern: '|arn:aws:iam::[0-9]{12}:policy/[A-Za-z0-9+=,.@_/-]+'
+    Description: >-
+      Optional IAM permissions boundary for the Lambda roles this stack creates.
+      Required when deploying through the scoped dev execution role
+      (infra/dev-deploy-roles.yaml, LambdaRoleBoundaryArn output). Empty keeps the roles unbounded.
 
 Conditions:
+  UsePermissionsBoundary: !Not [!Equals [!Ref PermissionsBoundaryArn, '']]
   SmsIngressRequested: !Equals [!Ref EnableSmsIngress, 'true']
   SmsConversationRequested: !And
     - !Condition SmsIngressRequested
@@ -72,6 +81,7 @@ Globals:
     CodeUri: backend/
     MemorySize: 256
     Timeout: 30
+    PermissionsBoundary: !If [UsePermissionsBoundary, !Ref PermissionsBoundaryArn, !Ref 'AWS::NoValue']
     Environment:
       Variables:
         SCHEDULING_TABLE_NAME: !Ref SchedulingTable

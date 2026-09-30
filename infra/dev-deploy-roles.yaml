@@ -68,12 +68,12 @@ Parameters:
   EnforcePermissionsBoundary:
     Type: String
     AllowedValues: ['true', 'false']
-    Default: 'false'
+    Default: 'true'
     Description: >-
-      When true, the execution role may create roles only with the boundary
-      policy from this stack attached. template.yaml must first set
-      PermissionsBoundary on its functions (proposed follow-up), otherwise
-      the dev stack creation will fail.
+      When true, the execution role may create or re-boundary roles only with
+      the boundary policy from this stack attached, so the dev stack must be
+      deployed with PermissionsBoundaryArn set to the LambdaRoleBoundaryArn
+      output. Set false only to deploy a template.yaml that predates that parameter.
 
 Conditions:
   MfaRequired: !Equals [!Ref RequireMfa, 'true']
@@ -406,7 +406,9 @@ Resources:
                   - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AdministratorAccess*'
                   - !Sub 'arn:${AWS::Partition}:iam::aws:policy/PowerUserAccess'
                   - !Sub 'arn:${AWS::Partition}:iam::aws:policy/IAMFullAccess'
-          - Sid: NeverTouchDeployRoles
+          # Also covers the boundary managed policy (deploy-<stack>-lambda-boundary): it cannot
+          # be edited, versioned, detached or deleted through the execution role.
+          - Sid: NeverTouchDeployRolesOrBoundaryPolicy
             Effect: Deny
             Action: 'iam:*'
             Resource:
@@ -625,5 +627,7 @@ Outputs:
     Description: Pass as --role-arn to sam deploy and aws cloudformation delete-stack.
     Value: !GetAtt CloudFormationExecutionRole.Arn
   LambdaRoleBoundaryArn:
-    Description: Permissions boundary for function roles once template.yaml sets it.
+    Description: Pass as the PermissionsBoundaryArn parameter of the dev stack.
     Value: !Ref LambdaRoleBoundary
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaRoleBoundaryArn'
