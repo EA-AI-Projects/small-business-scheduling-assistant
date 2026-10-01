@@ -808,6 +808,8 @@ Resources:
               - !Sub 'arn:${AWS::Partition}:amplify:${AWS::Region}:${AWS::AccountId}:apps/${AmplifyAppId}'
               - !Sub 'arn:${AWS::Partition}:amplify:${AWS::Region}:${AWS::AccountId}:apps/${AmplifyAppId}/branches/main'
               - !Sub 'arn:${AWS::Partition}:amplify:${AWS::Region}:${AWS::AccountId}:apps/${AmplifyAppId}/branches/main/jobs/*'
+              # CreateDeployment is authorized on the deployments resource (verified on dev, #94).
+              - !Sub 'arn:${AWS::Partition}:amplify:${AWS::Region}:${AWS::AccountId}:apps/${AmplifyAppId}/branches/main/deployments/*'
 
 Outputs:
   DeployerRoleArn:
