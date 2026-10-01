@@ -12,6 +12,7 @@ type Schemas = components["schemas"];
 export type ClientProfileBody = Schemas["ClientProfileBody"];
 export type ClientNoteBody = Schemas["ClientNoteBody"];
 export type LegalHoldBody = Schemas["LegalHoldBody"];
+export type InPersonConsentBody = Schemas["InPersonConsentBody"];
 export type DecisionBody = Schemas["DecisionBody"];
 export type EditAppointmentBody = Schemas["EditAppointmentBody"];
 export type BlockBody = Schemas["BlockBody"];
@@ -88,6 +89,17 @@ export interface ClientNote {
   created_by: string;
   created_at: string;
   legal_hold_reason: string | null;
+}
+
+/** A text that the carrier reported as failed or undelivered (`SmsDeliveryStatus`). */
+export interface SmsDeliveryFailure {
+  business_id: string;
+  outbox_id: string;
+  provider_id: string;
+  status: string;
+  recipient: string;
+  observed_at: string;
+  error_code: string | null;
 }
 
 export interface LocalWindow {

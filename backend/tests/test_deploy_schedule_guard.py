@@ -25,6 +25,13 @@ def guard_block() -> str:
     return text[start:end]
 
 
+def drift_warning_block() -> str:
+    text = SCRIPT.read_text()
+    start = text.index("schedule_parameter() {")
+    end = text.index('if [[ "${SMOKE_ONLY}" -eq 1 ]]', start)
+    return text[start:end]
+
+
 def run_guard(
     changes: list[dict[str, str]],
     template_rules: dict[str, dict[str, object]],
@@ -77,9 +84,12 @@ stack_resources() {{
     *) jq -r 'keys[] | [., .] | @tsv' {tmp_path}/mappings.json ;;
   esac
 }}
+stack_parameter() {{ jq -r --arg k "$1" '.[$k]' {tmp_path}/params.json; }}
 """
+    (tmp_path / "params.json").write_text(json.dumps(params))
     return subprocess.run(
-        ["bash", "-c", prelude + guard_block()], capture_output=True, text=True, check=False
+        ["bash", "-c", prelude + drift_warning_block() + guard_block() + "warn_schedule_drift\n"],
+        capture_output=True, text=True, check=False
     )
 
 
@@ -145,6 +155,11 @@ def test_parameter_state_change_needs_explicit_param(tmp_path: Path) -> None:
 
 
 def test_drift_warning_on_unmodified_rule(tmp_path: Path) -> None:
+    script = SCRIPT.read_text()
+    warning_call = script.index("warn_schedule_drift\n")
+    assert warning_call < script.index('if [[ -z "${CHANGESET}" ]]')
+    assert warning_call < script.index('if [[ "${CS_STATUS}" == "FAILED" ]]')
+    assert warning_call < script.index('if [[ "${COUNT}" -eq 0 ]]')
     result = run_guard([], {}, {"HoldExpiryScheduleState": "ENABLED"}, {HOLD: "DISABLED"}, [], tmp_path)
     assert result.returncode == 0
     assert f"WARNING: {HOLD} is DISABLED live but HoldExpiryScheduleState=ENABLED" in result.stdout
@@ -306,8 +321,35 @@ def test_other_mapping_must_be_disabled(tmp_path: Path) -> None:
     assert ok.returncode == 0, ok.stdout
 
 
-def test_conversation_mapping_is_not_guarded(tmp_path: Path) -> None:
+def test_conversation_mapping_exact_wiring_is_governed_by_its_condition(tmp_path: Path) -> None:
     change = {"Action": "Modify", "LogicalResourceId": RECEIPTS, "PhysicalResourceId": RECEIPTS, "Mapping": "yes"}
     template = {RECEIPTS: {"Enabled": {"Fn::If": ["SmsConversationRequested", True, False]}}}
     result = run_guard([change], template, {}, {}, [], tmp_path)
     assert result.returncode == 0, result.stdout
+    assert "governed by SmsConversationRequested" in result.stdout
+
+
+@pytest.mark.parametrize("enabled", [
+    {"Fn::If": ["SmsConversationRequested", False, True]},
+    {"Fn::If": ["OtherCondition", True, False]},
+    True,
+    False,
+    "true",
+])
+def test_conversation_mapping_other_wiring_is_refused(enabled: object, tmp_path: Path) -> None:
+    change = {"Action": "Modify", "LogicalResourceId": RECEIPTS, "PhysicalResourceId": RECEIPTS, "Mapping": "yes"}
+    result = run_guard([change], {RECEIPTS: {"Enabled": enabled}}, {}, {}, [], tmp_path)
+    assert result.returncode == 1
+    assert "cannot resolve the target state" in result.stdout
+
+
+def test_conversation_mapping_missing_enabled_is_refused(tmp_path: Path) -> None:
+    change = {"Action": "Modify", "LogicalResourceId": RECEIPTS, "PhysicalResourceId": RECEIPTS, "Mapping": "yes"}
+    result = run_guard([change], {RECEIPTS: {}}, {}, {}, [], tmp_path)
+    assert result.returncode == 1
+
+
+def test_no_change_drift_warning_covers_outbox_dispatch(tmp_path: Path) -> None:
+    result = run_guard([], {}, {"OutboxDispatchScheduleState": "ENABLED"}, {OUTBOX: "DISABLED"}, [], tmp_path)
+    assert result.returncode == 0, result.stdout
+    assert f"WARNING: {OUTBOX} is DISABLED live but OutboxDispatchScheduleState=ENABLED" in result.stdout

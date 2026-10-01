@@ -204,6 +204,39 @@ smoke_test() {
   [[ "${failed}" -eq 0 ]] || die "smoke test failed"
 }
 
+schedule_parameter() {
+  case "$1" in
+    HoldExpiryFunctionSweep) printf 'HoldExpiryScheduleState' ;;
+    NoteRetentionFunctionDaily) printf 'NoteRetentionScheduleState' ;;
+    SmsRetentionFunctionDaily) printf 'SmsRetentionScheduleState' ;;
+    OutboxDispatchFunctionSweep) printf 'OutboxDispatchScheduleState' ;;
+    *) printf '' ;;
+  esac
+}
+
+# Warn before creating a change set: SAM may report no changes without returning an ARN.
+warn_schedule_drift() {
+  local logical physical param want have
+  while IFS=$'\t' read -r logical physical; do
+    param="$(schedule_parameter "${logical}")"
+    [[ -n "${param}" ]] || continue
+    want="$(stack_parameter "${param}")"
+    have="$(aws_cli events describe-rule --name "${physical}" --query State --output text)"
+    if [[ -n "${want}" && "${have}" != "${want}" ]]; then
+      info "WARNING: ${logical} is ${have} live but ${param}=${want}. A later deploy that modifies the rule would set it to ${want} (refused unless --param ${param} is passed)."
+    fi
+  done < <(stack_resources AWS::Events::Rule)
+  # The sender mapping drifts the same way (for example after an emergency --no-enabled).
+  while IFS=$'\t' read -r logical physical; do
+    [[ "${logical}" == "SmsSenderFunctionOutbox" ]] || continue
+    want="$(stack_parameter SmsSenderMappingState)"
+    have="$(sender_mapping_state "${physical}")"
+    if [[ -n "${want}" && "${have}" != "${want}" ]]; then
+      info "WARNING: ${logical} is ${have} live but SmsSenderMappingState=${want}. A later deploy that modifies the mapping would set it to ${want} (refused unless --param SmsSenderMappingState=${want} is passed)."
+    fi
+  done < <(stack_resources AWS::Lambda::EventSourceMapping)
+}
+
 if [[ "${SMOKE_ONLY}" -eq 1 ]]; then
   if [[ "${DRY_RUN}" -eq 1 ]]; then
     info "+ smoke test: GET /v1/owner/businesses/<BusinessId>/policy without a token expects 401; CORS preflights"
@@ -247,6 +280,8 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
   info "+ smoke test: GET /v1/owner/businesses/<BusinessId>/policy without a token expects 401; CORS preflights"
   exit 0
 fi
+
+warn_schedule_drift
 
 SAM_LOG="$(mktemp)"
 trap 'rm -f "${SAM_LOG}"; cleanup' EXIT
@@ -322,15 +357,6 @@ info "Parameters: unchanged from the live stack."
 # (the live value, or the --param override). A missing State means ENABLED (EventBridge default).
 # - A rule with a *ScheduleState parameter: live vs target; a change needs an explicit --param.
 # - Any other rule (a new one): its target must be DISABLED, always.
-schedule_parameter() {
-  case "$1" in
-    HoldExpiryFunctionSweep) printf 'HoldExpiryScheduleState' ;;
-    NoteRetentionFunctionDaily) printf 'NoteRetentionScheduleState' ;;
-    SmsRetentionFunctionDaily) printf 'SmsRetentionScheduleState' ;;
-    OutboxDispatchFunctionSweep) printf 'OutboxDispatchScheduleState' ;;
-    *) printf '' ;;
-  esac
-}
 RULE_ROWS="$(jq -r '.Changes[].ResourceChange
   | select(.ResourceType == "AWS::Events::Rule" and (.Action == "Add" or .Action == "Modify" or .Replacement == "True" or .Replacement == "Conditional"))
   | [.Action, .LogicalResourceId, (.PhysicalResourceId // "")] | @tsv' <<<"${DESCRIPTION}")"
@@ -400,8 +426,8 @@ fi
 # Sender mapping guard: the SmsSender outbox mapping's State must not change silently either.
 # Live State comes from lambda get-event-source-mapping; the target is the Enabled property in the
 # change set's processed template (exact wiring only, see below). Only an added, modified or
-# replaced mapping is checked. Any other such mapping, except the conversation mapping, must be
-# DISABLED.
+# replaced mapping is checked. The conversation mapping must keep exactly
+# Fn::If [SmsConversationRequested, true, false]; any other such mapping must be DISABLED.
 SENDER_MAPPING="SmsSenderFunctionOutbox"
 SENDER_PARAM="SmsSenderMappingState"
 CONVERSATION_MAPPING="SmsConversationFunctionReceipts"
@@ -418,12 +444,10 @@ if [[ -n "${MAPPING_ROWS}" ]]; then
   info "Event source mapping states (live -> target):"
   while IFS=$'\t' read -r map_action map_logical map_physical; do
     [[ -n "${map_logical}" ]] || continue
-    # The conversation mapping is governed by SmsConversationRequested and is not guarded here.
-    [[ "${map_logical}" != "${CONVERSATION_MAPPING}" ]] || continue
     # Sender mapping: Enabled must be exactly Fn::If [SmsSenderMappingEnabled, true, false] and the
     # condition exactly Equals [Ref SmsSenderMappingState, ENABLED]. Any other mapping: a literal
     # false. Anything else is unresolved and refused.
-    map_target="$(jq -r --arg id "${map_logical}" --arg sender "${SENDER_MAPPING}" --argjson cs "${DESCRIPTION}" '
+    map_target="$(jq -r --arg id "${map_logical}" --arg sender "${SENDER_MAPPING}" --arg conv "${CONVERSATION_MAPPING}" --argjson cs "${DESCRIPTION}" '
       def flag: if . == true or . == "true" then "ENABLED" elif . == false or . == "false" then "DISABLED" else "UNRESOLVED" end;
       (.Resources[$id].Properties.Enabled) as $e
       | if $id == $sender then
@@ -432,10 +456,18 @@ if [[ -n "${MAPPING_ROWS}" ]]; then
             ([$cs.Parameters[] | select(.ParameterKey == "SmsSenderMappingState") | .ParameterValue] | first // "UNRESOLVED")
             | if . == "ENABLED" or . == "DISABLED" then . else "UNRESOLVED" end
           else "UNRESOLVED" end)
+        elif $id == $conv then
+          (if $e == {"Fn::If": ["SmsConversationRequested", true, false]} then "GOVERNED" else "UNRESOLVED" end)
         elif $e == null then "ENABLED"
         else ($e | flag) end' <<<"${PROCESSED}")"
+    # The conversation mapping is governed by the SmsConversationRequested condition (not by a
+    # parameter of this guard), but only in its exact wiring; any other shape is refused.
+    if [[ "${map_logical}" == "${CONVERSATION_MAPPING}" && "${map_target}" == "GOVERNED" ]]; then
+      info "  ${map_logical} [${map_action}]: governed by SmsConversationRequested"
+      continue
+    fi
     [[ "${map_target}" == "ENABLED" || "${map_target}" == "DISABLED" ]] ||
-      die "refusing: cannot resolve the target state of ${map_logical} (got ${map_target}; the sender mapping needs the exact SmsSenderMappingEnabled wiring)."
+      die "refusing: cannot resolve the target state of ${map_logical} (got ${map_target}; the sender mapping needs the exact SmsSenderMappingEnabled wiring and the conversation mapping the exact SmsConversationRequested wiring)."
     if [[ "${map_action}" == "Add" || -z "${map_physical}" ]]; then
       map_live="(new)"
     else
@@ -460,26 +492,6 @@ if [[ -n "${MAPPING_ROWS}" ]]; then
     [[ "${map_note}" != *REFUSED* ]] || die "refusing: ${map_logical}${map_note}. Turning the sender mapping on needs live-SMS authorization (#91)."
   done <<<"${MAPPING_ROWS}"
 fi
-
-# Every run: warn when a parameterized schedule's live state differs from its parameter value
-# (drift, for example after an emergency disable-rule), even if this change set leaves it alone.
-while IFS=$'\t' read -r logical physical; do
-  param="$(schedule_parameter "${logical}")"
-  [[ -n "${param}" ]] || continue
-  want="$(jq -r --arg k "${param}" '[.Parameters[] | select(.ParameterKey == $k) | .ParameterValue] | first // ""' <<<"${DESCRIPTION}")"
-  have="$(aws_cli events describe-rule --name "${physical}" --query State --output text)"
-  if [[ -n "${want}" && "${have}" != "${want}" ]]; then
-    info "WARNING: ${logical} is ${have} live but ${param}=${want}. A later deploy that modifies the rule would set it to ${want} (refused unless --param ${param} is passed)."
-  fi
-done < <(stack_resources AWS::Events::Rule)
-while IFS=$'\t' read -r logical physical; do
-  [[ "${logical}" == "${SENDER_MAPPING}" ]] || continue
-  want="$(jq -r '[.Parameters[] | select(.ParameterKey == "SmsSenderMappingState") | .ParameterValue] | first // ""' <<<"${DESCRIPTION}")"
-  have="$(sender_mapping_state "${physical}")"
-  if [[ -n "${want}" && "${have}" != "${want}" ]]; then
-    info "WARNING: ${logical} is ${have} live but ${SENDER_PARAM}=${want}. A later deploy that modifies the mapping would set it to ${want} (refused unless --param ${SENDER_PARAM} is passed)."
-  fi
-done < <(stack_resources AWS::Lambda::EventSourceMapping)
 
 if [[ "${COUNT}" -eq 0 ]]; then
   info "The change set has no changes. It is deleted on exit."
