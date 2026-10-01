@@ -45,10 +45,6 @@ Parameters:
   TwilioStatusUrl:
     Type: String
     Default: https://example.invalid/webhooks/sms/status
-  AuthorizedSmsRecipients:
-    Type: String
-    NoEcho: true
-    Default: ''
   SmsSendEnabled:
     Type: String
     AllowedValues: [disabled, authorized]
@@ -446,7 +442,6 @@ Resources:
           SCHEDULING_TABLE_NAME: !Ref SchedulingTable
           BUSINESS_ID: !Ref BusinessId
           SMS_SEND_ENABLED: !Ref SmsSendEnabled
-          AUTHORIZED_SMS_RECIPIENTS: !Ref AuthorizedSmsRecipients
           TWILIO_AUTH_TOKEN_PARAM: !Sub '/scheduling/${Environment}/twilio/auth-token'
           TWILIO_ACCOUNT_SID: !Ref TwilioAccountSid
           TWILIO_BUSINESS_NUMBER: !Ref TwilioBusinessNumber

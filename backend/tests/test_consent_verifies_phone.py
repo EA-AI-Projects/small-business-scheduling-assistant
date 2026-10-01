@@ -29,7 +29,7 @@ from scheduling.domain.sms_ingress import (
 from scheduling.twilio_webhooks import create_twilio_ingress_app
 
 NOW = datetime(2026, 9, 28, 17, tzinfo=UTC)
-PHONE = "+14155550101"
+PHONE = "+14155552671"
 URL = "https://sms.example.test/webhooks/sms/inbound"
 TOKEN = "synthetic-auth-token"
 
@@ -134,8 +134,7 @@ def test_sender_refuses_until_consent_then_sends() -> None:
     repository, _, store = world()
     messages = Messages()
     sender = TwilioSmsSender(messages, Records(repository), store,  # type: ignore[arg-type]
-                             "pilot", "+14155550000", "+14155559999",
-                             authorized_recipients=frozenset({PHONE, "+14155559999"}))
+                             "pilot", "+14155550000", "+14155559999")
     intent = OutboxRecord("pilot", "outbox-1", "visit-12345678", "client", "hold-pending", 1,
                           DeliveryState.SENDING, NOW, NOW, NOW)
     with pytest.raises(PermanentDeliveryFailure, match="CONSENT_REQUIRED"):

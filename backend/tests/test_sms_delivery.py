@@ -1,5 +1,6 @@
 """Outbound SMS uses committed intents, trusted destinations and consent."""
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -24,7 +25,7 @@ class Records:
     def __init__(self) -> None:
         self.appointment = Appointment("visit-12345678", "pilot", "client-1", NOW, NOW.replace(hour=18),
                                        CalendarStatus.PENDING_APPROVAL, NOW.replace(hour=19), 60, 0, 1)
-        self.profile = ClientProfile("pilot", "client-1", "Synthetic Client", "+14155550101",
+        self.profile = ClientProfile("pilot", "client-1", "Synthetic Client", "+14155552671",
                                      "123 Test Street", HomeSize.SMALL, 60, True, 1,
                                      NOW, NOW, NOW)
 
@@ -86,8 +87,7 @@ def record(recipient: str = "client", template: str = "hold-pending",
 def setup() -> tuple[TwilioSmsSender, Messages, Consent, Records]:
     messages, consent, records = Messages(), Consent(), Records()
     sender = TwilioSmsSender(messages, records, consent, "pilot", "+14155550000",
-                             "+14155559999", authorized_recipients=frozenset({
-                                 "+14155550101", "+14155559999"}))
+                             "+14155559999")
     return sender, messages, consent, records
 
 
@@ -111,7 +111,6 @@ def test_callback_identifies_committed_outbox_intent() -> None:
     messages, consent, records = Messages(), Consent(), Records()
     sender = TwilioSmsSender(
         messages, records, consent, "pilot", "+14155550000", "+14155559999",
-        authorized_recipients=frozenset({"+14155550101"}),
         status_callback="https://sms.example.test/webhooks/sms/status",
     )
     sender.deliver(record())
@@ -130,13 +129,42 @@ def test_unknown_or_stale_intent_never_sends() -> None:
     assert messages.calls[0]["to"] == "+14155559999"
 
 
-def test_unapproved_test_number_is_never_sent() -> None:
-    _, messages, consent, records = setup()
-    sender = TwilioSmsSender(messages, records, consent, "pilot", "+14155550000",
-                             "+14155559999", authorized_recipients=frozenset({
-                                 "+14155559999"}))
-    with pytest.raises(PermanentDeliveryFailure, match="RECIPIENT_NOT_AUTHORIZED"):
+def test_consented_verified_client_is_sent_to_without_any_allowlist() -> None:
+    sender, messages, _, records = setup()
+    assert sender.deliver(record()) == "SM-synthetic"
+    assert messages.calls[0]["to"] == records.profile.phone_e164
+
+
+def test_unverified_client_is_refused() -> None:
+    sender, messages, _, records = setup()
+    records.profile = replace(records.profile, phone_verified_at=None)
+    with pytest.raises(PermanentDeliveryFailure, match="CONSENT_REQUIRED"):
         sender.deliver(record())
+    assert messages.calls == []
+
+
+@pytest.mark.parametrize("number", ["+14155550100", "+14155550150", "+12125550199", "+16505550100"])
+def test_fictional_numbers_never_reach_twilio(number: str) -> None:
+    sender, messages, _, records = setup()
+    records.profile = replace(records.profile, phone_e164=number)
+    with pytest.raises(PermanentDeliveryFailure, match="FICTIONAL_NUMBER"):
+        sender.deliver(record())
+    assert messages.calls == []
+
+
+def test_numbers_just_outside_the_fictional_range_are_sent() -> None:
+    for number in ("+14155550200", "+14155550099"):
+        sender, messages, _, records = setup()
+        records.profile = replace(records.profile, phone_e164=number)
+        assert sender.deliver(record()) == "SM-synthetic"
+        assert messages.calls[0]["to"] == number
+
+
+def test_fictional_owner_number_is_refused() -> None:
+    messages, consent, records = Messages(), Consent(), Records()
+    sender = TwilioSmsSender(messages, records, consent, "pilot", "+14155550000", "+14155550123")
+    with pytest.raises(PermanentDeliveryFailure, match="FICTIONAL_NUMBER"):
+        sender.deliver(record("owner", "hold-request"))
     assert messages.calls == []
 
 
@@ -158,13 +186,13 @@ def test_owner_stop_blocks_owner_notifications() -> None:
 def test_conversation_reply_uses_persisted_verified_receipt_and_current_consent() -> None:
     sender, messages, consent, _ = setup()
     consent.reply_receipt = InboundReceipt(
-        "pilot", "SM-in", "+14155550101", "+14155550000",
+        "pilot", "SM-in", "+14155552671", "+14155550000",
         "Book 2026-10-01", NOW, SenderRole.CLIENT, "client-1", Keyword.OTHER, True)
     consent.reply_text = "Please send one exact date and time."
     reply = OutboxRecord("pilot", "sms-reply#SM-in", "SM-in", "client",
                          "conversation-reply", 0, DeliveryState.SENDING, NOW, NOW, NOW)
     assert sender.deliver(reply) == "SM-synthetic"
-    assert messages.calls[0]["to"] == "+14155550101"
+    assert messages.calls[0]["to"] == "+14155552671"
     assert messages.calls[0]["body"] == consent.reply_text
     consent.opted_out = True
     with pytest.raises(PermanentDeliveryFailure, match="OPTED_OUT"):
@@ -179,7 +207,7 @@ def test_conversation_reply_uses_persisted_verified_receipt_and_current_consent(
 def test_conversation_reply_rejects_missing_body_or_forged_destination() -> None:
     sender, messages, consent, _ = setup()
     consent.reply_receipt = InboundReceipt(
-        "pilot", "SM-in", "+14155550101", "+14155550000",
+        "pilot", "SM-in", "+14155552671", "+14155550000",
         "Book 2026-10-01", NOW, SenderRole.CLIENT, "client-1", Keyword.OTHER, True)
     consent.reply_text = "Safe clarification"
     reply = OutboxRecord("pilot", "sms-reply#SM-in", "SM-in", "owner",
