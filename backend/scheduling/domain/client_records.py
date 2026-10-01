@@ -107,7 +107,8 @@ class ClientRecordRepository(Protocol):
     def list_notes(self, business_id: str, client_id: str) -> tuple[ClientNote, ...]: ...
     def put_note(self, note: ClientNote) -> None: ...
     def update_note_hold(self, before: ClientNote, after: ClientNote) -> None: ...
-    def delete_note(self, note: ClientNote) -> None: ...
+    def delete_note(self, note: ClientNote, expected_revision: int | None = None) -> None: ...
+    def read_revision(self, business_id: str) -> int: ...
     def last_visit_end(self, business_id: str, client_id: str,
                        now: datetime) -> datetime | None: ...
 
@@ -218,13 +219,14 @@ class ClientRecordService:
         if not notes:
             return 0
         instant = _utc(now)
+        revision = self._repository.read_revision(business_id)
         last_visit = self._repository.last_visit_end(business_id, client_id, instant)
         expired = [note for note in notes
                    if note_expired(note, last_visit, instant)]
         deleted = 0
         for note in expired:
             try:
-                self._repository.delete_note(note)
+                self._repository.delete_note(note, revision)
             except RecordConflict:
                 # A concurrent change or legal hold wins; the next run rechecks it.
                 continue

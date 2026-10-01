@@ -17,6 +17,8 @@ class RecordingClient:
         self.transactions: list[dict[str, Any]] = []
         self.scans: list[dict[str, Any]] = []
         self.scan_pages: list[dict[str, Any]] = []
+        self.queries: list[dict[str, Any]] = []
+        self.query_pages: list[dict[str, Any]] = []
         self.updates: list[dict[str, Any]] = []
         self.reject = False
         self.reject_update = False
@@ -24,8 +26,9 @@ class RecordingClient:
     def get_item(self, **_kwargs: Any) -> dict[str, Any]:
         return {}
 
-    def query(self, **_kwargs: Any) -> dict[str, Any]:
-        return {"Items": []}
+    def query(self, **kwargs: Any) -> dict[str, Any]:
+        self.queries.append(kwargs)
+        return self.query_pages.pop(0) if self.query_pages else {"Items": []}
 
     def scan(self, **kwargs: Any) -> dict[str, Any]:
         self.scans.append(kwargs)
@@ -91,6 +94,12 @@ def test_note_keys_are_client_scoped_and_delete_respects_legal_hold() -> None:
     repository.delete_note(note)
     condition = client.transactions[1]["TransactItems"][0]["Delete"]["ConditionExpression"]
     assert "attribute_not_exists(legal_hold_reason)" in condition
+    repository.delete_note(note, expected_revision=7)
+    guarded = client.transactions[2]["TransactItems"]
+    assert guarded[0]["ConditionCheck"]["Key"]["SK"] == {"S": "CALENDAR#REVISION"}
+    assert guarded[0]["ConditionCheck"]["ExpressionAttributeValues"] == {
+        ":expected": {"N": "7"}}
+    assert "Delete" in guarded[1]
 
 
 def test_legal_hold_updates_are_conditional() -> None:
@@ -114,15 +123,19 @@ def test_legal_hold_updates_are_conditional() -> None:
         raise AssertionError("Expected conditional legal hold conflict")
 
 
-def test_last_visit_scans_strongly_and_paginates() -> None:
+def test_last_visit_queries_client_partition_strongly() -> None:
     client = RecordingClient()
-    client.scan_pages = [
-        {"Items": [{"end_at": {"S": "2026-08-01T10:00:00+00:00"}}],
-         "LastEvaluatedKey": {"PK": {"S": "page-1"}}},
-        {"Items": [{"end_at": {"S": "2026-09-01T10:00:00+00:00"}}]},
-    ]
+    client.query_pages = [{"Items": [{"end_at": {"S": "2026-09-01T10:00:00+00:00"}}]}]
     repository = DynamoDBCalendarRepository(client, "scheduling")
     assert repository.last_visit_end("business-1", "client-1", NOW) == datetime(
         2026, 9, 1, 10, tzinfo=UTC)
-    assert client.scans[0]["ConsistentRead"] is True
-    assert client.scans[1]["ExclusiveStartKey"] == {"PK": {"S": "page-1"}}
+    query = client.queries[0]
+    assert query["ConsistentRead"] is True
+    assert query["Limit"] == 1
+    assert query["ScanIndexForward"] is False
+    assert query["ExpressionAttributeValues"][":pk"]["S"] == repository._visit_partition(
+        "business-1", "client-1")
+    assert query["ExpressionAttributeValues"][":end"]["S"].startswith(
+        "END#2026-09-28T15:00:00")
+    assert not client.scans
+    assert repository.last_visit_end("business-1", "never-visited", NOW) is None

@@ -128,6 +128,23 @@ def test_never_visited_notes_expire_from_creation_and_legal_hold_survives() -> N
     assert repository.list_notes(BUSINESS, "client-1") == ()
 
 
+def test_purge_skips_note_when_calendar_changes_after_visit_read() -> None:
+    class RacingRepository(InMemoryCalendarRepository):
+        def last_visit_end(self, business_id: str, client_id: str,
+                           now: datetime) -> datetime | None:
+            result = super().last_visit_end(business_id, client_id, now)
+            self._revisions[business_id] += 1
+            return result
+
+    repository = RacingRepository()
+    OwnerPolicyService(repository, lambda: NOW).seed(BUSINESS, "owner-1", "seed")
+    service = ClientRecordService(repository)
+    save(service, "client-1", "+14155550101")
+    note = service.create_note(BUSINESS, "client-1", None, "Synthetic note", "owner-1", NOW)
+    assert service.purge_expired_notes(BUSINESS, "client-1", NOW.replace(year=2027)) == 0
+    assert repository.read_note(BUSINESS, "client-1", note.note_id) == note
+
+
 def test_owner_routes_require_verified_business_identity() -> None:
     repository, _ = ready()
 
