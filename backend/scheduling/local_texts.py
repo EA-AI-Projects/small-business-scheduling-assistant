@@ -45,6 +45,7 @@ from scheduling.domain.lifecycle import LifecycleService
 from scheduling.domain.outbox import PermanentDeliveryFailure
 from scheduling.domain.sms_ingress import (
     HELP_WORDS,
+    START_WORDS,
     STOP_WORDS,
     ConsentEvidence,
     InboundReceipt,
@@ -162,7 +163,7 @@ class TextSimulator:
             start = len(self._log)
             self._append(party, label, "in", "text", text)
             word = text.upper()
-            if word in STOP_WORDS or word in HELP_WORDS or word == "START":
+            if word in STOP_WORDS or word in HELP_WORDS or word in START_WORDS:
                 self._append(party, label, "note", "note",
                              "Keyword texts are handled by Twilio Advanced Opt-Out and are "
                              "not simulated here. Nothing changed.")
