@@ -63,6 +63,48 @@ describe("SettingsTab", () => {
     expect(request).toHaveBeenCalledWith("/policy/seed", expect.objectContaining({ method: "POST", idempotent: true }));
     expect(notify).toHaveBeenCalledWith("Pilot policy loaded", undefined);
     expect(screen.queryByRole("button", { name: "Load pilot policy" })).not.toBeInTheDocument();
+    expect(exceptionForm()).toBeInTheDocument();
+  });
+
+  it("disables the seed button while the request is in flight", async () => {
+    let releaseSeed: (() => void) | undefined;
+    const pendingSeed = new Promise<void>((resolve) => { releaseSeed = resolve; });
+    let seeded = false;
+    setup(async (method, path) => {
+      if (path === "/policy/seed" && method === "POST") {
+        await pendingSeed;
+        seeded = true;
+        return { status: 200, body: {} };
+      }
+      if (path === "/policy") return seeded ? { status: 200, body: POLICY }
+        : { status: 404, body: { error: { code: "POLICY_NOT_CONFIGURED", message: "missing" } } };
+      return undefined;
+    });
+    const button = await screen.findByRole("button", { name: "Load pilot policy" });
+    await userEvent.click(button);
+    expect(button).toBeDisabled();
+    releaseSeed?.();
+    expect(await screen.findByText("Timezone: America/Los_Angeles")).toBeInTheDocument();
+  });
+
+  it("refreshes when another owner seeded the policy first", async () => {
+    let seededElsewhere = false;
+    const { notify } = setup((method, path) => {
+      if (path === "/policy/seed" && method === "POST") {
+        seededElsewhere = true;
+        return { status: 409, body: { error: { code: "STALE_REVISION",
+          message: "Calendar revision changed" } } };
+      }
+      if (path === "/policy") return seededElsewhere ? { status: 200, body: POLICY }
+        : { status: 404, body: { error: { code: "POLICY_NOT_CONFIGURED", message: "missing" } } };
+      return undefined;
+    });
+    await userEvent.click(await screen.findByRole("button", { name: "Load pilot policy" }));
+    expect(await screen.findByText("Timezone: America/Los_Angeles")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Load pilot policy" })).not.toBeInTheDocument();
+    expect(exceptionForm()).toBeInTheDocument();
+    expect(notify).toHaveBeenCalledWith(
+      "Pilot policy could not be loaded because the policy or calendar changed. Current state has been refreshed.", true);
   });
 
   it("reports nothing saved when loading the pilot policy fails", async () => {
@@ -157,12 +199,12 @@ describe("SettingsTab", () => {
     expect(screen.queryByText(/2027-01-04/)).not.toBeInTheDocument();
   });
 
-  it("explains an unconfigured policy and refuses exception edits", async () => {
-    const { notify, calls } = setup((method, path) => path === "/policy"
+  it("hides exception editing until a policy exists", async () => {
+    const { calls } = setup((method, path) => path === "/policy"
       ? { status: 404, body: { error: { message: "Persist the pilot policy first" } } } : undefined);
     expect(await screen.findByText("Policy is not configured")).toBeInTheDocument();
-    await saveException("2027-01-04", "closed");
-    expect(notify).toHaveBeenCalledWith("Configure the policy before editing exceptions", true);
+    expect(screen.queryByRole("form", { name: "Date exception" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save exception" })).not.toBeInTheDocument();
     expect(calls.some((call) => call.method === "PUT")).toBe(false);
   });
 });

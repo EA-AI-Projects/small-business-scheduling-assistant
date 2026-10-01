@@ -11,7 +11,7 @@ export function SettingsTab() {
       <SectionHeading eyebrow="AVAILABILITY" title="Settings" />
       <div className="split">
         <PolicySummary policy={data.policy} />
-        <ExceptionForm />
+        {data.policy && <ExceptionForm />}
       </div>
     </>
   );

@@ -26,7 +26,8 @@ export const CLIENT: ClientProfile = {
   phone_verified_at: null,
 };
 
-export type Route = (method: string, path: string, body: unknown) => { status: number; body: unknown } | undefined;
+export type Route = (method: string, path: string, body: unknown) =>
+  { status: number; body: unknown } | undefined | Promise<{ status: number; body: unknown } | undefined>;
 
 /** An OwnerApi backed by an in-test router; unknown routes fail loudly. */
 export function fakeApi(route: Route, onUnauthorized = () => undefined) {
@@ -39,7 +40,7 @@ export function fakeApi(route: Route, onUnauthorized = () => undefined) {
     calls.push({ method, path, body });
     const defaults: Record<string, unknown> = {
       "/calendar": CALENDAR, "/requests": [], "/clients": [CLIENT], "/policy": POLICY };
-    const result = route(method, path, body)
+    const result = await route(method, path, body)
       ?? (method === "GET" && path in defaults ? { status: 200, body: defaults[path] } : undefined);
     if (!result) throw new Error(`Unexpected ${method} ${path}`);
     return new Response(JSON.stringify(result.body), { status: result.status });
