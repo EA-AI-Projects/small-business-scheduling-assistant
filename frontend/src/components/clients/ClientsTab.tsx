@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+import { normalizePhone } from "@/lib/phone";
 import { useOwner } from "@/owner/OwnerContext";
 
 import { SectionHeading } from "../Workspace";
@@ -23,7 +24,7 @@ export function ClientsTab() {
   const profileKey = client ? `client:${client.client_id}:${stamp.version}` : `new:${blank}`;
 
   const phoneUnsaved = client !== undefined && phoneDraft?.key === profileKey
-    && phoneDraft.phone.trim() !== client.phone_e164;
+    && normalizePhone(phoneDraft.phone) !== client.phone_e164;
 
   return (
     <>
@@ -40,8 +41,12 @@ export function ClientsTab() {
         <div className="stack">
           <ProfileForm key={profileKey} client={client} onCreated={setOnboardingId}
             onPhoneDraft={(phone) => setPhoneDraft({ key: profileKey, phone })} />
-          <ConsentForm key={`consent:${profileKey}`} client={client} onboarding={onboarding} phoneUnsaved={phoneUnsaved}
-            onSkip={() => setOnboardingId(null)} />
+          {client ? (
+            <ConsentForm key={`consent:${profileKey}`} client={client} onboarding={onboarding}
+              phoneUnsaved={phoneUnsaved} onSkip={() => setOnboardingId(null)} />
+          ) : (
+            <p className="hint">Save the profile to record text consent.</p>
+          )}
           <section className="card">
             <h3>Notes</h3>
             <p className="hint">Select a client first. Do not enter access codes.</p>

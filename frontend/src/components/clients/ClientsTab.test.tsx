@@ -127,6 +127,53 @@ describe("ClientsTab", () => {
       call.path === "/clients/new%20client%2F9/notes")).toBe(true));
   });
 
+  it("saves a pasted phone with direction marks and separators in normalized form", async () => {
+    const { calls, notify } = setup((method, path) => {
+      if (path === "/clients") return { status: 200, body: [] };
+      if (method === "PUT") return { status: 200, body: CLIENT };
+      return undefined;
+    });
+    await userEvent.click(await screen.findByRole("button", { name: "New client" }));
+    const form = within(profile());
+    await userEvent.type(form.getByLabelText("Client ID"), "client-1");
+    await userEvent.type(form.getByLabelText("Name"), "Avery Example");
+    await userEvent.click(form.getByLabelText("Phone (E.164)"));
+    await userEvent.paste("\u202A+1\u00A0(415) 555-0101\u202C");
+    await userEvent.type(form.getByLabelText("Service address"), "1 Example Way");
+    await userEvent.type(form.getByLabelText("Default minutes"), "60");
+    await userEvent.click(screen.getByRole("button", { name: "Save profile" }));
+    await waitFor(() => expect(notify).toHaveBeenCalledWith("Client profile saved", undefined));
+    expect(calls.find((call) => call.method === "PUT")?.body).toMatchObject({ phone_e164: "+14155550101" });
+  });
+
+  it("shows an inline error and does not submit a phone that is not E.164", async () => {
+    const { calls } = setup((method, path) => path === "/clients" ? { status: 200, body: [] } : undefined);
+    await userEvent.click(await screen.findByRole("button", { name: "New client" }));
+    const form = within(profile());
+    await userEvent.type(form.getByLabelText("Client ID"), "client-1");
+    await userEvent.type(form.getByLabelText("Name"), "Avery Example");
+    await userEvent.type(form.getByLabelText("Phone (E.164)"), "415-555-0101");
+    await userEvent.type(form.getByLabelText("Service address"), "1 Example Way");
+    await userEvent.type(form.getByLabelText("Default minutes"), "60");
+    await userEvent.click(screen.getByRole("button", { name: "Save profile" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/country code/);
+    expect(calls.some((call) => call.method === "PUT")).toBe(false);
+  });
+
+  it("shows the consent card only for a saved client", async () => {
+    setup((method, path) => {
+      if (path === "/clients") return { status: 200, body: [CLIENT] };
+      if (path.endsWith("/notes")) return { status: 200, body: [] };
+      return undefined;
+    });
+    await userEvent.click(await screen.findByRole("button", { name: "New client" }));
+    expect(screen.queryByRole("heading", { name: /text consent/ })).not.toBeInTheDocument();
+    expect(screen.getByText("Save the profile to record text consent.")).toBeInTheDocument();
+    await selectAvery();
+    expect(await screen.findByRole("heading", { name: /text consent/ })).toBeInTheDocument();
+    expect(screen.queryByText("Save the profile to record text consent.")).not.toBeInTheDocument();
+  });
+
   it("on a version conflict says nothing was saved and shows current data", async () => {
     let clients = [CLIENT];
     const { notify } = setup((method, path) => {
