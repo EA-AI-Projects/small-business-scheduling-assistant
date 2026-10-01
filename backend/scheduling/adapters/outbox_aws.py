@@ -2,7 +2,9 @@
 
 import json
 from collections.abc import Iterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any, Protocol
 
 from scheduling.domain.outbox import (
@@ -46,6 +48,29 @@ def _conditional_call(client: DynamoOutboxClient, **kwargs: Any) -> dict[str, An
         ):
             raise OutboxConflict("Outbox state changed") from exc
         raise
+
+
+RETIRED_BEFORE_LIVE_SMS = "RETIRED_BEFORE_LIVE_SMS"
+
+
+class RetireResult(StrEnum):
+    WOULD_RETIRE = "WOULD_RETIRE"
+    RETIRED = "RETIRED"
+    CONFLICT = "CONFLICT"
+    SKIPPED_LEASED = "SKIPPED_LEASED"
+
+
+@dataclass(frozen=True)
+class RetireOutcome:
+    """One record's retirement result; carries no phone number or message body."""
+
+    outbox_id: str
+    template: str
+    recipient: str
+    state: DeliveryState
+    created_at: datetime
+    due_at: datetime | None
+    result: RetireResult
 
 
 class DynamoOutboxStore:
@@ -244,6 +269,103 @@ class DynamoOutboxStore:
         else:
             raise ValueError("Failure must be retryable with a due time or terminal")
         self._finish(record, expression, values)
+
+    def _due_ids(self, business_id: str, state: DeliveryState) -> Iterator[str]:
+        """Every outbox id of one business in one due-index state (no due-time bound)."""
+        last_key: dict[str, Any] | None = None
+        while True:
+            arguments: dict[str, Any] = {
+                "TableName": self._table,
+                "IndexName": self._due_index,
+                "KeyConditionExpression": "outbox_due_pk = :state",
+                "ExpressionAttributeValues": {":state": {"S": f"OUTBOX#{state.value}"}},
+            }
+            if last_key is not None:
+                arguments["ExclusiveStartKey"] = last_key
+            page = self._client.query(**arguments)
+            for item in page.get("Items", ()):
+                if item["PK"]["S"] == f"BUSINESS#{business_id}":
+                    yield item["SK"]["S"].removeprefix("OUTBOX#")
+            last_key = page.get("LastEvaluatedKey")
+            if not last_key:
+                return
+
+    def pending_before(
+        self, business_id: str, cutoff: datetime
+    ) -> list[OutboxRecord]:
+        """PENDING, RETRYABLE and SENDING records created before the cutoff, oldest first."""
+        found: list[OutboxRecord] = []
+        for state in (DeliveryState.PENDING, DeliveryState.RETRYABLE, DeliveryState.SENDING):
+            for outbox_id in self._due_ids(business_id, state):
+                record = self.get(business_id, outbox_id)
+                if (
+                    record is not None and record.state == state
+                    and record.created_at < cutoff
+                ):
+                    found.append(record)
+        return sorted(found, key=lambda r: (r.created_at, r.outbox_id))
+
+    def retire_pending_before(
+        self, business_id: str, cutoff: datetime, reason: str, now: datetime,
+        *, execute: bool,
+    ) -> list[RetireOutcome]:
+        """Move unsent records created before the cutoff to terminal FAILED, never SENT.
+
+        A SENDING record holds a lease, so it is reported and left alone. Each update is
+        conditional on the state, due times and absence of a lease that were read, so a
+        record another worker touched meanwhile is reported as a conflict, not overwritten.
+        With ``execute=False`` nothing is written.
+        """
+        if not reason or not reason.replace("_", "").isalnum():
+            raise ValueError("Retire reason must be a safe identifier")
+        outcomes: list[RetireOutcome] = []
+        for record in self.pending_before(business_id, cutoff):
+            due_at = (
+                max(record.next_attempt_at, record.dispatch_after)
+                if record.next_attempt_at and record.dispatch_after else None
+            )
+            if record.state == DeliveryState.SENDING:
+                result = RetireResult.SKIPPED_LEASED
+            elif not execute:
+                result = RetireResult.WOULD_RETIRE
+            else:
+                try:
+                    self._retire(record, reason, now)
+                    result = RetireResult.RETIRED
+                except OutboxConflict:
+                    result = RetireResult.CONFLICT
+            outcomes.append(RetireOutcome(
+                record.outbox_id, record.template, record.recipient, record.state,
+                record.created_at, due_at, result,
+            ))
+        return outcomes
+
+    def _retire(self, record: OutboxRecord, reason: str, now: datetime) -> None:
+        if record.next_attempt_at is None or record.dispatch_after is None:
+            raise OutboxConflict("Outbox record is not due")
+        _conditional_call(
+            self._client,
+            TableName=self._table,
+            Key=self._key(record.business_id, record.outbox_id),
+            # Same terminal shape as mark_failure(FAILED), plus the retirement time.
+            UpdateExpression=(
+                "SET delivery_state = :failed, last_error_code = :error, "
+                "last_failed_at = :now, retired_at = :now "
+                "REMOVE outbox_due_pk, outbox_due_sk, dispatch_after, next_attempt_at, lease_token"
+            ),
+            ConditionExpression=(
+                "delivery_state = :state AND next_attempt_at = :old_attempt "
+                "AND dispatch_after = :old_dispatch AND attribute_not_exists(lease_token)"
+            ),
+            ExpressionAttributeValues={
+                ":failed": {"S": DeliveryState.FAILED.value},
+                ":error": {"S": reason},
+                ":now": {"S": _instant(now)},
+                ":state": {"S": record.state.value},
+                ":old_attempt": {"S": _instant(record.next_attempt_at)},
+                ":old_dispatch": {"S": _instant(record.dispatch_after)},
+            },
+        )
 
     def _finish(
         self, record: OutboxRecord, expression: str, values: dict[str, Any]
