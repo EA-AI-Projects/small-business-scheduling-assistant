@@ -37,6 +37,9 @@
 #   --param      Supply a parameter that the live stack does not have yet, or deliberately
 #                change one (for example HoldExpiryScheduleState=ENABLED). Not allowed for the four
 #                private keys above.
+#   --i-have-live-sms-authorization   Required whenever OutboxDispatchScheduleState or
+#                SmsSenderMappingState targets ENABLED. Pass it only with Enrique's separate
+#                live-SMS authorization (#91).
 #   --prompt-param Key   Read the value of OwnerNumber, AuthorizedSmsRecipients, TwilioAccountSid
 #                or TwilioBusinessNumber from a hidden prompt. No other key is accepted. Needs a
 #                terminal. --dry-run does not prompt and shows ****.
@@ -52,6 +55,7 @@ SMOKE_ONLY=0
 ALLOW_DIRTY=0
 EXTRA_PARAMS=()
 PROMPT_KEYS=()
+LIVE_SMS_AUTH=0
 
 usage() {
   sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'
@@ -65,11 +69,13 @@ while [[ $# -gt 0 ]]; do
     --yes) ASSUME_YES=1 ;;
     --smoke-only) SMOKE_ONLY=1 ;;
     --param)
-      [[ $# -ge 2 && "$2" == *=* ]] || die "--param needs Key=Value"
+      [[ $# -ge 2 && "$2" =~ ^[A-Za-z0-9]+=[^[:space:]]*$ ]] || die "--param needs Key=Value (letters and digits in the key, no whitespace in the value)"
+      [[ "$2" != ParameterKey=* && "$2" != *ParameterValue=* && "$2" != *ParameterKey=* ]] || die "--param does not accept the ParameterKey=...,ParameterValue=... form; use Key=Value"
       ! is_private_param "${2%%=*}" || die "--param does not accept ${2%%=*}: use --prompt-param ${2%%=*} (hidden prompt, value never printed)"
       EXTRA_PARAMS+=("$2")
       shift
       ;;
+    --i-have-live-sms-authorization) LIVE_SMS_AUTH=1 ;;
     --prompt-param)
       [[ $# -ge 2 ]] || die "--prompt-param needs a key"
       is_private_param "$2" || die "--prompt-param accepts only: ${PRIVATE_PARAMS[*]}"
@@ -142,7 +148,7 @@ for key in "${PROMPT_KEYS[@]+"${PROMPT_KEYS[@]}"}"; do
   read -r -s -p "Value for ${key} (hidden): " private_value
   printf '\n' >&2
   valid_private_value "${key}" "${private_value}" || die "the value for ${key} is not valid (${PRIVATE_FORMAT_HINT}); not echoed."
-  OVERRIDES+=("${key}=${private_value}")
+  OVERRIDES+=("$(private_override "${key}" "${private_value}")")
   SHOWN_OVERRIDES+=("${key}=****")
   private_value=""
 done
@@ -338,16 +344,22 @@ if [[ -n "${RULE_ROWS}" ]]; then
   while IFS=$'\t' read -r action logical physical; do
     [[ -n "${logical}" ]] || continue
     # Resolve the target: literal, Ref to a change-set parameter, or missing (ENABLED).
-    target_state="$(jq -r --arg id "${logical}" --argjson cs "${DESCRIPTION}" '
+    # A parameterized rule's State must be exactly {"Ref": <its own parameter>}; any other wiring
+    # is unresolved and refused. A rule without a parameter may be a literal or missing.
+    param="$(schedule_parameter "${logical}")"
+    target_state="$(jq -r --arg id "${logical}" --arg param "${param}" --argjson cs "${DESCRIPTION}" '
       (.Resources[$id].Properties.State) as $s
-      | if $s == null then "ENABLED"
+      | if $param != "" then
+          (if $s == {"Ref": $param} then
+            ([$cs.Parameters[] | select(.ParameterKey == $param) | .ParameterValue] | first // "UNRESOLVED")
+          else "UNRESOLVED" end)
+        elif $s == null then "ENABLED"
         elif ($s | type) == "string" then $s
         elif ($s | type) == "object" and ($s | keys) == ["Ref"] then
           ([$cs.Parameters[] | select(.ParameterKey == $s.Ref) | .ParameterValue] | first // "UNRESOLVED")
         else "UNRESOLVED" end' <<<"${PROCESSED}")"
     [[ "${target_state}" == "ENABLED" || "${target_state}" == "DISABLED" ]] ||
-      die "refusing: cannot resolve the target State of ${logical} (got ${target_state})."
-    param="$(schedule_parameter "${logical}")"
+      die "refusing: cannot resolve the target State of ${logical} (got ${target_state}; a parameterized rule's State must be exactly Ref ${param:-<its parameter>})."
     if [[ "${action}" == "Add" || -z "${physical}" ]]; then
       live_state="(new)"
     else
@@ -360,74 +372,93 @@ if [[ -n "${RULE_ROWS}" ]]; then
         SCHEDULE_REFUSED="${SCHEDULE_REFUSED:+${SCHEDULE_REFUSED}, }${logical}"
       fi
     elif [[ "${live_state}" != "${target_state}" ]]; then
+      # A change counts as requested only when the --param value equals the resolved target.
       explicit=0
-      for kv in "${EXTRA_PARAMS[@]+"${EXTRA_PARAMS[@]}"}"; do
-        [[ "${kv%%=*}" == "${param}" ]] && explicit=1
-      done
+      [[ "$(param_value "${param}")" != "${target_state}" ]] || explicit=1
       if [[ "${explicit}" -eq 1 ]]; then
         note="  (state change, requested with --param ${param})"
       else
-        note="  (REFUSED: state would change without --param ${param})"
+        note="  (REFUSED: state would change without --param ${param}=${target_state})"
         SCHEDULE_REFUSED="${SCHEDULE_REFUSED:+${SCHEDULE_REFUSED}, }${logical}"
       fi
     fi
     info "  ${logical} [${action}]: ${live_state} -> ${target_state}${note}"
+    if [[ -n "${param}" && "${param}" == "OutboxDispatchScheduleState" && "${target_state}" == "ENABLED" && "${LIVE_SMS_AUTH}" -ne 1 ]]; then
+      SMS_AUTH_MISSING="${SMS_AUTH_MISSING:+${SMS_AUTH_MISSING}, }${param}"
+    fi
   done <<<"${RULE_ROWS}"
   if [[ -n "${SCHEDULE_REFUSED}" ]]; then
     die "refusing: schedule state is not allowed to change: ${SCHEDULE_REFUSED}. A parameterized schedule needs its *ScheduleState parameter passed explicitly with --param (the live state keeps it); a rule without a parameter (a new one) must target DISABLED."
   fi
 fi
 
+SMS_AUTH_MISSING="${SMS_AUTH_MISSING:-}"
+if [[ -n "${RULE_ROWS}" && -n "${SMS_AUTH_MISSING}" ]]; then
+  die "refusing: ${SMS_AUTH_MISSING} targets ENABLED, which is a live-SMS action: pass --i-have-live-sms-authorization only with Enrique's separate authorization (#91)."
+fi
+
 # Sender mapping guard: the SmsSender outbox mapping's State must not change silently either.
 # Live State comes from lambda get-event-source-mapping; the target is the Enabled property in the
-# change set's processed template (a boolean, or an Fn::If on SmsSenderMappingEnabled resolved
-# against the change set's SmsSenderMappingState). Only an added, modified or replaced mapping
-# is checked.
+# change set's processed template (exact wiring only, see below). Only an added, modified or
+# replaced mapping is checked. Any other such mapping, except the conversation mapping, must be
+# DISABLED.
 SENDER_MAPPING="SmsSenderFunctionOutbox"
 SENDER_PARAM="SmsSenderMappingState"
-MAPPING_ROW="$(jq -r --arg id "${SENDER_MAPPING}" '.Changes[].ResourceChange
-  | select(.ResourceType == "AWS::Lambda::EventSourceMapping" and .LogicalResourceId == $id and (.Action == "Add" or .Action == "Modify" or .Replacement == "True" or .Replacement == "Conditional"))
-  | [.Action, (.PhysicalResourceId // "")] | @tsv' <<<"${DESCRIPTION}")"
-if [[ -n "${MAPPING_ROW}" ]]; then
-  IFS=$'\t' read -r map_action map_physical <<<"${MAPPING_ROW}"
+CONVERSATION_MAPPING="SmsConversationFunctionReceipts"
+MAPPING_ROWS="$(jq -r '.Changes[].ResourceChange
+  | select(.ResourceType == "AWS::Lambda::EventSourceMapping" and (.Action == "Add" or .Action == "Modify" or .Replacement == "True" or .Replacement == "Conditional"))
+  | [.Action, .LogicalResourceId, (.PhysicalResourceId // "")] | @tsv' <<<"${DESCRIPTION}")"
+if [[ -n "${MAPPING_ROWS}" ]]; then
   if [[ -z "${PROCESSED:-}" ]]; then
     PROCESSED="$(aws_cli cloudformation get-template --stack-name "${STACK_NAME}" --change-set-name "${CHANGESET}" \
       --template-stage Processed --query TemplateBody --output json | jq 'if type == "string" then fromjson else . end')" ||
-      die "refusing: cannot read the change set's processed template, so the sender mapping target state is unknown."
-  fi
-  map_target="$(jq -r --arg id "${SENDER_MAPPING}" --argjson cs "${DESCRIPTION}" '
-    def param: ([$cs.Parameters[] | select(.ParameterKey == "SmsSenderMappingState") | .ParameterValue] | first // "UNRESOLVED");
-    def flag: if . == true or . == "true" then "ENABLED" elif . == false or . == "false" then "DISABLED" else "UNRESOLVED" end;
-    (.Resources[$id].Properties.Enabled) as $e
-    | if $e == null then "ENABLED"
-      elif ($e | type) == "object" and ($e | keys) == ["Fn::If"] and $e["Fn::If"][0] == "SmsSenderMappingEnabled" then
-        (if param == "ENABLED" then ($e["Fn::If"][1] | flag) elif param == "DISABLED" then ($e["Fn::If"][2] | flag) else "UNRESOLVED" end)
-      else ($e | flag) end' <<<"${PROCESSED}")"
-  [[ "${map_target}" == "ENABLED" || "${map_target}" == "DISABLED" ]] ||
-    die "refusing: cannot resolve the target state of ${SENDER_MAPPING} (got ${map_target})."
-  if [[ "${map_action}" == "Add" || -z "${map_physical}" ]]; then
-    map_live="(new)"
-  else
-    map_live="$(sender_mapping_state "${map_physical}")"
-  fi
-  map_note=""
-  if [[ "${map_live}" != "${map_target}" ]]; then
-    map_explicit=0
-    for kv in "${EXTRA_PARAMS[@]+"${EXTRA_PARAMS[@]}"}"; do
-      [[ "${kv%%=*}" == "${SENDER_PARAM}" ]] && map_explicit=1
-    done
-    if [[ "${map_explicit}" -eq 1 ]]; then
-      map_note="  (state change, requested with --param ${SENDER_PARAM})"
-    else
-      map_note="  (REFUSED: state would change without --param ${SENDER_PARAM})"
-    fi
+      die "refusing: cannot read the change set's processed template, so mapping target states are unknown."
   fi
   info ""
-  info "Sender mapping state (live -> target):"
-  info "  ${SENDER_MAPPING} [${map_action}]: ${map_live} -> ${map_target}${map_note}"
-  if [[ "${map_note}" == *REFUSED* ]]; then
-    die "refusing: the sender mapping state is not allowed to change: pass --param ${SENDER_PARAM}=ENABLED|DISABLED explicitly (the live state keeps it). Turning it on needs live-SMS authorization (#91)."
-  fi
+  info "Event source mapping states (live -> target):"
+  while IFS=$'\t' read -r map_action map_logical map_physical; do
+    [[ -n "${map_logical}" ]] || continue
+    # The conversation mapping is governed by SmsConversationRequested and is not guarded here.
+    [[ "${map_logical}" != "${CONVERSATION_MAPPING}" ]] || continue
+    # Sender mapping: Enabled must be exactly Fn::If [SmsSenderMappingEnabled, true, false] and the
+    # condition exactly Equals [Ref SmsSenderMappingState, ENABLED]. Any other mapping: a literal
+    # false. Anything else is unresolved and refused.
+    map_target="$(jq -r --arg id "${map_logical}" --arg sender "${SENDER_MAPPING}" --argjson cs "${DESCRIPTION}" '
+      def flag: if . == true or . == "true" then "ENABLED" elif . == false or . == "false" then "DISABLED" else "UNRESOLVED" end;
+      (.Resources[$id].Properties.Enabled) as $e
+      | if $id == $sender then
+          (if $e == {"Fn::If": ["SmsSenderMappingEnabled", true, false]}
+              and .Conditions.SmsSenderMappingEnabled == {"Fn::Equals": [{"Ref": "SmsSenderMappingState"}, "ENABLED"]} then
+            ([$cs.Parameters[] | select(.ParameterKey == "SmsSenderMappingState") | .ParameterValue] | first // "UNRESOLVED")
+            | if . == "ENABLED" or . == "DISABLED" then . else "UNRESOLVED" end
+          else "UNRESOLVED" end)
+        elif $e == null then "ENABLED"
+        else ($e | flag) end' <<<"${PROCESSED}")"
+    [[ "${map_target}" == "ENABLED" || "${map_target}" == "DISABLED" ]] ||
+      die "refusing: cannot resolve the target state of ${map_logical} (got ${map_target}; the sender mapping needs the exact SmsSenderMappingEnabled wiring)."
+    if [[ "${map_action}" == "Add" || -z "${map_physical}" ]]; then
+      map_live="(new)"
+    else
+      map_live="$(sender_mapping_state "${map_physical}")"
+    fi
+    map_note=""
+    if [[ "${map_logical}" != "${SENDER_MAPPING}" ]]; then
+      [[ "${map_target}" == "DISABLED" ]] || map_note="  (REFUSED: other mappings must stay DISABLED)"
+    else
+      if [[ "${map_target}" == "ENABLED" && "${LIVE_SMS_AUTH}" -ne 1 ]]; then
+        map_note="  (REFUSED: targeting ENABLED needs --i-have-live-sms-authorization, #91)"
+      elif [[ "${map_live}" != "${map_target}" ]]; then
+        # A change counts as requested only when the --param value equals the resolved target.
+        if [[ "$(param_value "${SENDER_PARAM}")" == "${map_target}" ]]; then
+          map_note="  (state change, requested with --param ${SENDER_PARAM})"
+        else
+          map_note="  (REFUSED: state would change without --param ${SENDER_PARAM}=${map_target})"
+        fi
+      fi
+    fi
+    info "  ${map_logical} [${map_action}]: ${map_live} -> ${map_target}${map_note}"
+    [[ "${map_note}" != *REFUSED* ]] || die "refusing: ${map_logical}${map_note}. Turning the sender mapping on needs live-SMS authorization (#91)."
+  done <<<"${MAPPING_ROWS}"
 fi
 
 # Every run: warn when a parameterized schedule's live state differs from its parameter value

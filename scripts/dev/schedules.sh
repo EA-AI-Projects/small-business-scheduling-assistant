@@ -91,6 +91,7 @@ info "Full deploy of the current checkout; deploy-backend.sh below prints the co
 DEPLOY=("$(dirname "${BASH_SOURCE[0]}")/deploy-backend.sh" --param "${PARAM}=${WANT}")
 [[ "${DRY_RUN}" -ne 1 ]] || DEPLOY+=(--dry-run)
 [[ "${ALLOW_DIRTY}" -ne 1 ]] || DEPLOY+=(--allow-dirty)
+[[ "${LIVE_SMS_AUTH}" -ne 1 ]] || DEPLOY+=(--i-have-live-sms-authorization)
 if [[ -z "${PROFILE}" ]]; then DEPLOY+=(--no-profile); else DEPLOY+=(--profile "${PROFILE}"); fi
 
 if [[ "${DRY_RUN}" -eq 1 ]]; then

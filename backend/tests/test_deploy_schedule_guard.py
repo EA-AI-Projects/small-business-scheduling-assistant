@@ -33,6 +33,8 @@ def run_guard(
     extra: list[str],
     tmp_path: Path,
     mappings: dict[str, str] | None = None,
+    conditions: dict[str, object] | None = None,
+    auth: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     description = {
         "Changes": [
@@ -43,7 +45,10 @@ def run_guard(
         ],
         "Parameters": [{"ParameterKey": k, "ParameterValue": v} for k, v in params.items()],
     }
-    processed = {"Resources": {k: {"Type": "AWS::Events::Rule", "Properties": v} for k, v in template_rules.items()}}
+    processed = {
+        "Resources": {k: {"Type": "AWS::Events::Rule", "Properties": v} for k, v in template_rules.items()},
+        "Conditions": GOOD_CONDITIONS if conditions is None else conditions,
+    }
     (tmp_path / "mappings.json").write_text(json.dumps(mappings or {}))
     (tmp_path / "live.json").write_text(json.dumps(live))
     (tmp_path / "processed.json").write_text(json.dumps(processed))
@@ -56,6 +61,7 @@ info() {{ echo "$*"; }}
 CHANGESET=arn:synthetic
 STACK_NAME=synthetic
 DESCRIPTION="$(cat {tmp_path}/description.json)"
+LIVE_SMS_AUTH={1 if auth else 0}
 EXTRA_PARAMS=({" ".join(extra)})
 aws_cli() {{
   case "$1 $2" in
@@ -77,6 +83,9 @@ stack_resources() {{
     )
 
 
+GOOD_CONDITIONS: dict[str, object] = {
+    "SmsSenderMappingEnabled": {"Fn::Equals": [{"Ref": "SmsSenderMappingState"}, "ENABLED"]}
+}
 HOLD = "HoldExpiryFunctionSweep"
 OUTBOX = "OutboxDispatchFunctionSweep"
 HARDCODED = "NewFunctionSweep"
@@ -151,9 +160,42 @@ def test_outbox_dispatch_is_parameterized(tmp_path: Path) -> None:
     assert "REFUSED: state would change without --param OutboxDispatchScheduleState" in flipped.stdout
     allowed = run_guard(
         [modify(OUTBOX)], template, {"OutboxDispatchScheduleState": "ENABLED"}, {OUTBOX: "DISABLED"},
-        ["OutboxDispatchScheduleState=ENABLED"], tmp_path,
+        ["OutboxDispatchScheduleState=ENABLED"], tmp_path, auth=True,
     )
     assert allowed.returncode == 0, allowed.stdout
+    no_auth = run_guard(
+        [modify(OUTBOX)], template, {"OutboxDispatchScheduleState": "ENABLED"}, {OUTBOX: "DISABLED"},
+        ["OutboxDispatchScheduleState=ENABLED"], tmp_path,
+    )
+    assert no_auth.returncode == 1
+    assert "--i-have-live-sms-authorization" in no_auth.stdout
+
+
+def test_wrong_param_value_is_not_authorization(tmp_path: Path) -> None:
+    # --param is given, but its value is not the target the change set resolves to.
+    template = {HOLD: {"State": {"Ref": "HoldExpiryScheduleState"}}}
+    result = run_guard(
+        [modify(HOLD)], template, {"HoldExpiryScheduleState": "DISABLED"}, {HOLD: "ENABLED"},
+        ["HoldExpiryScheduleState=ENABLED"], tmp_path,
+    )
+    assert result.returncode == 1
+    assert "REFUSED" in result.stdout
+
+
+@pytest.mark.parametrize("state", [
+    {"State": "ENABLED"},
+    {"State": "DISABLED"},
+    {},
+    {"State": {"Ref": "HoldExpiryScheduleState"}},
+    {"State": {"Fn::If": ["X", "ENABLED", "DISABLED"]}},
+])
+def test_parameterized_rule_must_be_wired_to_its_own_parameter(state: dict[str, object], tmp_path: Path) -> None:
+    result = run_guard(
+        [modify(OUTBOX)], {OUTBOX: state}, {"HoldExpiryScheduleState": "ENABLED", "OutboxDispatchScheduleState": "DISABLED"},
+        {OUTBOX: "DISABLED"}, ["OutboxDispatchScheduleState=DISABLED"], tmp_path, auth=True,
+    )
+    assert result.returncode == 1
+    assert "cannot resolve the target State" in result.stdout
 
 
 def mapping_change(action: str = "Modify") -> dict[str, str]:
@@ -161,6 +203,7 @@ def mapping_change(action: str = "Modify") -> dict[str, str]:
 
 
 SENDER_TEMPLATE: dict[str, dict[str, object]] = {SENDER: {"Enabled": {"Fn::If": ["SmsSenderMappingEnabled", True, False]}}}
+RECEIPTS = "SmsConversationFunctionReceipts"
 
 
 @pytest.mark.parametrize(("live", "param", "explicit", "code"), [
@@ -174,11 +217,11 @@ SENDER_TEMPLATE: dict[str, dict[str, object]] = {SENDER: {"Enabled": {"Fn::If": 
 def test_sender_mapping_guard(live: str, param: str, explicit: list[str], code: int, tmp_path: Path) -> None:
     result = run_guard(
         [mapping_change()], SENDER_TEMPLATE, {"SmsSenderMappingState": param}, {}, explicit, tmp_path,
-        mappings={SENDER: live},
+        mappings={SENDER: live}, auth=param == "ENABLED" and (code == 0 or bool(explicit)),
     )
     assert result.returncode == code, result.stdout
     if code:
-        assert "REFUSED: state would change without --param SmsSenderMappingState" in result.stdout
+        assert "REFUSED" in result.stdout
 
 
 def test_sender_mapping_literal_enabled_is_refused(tmp_path: Path) -> None:
@@ -194,3 +237,77 @@ def test_sender_mapping_drift_warning(tmp_path: Path) -> None:
     result = run_guard([], {}, {"SmsSenderMappingState": "ENABLED"}, {}, [], tmp_path, mappings={SENDER: "Disabled"})
     assert result.returncode == 0, result.stdout
     assert f"WARNING: {SENDER} is DISABLED live but SmsSenderMappingState=ENABLED" in result.stdout
+
+
+def test_sender_mapping_enabled_needs_authorization_flag(tmp_path: Path) -> None:
+    result = run_guard(
+        [mapping_change()], SENDER_TEMPLATE, {"SmsSenderMappingState": "ENABLED"}, {},
+        ["SmsSenderMappingState=ENABLED"], tmp_path, mappings={SENDER: "Disabled"},
+    )
+    assert result.returncode == 1
+    assert "--i-have-live-sms-authorization" in result.stdout
+
+
+def test_sender_mapping_wrong_param_value_is_not_authorization(tmp_path: Path) -> None:
+    result = run_guard(
+        [mapping_change()], SENDER_TEMPLATE, {"SmsSenderMappingState": "DISABLED"}, {},
+        ["SmsSenderMappingState=ENABLED"], tmp_path, mappings={SENDER: "Enabled"}, auth=True,
+    )
+    assert result.returncode == 1
+
+
+@pytest.mark.parametrize("template", [
+    {SENDER: {"Enabled": {"Fn::If": ["SmsSenderMappingEnabled", False, True]}}},
+    {SENDER: {"Enabled": {"Fn::If": ["OtherCondition", True, False]}}},
+    {SENDER: {"Enabled": "false"}},
+    {SENDER: {}},
+])
+def test_sender_mapping_miswired_enabled_is_refused(template: dict[str, dict[str, object]], tmp_path: Path) -> None:
+    result = run_guard(
+        [mapping_change()], template, {"SmsSenderMappingState": "DISABLED"}, {}, ["SmsSenderMappingState=DISABLED"],
+        tmp_path, mappings={SENDER: "Disabled"}, auth=True,
+    )
+    assert result.returncode == 1
+    assert "cannot resolve the target state" in result.stdout
+
+
+@pytest.mark.parametrize("conditions", [
+    {},
+    {"SmsSenderMappingEnabled": {"Fn::Equals": [{"Ref": "SmsSenderMappingState"}, "DISABLED"]}},
+    {"SmsSenderMappingEnabled": {"Fn::Equals": [{"Ref": "OtherParameter"}, "ENABLED"]}},
+    {"SmsSenderMappingEnabled": {"Fn::Not": [{"Fn::Equals": [{"Ref": "SmsSenderMappingState"}, "ENABLED"]}]}},
+])
+def test_sender_mapping_miswired_condition_is_refused(conditions: dict[str, object], tmp_path: Path) -> None:
+    result = run_guard(
+        [mapping_change()], SENDER_TEMPLATE, {"SmsSenderMappingState": "DISABLED"}, {}, ["SmsSenderMappingState=DISABLED"],
+        tmp_path, mappings={SENDER: "Disabled"}, conditions=conditions, auth=True,
+    )
+    assert result.returncode == 1
+    assert "cannot resolve the target state" in result.stdout
+
+
+@pytest.mark.parametrize("state", ["Enabling", "Disabling", "Updating", "Creating", ""])
+def test_sender_mapping_unsettled_live_state_is_refused(state: str, tmp_path: Path) -> None:
+    result = run_guard(
+        [mapping_change()], SENDER_TEMPLATE, {"SmsSenderMappingState": "DISABLED"}, {}, [], tmp_path,
+        mappings={SENDER: state},
+    )
+    assert result.returncode == 1
+
+
+def test_other_mapping_must_be_disabled(tmp_path: Path) -> None:
+    other = {"Action": "Add", "LogicalResourceId": "NewFunctionQueue", "Mapping": "yes"}
+    refused = run_guard([other], {"NewFunctionQueue": {"Enabled": True}}, {}, {}, [], tmp_path)
+    assert refused.returncode == 1
+    assert "other mappings must stay DISABLED" in refused.stdout
+    missing = run_guard([other], {"NewFunctionQueue": {}}, {}, {}, [], tmp_path)
+    assert missing.returncode == 1
+    ok = run_guard([other], {"NewFunctionQueue": {"Enabled": False}}, {}, {}, [], tmp_path)
+    assert ok.returncode == 0, ok.stdout
+
+
+def test_conversation_mapping_is_not_guarded(tmp_path: Path) -> None:
+    change = {"Action": "Modify", "LogicalResourceId": RECEIPTS, "PhysicalResourceId": RECEIPTS, "Mapping": "yes"}
+    template = {RECEIPTS: {"Enabled": {"Fn::If": ["SmsConversationRequested", True, False]}}}
+    result = run_guard([change], template, {}, {}, [], tmp_path)
+    assert result.returncode == 0, result.stdout

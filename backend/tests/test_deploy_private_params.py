@@ -42,6 +42,8 @@ def validate(key: str, value: str) -> bool:
     ("AuthorizedSmsRecipients", "+14155550101,,+14155550102", False),
     ("AuthorizedSmsRecipients", "+14155550101, +14155550102", False),
     ("AuthorizedSmsRecipients", "+14155550101;+14155550102", False),
+    ("AuthorizedSmsRecipients", "+14155550101\n+14155550102", False),
+    ("AuthorizedSmsRecipients", "+14155550101 ", False),
     ("TwilioAccountSid", SID, True),
     ("TwilioAccountSid", "placeholder", False),
     ("TwilioAccountSid", SID[:-1], False),
@@ -113,3 +115,46 @@ aws_cli() {{ cat {tmp_path}/live.json; }}
     assert run("SmsSendEnabled=authorized", "").returncode == 0
     # A prompted key counts as given even when its value would differ.
     assert run("SmsSendEnabled=authorized", "AuthorizedSmsRecipients OwnerNumber").returncode == 0
+
+
+def test_empty_override_is_quoted_for_sam() -> None:
+    script = f'aws_cli() {{ return 1; }}\nsource {LIB}\nprivate_override AuthorizedSmsRecipients ""\nprivate_override OwnerNumber +14155550101'
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False).stdout
+    assert out == 'AuthorizedSmsRecipients=""OwnerNumber=+14155550101'
+
+
+@pytest.mark.parametrize("arg", [
+    "ParameterKey=OwnerNumber,ParameterValue=+14155550123",
+    "SmsSendEnabled=a b",
+    "OwnerNumber =+14155550123",
+    "=x",
+    "Key",
+    "Some-Key=x",
+])
+def test_param_format_is_strict(arg: str) -> None:
+    result = run_script("--dry-run", "--param", arg)
+    assert result.returncode == 1
+    assert "use Key=Value" in result.stderr or "--param needs Key=Value" in result.stderr
+    assert "+14155550123" not in result.stdout + result.stderr
+
+
+def test_dry_run_prompt_param_prints_stars_only() -> None:
+    # aws and sam are stubbed on PATH to fail, so nothing reaches AWS.
+    import os
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        for tool in ("aws", "sam"):
+            stub = Path(d) / tool
+            stub.write_text("#!/bin/sh\nexit 255\n")
+            stub.chmod(0o755)
+        env = {**os.environ, "PATH": f"{d}:{os.environ['PATH']}"}
+        result = subprocess.run(
+            ["bash", str(SCRIPT), "--no-profile", "--dry-run", "--prompt-param", "OwnerNumber",
+             "--prompt-param", "AuthorizedSmsRecipients", "--prompt-param", "TwilioAccountSid"],
+            capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL, env=env,
+        )
+    assert result.returncode == 0, result.stderr
+    assert "OwnerNumber=\\*\\*\\*\\*" in result.stdout
+    assert "AuthorizedSmsRecipients=\\*\\*\\*\\*" in result.stdout
+    assert "Value for" not in result.stdout + result.stderr
