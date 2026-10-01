@@ -16,7 +16,7 @@ import pytest
 from botocore.exceptions import BotoCoreError, ClientError
 
 from scheduling.adapters.dynamodb import DynamoDBCalendarRepository
-from scheduling.adapters.outbox_aws import DynamoOutboxStore
+from scheduling.adapters.outbox_aws import DynamoOutboxStore, due_keys
 from scheduling.adapters.sms_dynamodb import DynamoSmsIngressStore
 from scheduling.domain.appointments import Appointment
 from scheduling.domain.calendar import CalendarStatus
@@ -29,7 +29,13 @@ from scheduling.domain.lifecycle import (
     TransitionCommit,
     TransitionResult,
 )
-from scheduling.domain.outbox import ConsumeOutcome, ConsumeService, DispatchService, OutboxRecord
+from scheduling.domain.outbox import (
+    ConsumeOutcome,
+    ConsumeService,
+    DeliveryState,
+    DispatchService,
+    OutboxRecord,
+)
 from scheduling.domain.sms_ingress import record_in_person_consent
 
 DEV_TABLE = "scheduling-dev"
@@ -541,3 +547,57 @@ def test_two_concurrent_consents_commit_exactly_one(race_env: RaceEnv) -> None:
     profile = repo.read_verified_phone(env.business, "+14155550101")
     assert profile is not None and profile.version == 2
     assert len(_consent_items(env)) == 2
+
+
+def test_retire_pending_outbox_before_cutoff_leaves_the_due_index(race_env: RaceEnv) -> None:
+    env = race_env
+    store = DynamoOutboxStore(env.client, env.table)
+    cutoff = EXPIRY + timedelta(days=1)
+
+    def put(outbox_id: str, state: DeliveryState, created: datetime,
+            lease: str | None = None) -> None:
+        stamp = created.isoformat(timespec="microseconds")
+        item: dict[str, Any] = {
+            "PK": {"S": f"BUSINESS#{env.business}"}, "SK": {"S": f"OUTBOX#{outbox_id}"},
+            "outbox_id": {"S": outbox_id}, "entity_id": {"S": "synthetic-entity"},
+            "recipient": {"S": "owner"}, "template": {"S": "block_time"},
+            "event_version": {"N": "1"}, "delivery_state": {"S": state.value},
+            "created_at": {"S": stamp}, "next_attempt_at": {"S": stamp},
+            "dispatch_after": {"S": stamp}, **due_keys(state, created, outbox_id),
+        }
+        if lease:
+            item["lease_token"] = {"S": lease}
+        env.client.put_item(TableName=env.table, Item=item)
+
+    old = f"{env.run}-old"
+    new = f"{env.run}-new"
+    leased = f"{env.run}-leased"
+    put(old, DeliveryState.PENDING, EXPIRY)
+    put(new, DeliveryState.PENDING, cutoff + timedelta(hours=1))
+    put(leased, DeliveryState.SENDING, EXPIRY, lease="synthetic-token")
+    _wait_until(lambda: len(store.pending_before(env.business, cutoff)) == 2,
+                "Seeded outbox records did not appear in the due index")
+
+    dry = store.retire_pending_before(
+        env.business, cutoff, "RETIRED_BEFORE_LIVE_SMS", cutoff, execute=False)
+    assert {o.outbox_id: o.result.value for o in dry} == {
+        old: "WOULD_RETIRE", leased: "SKIPPED_LEASED"}
+    before = _get(env, f"BUSINESS#{env.business}", f"OUTBOX#{old}")
+    assert before is not None and before["delivery_state"]["S"] == "PENDING"
+
+    done = store.retire_pending_before(
+        env.business, cutoff, "RETIRED_BEFORE_LIVE_SMS", cutoff, execute=True)
+    assert {o.outbox_id: o.result.value for o in done} == {
+        old: "RETIRED", leased: "SKIPPED_LEASED"}
+    item = _get(env, f"BUSINESS#{env.business}", f"OUTBOX#{old}")
+    assert item is not None
+    assert item["delivery_state"]["S"] == "FAILED"
+    assert item["last_error_code"]["S"] == "RETIRED_BEFORE_LIVE_SMS"
+    assert "retired_at" in item
+    for gone in ("outbox_due_pk", "outbox_due_sk", "dispatch_after", "next_attempt_at"):
+        assert gone not in item
+    _wait_until(
+        lambda: [r.outbox_id for r in store.pending_before(env.business, cutoff)] == [leased],
+        "Retired record stayed in the due index")
+    kept = _get(env, f"BUSINESS#{env.business}", f"OUTBOX#{new}")
+    assert kept is not None and kept["delivery_state"]["S"] == "PENDING"

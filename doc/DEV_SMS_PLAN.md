@@ -32,8 +32,25 @@ Before stage 1:
 Before stage 3 (each waits for Enrique's answer on #91):
 
 4. **Phone verification (decided on #91, option (b); built in this change).** Incoming texts are acted on, and texts are sent, only for a client whose profile phone is marked verified (`phone_verified_at`). Recording in-person consent in the owner app now marks that phone verified in the same atomic write as the consent records, and onboarding a new client shows the consent step right away (consent can be recorded later from the client screen; until then the client can't text). The owner reads the number back to the client first, because nothing proves the client holds the phone. Changing a profile's phone clears the verification, so the new number needs fresh consent. No standalone verify route and no DynamoDB hand-editing.
-5. **Old pending texts.** Earlier synthetic testing left pending owner notifications in the dev outbox (for example "Scheduling policy updated" and "Owner calendar updated"). The dispatcher sends every due record, with no age limit. Purging the SQS queue does not help, because the records stay pending in DynamoDB and are re-queued. Before stage 3: count the due records read-only through `OutboxDueIndex`, then, if Enrique agrees on #91, run a reviewed one-off step that marks every record created before stage 3 as retired, not sent.
+5. **Old pending texts.** Earlier synthetic testing left pending owner notifications in the dev outbox (for example "Scheduling policy updated" and "Owner calendar updated"). The dispatcher sends every due record, with no age limit. Purging the SQS queue does not help, because the records stay pending in DynamoDB and are re-queued. Enrique decided on #91 to retire them before stage 3: a reviewed one-off tool marks every unsent record created before stage 3 as failed with `RETIRED_BEFORE_LIVE_SMS`, not sent (see "Retire pending outbox records" below).
 6. **Doc fixes (in this PR).** `PILOT_INFRASTRUCTURE.md` and the README said Advanced Opt-Out handles STOP and HELP before tester texting; they now record the Twilio-defaults decision.
+
+### Retire pending outbox records
+
+`backend/scheduling/tools/retire_outbox.py` moves every unsent outbox record of one business that was created before a cutoff to the terminal `FAILED` state with error code `RETIRED_BEFORE_LIVE_SMS` (and `retired_at`). It removes the due-index keys, so the dispatcher never queues them and the consumer never claims them. Each write is conditional on the state and due times it read and on there being no lease. A record that is `SENDING` holds a lease and is reported and left alone; a record another worker changed first is reported as a conflict. Delivery-failure status items (`SMS_STATUS#`, written from Twilio callbacks) are separate and are not created.
+
+The tool refuses unless the table is `scheduling-dev`, the region is `us-west-1` and the DynamoDB endpoint is exactly `https://dynamodb.us-west-1.amazonaws.com`. It prints each candidate's last 8 outbox-ID characters, template, recipient role, state, created and due times, and never reads or prints phone numbers or message bodies. It is run once, just before stage 3, from the repository root with Enrique's admin profile (pick the cutoff as the current UTC time):
+
+```sh
+export AWS_PROFILE=scheduling-dev-admin
+CUTOFF=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)
+(cd backend && python -m scheduling.tools.retire_outbox --table scheduling-dev \
+  --business-id dev-synthetic --cutoff "$CUTOFF")             # dry run, the default; writes nothing
+(cd backend && python -m scheduling.tools.retire_outbox --table scheduling-dev \
+  --business-id dev-synthetic --cutoff "$CUTOFF" --execute)   # same CUTOFF value
+```
+
+Expected today: 3 records (1 `seed_policy`, 2 `block_time`). `--execute` prints a result per record and a summary, then re-queries the due index and exits non-zero if any unsent record before the cutoff remains. Re-running is safe. The same command clears stale records before re-enabling after an outage (section 6).
 
 ## 3. What changes in AWS
 
@@ -57,7 +74,7 @@ Stage 1 adds the resources that `EnableSmsIngress=false` leaves out: the SMS HTT
 
 > **Owner-phone note.** In the app, STOP from the owner number blocks every owner text, and it can't be cleared the way a client's can (owners have no consent record). So the owner phone never texts STOP. Under Twilio defaults, a bare `CANCEL` is also an opt-out on Twilio's side, which `START` reverses; that is exactly what stage 2 observes, so `CANCEL` is followed by `START`. If the app turns out to record that `CANCEL` as a STOP, stop and report it before stage 3.
 
-**Stage 3: full flow with you and one tester.** Requires prerequisites 4 and 5. Record the tester's consent in the owner app, which also marks their phone verified. Retire the old pending texts. Set the allowlist to your number and that tester's, then turn on `SmsSendEnabled`, conversations, the sender trigger and outbox dispatch. Run one booking end to end: ask for times, pick one, you approve by text, the tester gets the confirmation, then cancel and reschedule.
+**Stage 3: full flow with you and one tester.** Requires prerequisites 4 and 5. Record the tester's consent in the owner app, which also marks their phone verified. Retire the old pending texts: run the dry run, then `--execute`, of "Retire pending outbox records" once, just before turning anything on. Set the allowlist to your number and that tester's, then turn on `SmsSendEnabled`, conversations, the sender trigger and outbox dispatch. Run one booking end to end: ask for times, pick one, you approve by text, the tester gets the confirmation, then cancel and reschedule.
 
 Next, check that a client outside the allowlist is refused. Use a second tester who has given consent and verified their phone but is not yet on the allowlist (inbound texts need no allowlist, so verification works). Book a visit for them in the owner app; its confirmation must fail with `RECIPIENT_NOT_AUTHORIZED` in delivery failures, and they receive nothing. A synthetic client with a 555 number also works: record its consent in the owner app, which verifies the phone, then book a visit. Then turn texting off with section 6, steps 1 and 2, timing it, and turn it back on.
 
@@ -82,7 +99,7 @@ Results of each stage are recorded on #91 without numbers or message text.
 ## 6. Turning texting off (runbook, verified once in stage 3)
 
 In order of speed; the first two take effect within a minute:
-1. **Stop outbound:** disable the sender trigger. Run `aws lambda list-event-source-mappings --function-name <SmsSenderFunction>`, then `update-event-source-mapping --uuid <id> --no-enabled`. Pending texts stay pending, in the queue and in the DynamoDB outbox, and are sent when the trigger is turned back on. Before turning it back on, count due records through `OutboxDueIndex` and decide whether to retire any (prerequisite 5); purging the queue alone does not stop them.
+1. **Stop outbound:** disable the sender trigger. Run `aws lambda list-event-source-mappings --function-name <SmsSenderFunction>`, then `update-event-source-mapping --uuid <id> --no-enabled`. Pending texts stay pending, in the queue and in the DynamoDB outbox, and are sent when the trigger is turned back on. Before turning it back on, clear stale records with the retire tool (dry run first, see "Retire pending outbox records"); purging the queue alone does not stop them.
 2. **Stop inbound:** in the Twilio console, clear the number's incoming-message webhook (or point it back to the previous value). Twilio still answers STOP and HELP itself and blocks later texts to anyone who sent STOP, but the app records no opt-out evidence for STOPs received while the webhook is cleared.
 3. Disable the outbox dispatch rule: `aws events disable-rule`.
 4. Make it permanent with one deploy: `SmsSendEnabled=disabled`, `EnableSmsConversations=disabled`, both new states `DISABLED`, and optionally `EnableSmsIngress=false`. Record the stop on #91.
