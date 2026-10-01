@@ -65,6 +65,7 @@ else
   # A parameter added to template.yaml has no previous value; it must be supplied once.
   live_keys="$(stack_query 'Stacks[0].Parameters[].ParameterKey' | tr '\t' '\n')"
   for key in $(template_parameter_keys); do
+    [[ "${SMOKE_ONLY}" -eq 1 ]] && break
     if ! grep -qx "${key}" <<<"${live_keys}"; then
       supplied=0
       for kv in "${EXTRA_PARAMS[@]+"${EXTRA_PARAMS[@]}"}"; do
@@ -173,6 +174,9 @@ trap 'rm -f "${SAM_LOG}"; cleanup' EXIT
 CHANGESET="$(grep -o 'arn:aws[a-z-]*:cloudformation:[^ ]*:changeSet/[^ ]*' "${SAM_LOG}" | head -n 1 || true)"
 
 if [[ -z "${CHANGESET}" ]]; then
+  # Only SAM's explicit no-change message may lead to a "nothing to deploy" success.
+  grep -q "No changes to deploy" "${SAM_LOG}" ||
+    die "SAM printed no change set ARN and no 'No changes to deploy' message; check the output above and any change set left on ${STACK_NAME}"
   # SAM prints no ARN when there is nothing to deploy; it may leave a FAILED empty change set.
   CHANGESET="$(aws_cli cloudformation list-change-sets --stack-name "${STACK_NAME}" --output json |
     jq -r --argjson start "$((START_EPOCH - 120))" '[.Summaries[]
