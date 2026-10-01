@@ -92,9 +92,9 @@ The pricing pages were fetched as HTML for the allowance rows; those pages are n
 
 **(b) Active verification month.** The checkpoint steps 1 to 6 in the pilot plan, with generous headroom. Synthetic dev table of 5 MB (0.005 GB) with PITR on, and 5 synthetic clients with notes.
 - 5,000 owner API requests (the pilot-plan scenario), 300 ms average, 256 MB.
-- 200,000 read and 100,000 write request units in total, plus the note scans below. This covers the API calls, three transaction-race families run repeatedly (two approvals for one slot, approval versus expiry, replacement swap versus stale write), and the fake-queue `DispatchService` harness. Transactions cost twice the units of ordinary writes, and each write to an indexed item also writes the GSIs.
+- 200,000 read and 100,000 write request units in total, including the note queries below. This covers the API calls, three transaction-race families run repeatedly (two approvals for one slot, approval versus expiry, replacement swap versus stale write), and the fake-queue `DispatchService` harness. Transactions cost twice the units of ordinary writes, and each write to an indexed item also writes the GSIs.
 - Hold expiry enabled for 7 days at `rate(5 minutes)`: 2,016 runs at 1 s. Note and SMS retention enabled for 7 days after the expiry and legal-hold checks: 14 runs at 5 s (7 of them note retention). Outbox dispatch stays **disabled**, as in the pilot plan. 1,000 extra manual or harness invocations at 1 s.
-- **Note scans:** 5 clients with notes x 7 note-retention runs, plus 300 owner note-list or note-create calls = 335 scans. Each scan of a 5 MB table reads about 1,280 read units (5 MB / 4 KB), so 335 x 1,280 = 428,800 read units. See the formula below.
+- **Last-visit queries:** 5 clients with notes x 7 note-retention runs, plus 300 owner note-list or note-create calls = 335 strongly consistent, client-keyed queries. Each reads at most one small visit item, independent of table size; this is covered by the 200,000 read-unit allowance above.
 - 10,000 SQS requests (300 synthetic intents through a fake consumer, plus the DLQ exercise; the stack has no consumer and the sender mapping stays disabled).
 - 0.1 GB of logs ingested. Both metric filters emit at least once (the alarm-transition checks), so 2 custom metrics bill.
 - 1 owner monthly active user. 10 Amplify builds of 4 minutes (manual deploy uses no build minutes; the figure is kept unchanged), 0.05 GB stored, 0.1 GB served. 0.1 GB of API responses out. 10,000 KMS requests for the DynamoDB managed key (an assumption). 0.25 GB in the SAM artifact bucket (several build versions of a Lambda zip, which is a small package: `backend/` is under 1 MB before dependencies).
@@ -102,9 +102,8 @@ The pricing pages were fetched as HTML for the allowance rows; those pages are n
 **(c) Worst case: all four schedules run all month.** As (b), but 30 days of every schedule, using the invocation counts in the pilot plan: hold expiry 8,640, outbox dispatch 43,200, note retention 30 and SMS retention 30. Synthetic dev table of 5 MB with 5 synthetic clients with notes, and 1 GB of logs (deliberate headroom).
 - Runs: hold expiry 1 s, outbox dispatch 0.5 s, retention 5 s.
 - Each hold-expiry run reads 1 read unit, each outbox run 0.5.
-- **Note scans.** 5 clients x 30 note-retention runs + 300 note-list or note-create calls = 450 scans x 1,280 read units = 576,000 read units. SMS retention uses queries and is assumed to cost about 100 read units per run.
-- **Cost formula for note retention.** `last_visit_end` (`backend/scheduling/adapters/dynamodb.py`) is a strongly consistent, full-table `Scan`. It runs once per client with notes on every daily note-retention run, and once per owner note list and per note create. Read units per month = (clients with notes x runs + note API calls) x table size / 4 KB. At $0.1395 per million read units, one scan of a 1 GB table (262,144 units) costs about $0.037. The scan bills every item in the table, not only notes, so cost grows with the table.
-- **Tracked for a code fix in #67.** That fix must land before real client records go into the `pilot` stack. It does not block the synthetic dev stack, whose table is a few megabytes.
+- **Last-visit queries.** 5 clients x 30 note-retention runs + 300 note-list or note-create calls = 450 client-keyed queries, covered by the read-unit allowance above. SMS retention uses queries and is assumed to cost about 100 read units per run. Confirming or changing a visit also writes its small client-visit item transactionally.
+- `last_visit_end` uses a strongly consistent reverse query on a client-specific base-table partition with `Limit=1`. Its read cost depends on one visit item, rather than total table size. The client-visit item is created or removed atomically with appointment changes.
 - The outbox queue mapping stays disabled, so messages produced by outbox dispatch would accumulate. Enabling either SQS event source mapping adds continuous long-poll receive requests billed as SQS requests. That is not included. A rough upper bound is about $0.26 per queue-month (about five pollers polling every 20 seconds at the $0.40/million price), which is an estimate to be measured, not a quote.
 
 ### 1.5 Monthly totals
@@ -113,7 +112,7 @@ The pricing pages were fetched as HTML for the allowance rows; those pages are n
 | --- | ---: | ---: | ---: |
 | Lambda (requests and duration) | $0.00 | $0.02 | $0.12 |
 | API Gateway HTTP API | $0.00 | $0.01 | $0.01 |
-| DynamoDB request units | $0.00 | $0.16 | $0.18 |
+| DynamoDB request units | $0.00 | $0.10 | $0.10 |
 | DynamoDB storage | $0.00 | $0.00 | $0.00 |
 | DynamoDB PITR | $0.00 | $0.00 | $0.00 |
 | SQS | $0.00 | $0.00 | $0.00 |
@@ -129,7 +128,7 @@ The pricing pages were fetched as HTML for the allowance rows; those pages are n
 | AWS Budgets | $0.00 | $0.00 | $0.00 |
 | Data transfer out | $0.00 | $0.01 | $0.01 |
 | S3 SAM artifacts | $0.01 | $0.01 | $0.01 |
-| **Total at list price (no allowances)** | **$1.14** | **$2.43** | **$3.20** |
+| **Total at list price (no allowances)** | **$1.14** | **$2.37** | **$3.12** |
 | **Total after always-free allowances** | **$0.11** | **$0.69** | **$0.75** |
 
 Rows are rounded to the cent, so they may not add exactly to the totals, which are computed from unrounded values (for example, (a) also includes about $0.001 of Amplify storage and a few hundredths of a cent of requests).
@@ -138,14 +137,14 @@ Reading the table:
 - The dominant fixed cost is the **11 CloudWatch alarms** ($1.10 at list; $0.10 after the 10-alarm allowance). Enabling SMS ingress adds a 12th ($0.10).
 - The idle stack costs about $1 per month at list price. It is not zero because alarms, the DynamoDB PITR/storage, and Amplify storage bill while idle.
 - Log ingestion is $0.67 per GB in `us-west-1`, which is more than the widely quoted `us-east-1` price. Log volume growth is the most likely source of surprise; every extra GB of ingested logs adds $0.67 before the 5 GB allowance.
-- Sensitivity, per scan: one full scan of a 10 GB table uses about 2.6 million read units, or about $0.37 **per scan**, and one of a 1 GB table about $0.037. **Pilot scale** with the current code: 20 clients with notes on a 1 GB table means 20 x 30 = 600 scans a month, or about **$22 a month** for daily retention alone, plus $0.037 for every owner note list or note create. That is why #67 must land before the `pilot` stack holds real records. A 10 GB table also adds about $2.2 a month of PITR before the 25 GB storage allowance.
+- Last-visit lookup cost is independent of table size. At 20 clients with notes and 30 daily runs, retention makes about 600 small keyed queries; owner note calls add one each. A 10 GB table also adds about $2.2 a month of PITR before the 25 GB storage allowance.
 - This estimate sits well below the earlier provisional $10 to $30 planning envelope, which the pilot plan no longer carries.
 
 ### 1.6 Approved AWS Budget, scoped to the dedicated account
 
 **Approved by the owner on 2026-09-30; the amounts and thresholds are unchanged.**
 
-- **Monthly budget: $10.00.** It is about three times the worst-case dev list-price total ($3.20), which leaves headroom for log growth or a mistaken schedule, and the first alert ($5) already sits above that worst case, so any alert signals something unexpected. **This is a dev-only figure.** The `pilot` stack needs its own budget in its own account after #67 lands, because at pilot scale the current scan costs about $22 a month.
+- **Monthly budget: $10.00.** It is about three times the worst-case dev list-price total ($3.12), which leaves headroom for log growth or a mistaken schedule, and the first alert ($5) already sits above that worst case, so any alert signals something unexpected. **This is a dev-only figure.** The `pilot` stack needs its own budget in its own account before onboarding real records.
 - **Type:** monthly cost budget with no budget actions (actions cost $0.10 per budget-day after 62 days and would need extra IAM).
 - **Alerts, sent to the owner-monitored mailbox:**
   - Actual spend at 50 percent ($5.00), 80 percent ($8.00), and 100 percent ($10.00).
@@ -221,7 +220,7 @@ The translator produces **61 resources** in this configuration. "Deletion" is th
 | `OutboxDispatchFunctionSweepPermission` | `AWS::Lambda::Permission` | EventBridge may invoke the function | Delete |
 | `OutboxDispatchLogGroup` | `AWS::Logs::LogGroup` | 30-day retention; source of the outbox-age metric filter | Delete |
 | `NoteRetentionFunction` | `AWS::Lambda::Function` | `scheduling.workers.note_retention.handler`, 60 s | Delete |
-| `NoteRetentionFunctionRole` | `AWS::IAM::Role` | Basic execution plus table access including `Scan` | Delete |
+| `NoteRetentionFunctionRole` | `AWS::IAM::Role` | Basic execution plus table access including `Query` | Delete |
 | `NoteRetentionFunctionDaily` | `AWS::Events::Rule` | `cron(0 9 * * ? *)`, **State=DISABLED** | Delete |
 | `NoteRetentionFunctionDailyPermission` | `AWS::Lambda::Permission` | EventBridge may invoke the function | Delete |
 | `NoteRetentionLogGroup` | `AWS::Logs::LogGroup` | 30-day retention | Delete |

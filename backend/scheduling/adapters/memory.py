@@ -101,8 +101,11 @@ class InMemoryCalendarRepository:
                 raise RecordConflict("Note ID was already used")
             self._client_notes[key] = note
 
-    def delete_note(self, note: ClientNote) -> None:
+    def delete_note(self, note: ClientNote, expected_revision: int | None = None) -> None:
         with self._lock:
+            if (expected_revision is not None
+                    and self._revisions[note.business_id] != expected_revision):
+                raise RecordConflict("Calendar changed before note purge")
             key = (note.business_id, note.client_id, note.note_id)
             current = self._client_notes.get(key)
             if current is not None and current.legal_hold_reason is not None:

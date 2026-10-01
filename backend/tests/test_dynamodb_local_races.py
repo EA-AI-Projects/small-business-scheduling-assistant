@@ -56,7 +56,9 @@ class RaceEnv:
 
     def scrub(self) -> None:
         """Delete only the items this run created (its business and appointment keys)."""
-        partitions = [f"BUSINESS#{self.business}"]
+        partitions = [f"BUSINESS#{self.business}",
+                      DynamoDBCalendarRepository._visit_partition(
+                          self.business, "synthetic-client")]
         partitions += [f"APPOINTMENT#{identifier}" for identifier in self.appointment_ids]
         errors: list[str] = []
         for pk in partitions:
@@ -202,6 +204,8 @@ def _seed(env: RaceEnv, appointments: tuple[Appointment, ...],
     for appointment in appointments:
         client.put_item(TableName=table, Item=repo._appointment_item(appointment))
         client.put_item(TableName=table, Item=repo._event_item(appointment))
+        if appointment.status == CalendarStatus.CONFIRMED:
+            client.put_item(TableName=table, Item=repo._visit_item(appointment))
     if guard_original:
         client.put_item(
             TableName=table,
@@ -332,6 +336,8 @@ def test_approval_and_expiry_commit_only_one_atomic_result(race_env: RaceEnv) ->
     assert len([item for item in items if item["SK"]["S"].startswith("OUTBOX#")]) == 1
     event = next((item for item in items if item["SK"]["S"].startswith("EVENT#")), None)
     assert (event is not None) == (metadata["status"]["S"] == "CONFIRMED")
+    assert repo.last_visit_end(env.business, before.client_id, START + timedelta(hours=2)) == (
+        before.end_at if metadata["status"]["S"] == "CONFIRMED" else None)
     revision = _get(env, f"BUSINESS#{env.business}", "CALENDAR#REVISION")
     assert revision is not None and revision["revision"]["N"] == "8"
 
@@ -368,6 +374,8 @@ def test_replacement_swap_rejects_adversarial_original_cancellation_atomically(
               if item["SK"]["S"].startswith("EVENT#")]
     assert original.appointment_id not in events
     assert replacement.appointment_id in events
+    assert repo.last_visit_end(env.business, original.client_id, START + timedelta(hours=2)) == (
+        replacement.end_at if replacement_item["status"]["S"] == "CONFIRMED" else None)
     guard = _get(env, f"BUSINESS#{env.business}", f"REPLACEMENT#{original.appointment_id}")
     assert (guard is None) == (replacement_item["status"]["S"] == "CONFIRMED")
 

@@ -351,14 +351,25 @@ class DynamoDBCalendarRepository:
                 raise
             raise RecordConflict("Note ID was already used") from exc
 
-    def delete_note(self, note: ClientNote) -> None:
-        try:
-            self._client.transact_write_items(TransactItems=[{"Delete": {
+    def delete_note(self, note: ClientNote, expected_revision: int | None = None) -> None:
+        writes: list[dict[str, Any]] = []
+        if expected_revision is not None:
+            writes.append({"ConditionCheck": {
                 "TableName": self._table,
-                "Key": self._note_key(note.business_id, note.client_id, note.note_id),
-                "ConditionExpression": "created_at = :created AND attribute_not_exists(legal_hold_reason)",
-                "ExpressionAttributeValues": {":created": {"S": _instant(note.created_at)}},
-            }}])
+                "Key": self._business_key(note.business_id, "CALENDAR#REVISION"),
+                "ConditionExpression": "attribute_not_exists(PK)" if expected_revision == 0
+                else "revision = :expected",
+                **({"ExpressionAttributeValues": {":expected": {"N": str(expected_revision)}}}
+                   if expected_revision else {}),
+            }})
+        writes.append({"Delete": {
+            "TableName": self._table,
+            "Key": self._note_key(note.business_id, note.client_id, note.note_id),
+            "ConditionExpression": "created_at = :created AND attribute_not_exists(legal_hold_reason)",
+            "ExpressionAttributeValues": {":created": {"S": _instant(note.created_at)}},
+        }})
+        try:
+            self._client.transact_write_items(TransactItems=writes)
         except Exception as exc:
             if not _record_transaction_conflict(exc):
                 raise
@@ -397,36 +408,30 @@ class DynamoDBCalendarRepository:
 
     def last_visit_end(self, business_id: str, client_id: str,
                        now: datetime) -> datetime | None:
-        # Strong scan is acceptable for the one-business pilot. A client-visit index
-        # can replace it when volume warrants; an eventual GSI cannot authorize deletion.
-        latest: datetime | None = None
-        last_key: dict[str, Any] | None = None
-        while True:
-            arguments: dict[str, Any] = {
-                "TableName": self._table,
-                "ConsistentRead": True,
-                "FilterExpression": ("begins_with(PK, :appointment) AND business_id = :business "
-                                     "AND client_id = :client AND #status = :confirmed "
-                                     "AND end_at <= :now"),
-                "ExpressionAttributeNames": {"#status": "status"},
-                "ExpressionAttributeValues": {
-                    ":appointment": {"S": "APPOINTMENT#"},
-                    ":business": {"S": business_id},
-                    ":client": {"S": client_id},
-                    ":confirmed": {"S": CalendarStatus.CONFIRMED.value},
-                    ":now": {"S": _instant(now)},
-                },
-                "ProjectionExpression": "end_at",
-            }
-            if last_key is not None:
-                arguments["ExclusiveStartKey"] = last_key
-            page = self._client.scan(**arguments)
-            for item in page.get("Items", ()):
-                end = datetime.fromisoformat(item["end_at"]["S"])
-                latest = max(latest, end) if latest else end
-            last_key = page.get("LastEvaluatedKey")
-            if not last_key:
-                return latest
+        partition = self._visit_partition(business_id, client_id)
+        page = self._client.query(
+            TableName=self._table, ConsistentRead=True,
+            KeyConditionExpression="PK = :pk AND SK <= :end",
+            ExpressionAttributeValues={
+                ":pk": {"S": partition},
+                ":end": {"S": f"END#{_instant(now)}$"},
+            },
+            ScanIndexForward=False, Limit=1, ProjectionExpression="end_at",
+        )
+        items = page.get("Items", ())
+        return datetime.fromisoformat(items[0]["end_at"]["S"]) if items else None
+
+    @staticmethod
+    def _visit_partition(business_id: str, client_id: str) -> str:
+        return f"VISITS#{business_id}#{sha256(client_id.encode()).hexdigest()}"
+
+    @classmethod
+    def _visit_item(cls, appointment: Appointment) -> dict[str, Any]:
+        return {
+            "PK": {"S": cls._visit_partition(appointment.business_id, appointment.client_id)},
+            "SK": {"S": f"END#{_instant(appointment.end_at)}#{appointment.appointment_id}"},
+            "end_at": {"S": _instant(appointment.end_at)},
+        }
 
     def read_revision(self, business_id: str) -> int:
         item = self._get(self._business_key(business_id, "CALENDAR#REVISION"))
@@ -586,6 +591,7 @@ class DynamoDBCalendarRepository:
         elif appointment is not None:
             writes.append(fresh_put(self._appointment_item(appointment)))
             writes.append(fresh_put(self._event_item(appointment)))
+            writes.append(fresh_put(self._visit_item(appointment)))
         else:
             raise ValueError("Owner calendar commit has no change")
 
@@ -1165,6 +1171,17 @@ class DynamoDBCalendarRepository:
             if after.status == CalendarStatus.CONFIRMED:
                 writes.append(fresh_put(self._event_item(after)))
 
+        before_visit = before.status == CalendarStatus.CONFIRMED
+        after_visit = after.status == CalendarStatus.CONFIRMED
+        if before_visit and (not after_visit or before.end_at != after.end_at):
+            writes.append({"Delete": {
+                "TableName": self._table,
+                "Key": {key: value for key, value in self._visit_item(before).items()
+                        if key in ("PK", "SK")},
+            }})
+        if after_visit and (not before_visit or before.end_at != after.end_at):
+            writes.append(fresh_put(self._visit_item(after)))
+
         replaced = commit.result.replaced_appointment
         if replaced is not None:
             original_before = self.read_appointment(replaced.appointment_id)
@@ -1177,6 +1194,11 @@ class DynamoDBCalendarRepository:
             writes.extend((
                 guarded_put(self._appointment_item(replaced), original_before),
                 event_delete(original_before),
+                {"Delete": {
+                    "TableName": self._table,
+                    "Key": {key: value for key, value in self._visit_item(original_before).items()
+                            if key in ("PK", "SK")},
+                }},
             ))
 
         if commit.clear_replacement_guard and before.replaces_appointment_id is not None:

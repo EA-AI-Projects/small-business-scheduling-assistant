@@ -74,12 +74,15 @@ def test_approve_checks_expiry_and_writes_metadata_event_audit_and_outbox_atomic
     )
 
     writes = client.transactions[0]["TransactItems"]
-    assert len(writes) == 6
+    assert len(writes) == 7
     assert writes[0]["Update"]["ConditionExpression"] == "revision = :old"
     assert "hold_expires_at > :decision_at" in writes[1]["Put"]["ConditionExpression"]
     assert "hold_expires_at > :decision_at" in writes[2]["Put"]["ConditionExpression"]
     assert writes[1]["Put"]["Item"]["status"] == {"S": "CONFIRMED"}
     assert writes[2]["Put"]["Item"]["version"] == {"N": "2"}
+    assert any(write.get("Put", {}).get("Item", {}).get("PK") == {
+        "S": DynamoDBCalendarRepository._visit_partition(before.business_id, before.client_id)
+    } for write in writes)
     assert any(
         write.get("Put", {}).get("Item", {}).get("SK", {}).get("S", "").startswith("AUDIT#")
         for write in writes
@@ -156,4 +159,23 @@ def test_replacement_approval_cancels_original_and_deletes_guard_in_one_transact
         write.get("Delete", {}).get("Key", {}).get("SK") == {"S": "REPLACEMENT#original-1"}
         for write in writes
     )
-    assert sum("Delete" in write for write in writes) == 2
+    assert sum("Delete" in write for write in writes) == 3
+    assert any(write.get("Delete", {}).get("Key", {}).get("PK") == {
+        "S": DynamoDBCalendarRepository._visit_partition(original.business_id, original.client_id)
+    } for write in writes)
+
+
+def test_cancellation_removes_client_visit_in_same_transaction() -> None:
+    client = RecordingClient()
+    before = replace(pending(), status=CalendarStatus.CONFIRMED, version=2)
+    after = replace(before, status=CalendarStatus.CANCELLED, version=3)
+    DynamoDBCalendarRepository(client, "scheduling").commit_transition(
+        7, transition(before, Action.CANCEL, after)
+    )
+    writes = client.transactions[0]["TransactItems"]
+    assert any(write.get("Delete", {}).get("Key", {}).get("PK") == {
+        "S": DynamoDBCalendarRepository._visit_partition(before.business_id, before.client_id)
+    } for write in writes)
+    assert not any(write.get("Put", {}).get("Item", {}).get("PK") == {
+        "S": DynamoDBCalendarRepository._visit_partition(before.business_id, before.client_id)
+    } for write in writes)
