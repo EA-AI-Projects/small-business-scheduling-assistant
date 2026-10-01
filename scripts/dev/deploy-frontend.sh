@@ -9,7 +9,7 @@
 # Either way the app's defaultDomain must produce exactly OwnerAppOrigin.
 #
 # This deploys the LOCAL checkout, not GitHub. It prints the commit, refuses a dirty tree unless
-# --allow-dirty, and warns, without blocking, when HEAD is on no remote branch.
+# --allow-dirty (--dry-run is never blocked), and warns, without blocking, when HEAD is on no remote branch.
 #
 # Usage: scripts/dev/deploy-frontend.sh [--allow-dirty] [--dry-run] [--app-id ID]
 #                                       [--profile NAME | --no-profile]
@@ -50,7 +50,9 @@ done
 need_tool aws jq curl zip git npm
 pin_region
 cd "${REPO_ROOT}"
-report_commit "${ALLOW_DIRTY}" 1
+ENFORCE_CLEAN=1
+[[ "${DRY_RUN}" -eq 0 ]] || ENFORCE_CLEAN=0
+report_commit "${ALLOW_DIRTY}" "${ENFORCE_CLEAN}"
 warn_if_unpushed
 check_identity
 

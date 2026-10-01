@@ -11,9 +11,9 @@
 # Only the three listed logical IDs are accepted. Outbox dispatch (OutboxDispatch*) is refused:
 # it stays off until live SMS is separately authorized.
 #
-# This ships the CURRENT CHECKOUT. It prints the commit and whether the tree is dirty, and refuses
-# a dirty tree unless --allow-dirty is given (passed on to deploy-backend.sh). It warns, without
-# blocking, when HEAD is on no remote branch. To stop a schedule in an emergency, do not use this
+# This ships the CURRENT CHECKOUT. deploy-backend.sh prints the commit, refuses a dirty tree
+# unless --allow-dirty is given (passed on to it), and warns, without blocking, when HEAD is on no
+# remote branch. To stop a schedule in an emergency, do not use this
 # script: use the aws events disable-rule procedure in doc/DEV_STACK_PLAN.md section 3.1.
 #
 # Usage: scripts/dev/schedules.sh enable|disable <LogicalId> [--allow-dirty] [--dry-run]
@@ -79,10 +79,7 @@ pin_region
 check_identity
 
 cd "${REPO_ROOT}"
-ENFORCE_CLEAN=1
-[[ "${DRY_RUN}" -eq 0 ]] || ENFORCE_CLEAN=0
-report_commit "${ALLOW_DIRTY}" "${ENFORCE_CLEAN}"
-warn_if_unpushed
+info "Full deploy of the current checkout; deploy-backend.sh below prints the commit and applies the dirty and unpushed guards."
 
 DEPLOY=("$(dirname "${BASH_SOURCE[0]}")/deploy-backend.sh" --param "${PARAM}=${WANT}")
 [[ "${DRY_RUN}" -ne 1 ]] || DEPLOY+=(--dry-run)
