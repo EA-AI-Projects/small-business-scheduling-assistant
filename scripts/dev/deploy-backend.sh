@@ -217,10 +217,18 @@ schedule_parameter() {
 # Warn before creating a change set: SAM may report no changes without returning an ARN.
 warn_schedule_drift() {
   local logical physical param want have
+  # A parameter that is not on the live stack yet (the first deploy after it was added) has no
+  # value to compare: skip its warning instead of failing like stack_parameter does.
+  live_parameter() {
+    local value
+    value="$(stack_query "Stacks[0].Parameters[?ParameterKey=='$1'].ParameterValue | [0]")" || return 1
+    [[ "${value}" != "None" ]] || value=""
+    printf '%s' "${value}"
+  }
   while IFS=$'\t' read -r logical physical; do
     param="$(schedule_parameter "${logical}")"
     [[ -n "${param}" ]] || continue
-    want="$(stack_parameter "${param}")"
+    want="$(live_parameter "${param}")"
     have="$(aws_cli events describe-rule --name "${physical}" --query State --output text)"
     if [[ -n "${want}" && "${have}" != "${want}" ]]; then
       info "WARNING: ${logical} is ${have} live but ${param}=${want}. A later deploy that modifies the rule would set it to ${want} (refused unless --param ${param} is passed)."
@@ -229,7 +237,7 @@ warn_schedule_drift() {
   # The sender mapping drifts the same way (for example after an emergency --no-enabled).
   while IFS=$'\t' read -r logical physical; do
     [[ "${logical}" == "SmsSenderFunctionOutbox" ]] || continue
-    want="$(stack_parameter SmsSenderMappingState)"
+    want="$(live_parameter SmsSenderMappingState)"
     have="$(sender_mapping_state "${physical}")"
     if [[ -n "${want}" && "${have}" != "${want}" ]]; then
       info "WARNING: ${logical} is ${have} live but SmsSenderMappingState=${want}. A later deploy that modifies the mapping would set it to ${want} (refused unless --param SmsSenderMappingState=${want} is passed)."

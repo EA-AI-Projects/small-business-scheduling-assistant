@@ -42,6 +42,7 @@ def run_guard(
     mappings: dict[str, str] | None = None,
     conditions: dict[str, object] | None = None,
     auth: bool = False,
+    live_params: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     description = {
         "Changes": [
@@ -84,9 +85,18 @@ stack_resources() {{
     *) jq -r 'keys[] | [., .] | @tsv' {tmp_path}/mappings.json ;;
   esac
 }}
-stack_parameter() {{ jq -r --arg k "$1" '.[$k]' {tmp_path}/params.json; }}
+stack_parameter() {{
+  local v
+  v="$(jq -r --arg k "$1" '.[$k] // empty' {tmp_path}/live_params.json)"
+  [[ -n "$v" ]] || die "stack parameter $1 not found on synthetic"
+  printf '%s' "$v"
+}}
+stack_query() {{
+  jq -rn --arg q "$1" --slurpfile p {tmp_path}/live_params.json \
+    '($q | capture("ParameterKey==.(?<k>[A-Za-z0-9]+).").k) as $k | $p[0][$k] // "None"'
+}}
 """
-    (tmp_path / "params.json").write_text(json.dumps(params))
+    (tmp_path / "live_params.json").write_text(json.dumps(params if live_params is None else live_params))
     return subprocess.run(
         ["bash", "-c", prelude + drift_warning_block() + guard_block() + "warn_schedule_drift\n"],
         capture_output=True, text=True, check=False
@@ -353,3 +363,21 @@ def test_no_change_drift_warning_covers_outbox_dispatch(tmp_path: Path) -> None:
     result = run_guard([], {}, {"OutboxDispatchScheduleState": "ENABLED"}, {OUTBOX: "DISABLED"}, [], tmp_path)
     assert result.returncode == 0, result.stdout
     assert f"WARNING: {OUTBOX} is DISABLED live but OutboxDispatchScheduleState=ENABLED" in result.stdout
+
+
+def test_first_deploy_with_new_parameters_missing_live_proceeds(tmp_path: Path) -> None:
+    # Neither new parameter is on the live stack yet; both are passed as DISABLED, which matches
+    # the live DISABLED rule and mapping. The pre-change-set drift check must not die.
+    result = run_guard(
+        [modify(OUTBOX), mapping_change()],
+        {OUTBOX: {"State": {"Ref": "OutboxDispatchScheduleState"}}, **SENDER_TEMPLATE},
+        {"OutboxDispatchScheduleState": "DISABLED", "SmsSenderMappingState": "DISABLED"},
+        {OUTBOX: "DISABLED"},
+        ["OutboxDispatchScheduleState=DISABLED", "SmsSenderMappingState=DISABLED"],
+        tmp_path,
+        mappings={SENDER: "Disabled"},
+        live_params={"HoldExpiryScheduleState": "ENABLED"},
+    )
+    assert result.returncode == 0, result.stdout
+    assert "WARNING" not in result.stdout
+    assert f"{OUTBOX} [Modify]: DISABLED -> DISABLED" in result.stdout
