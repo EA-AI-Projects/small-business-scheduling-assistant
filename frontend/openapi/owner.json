@@ -227,6 +227,41 @@
         "title": "HomeSize",
         "type": "string"
       },
+      "InPersonConsentBody": {
+        "additionalProperties": false,
+        "properties": {
+          "clear_yes": {
+            "title": "Clear Yes",
+            "type": "boolean"
+          },
+          "participant_name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Participant Name",
+            "type": "string"
+          },
+          "phone_e164": {
+            "maxLength": 16,
+            "minLength": 2,
+            "title": "Phone E164",
+            "type": "string"
+          },
+          "script_version": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Script Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phone_e164",
+          "participant_name",
+          "script_version",
+          "clear_yes"
+        ],
+        "title": "InPersonConsentBody",
+        "type": "object"
+      },
       "LegalHoldBody": {
         "additionalProperties": false,
         "properties": {
@@ -1511,6 +1546,69 @@
         "summary": "Change Client Note Hold"
       }
     },
+    "/v1/owner/businesses/{business_id}/clients/{client_id}/sms-consent": {
+      "post": {
+        "operationId": "capture_sms_consent_v1_owner_businesses__business_id__clients__client_id__sms_consent_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "business_id",
+            "required": true,
+            "schema": {
+              "title": "Business Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InPersonConsentBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Capture Sms Consent V1 Owner Businesses  Business Id  Clients  Client Id  Sms Consent Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Capture Sms Consent"
+      }
+    },
     "/v1/owner/businesses/{business_id}/local-time": {
       "get": {
         "operationId": "resolve_local_time_v1_owner_businesses__business_id__local_time_get",
@@ -1974,6 +2072,50 @@
           }
         ],
         "summary": "Decline"
+      }
+    },
+    "/v1/owner/businesses/{business_id}/sms-delivery-failures": {
+      "get": {
+        "operationId": "sms_delivery_failures_v1_owner_businesses__business_id__sms_delivery_failures_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "business_id",
+            "required": true,
+            "schema": {
+              "title": "Business Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Sms Delivery Failures V1 Owner Businesses  Business Id  Sms Delivery Failures Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Sms Delivery Failures"
       }
     }
   }

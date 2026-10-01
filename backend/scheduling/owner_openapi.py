@@ -7,6 +7,7 @@ import json
 import sys
 
 from scheduling.adapters.memory import InMemoryCalendarRepository
+from scheduling.adapters.sms_dynamodb import DynamoSmsIngressStore
 from scheduling.owner_api import OwnerPrincipal, create_owner_app
 
 
@@ -15,7 +16,10 @@ def owner_schema() -> dict[str, object]:
         del token
         raise ValueError("Schema export never authenticates")
 
-    return create_owner_app(InMemoryCalendarRepository(), reject).openapi()
+    # The deployed app always mounts the SMS consent and delivery-failure routes, so the
+    # exported contract must include them. The store is never called while exporting.
+    sms_store = DynamoSmsIngressStore(None, "schema-export")  # type: ignore[arg-type]
+    return create_owner_app(InMemoryCalendarRepository(), reject, sms_store=sms_store).openapi()
 
 
 def main() -> None:

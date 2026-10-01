@@ -4,6 +4,8 @@ import { useOwner } from "@/owner/OwnerContext";
 
 import { SectionHeading } from "../Workspace";
 import { ClientList } from "./ClientList";
+import { ConsentForm } from "./ConsentForm";
+import { DeliveryFailures } from "./DeliveryFailures";
 import { NoteForm } from "./NoteForm";
 import { NoteList } from "./NoteList";
 import { ProfileForm } from "./ProfileForm";
@@ -24,9 +26,13 @@ export function ClientsTab() {
         </button>
       </SectionHeading>
       <div className="split">
-        <ClientList clients={data.clients} onSelect={(id) => selectClient(id)} />
+        <div className="stack">
+          <ClientList clients={data.clients} onSelect={(id) => selectClient(id)} />
+          <DeliveryFailures />
+        </div>
         <div className="stack">
           <ProfileForm key={profileKey} client={client} />
+          <ConsentForm key={`consent:${profileKey}`} client={client} />
           <section className="card">
             <h3>Notes</h3>
             <p className="hint">Select a client first. Do not enter access codes.</p>
