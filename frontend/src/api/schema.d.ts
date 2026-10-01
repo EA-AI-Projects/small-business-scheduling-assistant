@@ -196,6 +196,23 @@ export interface paths {
         patch: operations["change_client_note_hold_v1_owner_businesses__business_id__clients__client_id__notes__note_id__legal_hold_patch"];
         trace?: never;
     };
+    "/v1/owner/businesses/{business_id}/clients/{client_id}/sms-consent": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Capture Sms Consent */
+        post: operations["capture_sms_consent_v1_owner_businesses__business_id__clients__client_id__sms_consent_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/owner/businesses/{business_id}/local-time": {
         parameters: {
             query?: never;
@@ -300,6 +317,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/owner/businesses/{business_id}/sms-delivery-failures": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Sms Delivery Failures */
+        get: operations["sms_delivery_failures_v1_owner_businesses__business_id__sms_delivery_failures_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -388,6 +422,17 @@ export interface components {
          * @enum {string}
          */
         HomeSize: "small" | "medium" | "large";
+        /** InPersonConsentBody */
+        InPersonConsentBody: {
+            /** Clear Yes */
+            clear_yes: boolean;
+            /** Participant Name */
+            participant_name: string;
+            /** Phone E164 */
+            phone_e164: string;
+            /** Script Version */
+            script_version: string;
+        };
         /** LegalHoldBody */
         LegalHoldBody: {
             /** Reason */
@@ -1064,6 +1109,42 @@ export interface operations {
             };
         };
     };
+    capture_sms_consent_v1_owner_businesses__business_id__clients__client_id__sms_consent_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                business_id: string;
+                client_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InPersonConsentBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     resolve_local_time_v1_owner_businesses__business_id__local_time_get: {
         parameters: {
             query: {
@@ -1321,6 +1402,37 @@ export interface operations {
                 "application/json": components["schemas"]["DecisionBody"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    sms_delivery_failures_v1_owner_businesses__business_id__sms_delivery_failures_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                business_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {

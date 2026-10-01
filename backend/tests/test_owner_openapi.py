@@ -13,3 +13,11 @@ def test_owner_schema_lists_owner_routes_and_request_bodies() -> None:
     assert isinstance(components, dict)
     for name in ("ClientProfileBody", "BlockBody", "PolicyEditBody", "DecisionBody"):
         assert name in components["schemas"]
+
+
+def test_owner_schema_includes_sms_consent_and_delivery_failure_routes() -> None:
+    paths = owner_schema()["paths"]
+    assert isinstance(paths, dict)
+    consent = "/v1/owner/businesses/{business_id}/clients/{client_id}/sms-consent"
+    assert "post" in paths[consent]
+    assert "get" in paths["/v1/owner/businesses/{business_id}/sms-delivery-failures"]
