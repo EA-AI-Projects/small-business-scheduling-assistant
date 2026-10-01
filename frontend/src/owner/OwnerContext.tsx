@@ -107,11 +107,14 @@ export function OwnerProvider({ api, notify, children }: {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (error instanceof ApiError && error.status === 409) {
+          const conflictMessage = path === "/policy/seed"
+            ? "Pilot policy could not be loaded because the policy or calendar changed"
+            : `Nothing was saved: ${message}`;
           try {
             await refresh(true);
-            safeNotify(`Nothing was saved: ${message}. Current state has been refreshed.`, true);
+            safeNotify(`${conflictMessage}. Current state has been refreshed.`, true);
           } catch (refreshError) {
-            safeNotify(`Nothing was saved: ${message}. Current state could not load: ${
+            safeNotify(`${conflictMessage}. Current state could not load: ${
               refreshError instanceof Error ? refreshError.message : String(refreshError)}`, true);
           }
         } else {
