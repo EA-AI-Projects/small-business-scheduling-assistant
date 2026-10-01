@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 PHONE = re.compile(r"^\+[1-9][0-9]{1,14}$")
 STOP_WORDS = frozenset({"STOP", "STOPALL", "UNSUBSCRIBE", "END", "QUIT", "REVOKE", "OPTOUT"})
 HELP_WORDS = frozenset({"HELP", "INFO"})
+START_WORDS = frozenset({"START", "UNSTOP"})
 
 
 class SmsCommandInterrupted(Exception):
@@ -140,10 +141,16 @@ class SmsIngressService:
         if provider_keyword and provider_keyword not in {"STOP", "HELP", "START"}:
             raise ValueError("Unsupported provider opt-out type")
         word = body.strip().upper()
+        # STOP and HELP provider tags are authoritative. Twilio also tags any
+        # configured opt-in keyword (such as YES or SUBSCRIBE) as START, which
+        # would swallow our "Reply YES" confirmations, so honour START only for
+        # Twilio's reserved opt-in words and otherwise classify the body ourselves.
+        if provider_keyword == "START" and word not in START_WORDS:
+            provider_keyword = ""
         keyword = (Keyword(provider_keyword) if provider_keyword else
                    Keyword.STOP if word in STOP_WORDS else
                    Keyword.HELP if word in HELP_WORDS else
-                   Keyword.START if word == "START" else Keyword.OTHER)
+                   Keyword.START if word in START_WORDS else Keyword.OTHER)
         profile = (None if sender == self._owner_number else
                    self._clients.read_verified_phone(self._business_id, sender))
         role = (SenderRole.OWNER if sender == self._owner_number else

@@ -138,6 +138,60 @@ def test_stop_help_and_start_never_run_scheduling_command() -> None:
     assert "+14155550101" not in store.opted_out
 
 
+def test_provider_start_tag_is_honoured_only_for_reserved_opt_in_words() -> None:
+    client, service, store = setup()
+    service.record_in_person_consent("client-1", "+14155550101", "Synthetic Client",
+                                     "pilot-v1", NOW)
+    for sid, body in (("SM-yes", "Yes"), ("SM-sub", "SUBSCRIBE")):
+        assert send(client, {**inbound(sid, body=body), "OptOutType": "START"}) == 204
+        assert store.receipts[sid].keyword == Keyword.OTHER
+        assert store.receipts[sid].body == body
+        assert store.receipts[sid].authorized_for_commands is True
+    assert send(client, {**inbound("SM-owner", "+14155559999", "yes"),
+                         "OptOutType": "START"}) == 204
+    assert store.receipts["SM-owner"].keyword == Keyword.OTHER
+    assert store.receipts["SM-owner"].authorized_for_commands is True
+    for sid, body in (("SM-start", " start "), ("SM-unstop", "unstop")):
+        assert send(client, {**inbound(sid, body=body), "OptOutType": "START"}) == 204
+        assert store.receipts[sid].keyword == Keyword.START
+        assert store.receipts[sid].body is None
+    # Without a provider tag, UNSTOP is also an opt-in keyword, never a command.
+    assert send(client, inbound("SM-bare-unstop", body="UNSTOP")) == 204
+    assert store.receipts["SM-bare-unstop"].keyword == Keyword.START
+    assert store.receipts["SM-bare-unstop"].body is None
+
+
+def test_provider_stop_and_help_tags_stay_authoritative() -> None:
+    client, service, store = setup()
+    service.record_in_person_consent("client-1", "+14155550101", "Synthetic Client",
+                                     "pilot-v1", NOW)
+    assert send(client, {**inbound("SM-yes-stop", body="yes"), "OptOutType": "STOP"}) == 204
+    assert store.receipts["SM-yes-stop"].keyword == Keyword.STOP
+    assert store.receipts["SM-yes-stop"].body is None
+    assert "+14155550101" in store.opted_out
+    assert send(client, {**inbound("SM-yes-help", body="yes"), "OptOutType": "HELP"}) == 204
+    assert store.receipts["SM-yes-help"].keyword == Keyword.HELP
+    assert store.receipts["SM-yes-help"].body is None
+
+
+def test_start_tagged_yes_never_reenables_an_opted_out_sender() -> None:
+    client, service, store = setup()
+    service.record_in_person_consent("client-1", "+14155550101", "Synthetic Client",
+                                     "pilot-v1", NOW)
+    assert send(client, {**inbound("SM-stop", body="stop"), "OptOutType": "STOP"}) == 204
+    service.record_in_person_consent("client-1", "+14155550101", "Synthetic Client",
+                                     "pilot-v2", NOW + timedelta(seconds=1))
+    assert send(client, {**inbound("SM-yes", body="yes"), "OptOutType": "START"}) == 204
+    receipt = store.receipts["SM-yes"]
+    assert receipt.keyword == Keyword.OTHER
+    assert receipt.body is None
+    assert receipt.authorized_for_commands is False
+    assert "+14155550101" in store.opted_out
+    assert send(client, {**inbound("SM-unstop", body="unstop"), "OptOutType": "START"}) == 204
+    assert store.receipts["SM-unstop"].keyword == Keyword.START
+    assert "+14155550101" not in store.opted_out
+
+
 def test_malformed_or_wrong_recipient_is_never_recorded() -> None:
     client, _, store = setup()
     assert send(client, {**inbound("SM-wrong"), "To": "+14155550001"}) == 422
