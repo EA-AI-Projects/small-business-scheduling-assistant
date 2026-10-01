@@ -230,3 +230,72 @@ stack_resources() {
   aws_cli cloudformation list-stack-resources --stack-name "${STACK_NAME}" --output json |
     jq -r --arg type "$1" '.StackResourceSummaries[] | select(.ResourceType == $type) | [.LogicalResourceId, .PhysicalResourceId] | @tsv'
 }
+
+# Parameters that hold personal or account-identifying values. They are only ever set with a
+# hidden prompt (deploy-backend.sh --prompt-param) and never printed.
+PRIVATE_PARAMS=(OwnerNumber AuthorizedSmsRecipients TwilioAccountSid TwilioBusinessNumber)
+PRIVATE_FORMAT_HINT=""
+
+is_private_param() {
+  local k
+  for k in "${PRIVATE_PARAMS[@]}"; do
+    [[ "$1" == "${k}" ]] && return 0
+  done
+  return 1
+}
+
+# valid_private_value <key> <value>: format check only; never prints the value. Sets
+# PRIVATE_FORMAT_HINT to the expected format (no value in it).
+valid_private_value() {
+  local key="$1" value="$2"
+  local e164='^\+[1-9][0-9]{7,14}$'
+  local list='^\+[1-9][0-9]{7,14}(,\+[1-9][0-9]{7,14})*$'
+  local sid='^AC[0-9a-fA-F]{32}$'
+  case "${key}" in
+    OwnerNumber | TwilioBusinessNumber)
+      PRIVATE_FORMAT_HINT="expected E.164: a plus sign and 8 to 15 digits, no spaces"
+      [[ "${value}" =~ ${e164} ]]
+      ;;
+    AuthorizedSmsRecipients)
+      PRIVATE_FORMAT_HINT="expected comma-separated E.164 numbers without spaces, or empty for no recipients"
+      [[ -n "${value}" ]] || return 0
+      [[ "${value}" =~ ${list} ]]
+      ;;
+    TwilioAccountSid)
+      PRIVATE_FORMAT_HINT="expected AC followed by 32 hexadecimal characters"
+      [[ "${value}" =~ ${sid} ]]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# sender_mapping_state <uuid>: the live mapping State folded to ENABLED or DISABLED.
+sender_mapping_state() {
+  local s
+  s="$(aws_cli lambda get-event-source-mapping --uuid "$1" --query State --output text)" ||
+    die "refusing: cannot read the live state of the sender mapping."
+  case "${s}" in
+    Enabled) printf 'ENABLED' ;;
+    Disabled) printf 'DISABLED' ;;
+    *) die "refusing: the sender mapping is in state ${s}; wait until it is Enabled or Disabled." ;;
+  esac
+}
+
+# private_override <key> <value>: the Key=Value argument for sam deploy. An empty value is
+# passed as Key="" because SAM rejects a bare Key=. Never print the result.
+private_override() {
+  if [[ -z "$2" ]]; then
+    printf '%s=""' "$1"
+  else
+    printf '%s=%s' "$1" "$2"
+  fi
+}
+
+# param_value <key>: the value given with --param for the key (last one wins), or empty.
+param_value() {
+  local kv v=""
+  for kv in "${EXTRA_PARAMS[@]+"${EXTRA_PARAMS[@]}"}"; do
+    [[ "${kv%%=*}" != "$1" ]] || v="${kv#*=}"
+  done
+  printf '%s' "${v}"
+}

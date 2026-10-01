@@ -8,8 +8,10 @@
 # shows the change set (including the schedule states, live -> target) and asks for
 # confirmation, so it also ships any pending code. It never calls enable-rule/disable-rule.
 #
-# Only the three listed logical IDs are accepted. Outbox dispatch (OutboxDispatch*) is refused:
-# it stays off until live SMS is separately authorized.
+# Only the four listed logical IDs are accepted. Enabling outbox dispatch (OutboxDispatchFunctionSweep)
+# is a live-SMS action: it needs Enrique's separate authorization (#91), and enabling it also needs
+# the SMS sender mapping on (scripts/dev/deploy-backend.sh --param SmsSenderMappingState=ENABLED).
+# Disabling it is always allowed. This script never changes the sender mapping.
 #
 # This ships the CURRENT CHECKOUT. deploy-backend.sh prints the commit, refuses a dirty tree
 # unless --allow-dirty is given (passed on to it), and warns, without blocking, when HEAD is on no
@@ -20,7 +22,8 @@
 #                                 [--profile NAME | --no-profile]
 #   --allow-dirty  Deploy a dirty working tree (uncommitted changes ship too).
 #   Logical IDs: HoldExpiryFunctionSweep, NoteRetentionFunctionDaily,
-#                SmsRetentionFunctionDaily
+#                SmsRetentionFunctionDaily, OutboxDispatchFunctionSweep
+#   --i-have-live-sms-authorization  Required to ENABLE OutboxDispatchFunctionSweep.
 set -euo pipefail
 
 # shellcheck source=lib.sh
@@ -32,9 +35,14 @@ usage() {
 
 parse_common "$@"
 ALLOW_DIRTY=0
+LIVE_SMS_AUTH=0
 ARGS=()
 for arg in "${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}"; do
-  if [[ "${arg}" == "--allow-dirty" ]]; then ALLOW_DIRTY=1; else ARGS+=("${arg}"); fi
+  case "${arg}" in
+    --allow-dirty) ALLOW_DIRTY=1 ;;
+    --i-have-live-sms-authorization) LIVE_SMS_AUTH=1 ;;
+    *) ARGS+=("${arg}") ;;
+  esac
 done
 set -- "${ARGS[@]+"${ARGS[@]}"}"
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
@@ -53,23 +61,22 @@ case "${ACTION}" in
 esac
 [[ "${NAME}" =~ ^[A-Za-z0-9]+$ ]] || die "the schedule name must be a stack logical ID"
 
-# Allowlist, checked before any AWS call. Outbox dispatch stays disabled until live SMS is
-# separately authorized, and any future schedule needs a reviewed change here.
+# Allowlist, checked before any AWS call. Any future schedule needs a reviewed change here.
 case "${NAME}" in
-  HoldExpiryFunctionSweep | NoteRetentionFunctionDaily | SmsRetentionFunctionDaily) ;;
+  HoldExpiryFunctionSweep | NoteRetentionFunctionDaily | SmsRetentionFunctionDaily | OutboxDispatchFunctionSweep) ;;
   *)
-    shopt -s nocasematch
-    if [[ "${NAME}" == OutboxDispatch* ]]; then
-      die "outbox dispatch stays disabled until live SMS is separately authorized; refusing."
-    fi
-    die "${NAME} is not an allowed schedule (HoldExpiryFunctionSweep, NoteRetentionFunctionDaily, SmsRetentionFunctionDaily)."
+    die "${NAME} is not an allowed schedule (HoldExpiryFunctionSweep, NoteRetentionFunctionDaily, SmsRetentionFunctionDaily, OutboxDispatchFunctionSweep)."
     ;;
 esac
+if [[ "${NAME}" == OutboxDispatchFunctionSweep && "${ACTION}" == "enable" && "${LIVE_SMS_AUTH}" -ne 1 ]]; then
+  die "enabling outbox dispatch is a live-SMS action that needs Enrique's separate authorization (#91); pass --i-have-live-sms-authorization only with it. Refusing."
+fi
 
 case "${NAME}" in
   HoldExpiryFunctionSweep) PARAM="HoldExpiryScheduleState" ;;
   NoteRetentionFunctionDaily) PARAM="NoteRetentionScheduleState" ;;
   SmsRetentionFunctionDaily) PARAM="SmsRetentionScheduleState" ;;
+  OutboxDispatchFunctionSweep) PARAM="OutboxDispatchScheduleState" ;;
 esac
 WANT="ENABLED"
 [[ "${ACTION}" == "enable" ]] || WANT="DISABLED"
@@ -84,6 +91,7 @@ info "Full deploy of the current checkout; deploy-backend.sh below prints the co
 DEPLOY=("$(dirname "${BASH_SOURCE[0]}")/deploy-backend.sh" --param "${PARAM}=${WANT}")
 [[ "${DRY_RUN}" -ne 1 ]] || DEPLOY+=(--dry-run)
 [[ "${ALLOW_DIRTY}" -ne 1 ]] || DEPLOY+=(--allow-dirty)
+[[ "${LIVE_SMS_AUTH}" -ne 1 ]] || DEPLOY+=(--i-have-live-sms-authorization)
 if [[ -z "${PROFILE}" ]]; then DEPLOY+=(--no-profile); else DEPLOY+=(--profile "${PROFILE}"); fi
 
 if [[ "${DRY_RUN}" -eq 1 ]]; then

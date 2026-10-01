@@ -47,6 +47,7 @@ Parameters:
     Default: https://example.invalid/webhooks/sms/status
   AuthorizedSmsRecipients:
     Type: String
+    NoEcho: true
     Default: ''
   SmsSendEnabled:
     Type: String
@@ -86,10 +87,27 @@ Parameters:
     Description: >-
       State of the SMS-retention schedule. Pass the current live state on the first deploy so a
       deploy never changes it silently (scripts/dev/deploy-backend.sh enforces this).
+  OutboxDispatchScheduleState:
+    Type: String
+    AllowedValues: [ENABLED, DISABLED]
+    Default: DISABLED
+    Description: >-
+      State of the outbox-dispatch schedule. ENABLED only under separate live-SMS authorization
+      (#91). Pass the current live state on the first deploy so a deploy never changes it silently
+      (scripts/dev/deploy-backend.sh enforces this).
+  SmsSenderMappingState:
+    Type: String
+    AllowedValues: [ENABLED, DISABLED]
+    Default: DISABLED
+    Description: >-
+      State of the SMS sender's outbox queue event source mapping. ENABLED only under separate
+      live-SMS authorization (#91). Pass the current live state on the first deploy so a deploy
+      never changes it silently (scripts/dev/deploy-backend.sh enforces this).
 
 Conditions:
   UsePermissionsBoundary: !Not [!Equals [!Ref PermissionsBoundaryArn, '']]
   SmsIngressRequested: !Equals [!Ref EnableSmsIngress, 'true']
+  SmsSenderMappingEnabled: !Equals [!Ref SmsSenderMappingState, ENABLED]
   SmsConversationRequested: !And
     - !Condition SmsIngressRequested
     - !Equals [!Ref SmsSendEnabled, authorized]
@@ -460,7 +478,7 @@ Resources:
             Queue: !GetAtt OutboxQueue.Arn
             BatchSize: 10
             FunctionResponseTypes: [ReportBatchItemFailures]
-            Enabled: false
+            Enabled: !If [SmsSenderMappingEnabled, true, false]
   SmsSenderLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -515,7 +533,7 @@ Resources:
           Type: Schedule
           Properties:
             Schedule: rate(1 minute)
-            Enabled: false
+            State: !Ref OutboxDispatchScheduleState
   OutboxDispatchLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
