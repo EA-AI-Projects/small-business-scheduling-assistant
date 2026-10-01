@@ -3,8 +3,9 @@
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
-from scheduling.adapters.dynamodb import _command_sort_key
+from scheduling.adapters.dynamodb import _command_sort_key, _record_transaction_conflict
 from scheduling.adapters.outbox_aws import due_keys
+from scheduling.domain.client_records import ClientProfile, RecordConflict
 from scheduling.domain.outbox import DeliveryState
 from scheduling.domain.sms_ingress import (
     ConsentEvidence,
@@ -395,7 +396,7 @@ class DynamoSmsIngressStore(SmsIngressStore):
             item["script_version"]["S"], item["method"]["S"],
         )
 
-    def put_consent(self, evidence: ConsentEvidence) -> None:
+    def _consent_writes(self, evidence: ConsentEvidence) -> list[dict[str, Any]]:
         attrs = {
             "client_id": {"S": evidence.client_id},
             "participant_name": {"S": evidence.participant_name},
@@ -406,7 +407,7 @@ class DynamoSmsIngressStore(SmsIngressStore):
             "response": {"S": "yes"},
         }
         history_key = f"SMS_CONSENT#{evidence.phone_e164}#{_instant(evidence.agreed_at)}"
-        self._client.transact_write_items(TransactItems=[
+        return [
             {"Put": {"TableName": self._table,
                      "Item": {**self._key(evidence.business_id, history_key), **attrs},
                      "ConditionExpression": "attribute_not_exists(PK)"}},
@@ -418,7 +419,42 @@ class DynamoSmsIngressStore(SmsIngressStore):
                         "ExpressionAttributeNames": {f"#{key}": key for key in attrs},
                         "ExpressionAttributeValues": {f":{key}": value
                                                       for key, value in attrs.items()}}},
-        ])
+        ]
+
+    def put_consent(self, evidence: ConsentEvidence) -> None:
+        self._client.transact_write_items(TransactItems=self._consent_writes(evidence))
+
+    def put_consent_verifying_phone(self, evidence: ConsentEvidence,
+                                    verified: ClientProfile) -> None:
+        """One transaction: both consent records plus the profile's verification."""
+        if (verified.phone_verified_at is None or verified.version < 2
+                or verified.business_id != evidence.business_id
+                or verified.client_id != evidence.client_id
+                or verified.phone_e164 != evidence.phone_e164):
+            raise ValueError("Verified profile must match the consent evidence")
+        profile_update = {"Update": {
+            "TableName": self._table,
+            "Key": self._key(verified.business_id, f"CLIENT#{verified.client_id}"),
+            "UpdateExpression": ("SET phone_verified_at = :verified, updated_at = :updated, "
+                                 "version = :new_version"),
+            "ConditionExpression": ("attribute_exists(PK) AND version = :old_version "
+                                    "AND phone_e164 = :phone AND active = :active"),
+            "ExpressionAttributeValues": {
+                ":verified": {"S": _instant(verified.phone_verified_at)},
+                ":updated": {"S": _instant(verified.updated_at)},
+                ":new_version": {"N": str(verified.version)},
+                ":old_version": {"N": str(verified.version - 1)},
+                ":phone": {"S": verified.phone_e164},
+                ":active": {"BOOL": True},
+            },
+        }}
+        try:
+            self._client.transact_write_items(
+                TransactItems=[*self._consent_writes(evidence), profile_update])
+        except Exception as exc:
+            if not _record_transaction_conflict(exc):
+                raise
+            raise RecordConflict("Client profile changed; nothing was recorded") from exc
 
     def set_evidence_legal_hold(self, business_id: str, sort_key: str,
                                 reason: str | None) -> None:

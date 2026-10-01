@@ -55,6 +55,10 @@ class MemoryStore:
     def put_consent(self, evidence: ConsentEvidence) -> None:
         self.consent[evidence.phone_e164] = evidence
 
+    def put_consent_verifying_phone(self, evidence: ConsentEvidence,
+                                    verified: ClientProfile) -> None:
+        self.put_consent(evidence)
+
     def put_status(self, status: SmsDeliveryStatus) -> None:
         self.statuses[status.provider_id] = status
 

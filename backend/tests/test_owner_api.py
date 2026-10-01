@@ -58,6 +58,10 @@ def test_owner_records_in_person_yes_without_sending_enrollment_sms() -> None:
         def put_consent(self, evidence: ConsentEvidence) -> None:
             self.evidence = evidence
 
+        def put_consent_verifying_phone(self, evidence: ConsentEvidence, verified: object) -> None:
+            self.evidence = evidence
+            self.verified = verified
+
         def list_delivery_failures(self, business_id: str) -> tuple[()]:
             return ()
 
@@ -75,6 +79,7 @@ def test_owner_records_in_person_yes_without_sending_enrollment_sms() -> None:
     assert store.evidence is not None
     assert store.evidence.method == "in_person"
     assert store.evidence.agreed_at == NOW
+    assert store.verified.phone_verified_at == NOW  # type: ignore[attr-defined]
     failures_path = f"{BASE}/sms-delivery-failures"
     assert api.get(failures_path).status_code == 401
     assert api.get(failures_path, headers=headers()).json() == []

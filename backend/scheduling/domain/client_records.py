@@ -145,7 +145,12 @@ class ClientRecordService:
 
     def verify_phone(self, business_id: str, client_id: str, phone_e164: str,
                      now: datetime) -> ClientProfile:
-        """Trusted verified-webhook flow only; never exposed as an owner HTTP route."""
+        """Mark a phone verified (local simulator seed only).
+
+        The owner app verifies a phone only through in-person consent capture
+        (``record_in_person_consent``), which writes the consent and verification
+        atomically. There is no standalone verify route.
+        """
         current = self._repository.read_profile(business_id, client_id)
         if current is None or current.phone_e164 != phone_e164:
             raise RecordNotFound("Matching client phone was not found")

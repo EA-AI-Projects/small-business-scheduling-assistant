@@ -17,7 +17,12 @@ const CONSENT_PAGE = "https://ea-ai-projects.github.io/small-business-scheduling
  * Record that a client clearly said yes in person to receiving texts. No text is sent.
  * Remounted by key when the selection or the client's data changes.
  */
-export function ConsentForm({ client }: { client: ClientProfile | undefined }) {
+export function ConsentForm({ client, onboarding = false, onSkip }: {
+  client: ClientProfile | undefined;
+  /** True right after the owner created this client: show the step as part of onboarding. */
+  onboarding?: boolean;
+  onSkip?: () => void;
+}) {
   const { change, notify } = useOwner();
   const [clearYes, setClearYes] = useState(false);
 
@@ -37,7 +42,14 @@ export function ConsentForm({ client }: { client: ClientProfile | undefined }) {
 
   return (
     <section className="card">
-      <h3>Record in-person text consent</h3>
+      <h3>{onboarding ? "Onboarding: record in-person text consent" : "Record in-person text consent"}</h3>
+      {onboarding && (
+        <p className="hint" role="status">
+          Last step for this new client. Recording consent also marks their phone verified, which
+          lets them text. You can skip it now; until it is recorded, this client cannot text.{" "}
+          <button type="button" onClick={onSkip}>Skip for now</button>
+        </p>
+      )}
       <p className="hint">
         Read the exact script on the <a href={CONSENT_PAGE} target="_blank" rel="noreferrer">
         public consent page</a> aloud first. Recording consent sends no text. The full private
@@ -48,6 +60,7 @@ export function ConsentForm({ client }: { client: ClientProfile | undefined }) {
           value={client?.name ?? ""} /></label>
         <p className="hint">In dev this is the profile&apos;s placeholder name; record the real name
           only in your private consent record.</p>
+        <p className="hint">Read the number back to them before recording consent.</p>
         <p className="hint">Record this right after they say yes; the time saved is the consent time.</p>
         <p>{`Script version ${CONSENT_SCRIPT_VERSION} (${CONSENT_SCRIPT_DATE})`}</p>
         <label className="inline"><input name="clear_yes" type="checkbox" required

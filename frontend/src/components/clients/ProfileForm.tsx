@@ -12,7 +12,11 @@ function text(form: FormData, name: string): string {
  * Create or update one client profile. Uncontrolled: the parent remounts it (by key)
  * whenever the selection changes or a refresh delivers the selected client's current data.
  */
-export function ProfileForm({ client }: { client: ClientProfile | undefined }) {
+export function ProfileForm({ client, onCreated }: {
+  client: ClientProfile | undefined;
+  /** Called with the id after a new client is saved, to start onboarding. */
+  onCreated?: (clientId: string) => void;
+}) {
   const { data, change, selectClient } = useOwner();
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -31,12 +35,20 @@ export function ProfileForm({ client }: { client: ClientProfile | undefined }) {
     };
     if (await change(path`/clients/${id}`, "PUT", body, "Client profile saved", false)) {
       selectClient(id);
+      if (!current) onCreated?.(id);
     }
   }
 
   return (
     <section className="card">
       <h3>Profile</h3>
+      {client && (
+        <p className="hint" data-testid="phone-status">
+          {client.phone_verified_at
+            ? "Phone verified for texting (in-person consent recorded)."
+            : "Phone not verified: this client cannot text until in-person consent is recorded."}
+        </p>
+      )}
       <form className="form-stack" aria-label="Client profile" onSubmit={submit}>
         <label>Client ID <input name="client_id" required readOnly={client !== undefined}
           defaultValue={client?.client_id ?? ""} /></label>
