@@ -35,7 +35,7 @@ Status, 2026-09-30 (issue #43): decisions 1 to 4 and 7 were answered by the owne
 - All Lambda functions are `arm64`, 256 MB (`Globals.Function` in `template.yaml`), Python 3.12. All SQS queues use SSE-SQS (`SqsManagedSseEnabled: true`), which has no separate charge and no KMS request fees. The DynamoDB table sets `SSEEnabled: true` without a key, which CloudFormation treats as encryption with the AWS managed key `aws/dynamodb`. There is no monthly key fee for it; KMS request fees can apply and are included as a small assumption below.
 - The Cognito user pool sets no `UserPoolTier`. The template selects nothing, so the account default applies. As far as the CloudFormation documentation says, that default is **Essentials**. Confirm with `describe-user-pool` after any deployment. Lite would be $0.0055/MAU instead of $0.015/MAU; the difference is immaterial for one user.
 - A month is 30 days (720 hours), matching the invocation counts in the pilot plan.
-- Excluded: Twilio, OpenAI, taxes, a custom domain, support plans, and anything else in the account.
+- Excluded: Twilio (dev Twilio spend is about $10 per month, funded by $46 of prepaid Twilio credit for dev and pilot testing, issue #91), OpenAI, taxes, a custom domain, support plans, and anything else in the account.
 
 ### 1.2 Unit prices used (fetched 2026-09-29)
 

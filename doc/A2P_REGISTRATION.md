@@ -2,6 +2,8 @@
 
 The public policy pages are in `docs/`. They describe the Small Business Scheduling Assistant proof of concept and contain no placeholder brand or contact details. The stated support email is `ealeman.kikito@gmail.com`. Review the policies against actual behavior before publishing or submitting them to Twilio.
 
+Status (issue #91): the Twilio account is upgraded, a US number is bought, and the A2P 10DLC brand and campaign are approved; the owner verified that API sending works. Approval does not authorize live SMS, deployment, or real clients. Until launch approval, send only to explicitly authorized test numbers.
+
 ## Sender and consent
 
 The registered Twilio A2P brand is an individual's name, while these public pages identify only the proof-of-concept program. Twilio may reject a campaign if the sender identified in the policies, consent request, HELP reply, and sample messages cannot be connected clearly to the registered brand. Do not assert that a fictional cleaning business is a real sender. Before production use by a real business, register the appropriate business sender and align all consumer-facing disclosures with it.
