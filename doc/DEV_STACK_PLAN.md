@@ -10,7 +10,7 @@ Target if authorized: the **dedicated dev member account `214965372605`** (`sche
 
 - **What it would cost per month** (us-west-1, list price, 12-month free tier not assumed): about **$1.14** idle, **$2.43** in an active test month, and **$3.20** in a worst case where every scheduled job ran all month. After the allowances AWS always gives away for free, those become about $0.11, $0.69, and $0.75. Twilio, OpenAI, and taxes are not included.
 - **Approved budget (2026-09-30):** a **$10 per month** AWS budget, with email alerts when actual spend reaches $5, $8, and $10 and when AWS forecasts $10. It is scoped to the dedicated account and is created before the stack ([section 1.6](#16-approved-aws-budget-scoped-to-the-dedicated-account)). A budget warns; it does not stop spending.
-- **What saying yes to the dev checkpoint would authorize:** (1) creating a private, versioned, encrypted S3 bucket for build artifacts and uploading the build; (2) creating a *change set* (below); (3) executing it, which creates the 61 resources listed in section 2, all with SMS off and every schedule off; (4) creating one owner test user and one Amplify app (the budget is created earlier, first); (5) the checkpoint tests on synthetic data, including switching on the hold-expiry schedule and later the two retention schedules; and (6) the teardown in section 3 afterward.
+- **What saying yes to the dev checkpoint would authorize:** (1) creating a private, versioned, encrypted S3 bucket for build artifacts and uploading the build; (2) creating a *change set* (below); (3) executing it, which creates the 61 resources listed in section 2, all with SMS off and every schedule off; (4) creating one owner test user and one Amplify app (the budget is created earlier, first); (5) the checkpoint tests on synthetic data, including switching on the hold-expiry schedule and later the two retention schedules; and (6) the teardown in section 3, which stays documented and available but is no longer the planned next step after the checkpoint (owner decision 2026-09-30, [section 5](#5-checkpoint-results-2026-09-30)).
 - **What it would not authorize:** SMS ingress or sending, Twilio, OpenAI, outbox dispatch, any real client data, the `pilot` stack, or rollback redeploys unless you approve those in decision 4.
 
 Two terms, once. A **change set** is CloudFormation's preview of what a deployment would create; nothing exists until it is executed, but creating it still needs AWS credentials, uploads the build to S3, and leaves an empty stack in `REVIEW_IN_PROGRESS`. **PITR** (point-in-time recovery) is DynamoDB's continuous backup that can restore the table to any second in the last 35 days.
@@ -353,6 +353,8 @@ This packet assumes the out-of-band toggle for the dev checkpoint only, and flag
 
 ## 3. Rollback and data cleanup
 
+Teardown is no longer the planned next step: on 2026-09-30 the owner decided to keep `dev` running (see [section 5](#5-checkpoint-results-2026-09-30)). This section remains the documented procedure.
+
 All commands below are documentation. `<...>` values are placeholders. Every command touches the AWS account and needs the same authorization as the deployment. Commands run with the deployer profile (`--profile scheduling-dev-deployer`, omitted below for brevity) unless marked "admin" (the Identity Center administrator profile) or "management account".
 
 ### 3.1 Stop on a failed safety gate
@@ -508,5 +510,58 @@ Run after teardown. Each check should show nothing for `scheduling-dev`. The dep
 ## 4. What this packet does not do
 
 - It does not deploy, and it did not contact the AWS account. The resource list came from an offline translator run and the prices came from anonymous public HTTP requests.
-- It does not claim the fake SQS consumer and DLQ harness has passed. The harness is `backend/tests/test_dev_outbox_queue.py` (issue #87); it needs the deployer role's outbox queue grants from a role-stack change set, and a recorded deployed run, before outbox dispatch is enabled.
+- It does not record the fake SQS consumer and DLQ harness result. The harness is `backend/tests/test_dev_outbox_queue.py` (issue #87); its deployed run is recorded in [section 5](#5-checkpoint-results-2026-09-30). Outbox dispatch stays disabled until live SMS is separately authorized.
 - It does not include Twilio, OpenAI, or custom-domain costs.
+
+## 5. Checkpoint results (2026-09-30)
+
+Source: issue #43 comments. All data is synthetic; no addresses, subject IDs, app or API IDs, or passwords are recorded here.
+
+### 5.1 Owner decision (2026-09-30)
+
+Keep the synthetic `dev` environment running indefinitely, within the $10/month budget, as a pre-production test environment. The hold-expiry and retention schedules stay enabled. Outbox dispatch and the SMS sender stay disabled until live SMS is separately authorized. The budget alerts remain the guard. Teardown (section 3) remains documented and available but is no longer the planned next step.
+
+### 5.2 What was proven
+
+| Area | Evidence |
+| --- | --- |
+| Deployment | Stack `scheduling-dev` has 61 resources, deployed through the scoped deployer and execution roles. SMS was off and schedules were disabled at creation. |
+| Alarms | The SNS subscription was confirmed and a synthetic alarm delivery was received. |
+| Owner app | Hosted UI sign-in with authorization code and PKCE. Amplify security headers present. CORS allowed from the app origin and denied from a foreign origin. An unauthenticated request returns 401 with the allow-origin header. |
+| Owner API | Policy seed, client save, and rejection of a different subject. |
+| Transaction races | Against the deployed table, 3 runs, 15 of 15 passed (#80/#81). |
+| Due GSIs and IAM | Verified. |
+| Hold-expiry proof | Report of 4 examined, 3 expired, 1 stale (#84/#85). |
+| Scheduled hold-expiry runs | 0 errors; about 180 ms warm and 988 ms cold; 92 MB. |
+| Retention proof | 7 of 7 passed. Notes deleted 1; SMS bodies 1 and evidence 2. Owner partition unchanged at 11 items (#86/#88). |
+| Outbox SQS/DLQ gate | 9 of 9 passed; the real sender was never invoked (#87/#89). |
+
+### 5.3 Deviations from the original plan
+
+- A dedicated member account instead of the shared account (#17 superseded). The budget lives in the member account.
+- Three first-run execution-role permission fixes: the SAM transform (#73), stage tagging and mapping reads (#74), and a failed rollback recovered with a verified `--retain-resources` (#75).
+- The Amplify manual deploy (#76).
+- App fixes found in testing: the policy seed UI (#77/#78) and hosted UI logout on 401 (#82/#83).
+- The Identity Center interactive session is 8 hours, not the recommended 1 to 4.
+- The newly installed AWS MCP tool authenticates as a management-account IAM user, so it was not used for changes.
+
+### 5.4 Running cost observations
+
+Budget actual spend is $0.00. Cost Explorer daily cost for 2026-09-29 and 2026-09-30 is $0.00 (estimated). Cost data lags; the next check is on the first full billing day. For comparison, the estimate in section 1.5 is about $1 per month idle and about $3.20 in the checkpoint worst case.
+
+### 5.5 Rollback and cleanup evidence
+
+- The failed first creation recovery is the rollback evidence: the stack was deleted via the execution role, the retained empty table was deleted with PITR off and 0 backups, and a fresh change set followed.
+- Test users were deleted.
+- Every harness run's leftover sweep returned 0.
+
+### 5.6 Current state
+
+- Enabled: hold expiry (from 2026-09-30T22:37:53Z); note retention and SMS retention (from 2026-09-30T23:56:38Z).
+- Disabled: outbox dispatch, both event source mappings, SMS ingress and sending.
+- The owner test user exists. The owner app rollback zips are kept under `owner-app/` in the artifact bucket.
+
+### 5.7 Open follow-ups
+
+- #79.
+- #67, which is required before `pilot`.
