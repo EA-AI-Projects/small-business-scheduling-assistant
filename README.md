@@ -73,7 +73,7 @@ Everything resets when Terminal A stops. Hold expiry and other scheduled workers
 
 ## Deploy to dev
 
-The long-lived synthetic `dev` environment (#43) has helper scripts in [`scripts/dev/`](scripts/dev). Sign in with `aws sso login --profile scheduling-dev-deployer`, then run from the repository root. Each script targets only account `214965372605`, region `us-west-1`, and accepts `--dry-run` (prints commands, calls no AWS beyond the identity check).
+The long-lived synthetic `dev` environment (#43) has helper scripts in [`scripts/dev/`](scripts/dev). Sign in with `aws sso login --profile scheduling-dev-admin` (the scripts use the `scheduling-dev-deployer` profile, which assumes its role through that sign-in; `aws sso login` on the deployer profile itself fails), then run from the repository root. Each script targets only account `214965372605`, region `us-west-1`, and accepts `--dry-run` (prints commands, calls no AWS beyond the identity check).
 
 ```sh
 scripts/dev/deploy-backend.sh     # sam build, change set, readable summary, schedule-state guard, y/N, execute, smoke test

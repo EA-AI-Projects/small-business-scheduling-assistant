@@ -97,7 +97,12 @@ check_identity() {
       info "[dry-run] identity check skipped: no usable AWS credentials."
       return 0
     fi
-    die "sts get-caller-identity failed. Sign in first: aws sso login --profile ${PROFILE:-<profile>}"
+    # The deployer profile assumes its role through the admin SSO session, so that is the
+    # profile to sign in with; "aws sso login" on the deployer profile itself fails.
+    if [[ -z "${PROFILE}" ]]; then
+      die "sts get-caller-identity failed: no usable ambient AWS credentials (--no-profile). Provide them, or drop --no-profile and sign in with: aws sso login --profile ${ADMIN_PROFILE}"
+    fi
+    die "sts get-caller-identity failed for profile ${PROFILE}. Sign in first: aws sso login --profile ${ADMIN_PROFILE}"
   fi
   if [[ "${account}" != "${EXPECTED_ACCOUNT}" ]]; then
     die "caller account is not ${EXPECTED_ACCOUNT}; refusing."
