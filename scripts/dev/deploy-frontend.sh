@@ -5,8 +5,8 @@
 #
 # Needs the deployer's Amplify grant (infra/dev-deploy-roles.yaml, AmplifyAppId).
 # The Amplify app ID is derived from the live OwnerAppOrigin parameter
-# (https://main.<app id>.amplifyapp.com) or given with --app-id / AMPLIFY_APP_ID;
-# it is never committed.
+# (https://main.<app id>.amplifyapp.com) or given with --app-id; it is never committed.
+# Either way the app's defaultDomain must produce exactly OwnerAppOrigin.
 #
 # Usage: scripts/dev/deploy-frontend.sh [--allow-dirty] [--dry-run] [--app-id ID]
 #                                       [--profile NAME | --no-profile]
@@ -18,7 +18,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 ALLOW_DIRTY=0
-APP_ID="${AMPLIFY_APP_ID:-}"
+APP_ID=""
 JOB_TIMEOUT_SECONDS=900
 
 usage() {
@@ -77,8 +77,10 @@ else
       die "cannot derive the Amplify app ID from OwnerAppOrigin; pass --app-id."
     fi
   fi
-  found_name="$(aws_cli amplify get-app --app-id "${APP_ID}" --query app.name --output text)"
+  read -r found_name found_domain < <(aws_cli amplify get-app --app-id "${APP_ID}" --query '[app.name, app.defaultDomain]' --output text)
   [[ "${found_name}" == "${AMPLIFY_APP_NAME}" ]] || die "Amplify app is not named ${AMPLIFY_APP_NAME}; refusing."
+  [[ "https://${AMPLIFY_BRANCH}.${found_domain}" == "${APP_ORIGIN}" ]] ||
+    die "the Amplify app's default domain does not match OwnerAppOrigin; refusing to deploy to a different app."
   info "Amplify app ${AMPLIFY_APP_NAME}, branch ${AMPLIFY_BRANCH}."
 fi
 
@@ -89,7 +91,7 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
 else
   (
     cd frontend
-    [[ -d node_modules ]] || npm ci
+    npm ci
     export NEXT_PUBLIC_API_BASE_URL="${API_URL}"
     export NEXT_PUBLIC_COGNITO_DOMAIN="${COGNITO_DOMAIN}"
     export NEXT_PUBLIC_COGNITO_CLIENT_ID="${CLIENT_ID}"
@@ -98,6 +100,8 @@ else
     npm run build
     npm run check:export
   )
+  BUILD_ID="$(<frontend/.next/BUILD_ID)"
+  [[ -n "${BUILD_ID}" ]] || die "no Next.js build ID found after the build"
 fi
 
 WORK_DIR="$(mktemp -d)"
@@ -118,6 +122,7 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
   info "+ aws amplify start-deployment --app-id ${APP_ID} --branch-name ${AMPLIFY_BRANCH} --job-id <jobId>"
   info "+ poll aws amplify get-job until SUCCEED (FAILED or CANCELLED stops the script)"
   info "+ curl -sSI ${APP_ORIGIN}/  and check Content-Security-Policy, Strict-Transport-Security, X-Frame-Options"
+  info "+ curl -sS ${APP_ORIGIN}/  and check it serves the Next.js build ID of frontend/.next/BUILD_ID"
   exit 0
 fi
 
@@ -156,7 +161,9 @@ header_ok() {
 verified=0
 for attempt in 1 2 3 4 5 6; do
   HEADERS="$(curl -sSI --max-time 20 "${APP_ORIGIN}/" | tr -d '\r' || true)"
-  if header_ok Content-Security-Policy "frame-ancestors 'none'" &&
+  # The headers also exist on the previous build, so require the new build ID in the served page.
+  if curl -sS --max-time 20 "${APP_ORIGIN}/" | grep -qF "\"buildId\":\"${BUILD_ID}\"" &&
+    header_ok Content-Security-Policy "frame-ancestors 'none'" &&
     header_ok Strict-Transport-Security "max-age=" &&
     header_ok X-Frame-Options "DENY"; then
     verified=1
@@ -165,6 +172,6 @@ for attempt in 1 2 3 4 5 6; do
   info "  headers not all present yet (attempt ${attempt}); waiting."
   sleep 10
 done
-[[ "${verified}" -eq 1 ]] || die "Content-Security-Policy, Strict-Transport-Security or X-Frame-Options is missing or wrong on the app origin."
-info "  ok: Content-Security-Policy, Strict-Transport-Security, X-Frame-Options"
+[[ "${verified}" -eq 1 ]] || die "the app origin does not serve the new build, or Content-Security-Policy, Strict-Transport-Security or X-Frame-Options is missing or wrong."
+info "  ok: the new build is served, with Content-Security-Policy, Strict-Transport-Security, X-Frame-Options"
 info "Frontend deploy complete: ${ZIP_NAME}"

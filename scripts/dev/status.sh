@@ -14,7 +14,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SHOW_BUDGET=1
-APP_ID="${AMPLIFY_APP_ID:-}"
+APP_ID=""
 BUDGET_NAME="scheduling-dev"
 
 usage() {

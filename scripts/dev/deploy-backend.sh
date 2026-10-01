@@ -6,10 +6,11 @@
 # value (UsePreviousValue), so NoEcho values such as OwnerNumber stay untouched.
 # Only PermissionsBoundaryArn is passed explicitly, read from the live stack.
 #
-# Usage: scripts/dev/deploy-backend.sh [--yes] [--dry-run] [--param Key=Value]...
+# Usage: scripts/dev/deploy-backend.sh [--yes] [--smoke-only] [--dry-run] [--param Key=Value]...
 #                                      [--profile NAME | --no-profile]
 #   --yes        Skip the confirmation prompt (CI only, issue #95 rules).
 #   --param      Supply a parameter that the live stack does not have yet.
+#   --smoke-only Run only the owner API smoke test (no build, no change set).
 #   --dry-run    Print the commands without calling AWS (read-only identity check only).
 set -euo pipefail
 
@@ -17,6 +18,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 ASSUME_YES=0
+SMOKE_ONLY=0
 EXTRA_PARAMS=()
 
 usage() {
@@ -28,6 +30,7 @@ set -- "${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --yes) ASSUME_YES=1 ;;
+    --smoke-only) SMOKE_ONLY=1 ;;
     --param)
       [[ $# -ge 2 && "$2" == *=* ]] || die "--param needs Key=Value"
       EXTRA_PARAMS+=("$2")
@@ -75,6 +78,66 @@ fi
 OVERRIDES=("PermissionsBoundaryArn=${BOUNDARY_ARN}")
 OVERRIDES+=("${EXTRA_PARAMS[@]+"${EXTRA_PARAMS[@]}"}")
 
+CHANGESET=""
+EXECUTING=0
+cleanup() {
+  # Delete an unexecuted change set on every exit path (decline, Ctrl-C, error, no changes).
+  if [[ -n "${CHANGESET}" && "${EXECUTING}" -eq 0 ]]; then
+    aws_cli cloudformation delete-change-set --change-set-name "${CHANGESET}" >/dev/null 2>&1 || true
+  fi
+  return 0
+}
+trap cleanup EXIT
+
+# Smoke test the owner API on a real GET route of the live business: 401 without a token
+# and CORS preflights (allowed from the app origin, not from a foreign origin).
+smoke_test() {
+  info "Smoke test."
+  local api_url business_id app_origin route code failed=0
+  api_url="$(stack_output OwnerApiUrl)"
+  api_url="${api_url%/}"
+  business_id="$(stack_parameter BusinessId)"
+  app_origin="$(stack_parameter OwnerAppOrigin)"
+  route="${api_url}/v1/owner/businesses/${business_id}/policy"
+
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "${route}")"
+  if [[ "${code}" == "401" ]]; then
+    info "  ok: owner API without a token returns 401"
+  else
+    info "  FAIL: owner API without a token returned ${code}, expected 401"
+    failed=1
+  fi
+
+  preflight_allow_origin() {
+    curl -sS -o /dev/null -D - --max-time 20 -X OPTIONS \
+      -H "Origin: $1" -H "Access-Control-Request-Method: GET" \
+      -H "Access-Control-Request-Headers: authorization" \
+      "${route}" | tr -d '\r' | awk -F': ' 'tolower($1) == "access-control-allow-origin" {print $2}'
+  }
+  if [[ "$(preflight_allow_origin "${app_origin}")" == "${app_origin}" ]]; then
+    info "  ok: CORS preflight from the app origin is allowed"
+  else
+    info "  FAIL: CORS preflight from the app origin was not allowed"
+    failed=1
+  fi
+  if [[ -z "$(preflight_allow_origin "https://example.invalid")" ]]; then
+    info "  ok: CORS preflight from a foreign origin is not allowed"
+  else
+    info "  FAIL: CORS preflight from a foreign origin was allowed"
+    failed=1
+  fi
+  [[ "${failed}" -eq 0 ]] || die "smoke test failed"
+}
+
+if [[ "${SMOKE_ONLY}" -eq 1 ]]; then
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    info "+ smoke test: GET /v1/owner/businesses/<BusinessId>/policy without a token expects 401; CORS preflights"
+    exit 0
+  fi
+  smoke_test
+  exit 0
+fi
+
 START_EPOCH="$(date +%s)"
 
 info "Building."
@@ -93,42 +156,48 @@ SAM_DEPLOY=(sam deploy
 if [[ "${DRY_RUN}" -eq 1 ]]; then
   show_cmd "${SAM_DEPLOY[@]}"
   info "+ (all other parameters keep their live values via UsePreviousValue)"
-  info "+ aws cloudformation list-change-sets / describe-change-set: print action, logical ID, type, replacement"
+  info "+ take the change set ARN from SAM's output, then aws cloudformation describe-change-set: print action, logical ID, type, replacement"
+  info "+ refuse if any parameter not given with --param would differ from the live stack"
   info "+ ask y/N (skipped with --yes), then aws cloudformation execute-change-set and wait stack-update-complete"
-  info "+ smoke test: GET owner API without a token expects 401; CORS preflight from the app origin"
+  info "+ an exit trap deletes the change set unless execution started"
+  info "+ smoke test: GET /v1/owner/businesses/<BusinessId>/policy without a token expects 401; CORS preflights"
   exit 0
 fi
 
+SAM_LOG="$(mktemp)"
+trap 'rm -f "${SAM_LOG}"; cleanup' EXIT
 # SAM echoes the parameter overrides it was given; drop that line so no value is printed.
-"${SAM_DEPLOY[@]}" 2>&1 | sed '/[Pp]arameter overrides/d'
+"${SAM_DEPLOY[@]}" 2>&1 | sed '/[Pp]arameter overrides/d' | tee "${SAM_LOG}"
 
-# Find the change set this run created (newest, created at or after the start).
-CHANGESET_JSON="$(aws_cli cloudformation list-change-sets --stack-name "${STACK_NAME}" --output json |
-  jq -c --argjson start "$((START_EPOCH - 120))" '[.Summaries[]
-    | select((.CreationTime[0:19] + "Z" | fromdate) >= $start)] | sort_by(.CreationTime) | last // empty')"
+# The change set this run created: the ARN SAM printed.
+CHANGESET="$(grep -o 'arn:aws[a-z-]*:cloudformation:[^ ]*:changeSet/[^ ]*' "${SAM_LOG}" | head -n 1 || true)"
 
-if [[ -z "${CHANGESET_JSON}" ]]; then
-  info "No change set was created: the stack is already up to date."
+if [[ -z "${CHANGESET}" ]]; then
+  # SAM prints no ARN when there is nothing to deploy; it may leave a FAILED empty change set.
+  CHANGESET="$(aws_cli cloudformation list-change-sets --stack-name "${STACK_NAME}" --output json |
+    jq -r --argjson start "$((START_EPOCH - 120))" '[.Summaries[]
+      | select(.Status == "FAILED")
+      | select((.CreationTime[0:19] + "Z" | fromdate) >= $start)] | sort_by(.CreationTime) | last | .ChangeSetId // empty')"
+  info "No changes to deploy; the stack is up to date. The empty change set is deleted on exit."
+  smoke_test
   exit 0
 fi
-CHANGESET="$(jq -r .ChangeSetName <<<"${CHANGESET_JSON}")"
-CS_STATUS="$(jq -r .Status <<<"${CHANGESET_JSON}")"
 
+DESCRIPTION="$(aws_cli cloudformation describe-change-set --change-set-name "${CHANGESET}" --output json)"
+CS_STATUS="$(jq -r .Status <<<"${DESCRIPTION}")"
 if [[ "${CS_STATUS}" == "FAILED" ]]; then
-  reason="$(jq -r '.StatusReason // ""' <<<"${CHANGESET_JSON}")"
+  reason="$(jq -r '.StatusReason // ""' <<<"${DESCRIPTION}")"
   if grep -qiE "didn't contain changes|No updates are to be performed" <<<"${reason}"; then
-    info "No changes to deploy. Deleting the empty change set."
-    aws_cli cloudformation delete-change-set --stack-name "${STACK_NAME}" --change-set-name "${CHANGESET}"
+    info "No changes to deploy. The empty change set is deleted on exit."
+    smoke_test
     exit 0
   fi
-  die "change set ${CHANGESET} failed: ${reason}"
+  die "change set failed: ${reason}"
 fi
-[[ "${CS_STATUS}" == "CREATE_COMPLETE" ]] || die "change set ${CHANGESET} is ${CS_STATUS}, not CREATE_COMPLETE"
-
-DESCRIPTION="$(aws_cli cloudformation describe-change-set --stack-name "${STACK_NAME}" --change-set-name "${CHANGESET}" --output json)"
+[[ "${CS_STATUS}" == "CREATE_COMPLETE" ]] || die "change set is ${CS_STATUS}, not CREATE_COMPLETE"
 
 info ""
-info "Change set ${CHANGESET}"
+info "Change set $(jq -r .ChangeSetName <<<"${DESCRIPTION}")"
 {
   printf 'ACTION\tLOGICAL ID\tTYPE\tREPLACEMENT\n'
   jq -r '.Changes[] | .ResourceChange | [.Action, .LogicalResourceId, .ResourceType, (.Replacement // "-")] | @tsv' <<<"${DESCRIPTION}"
@@ -139,22 +208,23 @@ RISKY="$(jq -r '[.Changes[].ResourceChange | select(.Action == "Remove" or .Repl
 info "${COUNT} resource change(s)."
 [[ -z "${RISKY}" ]] || info "WARNING: removed or replaced (possibly): ${RISKY}"
 
-# Safety net: report which parameters would change (names only, never values).
-# NoEcho values are masked on both sides, so they compare equal.
+# Refuse parameter drift (names only, never values): any parameter not given with --param must
+# keep its live value. NoEcho values are masked on both sides, so they compare equal.
 LIVE_PARAMS="$(aws_cli cloudformation describe-stacks --stack-name "${STACK_NAME}" --query 'Stacks[0].Parameters' --output json)"
-CHANGED_PARAMS="$(jq -r --argjson live "${LIVE_PARAMS}" '
+ALLOWED_KEYS="$(printf '%s\n' "${EXTRA_PARAMS[@]+"${EXTRA_PARAMS[@]}"}" | sed 's/=.*//' | jq -R . | jq -sc .)"
+CHANGED_PARAMS="$(jq -r --argjson live "${LIVE_PARAMS}" --argjson allowed "${ALLOWED_KEYS}" '
   [.Parameters[] | . as $p
+    | select(($allowed | index($p.ParameterKey)) == null)
     | select(($live | map(select(.ParameterKey == $p.ParameterKey)) | first | .ParameterValue) != $p.ParameterValue)
     | .ParameterKey] | join(", ")' <<<"${DESCRIPTION}")"
 if [[ -n "${CHANGED_PARAMS}" ]]; then
-  info "Parameters that differ from the live stack (names only): ${CHANGED_PARAMS}"
-else
-  info "Parameters: unchanged from the live stack."
+  die "refusing: parameters would change that were not given with --param (names only): ${CHANGED_PARAMS}"
 fi
+info "Parameters: unchanged from the live stack."
 
 if [[ "${COUNT}" -eq 0 ]]; then
-  info "The change set has no changes. Deleting it."
-  aws_cli cloudformation delete-change-set --stack-name "${STACK_NAME}" --change-set-name "${CHANGESET}"
+  info "The change set has no changes. It is deleted on exit."
+  smoke_test
   exit 0
 fi
 
@@ -162,51 +232,19 @@ if [[ "${ASSUME_YES}" -ne 1 ]]; then
   [[ -t 0 ]] || die "no terminal for the confirmation prompt; review the change set and pass --yes only under the CI rules."
   read -r -p "Execute this change set on ${STACK_NAME}? [y/N] " answer
   if [[ "${answer}" != "y" && "${answer}" != "Y" ]]; then
-    info "Not executed. Deleting the change set."
-    aws_cli cloudformation delete-change-set --stack-name "${STACK_NAME}" --change-set-name "${CHANGESET}"
+    info "Not executed. The change set is deleted on exit."
     exit 1
   fi
 fi
 
 info "Executing."
-aws_cli cloudformation execute-change-set --stack-name "${STACK_NAME}" --change-set-name "${CHANGESET}"
+EXECUTING=1
+aws_cli cloudformation execute-change-set --change-set-name "${CHANGESET}"
 if ! aws_cli cloudformation wait stack-update-complete --stack-name "${STACK_NAME}"; then
   info "Final stack status: $(stack_query 'Stacks[0].StackStatus')"
   die "the stack update did not complete; inspect the stack events."
 fi
 info "Stack status: $(stack_query 'Stacks[0].StackStatus')"
 
-info "Smoke test."
-API_URL="$(stack_output OwnerApiUrl)"
-API_URL="${API_URL%/}"
-APP_ORIGIN="$(stack_parameter OwnerAppOrigin)"
-FAILED=0
-
-code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "${API_URL}/v1/owner/appointments")"
-if [[ "${code}" == "401" ]]; then
-  info "  ok: owner API without a token returns 401"
-else
-  info "  FAIL: owner API without a token returned ${code}, expected 401"
-  FAILED=1
-fi
-
-preflight_allow_origin() {
-  curl -sS -o /dev/null -D - --max-time 20 -X OPTIONS \
-    -H "Origin: $1" -H "Access-Control-Request-Method: GET" \
-    -H "Access-Control-Request-Headers: authorization" \
-    "${API_URL}/v1/owner/appointments" | tr -d '\r' | awk -F': ' 'tolower($1) == "access-control-allow-origin" {print $2}'
-}
-if [[ "$(preflight_allow_origin "${APP_ORIGIN}")" == "${APP_ORIGIN}" ]]; then
-  info "  ok: CORS preflight from the app origin is allowed"
-else
-  info "  FAIL: CORS preflight from the app origin was not allowed"
-  FAILED=1
-fi
-if [[ -z "$(preflight_allow_origin "https://example.invalid")" ]]; then
-  info "  ok: CORS preflight from a foreign origin is not allowed"
-else
-  info "  FAIL: CORS preflight from a foreign origin was allowed"
-  FAILED=1
-fi
-[[ "${FAILED}" -eq 0 ]] || die "smoke test failed"
+smoke_test
 info "Backend deploy complete."

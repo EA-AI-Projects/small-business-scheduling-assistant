@@ -2,8 +2,8 @@
 # Enable or disable one scheduled rule of the dev stack by its logical ID, then
 # print the line to record on the issue (#43 for dev).
 #
-# Only EventBridge rules that belong to the stack are accepted. Outbox dispatch
-# (OutboxDispatch*) is refused: it stays off until live SMS is separately
+# Only the three listed logical IDs are accepted, and each must be an EventBridge rule of
+# the stack. Outbox dispatch (OutboxDispatch*) is refused: it stays off until live SMS is separately
 # authorized.
 #
 # Usage: scripts/dev/schedules.sh enable|disable <LogicalId> [--dry-run]
@@ -37,12 +37,18 @@ case "${ACTION}" in
 esac
 [[ "${NAME}" =~ ^[A-Za-z0-9]+$ ]] || die "the schedule name must be a stack logical ID"
 
-# Refuse outbox dispatch before any AWS call, whatever the case.
-shopt -s nocasematch
-if [[ "${NAME}" == OutboxDispatch* ]]; then
-  die "outbox dispatch stays disabled until live SMS is separately authorized; refusing."
-fi
-shopt -u nocasematch
+# Allowlist, checked before any AWS call. Outbox dispatch stays disabled until live SMS is
+# separately authorized, and any future schedule needs a reviewed change here.
+case "${NAME}" in
+  HoldExpiryFunctionSweep | NoteRetentionFunctionDaily | SmsRetentionFunctionDaily) ;;
+  *)
+    shopt -s nocasematch
+    if [[ "${NAME}" == OutboxDispatch* ]]; then
+      die "outbox dispatch stays disabled until live SMS is separately authorized; refusing."
+    fi
+    die "${NAME} is not an allowed schedule (HoldExpiryFunctionSweep, NoteRetentionFunctionDaily, SmsRetentionFunctionDaily)."
+    ;;
+esac
 
 need_tool aws jq
 pin_region
