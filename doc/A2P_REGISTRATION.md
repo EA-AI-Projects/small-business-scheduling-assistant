@@ -18,6 +18,8 @@ The Twilio `message_flow` must describe the in-person conversation, the exact di
 
 ## Correction for rejection 30896
 
+This section is submission history; the campaign was later approved (issue #91). It does not record which `message_flow` text was approved.
+
 The rejected `message_flow` said only: “Small business owner asks user for consent personally before enrolling them on the service.” That did not show the consent language, where it was delivered, how the yes was recorded, or public evidence. The screenshot also showed YES and SUBSCRIBE as opt-in keywords, although the described process did not use text-to-join.
 
 After the in-person process above is actually in use and the public script URL works, replace the `message_flow` with this text (under Twilio's 2049-character limit):
@@ -36,6 +38,8 @@ If custom replies are enabled in the Messaging Service, examples to review again
 - Help: “Small Business Scheduling Assistant scheduling texts. For help, email ealeman.kikito@gmail.com. Reply STOP to opt out. Message and data rates may apply.”
 
 ## Before submitting
+
+The campaign is approved (issue #91), so this checklist is history, except that items 1, 3, and 5 (including STOP/HELP replies that name the registered sender) still apply before live SMS.
 
 1. Confirm the policy's statements about the actual data, service providers, retention, and no marketing use are true.
 2. Resolve the difference between the registered Twilio A2P brand and the public program name with Twilio before relying on these pages for campaign approval.
