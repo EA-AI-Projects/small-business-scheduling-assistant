@@ -148,6 +148,29 @@ smoke_test() {
   [[ "${failed}" -eq 0 ]] || die "smoke test failed"
 }
 
+schedule_parameter() {
+  case "$1" in
+    HoldExpiryFunctionSweep) printf 'HoldExpiryScheduleState' ;;
+    NoteRetentionFunctionDaily) printf 'NoteRetentionScheduleState' ;;
+    SmsRetentionFunctionDaily) printf 'SmsRetentionScheduleState' ;;
+    *) printf '' ;;
+  esac
+}
+
+# Warn before creating a change set: SAM may report no changes without returning an ARN.
+warn_schedule_drift() {
+  local logical physical param want have
+  while IFS=$'\t' read -r logical physical; do
+    param="$(schedule_parameter "${logical}")"
+    [[ -n "${param}" ]] || continue
+    want="$(stack_parameter "${param}")"
+    have="$(aws_cli events describe-rule --name "${physical}" --query State --output text)"
+    if [[ -n "${want}" && "${have}" != "${want}" ]]; then
+      info "WARNING: ${logical} is ${have} live but ${param}=${want}. A later deploy that modifies the rule would set it to ${want} (refused unless --param ${param} is passed)."
+    fi
+  done < <(stack_resources AWS::Events::Rule)
+}
+
 if [[ "${SMOKE_ONLY}" -eq 1 ]]; then
   if [[ "${DRY_RUN}" -eq 1 ]]; then
     info "+ smoke test: GET /v1/owner/businesses/<BusinessId>/policy without a token expects 401; CORS preflights"
@@ -183,6 +206,8 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
   info "+ smoke test: GET /v1/owner/businesses/<BusinessId>/policy without a token expects 401; CORS preflights"
   exit 0
 fi
+
+warn_schedule_drift
 
 SAM_LOG="$(mktemp)"
 trap 'rm -f "${SAM_LOG}"; cleanup' EXIT
@@ -251,14 +276,6 @@ info "Parameters: unchanged from the live stack."
 # (the live value, or the --param override). A missing State means ENABLED (EventBridge default).
 # - A rule with a *ScheduleState parameter: live vs target; a change needs an explicit --param.
 # - Any other rule (outbox dispatch, or a new one): its target must be DISABLED, always.
-schedule_parameter() {
-  case "$1" in
-    HoldExpiryFunctionSweep) printf 'HoldExpiryScheduleState' ;;
-    NoteRetentionFunctionDaily) printf 'NoteRetentionScheduleState' ;;
-    SmsRetentionFunctionDaily) printf 'SmsRetentionScheduleState' ;;
-    *) printf '' ;;
-  esac
-}
 RULE_ROWS="$(jq -r '.Changes[].ResourceChange
   | select(.ResourceType == "AWS::Events::Rule" and (.Action == "Add" or .Action == "Modify" or .Replacement == "True" or .Replacement == "Conditional"))
   | [.Action, .LogicalResourceId, (.PhysicalResourceId // "")] | @tsv' <<<"${DESCRIPTION}")"
@@ -311,18 +328,6 @@ if [[ -n "${RULE_ROWS}" ]]; then
     die "refusing: schedule state is not allowed to change: ${SCHEDULE_REFUSED}. A parameterized schedule needs its *ScheduleState parameter passed explicitly with --param (the live state keeps it); a hard-coded rule (outbox dispatch) must target DISABLED and cannot be enabled by a deploy."
   fi
 fi
-
-# Every run: warn when a parameterized schedule's live state differs from its parameter value
-# (drift, for example after an emergency disable-rule), even if this change set leaves it alone.
-while IFS=$'\t' read -r logical physical; do
-  param="$(schedule_parameter "${logical}")"
-  [[ -n "${param}" ]] || continue
-  want="$(jq -r --arg k "${param}" '[.Parameters[] | select(.ParameterKey == $k) | .ParameterValue] | first // ""' <<<"${DESCRIPTION}")"
-  have="$(aws_cli events describe-rule --name "${physical}" --query State --output text)"
-  if [[ -n "${want}" && "${have}" != "${want}" ]]; then
-    info "WARNING: ${logical} is ${have} live but ${param}=${want}. A later deploy that modifies the rule would set it to ${want} (refused unless --param ${param} is passed)."
-  fi
-done < <(stack_resources AWS::Events::Rule)
 
 if [[ "${COUNT}" -eq 0 ]]; then
   info "The change set has no changes. It is deleted on exit."
