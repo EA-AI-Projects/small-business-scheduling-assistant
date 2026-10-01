@@ -243,7 +243,7 @@ All timestamps should be stored in UTC and rendered in the configured business t
 
 ## 10. Deployment and operations (initial direction)
 
-For the pilot, use `us-west-1` (the synthetic `dev` stack in the dedicated member account `214965372605`; `pilot` in its own separate account, see [ARCHITECTURE.md](ARCHITECTURE.md)) with the proposed Lambda, DynamoDB on-demand, and SQS architecture. The first proof of concept includes the authenticated owner calendar. Use Twilio for the California-only SMS pilot; a US number is bought and the A2P 10DLC brand and campaign are approved (issue #91), which does not authorize live SMS. Keep a staging environment and test with synthetic contacts before enabling real client traffic. This choice does not authorize resource provisioning, deployment, or live SMS.
+For the pilot, use `us-west-1` (the synthetic `dev` stack in the dedicated member account `214965372605`; `pilot` in its own separate account, see [ARCHITECTURE.md](ARCHITECTURE.md)) with the proposed Lambda, DynamoDB on-demand, and SQS architecture. The first proof of concept includes the authenticated owner calendar. Use Twilio for the California-only SMS pilot; a US number is bought and the A2P 10DLC brand and campaign are approved (issue #91), which does not authorize live SMS. Keep a staging environment and test with synthetic contacts before enabling real client traffic; the only real personal data allowed in `dev` is the authorized testers' phone numbers, messages, and consent evidence (see [ARCHITECTURE.md](ARCHITECTURE.md) section 8.3). This choice does not authorize resource provisioning, deployment, or live SMS.
 
 Operational essentials:
 - Health/readiness endpoint and structured, redacted logs.

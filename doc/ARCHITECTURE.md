@@ -218,7 +218,7 @@ Approval also checks `hold_expires_at > decision_at` against the scheduling serv
 - Do not log raw SMS body, access code, full address, or model prompt by default. Use message/request IDs and redacted structured metadata for diagnostics.
 - Implement the issue #16 consent, opt-out, and retention decisions and define deletion/export handling before onboarding real customers.
 - Use separate client-level and booking-level notes. Do not let model extraction silently create permanent notes; use owner-reviewable drafts. Do not collect or store entry/access codes in this MVP.
-- Accounts are separated by environment inside one AWS Organization: a dedicated `dev` member account (`214965372605`, synthetic data only, operator access through IAM Identity Center with MFA) and, when real clients are onboarded, a separate `pilot` account. The management account (`339713090487`) holds billing and organization administration only and runs no workload. Each environment gets its own budget and alerts.
+- Accounts are separated by environment inside one AWS Organization: a dedicated `dev` member account (`214965372605`, synthetic data only apart from the authorized testers' data in section 8.3, operator access through IAM Identity Center with MFA) and, when real clients are onboarded, a separate `pilot` account. The management account (`339713090487`) holds billing and organization administration only and runs no workload. Each environment gets its own budget and alerts.
 
 ## 8. Infrastructure and delivery
 
@@ -240,7 +240,7 @@ Approval also checks `hold_expires_at > decision_at` against the scheduling serv
 ### 8.3 Environments
 
 - `local`: FastAPI + DynamoDB Local or a lightweight local adapter; mocked Twilio/OpenAI by default.
-- `dev`: synthetic client data, two-way SMS only with explicitly authorized test numbers (the owner plus a few friends and family, each with documented in-person consent, an owner-verified profile, and a California number; numbers never go in the repo or GitHub), OpenAI plain-language texts approved with a budget limit set on the OpenAI side, the OpenAI key and Twilio auth token as Standard SecureString parameters at `/scheduling/dev/openai/api-key` and `/scheduling/dev/twilio/auth-token` (`alias/aws/ssm`), low-cost AWS stack in the dedicated member account `214965372605`; dev SMS ingress, sending, and conversations stay disabled until separately authorized.
+- `dev`: synthetic client data, except that once texting is enabled it may also hold authorized testers' real phone numbers, their message bodies (deleted after 90 days under the existing retention rule), and the minimal consent and opt-out evidence (kept four years after the last program text under the existing rule) (owner decision, 2026-10-01, #91); tester profiles use placeholder names and addresses (for example "Tester A"), so the phone number is the only real personal detail, and the owner keeps the full private consent records (name, number, time, method, the yes, and script version) himself for now, outside the repository, GitHub, and AWS; two-way SMS only with explicitly authorized test numbers (the owner plus a few friends and family, each with documented in-person consent, an owner-verified profile, and a California number; numbers never go in the repo or GitHub), OpenAI plain-language texts approved with a budget limit set on the OpenAI side, the OpenAI key and Twilio auth token as Standard SecureString parameters at `/scheduling/dev/openai/api-key` and `/scheduling/dev/twilio/auth-token` (`alias/aws/ssm`), low-cost AWS stack in the dedicated member account `214965372605`; dev SMS ingress, sending, and conversations stay disabled until separately authorized.
 - `pilot`: in its own future account (not yet created); actual approved Twilio business number and explicitly authorized California clients; human approval always enabled. Do not send live SMS until number/campaign approval, consent records, STOP/HELP handling, and separate test-number authorization are in place.
 - No need for Kubernetes, ECS/Fargate, RDS/Aurora, NAT Gateway, ElastiCache, or always-on EC2 in the MVP.
 
@@ -294,7 +294,7 @@ Cognito is preferred for password and token management. Do not use SMS OTP as th
 - Test malformed or ambiguous natural-language dates and owner replies; ambiguity must not alter schedule state.
 - Test model timeout/unavailability and ensure the user gets a safe fallback.
 - Test outbox/SQS retry, DLQ handling, duplicate notification delivery, and replay.
-- Use only synthetic data before pilot; live SMS tests must use explicitly authorized test numbers.
+- Use only synthetic data before pilot, except the authorized testers' data allowed in `dev` (section 8.3); live SMS tests must use explicitly authorized test numbers.
 - Track operational indicators: API errors/latency, Lambda throttles/errors, transaction conflicts, outbox age, SMS delivery failures, DLQ depth, expired holds, LLM timeout/rate, and estimated AWS spend.
 
 ## 12. Pilot decisions and remaining gates
