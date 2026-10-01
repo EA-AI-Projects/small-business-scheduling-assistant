@@ -71,6 +71,19 @@ Open `http://127.0.0.1:3000` (owner calendar) and `http://127.0.0.1:8000/local/t
 
 Everything resets when Terminal A stops. Hold expiry and other scheduled workers do not run locally. STOP/HELP keywords are handled by Twilio in production and are not simulated.
 
+## Deploy to dev
+
+The long-lived synthetic `dev` environment (#43) has helper scripts in [`scripts/dev/`](scripts/dev). Sign in with `aws sso login --profile scheduling-dev-deployer`, then run from the repository root. Each script targets only account `214965372605`, region `us-west-1`, and accepts `--dry-run` (prints commands, calls no AWS beyond the identity check).
+
+```sh
+scripts/dev/deploy-backend.sh     # sam build, change set, readable summary, y/N, execute, smoke test
+scripts/dev/deploy-frontend.sh    # build with stack outputs, keep the zip in S3, Amplify deploy, header check
+scripts/dev/status.sh             # read-only: stack, schedules, deployment, alarms, budget
+scripts/dev/schedules.sh enable|disable <LogicalId>   # one stack schedule; never outbox dispatch
+```
+
+No parameter value is read into the repository or printed. Details and the IAM grant are in [Deploy to dev with scripts](doc/PILOT_INFRASTRUCTURE.md#deploy-to-dev-with-scripts).
+
 ## Local backend
 
 Python 3.12+ is required locally. From the repository root:
@@ -113,7 +126,7 @@ The owner calendar is a static Next.js + React + TypeScript app in [`frontend/`]
 
 The app provides day/week schedule and pending approvals in the business timezone, appointment edits/cancellation, unavailable blocks, date exceptions, client profiles, and separate client/visit notes. Local date-time inputs are resolved by the authenticated API, which rejects ambiguous or nonexistent daylight-saving times. A conflicting edit refreshes current state and states that nothing was saved. The app bundle and its public build settings contain no customer data or credentials. For local development against the synthetic `scheduling.local_owner` API, see [`frontend/README.md`](frontend/README.md). Creating the Amplify app is a deployment step gated by #43.
 
-Focused checks (GitHub Actions `CI` also runs these, plus the DynamoDB Local race tests and `cfn-lint template.yaml`, on every pull request and push to `main`):
+Focused checks (GitHub Actions `CI` also runs these, plus the DynamoDB Local race tests, `cfn-lint` on both templates, and `shellcheck` on `scripts/dev`, on every pull request and push to `main`):
 
 ```sh
 backend/.venv/bin/python -m pytest backend/tests

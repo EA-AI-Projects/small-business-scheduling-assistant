@@ -38,7 +38,9 @@ Description: >-
 # either of them through its own IAM permissions (and it is also denied).
 #
 # Amplify app creation and AWS Budget creation are NOT covered; the owner does
-# those two one-time actions with their own credentials.
+# those two one-time actions with their own credentials. Once the app exists, the
+# AmplifyAppId parameter adds a narrow manual-deploy grant for that one app only
+# (issue #94); with the default empty value the deployer has no Amplify access.
 
 Parameters:
   IdentityCenterPermissionSetName:
@@ -101,6 +103,14 @@ Parameters:
       Optional. After the dev stack exists, update this stack with the user
       pool ID to pin the Cognito admin actions to that one pool. Empty means
       "any pool tagged with this CloudFormation stack".
+  AmplifyAppId:
+    Type: String
+    Default: ''
+    AllowedPattern: '|[a-z0-9]{10,16}'
+    Description: >-
+      Optional. After the owner creates the Amplify app, update this stack with its app ID
+      (the segment between "main." and ".amplifyapp.com" in the app origin) to let the deployer
+      run manual deployments of that one app. No ID is committed; empty means no Amplify access.
   TrustCloudFormationSourceArn:
     Type: String
     AllowedValues: ['true', 'false']
@@ -126,6 +136,7 @@ Conditions:
   MfaRequired: !Equals [!Ref RequireMfa, 'true']
   UseExplicitPrincipal: !Not [!Equals [!Ref TrustedPrincipalArn, '']]
   HasUserPoolId: !Not [!Equals [!Ref OwnerUserPoolId, '']]
+  HasAmplifyAppId: !Not [!Equals [!Ref AmplifyAppId, '']]
   TrustSourceArn: !Equals [!Ref TrustCloudFormationSourceArn, 'true']
 
 Resources:
@@ -547,6 +558,10 @@ Resources:
       ManagedPolicyArns:
         - !Ref DeployerDeployPolicy
         - !Ref DeployerOperatePolicy
+        - !If
+          - HasAmplifyAppId
+          - !Ref DeployerAmplifyPolicy
+          - !Ref AWS::NoValue
 
   DeployerDeployPolicy:
     Type: AWS::IAM::ManagedPolicy
@@ -766,6 +781,33 @@ Resources:
             Effect: Allow
             Action: [sqs:ReceiveMessage, sqs:DeleteMessage]
             Resource: !Sub 'arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:scheduling-outbox-dlq-${Environment}'
+
+  # Manual deployment of the one dev owner app (issue #94, scripts/dev/deploy-frontend.sh):
+  # create-deployment, upload to the returned URL (no AWS permission), start-deployment, poll the
+  # job, and the app/branch reads that deploy-frontend.sh and status.sh use. No create, update or
+  # delete of apps or branches, no ListApps, and no other app. The zip upload to the artifact
+  # bucket under owner-app/ is already covered by ArtifactBucketObjects.
+  DeployerAmplifyPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: HasAmplifyAppId
+    Properties:
+      ManagedPolicyName: !Sub 'deploy-${StackName}-deployer-amplify'
+      Description: Deployer role, optional part 3 - manual deployments of the one dev Amplify app.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: OwnerAppManualDeployments
+            Effect: Allow
+            Action:
+              - amplify:GetApp
+              - amplify:GetBranch
+              - amplify:CreateDeployment
+              - amplify:StartDeployment
+              - amplify:GetJob
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:amplify:${AWS::Region}:${AWS::AccountId}:apps/${AmplifyAppId}'
+              - !Sub 'arn:${AWS::Partition}:amplify:${AWS::Region}:${AWS::AccountId}:apps/${AmplifyAppId}/branches/*'
+              - !Sub 'arn:${AWS::Partition}:amplify:${AWS::Region}:${AWS::AccountId}:apps/${AmplifyAppId}/branches/*/jobs/*'
 
 Outputs:
   DeployerRoleArn:
