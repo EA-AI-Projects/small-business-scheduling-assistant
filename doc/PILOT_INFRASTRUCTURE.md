@@ -216,7 +216,7 @@ This is the proposed **separate** authorization boundary, not an instruction to 
 
 ## Deploy to dev with scripts
 
-For frequent changes to the long-lived synthetic `dev` environment (#43), `scripts/dev/` wraps the manual procedures. They target only account `214965372605`, region `us-west-1`, stack `scheduling-dev`, and the Amplify app `scheduling-owner-dev`, and refuse anything else. Sign in first with `aws sso login --profile scheduling-dev-deployer`. Every script accepts `--dry-run`, which prints the commands without calling AWS (apart from the read-only `sts get-caller-identity` check).
+For frequent changes to the long-lived synthetic `dev` environment (#43), `scripts/dev/` wraps the manual procedures. They target only account `214965372605`, region `us-west-1`, stack `scheduling-dev`, and the Amplify app `scheduling-owner-dev`, and refuse anything else. Sign in first with `aws sso login --profile scheduling-dev-admin`; the scripts run as `scheduling-dev-deployer`, which assumes its role through that admin sign-in, so `aws sso login` on the deployer profile itself fails with a missing `sso_start_url` error. Every script accepts `--dry-run`, which prints the commands without calling AWS (apart from the read-only `sts get-caller-identity` check).
 
 | Script | What it does |
 | --- | --- |
