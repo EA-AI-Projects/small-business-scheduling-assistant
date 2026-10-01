@@ -19,7 +19,7 @@ This packet asks Enrique to authorize texting in the synthetic `dev` environment
 | Testers | Enrique plus a few friends and family. Each needs in-person consent, an owner-verified profile with placeholder name and address, and a California number. Numbers never go in the repository or GitHub. |
 | Spending | Twilio dev spend stays within about $10/month from the prepaid credit (balance $46.41 on 2026-10-01). Keep auto-recharge off so the balance is a hard stop. OpenAI is limited by the budget Enrique set there. |
 | Plain-language texts | Approved (OpenAI interpreter). |
-| Keyword handling | Advanced Opt-Out is enabled on the Messaging Service used by dev, with CANCEL removed from its opt-out keywords (owner decision on #91, superseding the earlier 2026-10-01 "Twilio defaults; Advanced Opt-Out stays off" decision for dev only). Remaining opt-out keywords: Stop (reserved), end, optout, quit, revoke, stopall, unsubscribe. Opt-in: Start, Unstop. A bare "Cancel" now reaches the app as an ordinary scheduling message. The app's `STOP_WORDS` already exclude CANCEL, so code and Twilio agree. No keyword code changes. Revisit before the pilot (see section 8). |
+| Keyword handling | Advanced Opt-Out is enabled on the Messaging Service used by dev, with CANCEL removed from its opt-out keywords (owner decision on #91, superseding the earlier 2026-10-01 "Twilio defaults; Advanced Opt-Out stays off" decision for dev only). The full live keyword lists are not recorded here; opt-in keywords must not include YES (see #91). A bare "Cancel" now reaches the app as an ordinary scheduling message. The app's `STOP_WORDS` already exclude CANCEL, so code and Twilio agree. No keyword code changes. Revisit before the pilot (see section 8). |
 | Evidence | Once testers text, dev is not torn down while their consent and opt-out evidence is retained (four years). |
 
 ## 2. Code prerequisites (reviewed PRs; no live action)
@@ -87,7 +87,7 @@ Last: the tester texts STOP and you confirm no further texts reach them. To brin
 
 Results of each stage are recorded on #91 without numbers or message text.
 
-**Stage 2 results.** Recorded in the Advanced Opt-Out comment on #91 (no numbers or message text): a bare "Cancel" was stored as `OTHER`, `HELP` is forwarded with the HELP keyword, and no opt-out was recorded.
+**Stage 2 results** (#91, no numbers or message text). Under Twilio defaults: every forwarded owner text validated, which is the positive signature check deferred from stage 1. The logs held only invocation summaries. A bare "Cancel" unsubscribed the sender on Twilio's side while the app stored it as an ordinary message, and Twilio did not forward HELP. After Enrique enabled Advanced Opt-Out with CANCEL removed: "Cancel" was stored as `OTHER` with no unsubscribe, `HELP` is forwarded with the HELP keyword, and no opt-out was recorded.
 
 ## 5. Cost (fetched 2026-10-01; list prices)
 
