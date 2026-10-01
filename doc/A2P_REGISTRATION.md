@@ -47,4 +47,6 @@ The campaign is approved (issue #91), so this checklist is history, except that 
 4. Put the same URLs in the Twilio campaign and in the in-person disclosure.
 5. Configure and test STOP and HELP replies and ensure sample messages identify the registered sender.
 
+**Pre-pilot note (#91).** In `dev`, Advanced Opt-Out is enabled with CANCEL removed from its opt-out keywords. CANCEL is on the CTIA standard opt-out list and in the approved campaign's registered opt-out keywords, so the two disagree. Before the pilot, either update the campaign registration or restore CANCEL; the owner has not chosen between them.
+
 Sources: [Twilio error 30896 guidance](https://www.twilio.com/docs/api/errors/30896), [Twilio registration quickstart](https://www.twilio.com/docs/messaging/compliance/a2p-10dlc/quickstart), [Twilio business information guidance](https://www.twilio.com/docs/messaging/compliance/a2p-10dlc/collect-business-info), and [Twilio consent-flow checklist](https://www.twilio.com/docs/api/errors/30924).

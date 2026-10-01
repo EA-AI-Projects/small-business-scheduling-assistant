@@ -19,7 +19,7 @@ This packet asks Enrique to authorize texting in the synthetic `dev` environment
 | Testers | Enrique plus a few friends and family. Each needs in-person consent, an owner-verified profile with placeholder name and address, and a California number. Numbers never go in the repository or GitHub. |
 | Spending | Twilio dev spend stays within about $10/month from the prepaid credit (balance $46.41 on 2026-10-01). Keep auto-recharge off so the balance is a hard stop. OpenAI is limited by the budget Enrique set there. |
 | Plain-language texts | Approved (OpenAI interpreter). |
-| Keyword handling | Twilio defaults; Advanced Opt-Out stays off. No keyword code changes before live testing. Keyword behavior is checked live in stages 2 and 3. |
+| Keyword handling | Advanced Opt-Out is enabled on the Messaging Service used by dev, with CANCEL removed from its opt-out keywords (owner decision on #91, superseding the earlier 2026-10-01 "Twilio defaults; Advanced Opt-Out stays off" decision for dev only). The full live keyword lists are not recorded here; opt-in keywords must not include YES (see #91). A bare "Cancel" now reaches the app as an ordinary scheduling message. The app's `STOP_WORDS` already exclude CANCEL, so code and Twilio agree. No keyword code changes. Revisit before the pilot (see section 8). |
 | Evidence | Once testers text, dev is not torn down while their consent and opt-out evidence is retained (four years). |
 
 ## 2. Code prerequisites (reviewed PRs; no live action)
@@ -33,7 +33,7 @@ Before stage 3 (each waits for Enrique's answer on #91):
 
 4. **Phone verification (decided on #91, option (b); built in this change).** Incoming texts are acted on, and texts are sent, only for a client whose profile phone is marked verified (`phone_verified_at`). Recording in-person consent in the owner app now marks that phone verified in the same atomic write as the consent records, and onboarding a new client shows the consent step right away (consent can be recorded later from the client screen; until then the client can't text). The owner reads the number back to the client first, because nothing proves the client holds the phone. Changing a profile's phone clears the verification, so the new number needs fresh consent. No standalone verify route and no DynamoDB hand-editing.
 5. **Old pending texts.** Earlier synthetic testing left pending owner notifications in the dev outbox (for example "Scheduling policy updated" and "Owner calendar updated"). The dispatcher sends every due record, with no age limit. Purging the SQS queue does not help, because the records stay pending in DynamoDB and are re-queued. Enrique decided on #91 to retire them before stage 3: a reviewed one-off tool marks every unsent record created before stage 3 as failed with `RETIRED_BEFORE_LIVE_SMS`, not sent (see "Retire pending outbox records" below).
-6. **Doc fixes (in this PR).** `PILOT_INFRASTRUCTURE.md` and the README said Advanced Opt-Out handles STOP and HELP before tester texting; they now record the Twilio-defaults decision.
+6. **Doc fixes (in this PR).** `PILOT_INFRASTRUCTURE.md` and the README said Advanced Opt-Out handles STOP and HELP before tester texting; they first recorded the Twilio-defaults decision, which the Advanced Opt-Out decision in section 1 now supersedes for dev.
 
 ### Retire pending outbox records
 
@@ -73,9 +73,9 @@ Stage 1 adds the resources that `EnableSmsIngress=false` leaves out: the SMS HTT
 
 **Stage 1: signed webhook, no texts.** Deploy the merged prerequisites 1 to 3. Enable ingress with the inert URLs, read `SmsApiUrl`, and redeploy with the exact URLs (the two-step bootstrap in PILOT_INFRASTRUCTURE). Then check that an unsigned POST and a POST with a wrong signature both get 403. A correctly signed request needs the real auth token, which no agent may read, so the positive check happens in stage 2 with real Twilio traffic. The Twilio number still points elsewhere. *No SMS is sent or received.*
 
-**Stage 2: inbound only, from your phone.** You point the Twilio number's incoming-message webhook at the exact inbound URL in the Twilio console. Sending and conversations stay off, so the app cannot text anyone. From your own phone, text the number: `HELP`, `YES`, `CANCEL`, `START`, then one plain sentence. Do not text STOP (see the note below). For each text, record what Twilio replied and what the app stored: keyword, role, and whether the body was kept. The first stored receipt is also the positive signature check from stage 1. Check the logs for phone numbers or message text. *Only Twilio's own default keyword replies are sent; the app sends nothing.*
+**Stage 2: inbound only, from your phone.** You point the Twilio number's incoming-message webhook at the exact inbound URL in the Twilio console. Sending and conversations stay off, so the app cannot text anyone. From your own phone, text the number: `HELP`, `YES`, `CANCEL`, `START`, then one plain sentence. Do not text STOP (see the note below). For each text, record what Twilio replied and what the app stored: keyword, role, and whether the body was kept. The first stored receipt is also the positive signature check from stage 1. Check the logs for phone numbers or message text. *Only Twilio's own keyword replies are sent; the app sends nothing.*
 
-> **Owner-phone note.** In the app, STOP from the owner number blocks every owner text, and it can't be cleared the way a client's can (owners have no consent record). So the owner phone never texts STOP. Under Twilio defaults, a bare `CANCEL` is also an opt-out on Twilio's side, which `START` reverses; that is exactly what stage 2 observes, so `CANCEL` is followed by `START`. If the app turns out to record that `CANCEL` as a STOP, stop and report it before stage 3.
+> **Owner-phone note.** In the app, STOP from the owner number blocks every owner text, and it can't be cleared the way a client's can (owners have no consent record). So the owner phone never texts STOP. With CANCEL removed from the Advanced Opt-Out keywords, a bare `CANCEL` is no longer an opt-out on Twilio's side and is not a STOP in the app. If the app records that `CANCEL` as a STOP, stop and report it before stage 3.
 
 **Stage 3: full flow with you and one tester.** Requires prerequisites 4 and 5. Record the tester's consent in the owner app, which also marks their phone verified. Retire the old pending texts: run the dry run, then `--execute`, of "Retire pending outbox records" once, just before turning anything on. Then turn on `SmsSendEnabled`, conversations, the sender trigger and outbox dispatch. Run one booking end to end: ask for times, pick one, you approve by text, the tester gets the confirmation, then cancel and reschedule.
 
@@ -86,6 +86,8 @@ Last: the tester texts STOP and you confirm no further texts reach them. To brin
 **Stage 4: remaining testers.** For each new tester: in-person consent, a profile with a placeholder name, the consent record and phone verification. Onboarding is the only step: no deploy is needed, and the tester can receive texts as soon as the consent is recorded. *Live texts go only to people onboarded this way.*
 
 Results of each stage are recorded on #91 without numbers or message text.
+
+**Stage 2 results** (#91, no numbers or message text). Under Twilio defaults: every forwarded owner text validated, which is the positive signature check deferred from stage 1. The logs held only invocation summaries. A bare "Cancel" unsubscribed the sender on Twilio's side while the app stored it as an ordinary message, and Twilio did not forward HELP. After Enrique enabled Advanced Opt-Out with CANCEL removed: "Cancel" was stored as `OTHER` with no unsubscribe, `HELP` is forwarded with the HELP keyword, and no opt-out was recorded.
 
 ## 5. Cost (fetched 2026-10-01; list prices)
 
@@ -117,7 +119,7 @@ Ingress can stay on while sending is off; it only stores receipts. Turning ingre
 | A text reaches someone not authorized | Checks before every send: a verified phone and recorded consent for the client, no opt-out, and a refusal of fictional 555-0100 to 555-0199 numbers. Tested in code; checked live in stage 3. |
 | A stranger texts the number | No reply, and no scheduling change (PRD). The body is not processed. |
 | Forged webhook calls | Twilio signature required on the exact URL; checked in stages 1 and 2. A flood of rejected calls costs little (API Gateway and Lambda per-request pricing) and is visible in the ingress error alarm. |
-| Keyword surprises (for example a bare "cancel" opts someone out under Twilio defaults) | Observed in stage 2 before testers. Any fix is a separate decision. |
+| Keyword mismatch: CANCEL is on the CTIA standard opt-out list and in the approved campaign's registered opt-out keywords, but is removed from dev's Advanced Opt-Out keywords | Accepted for dev only. Before the pilot, either update the campaign registration or restore CANCEL (see `doc/A2P_REGISTRATION.md`). Other keyword surprises are observed in stages 2 and 3 before testers; any fix is a separate decision. |
 | Old synthetic texts sent to real phones | Prerequisite 5 before stage 3. |
 | Testers' message text goes to OpenAI | Plain-language texts are sent to OpenAI for interpretation. A text that matches the access-code pattern (phrases such as "gate code") is dropped before processing, but other wording, such as a bare number at "the side door", still reaches OpenAI. Tell testers to keep texts to scheduling and never send access codes. |
 | Real numbers in logs | The SMS code logs no numbers or bodies; error tracebacks are checked in stage 2. Log groups keep 30 days. |
@@ -126,4 +128,4 @@ Ingress can stay on while sending is off; it only stores receipts. Turning ingre
 
 ## 8. What this packet does not do
 
-It does not cover `pilot`, real clients, a business-registered sender, Advanced Opt-Out, or any change to keyword handling. It does not change retention, consent rules, or the conversation wording.
+It does not cover `pilot`, real clients, a business-registered sender, or the pilot's keyword handling. Advanced Opt-Out with CANCEL removed applies to dev only; the pilot direction (update the campaign registration or restore CANCEL) is open. It does not change retention, consent rules, or the conversation wording.
