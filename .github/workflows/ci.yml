@@ -48,6 +48,12 @@ jobs:
       - name: Lint SAM template
         run: cfn-lint template.yaml
 
+      - name: Lint dev deployment roles template
+        run: cfn-lint infra/dev-deploy-roles.yaml
+
+      - name: Shellcheck dev scripts
+        run: shellcheck -x -s bash scripts/dev/*.sh
+
       - name: Owner OpenAPI schema is current
         run: |
           python -m scheduling.owner_openapi > frontend/openapi/owner.json
