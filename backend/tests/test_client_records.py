@@ -195,3 +195,9 @@ def test_profile_phone_drops_format_characters_and_whitespace_only() -> None:
     assert profile.phone_e164 == "+14155550101"
     with pytest.raises(ValueError):
         save(service, "client-2", "+1-415-555-0102")
+
+
+def test_profile_phone_rejects_non_ascii_digits() -> None:
+    _, service = ready()
+    with pytest.raises(ValueError):
+        save(service, "client-1", "+1\u0664155550101")

@@ -66,8 +66,8 @@ export function ProfileForm({ client, onCreated, onPhoneDraft }: {
         <label>Phone (E.164) <input name="phone_e164" type="tel" placeholder="+14155550101" required
           defaultValue={client?.phone_e164 ?? ""}
           aria-invalid={phoneError !== null} aria-describedby={phoneError ? "phone-error" : undefined}
-          onChange={(event) => { setPhoneError(null); onPhoneDraft?.(normalizePhone(event.target.value)); }} />
-          {phoneError && <span id="phone-error" role="alert" className="field-error">{phoneError}</span>}</label>
+          onChange={(event) => { setPhoneError(null); onPhoneDraft?.(normalizePhone(event.target.value)); }} /></label>
+        {phoneError && <span id="phone-error" role="alert" className="field-error">{phoneError}</span>}
         <label>Service address <input name="service_address" required maxLength={500}
           defaultValue={client?.service_address ?? ""} /></label>
         <label>Home size <select name="home_size" defaultValue={client?.home_size ?? "small"}>

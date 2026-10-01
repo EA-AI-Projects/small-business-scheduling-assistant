@@ -1,6 +1,6 @@
 /** Phone entry helpers. The backend accepts only E.164, so clean pasted values before sending. */
 
-export const E164_PATTERN = /^\+[1-9]\d{1,14}$/;
+export const E164_PATTERN = /^\+[1-9][0-9]{1,14}$/;
 
 /**
  * Remove what copying from Contacts or Messages adds: invisible format characters (directional

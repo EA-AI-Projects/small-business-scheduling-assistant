@@ -58,6 +58,7 @@ textarea { min-height: 85px; resize: vertical; }
 .badge { display: inline-block; border-radius: 999px; padding: .12rem .5rem; background: #e6efe8; color: #2c6040; font-size: .76rem; font-weight: 700; }
 .notice:empty { display: none; }
 .notice { margin: 0 0 1rem; padding: .7rem .9rem; border-radius: 8px; background: #e8f1e9; color: #245339; }
+.field-error { color: #8e2d31; font-weight: 400; }
 .notice.error { background: #fbe9e9; color: #8e2d31; }
 footer { max-width: 1300px; margin: auto; padding: 0 clamp(1rem, 3vw, 3rem) 2rem; color: #7b8b7e; font-size: .78rem; }
 @media (max-width: 850px) { .split { grid-template-columns: 1fr; } .toolbar .calendar-zone { width: 100%; margin-left: 0; } }

@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from scheduling.domain.appointments import Appointment
 
-PHONE_PATTERN = re.compile(r"^\+[1-9]\d{1,14}$")
+PHONE_PATTERN = re.compile(r"^\+[1-9][0-9]{1,14}$")
 ACCESS_CODE_PATTERN = re.compile(
     r"\b(?:door|gate|entry|access|lockbox|alarm|keypad)\s*"
     r"(?:code|pin|password|combination)\b|"

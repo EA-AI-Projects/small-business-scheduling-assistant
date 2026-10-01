@@ -121,6 +121,20 @@ describe("onboarding consent step", () => {
     expect(calls.some((call) => call.method === "POST")).toBe(false);
   });
 
+  it("keeps consent enabled when the phone field holds a formatted or marked copy of the saved number", async () => {
+    setup(() => undefined);
+    await selectAvery();
+    const phone = screen.getByLabelText("Phone (E.164)");
+    await userEvent.clear(phone);
+    await userEvent.type(phone, "+1 (415) 555-0101");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Record consent" })).toBeEnabled();
+    await userEvent.clear(phone);
+    await userEvent.paste("\u202A+14155550101\u202C");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Record consent" })).toBeEnabled();
+  });
+
   it("shows the saved number read-only and blocks consent while the phone edit is unsaved", async () => {
     const { calls } = setup(() => undefined);
     await selectAvery();
