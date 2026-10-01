@@ -240,7 +240,7 @@ Approval also checks `hold_expires_at > decision_at` against the scheduling serv
 ### 8.3 Environments
 
 - `local`: FastAPI + DynamoDB Local or a lightweight local adapter; mocked Twilio/OpenAI by default.
-- `dev`: synthetic client data, SMS sandbox/test number where available, low-cost AWS stack in the dedicated member account `214965372605`.
+- `dev`: synthetic client data, two-way SMS only with explicitly authorized test numbers (the owner plus a few friends and family, each with documented in-person consent, an owner-verified profile, and a California number; numbers never go in the repo or GitHub), OpenAI plain-language texts approved with a budget limit set on the OpenAI side, the OpenAI key and Twilio auth token as Standard SecureString parameters at `/scheduling/dev/openai/api-key` and `/scheduling/dev/twilio/auth-token` (`alias/aws/ssm`), low-cost AWS stack in the dedicated member account `214965372605`; dev SMS ingress, sending, and conversations stay disabled until separately authorized.
 - `pilot`: in its own future account (not yet created); actual approved Twilio business number and explicitly authorized California clients; human approval always enabled. Do not send live SMS until number/campaign approval, consent records, STOP/HELP handling, and separate test-number authorization are in place.
 - No need for Kubernetes, ECS/Fargate, RDS/Aurora, NAT Gateway, ElastiCache, or always-on EC2 in the MVP.
 
@@ -301,8 +301,8 @@ Cognito is preferred for password and token management. Do not use SMS OTP as th
 
 1. Region `us-west-1` is confirmed. `dev` targets the dedicated member account `214965372605` (issue #43); `pilot` will use a separate account to be recorded when it is created. Resource provisioning and deployment need separate authorization.
 2. `America/Los_Angeles` with daylight saving, Monday–Friday 8:00 a.m.–5:00 p.m., and editable observed US federal holiday closures are confirmed.
-3. Twilio and California-only pilot messaging are confirmed. The in-person consent process and private yes/no evidence record are documented on the `a2p-policy-pages` branch. Business-number/campaign approval, STOP/HELP behavior, and explicit test-number authorization remain before live SMS.
-4. OpenAI is confirmed, and `gpt-6-luna` is the initial pilot interpretation model ID after the synthetic malformed/ambiguous-message evaluation in #24 passed twice with the final clarification prompt. The model only proposes an interpretation; the backend must validate actors, request references, dates, and permissions before any write. The owner specified no additional data-handling or budget constraints. No live SMS is authorized by this model selection.
+3. Twilio and California-only pilot messaging are confirmed. The in-person consent process and private yes/no evidence record are documented on the `a2p-policy-pages` branch. A US number is bought and the A2P 10DLC brand and campaign are approved (issue #91); STOP/HELP behavior and explicit test-number authorization remain before live SMS.
+4. OpenAI is confirmed, and `gpt-6-luna` is the initial pilot interpretation model ID after the synthetic malformed/ambiguous-message evaluation in #24 passed twice with the final clarification prompt. The model only proposes an interpretation; the backend must validate actors, request references, dates, and permissions before any write. The owner specified no additional data-handling or budget constraints (a budget limit is now set on the OpenAI side, issue #91). No live SMS is authorized by this model selection.
 5. The first POC includes the authenticated owner calendar.
 6. 15-minute start increments, a current 3-hour maximum, and a 30-minute between-visit buffer with no first/last boundary buffer are confirmed.
 7. One crew/resource is confirmed for the pilot.

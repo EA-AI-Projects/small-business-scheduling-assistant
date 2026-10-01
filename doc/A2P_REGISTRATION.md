@@ -2,6 +2,8 @@
 
 The public policy pages are in `docs/`. They describe the Small Business Scheduling Assistant proof of concept and contain no placeholder brand or contact details. The stated support email is `ealeman.kikito@gmail.com`. Review the policies against actual behavior before publishing or submitting them to Twilio.
 
+Status (issue #91): the Twilio account is upgraded, a US number is bought, and the A2P 10DLC brand and campaign are approved; the owner verified that API sending works. Approval does not authorize live SMS, deployment, or real clients. Until launch approval, send only to explicitly authorized test numbers.
+
 ## Sender and consent
 
 The registered Twilio A2P brand is an individual's name, while these public pages identify only the proof-of-concept program. Twilio may reject a campaign if the sender identified in the policies, consent request, HELP reply, and sample messages cannot be connected clearly to the registered brand. Do not assert that a fictional cleaning business is a real sender. Before production use by a real business, register the appropriate business sender and align all consumer-facing disclosures with it.
@@ -15,6 +17,8 @@ In-person disclosure, matching the public page; use this exact script if it is t
 The Twilio `message_flow` must describe the in-person conversation, the exact disclosure, how a clear yes is recorded, and what confirmation follows. If any other opt-in method is actually used, describe it too. Verbal consent is not sufficient for marketing texts; this program is drafted for scheduling messages only.
 
 ## Correction for rejection 30896
+
+This section is submission history; the campaign was later approved (issue #91). It does not record which `message_flow` text was approved.
 
 The rejected `message_flow` said only: “Small business owner asks user for consent personally before enrolling them on the service.” That did not show the consent language, where it was delivered, how the yes was recorded, or public evidence. The screenshot also showed YES and SUBSCRIBE as opt-in keywords, although the described process did not use text-to-join.
 
@@ -34,6 +38,8 @@ If custom replies are enabled in the Messaging Service, examples to review again
 - Help: “Small Business Scheduling Assistant scheduling texts. For help, email ealeman.kikito@gmail.com. Reply STOP to opt out. Message and data rates may apply.”
 
 ## Before submitting
+
+The campaign is approved (issue #91), so this checklist is history, except that items 1, 3, and 5 (including STOP/HELP replies that name the registered sender) still apply before live SMS.
 
 1. Confirm the policy's statements about the actual data, service providers, retention, and no marketing use are true.
 2. Resolve the difference between the registered Twilio A2P brand and the public program name with Twilio before relying on these pages for campaign approval.

@@ -243,7 +243,7 @@ All timestamps should be stored in UTC and rendered in the configured business t
 
 ## 10. Deployment and operations (initial direction)
 
-For the pilot, use `us-west-1` (the synthetic `dev` stack in the dedicated member account `214965372605`; `pilot` in its own separate account, see [ARCHITECTURE.md](ARCHITECTURE.md)) with the proposed Lambda, DynamoDB on-demand, and SQS architecture. The first proof of concept includes the authenticated owner calendar. Use Twilio for the California-only SMS pilot; business-number and campaign approval are pending. Keep a staging environment and test with synthetic contacts before enabling real client traffic. This choice does not authorize resource provisioning, deployment, or live SMS.
+For the pilot, use `us-west-1` (the synthetic `dev` stack in the dedicated member account `214965372605`; `pilot` in its own separate account, see [ARCHITECTURE.md](ARCHITECTURE.md)) with the proposed Lambda, DynamoDB on-demand, and SQS architecture. The first proof of concept includes the authenticated owner calendar. Use Twilio for the California-only SMS pilot; a US number is bought and the A2P 10DLC brand and campaign are approved (issue #91), which does not authorize live SMS. Keep a staging environment and test with synthetic contacts before enabling real client traffic. This choice does not authorize resource provisioning, deployment, or live SMS.
 
 Operational essentials:
 - Health/readiness endpoint and structured, redacted logs.
@@ -285,7 +285,7 @@ Operational essentials:
 3. Configurable 30-minute travel buffer between visits only; none before the first or after the last.
 4. Reschedule rule: retain the original confirmed appointment until the replacement is approved; atomically swap them on approval (owner confirmed in issue #3).
 5. The first proof of concept includes the authenticated owner calendar; its unavailable-block flow is the fallback for owner corrections.
-6. California-only pilot SMS uses Twilio and the documented in-person consent process; business-number/campaign approval remains pending. STOP/HELP behavior and the owner-approved 90-day message, 12-month ordinary-note, and four-year minimal consent/opt-out evidence periods must be implemented before live messaging.
+6. California-only pilot SMS uses Twilio and the documented in-person consent process; a US number is bought and the A2P 10DLC brand and campaign are approved (issue #91). STOP/HELP behavior and the owner-approved 90-day message, 12-month ordinary-note, and four-year minimal consent/opt-out evidence periods must be implemented before live messaging.
 7. Entry/access codes are excluded from this MVP.
 8. One crew/resource is confirmed for the pilot; revisit only if staff capacity changes.
 
