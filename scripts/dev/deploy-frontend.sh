@@ -8,6 +8,9 @@
 # (https://main.<app id>.amplifyapp.com) or given with --app-id; it is never committed.
 # Either way the app's defaultDomain must produce exactly OwnerAppOrigin.
 #
+# This deploys the LOCAL checkout, not GitHub. It prints the commit, refuses a dirty tree unless
+# --allow-dirty (--dry-run is never blocked), and warns, without blocking, when HEAD is on no remote branch.
+#
 # Usage: scripts/dev/deploy-frontend.sh [--allow-dirty] [--dry-run] [--app-id ID]
 #                                       [--profile NAME | --no-profile]
 #   --allow-dirty  Build a dirty tree; the zip name gets a -dirty suffix.
@@ -47,14 +50,16 @@ done
 need_tool aws jq curl zip git npm
 pin_region
 cd "${REPO_ROOT}"
+ENFORCE_CLEAN=1
+[[ "${DRY_RUN}" -eq 0 ]] || ENFORCE_CLEAN=0
+report_commit "${ALLOW_DIRTY}" "${ENFORCE_CLEAN}"
+warn_if_unpushed
 check_identity
 
-COMMIT="$(git rev-parse HEAD)"
 ZIP_NAME="${COMMIT}"
-if [[ -n "$(git status --porcelain)" ]]; then
-  [[ "${ALLOW_DIRTY}" -eq 1 ]] || die "the working tree is dirty; commit or stash, or pass --allow-dirty."
+if [[ "${DIRTY}" -eq 1 ]]; then
   ZIP_NAME="${COMMIT}-dirty"
-  info "Working tree is dirty: zip will be named ${ZIP_NAME}.zip"
+  info "The zip will be named ${ZIP_NAME}.zip"
 fi
 ZIP_KEY="owner-app/${ZIP_NAME}.zip"
 

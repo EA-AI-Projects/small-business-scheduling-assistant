@@ -12,8 +12,13 @@
 # would change and its *ScheduleState parameter was not given with --param. Any other rule must
 # target DISABLED. A warning is printed on every run when live state and parameter differ.
 #
-# Usage: scripts/dev/deploy-backend.sh [--yes] [--smoke-only] [--dry-run] [--param Key=Value]...
+# This deploys the LOCAL checkout, not GitHub. It prints the commit and refuses a dirty working
+# tree unless --allow-dirty (uncommitted changes then ship). It also warns, without blocking, when
+# HEAD is on no remote branch. --smoke-only and --dry-run are never blocked by the dirty check.
+#
+# Usage: scripts/dev/deploy-backend.sh [--allow-dirty] [--yes] [--smoke-only] [--dry-run] [--param Key=Value]...
 #                                      [--profile NAME | --no-profile]
+#   --allow-dirty Deploy a dirty working tree (uncommitted changes ship too).
 #   --yes        Skip the confirmation prompt (CI only, issue #95 rules).
 #   --param      Supply a parameter that the live stack does not have yet, or deliberately
 #                change one (for example HoldExpiryScheduleState=ENABLED).
@@ -26,6 +31,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 ASSUME_YES=0
 SMOKE_ONLY=0
+ALLOW_DIRTY=0
 EXTRA_PARAMS=()
 
 usage() {
@@ -36,6 +42,7 @@ parse_common "$@"
 set -- "${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --allow-dirty) ALLOW_DIRTY=1 ;;
     --yes) ASSUME_YES=1 ;;
     --smoke-only) SMOKE_ONLY=1 ;;
     --param)
@@ -52,9 +59,13 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-need_tool aws sam jq curl
+need_tool aws sam jq curl git
 pin_region
 cd "${REPO_ROOT}"
+ENFORCE_CLEAN=1
+[[ "${SMOKE_ONLY}" -eq 0 && "${DRY_RUN}" -eq 0 ]] || ENFORCE_CLEAN=0
+report_commit "${ALLOW_DIRTY}" "${ENFORCE_CLEAN}"
+warn_if_unpushed
 check_identity
 
 template_parameter_keys() {

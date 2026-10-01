@@ -130,6 +130,80 @@ parse_common() {
   done
 }
 
+# report_commit <allow_dirty 0|1> <enforce 0|1>: print the commit this checkout would deploy and
+# whether the tree is dirty. These scripts deploy the LOCAL checkout, not GitHub. A dirty tree is
+# refused when enforce is 1 and allow_dirty is 0; otherwise it only warns that uncommitted changes
+# will ship. Sets COMMIT and DIRTY (0|1). Run it from inside the repository.
+COMMIT=""
+DIRTY=0
+report_commit() {
+  local allow_dirty="${1:-0}" enforce="${2:-1}"
+  COMMIT="$(git rev-parse HEAD)"
+  info "Local checkout (not GitHub): commit ${COMMIT}."
+  if [[ -n "$(git status --porcelain)" ]]; then
+    DIRTY=1
+    if [[ "${enforce}" -eq 1 && "${allow_dirty}" -ne 1 ]]; then
+      die "the working tree is dirty; commit or stash, or pass --allow-dirty."
+    fi
+    info "WARNING: the working tree is dirty; uncommitted changes will ship."
+  else
+    DIRTY=0
+    info "Working tree is clean."
+  fi
+}
+
+# warn_if_unpushed: warn, never block, when HEAD is on no remote-tracking branch. First a quiet,
+# non-interactive git fetch of the default remote, bounded by GIT_FETCH_TIMEOUT seconds (default
+# 10); if it fails or times out, warn and use the local remote-tracking refs as they are.
+# The fetch never prompts (no tty, ssh BatchMode, no credential prompt). It runs in its own
+# process group so a timeout kills git and its transport (ssh, git-remote-https) together.
+warn_if_unpushed() {
+  local timeout="${GIT_FETCH_TIMEOUT:-10}" fetch_pid fetched=1 ticks=0 commit
+  commit="$(git rev-parse HEAD)"
+  if [[ -n "$(git remote)" ]]; then
+    local grouped=0
+    command -v perl >/dev/null 2>&1 && grouped=1
+    # Scoped to the fetch only; honor a configured core.sshCommand (for example a chosen key).
+    local base_ssh fetch_ssh
+    base_ssh="${GIT_SSH_COMMAND:-$(git config core.sshCommand || echo ssh)}"
+    fetch_ssh="${base_ssh} -o BatchMode=yes -o ConnectTimeout=5"
+    if [[ "${grouped}" -eq 1 ]]; then
+      GIT_SSH_COMMAND="${fetch_ssh}" GIT_TERMINAL_PROMPT=0 perl -e 'setpgrp(0, 0); exec @ARGV or exit 127' -- \
+        git -c credential.interactive=never fetch --quiet </dev/null >/dev/null 2>&1 &
+    else
+      GIT_SSH_COMMAND="${fetch_ssh}" GIT_TERMINAL_PROMPT=0 git -c credential.interactive=never fetch --quiet </dev/null >/dev/null 2>&1 &
+    fi
+    fetch_pid=$!
+    while kill -0 "${fetch_pid}" 2>/dev/null; do
+      if [[ "${ticks}" -ge $((timeout * 10)) ]]; then
+        if [[ "${grouped}" -eq 1 ]]; then
+          kill -TERM -- "-${fetch_pid}" 2>/dev/null || true
+          sleep 0.2
+          kill -KILL -- "-${fetch_pid}" 2>/dev/null || true
+        else
+          kill -KILL "${fetch_pid}" 2>/dev/null || true
+        fi
+        fetched=0
+        break
+      fi
+      sleep 0.1
+      ticks=$((ticks + 1))
+    done
+    wait "${fetch_pid}" 2>/dev/null || fetched=0
+    if [[ "${fetched}" -eq 0 ]]; then
+      info "WARNING: git fetch failed or timed out; checking against the local remote-tracking refs, which may be stale."
+    fi
+  else
+    info "WARNING: no git remote is configured."
+  fi
+  if [[ -z "$(git branch -r --contains HEAD 2>/dev/null)" ]]; then
+    info "WARNING: commit ${commit} is not on GitHub yet (on no remote branch); push it so the deployed code can be reviewed."
+  else
+    info "Commit is on a remote branch."
+  fi
+  return 0
+}
+
 # stack_query <JMESPath>: read the live stack with a --query.
 stack_query() {
   aws_cli cloudformation describe-stacks --stack-name "${STACK_NAME}" --query "$1" --output text
