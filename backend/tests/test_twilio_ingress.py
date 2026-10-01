@@ -174,6 +174,24 @@ def test_provider_stop_and_help_tags_stay_authoritative() -> None:
     assert store.receipts["SM-yes-help"].body is None
 
 
+def test_start_tagged_yes_never_reenables_an_opted_out_sender() -> None:
+    client, service, store = setup()
+    service.record_in_person_consent("client-1", "+14155550101", "Synthetic Client",
+                                     "pilot-v1", NOW)
+    assert send(client, {**inbound("SM-stop", body="stop"), "OptOutType": "STOP"}) == 204
+    service.record_in_person_consent("client-1", "+14155550101", "Synthetic Client",
+                                     "pilot-v2", NOW + timedelta(seconds=1))
+    assert send(client, {**inbound("SM-yes", body="yes"), "OptOutType": "START"}) == 204
+    receipt = store.receipts["SM-yes"]
+    assert receipt.keyword == Keyword.OTHER
+    assert receipt.body is None
+    assert receipt.authorized_for_commands is False
+    assert "+14155550101" in store.opted_out
+    assert send(client, {**inbound("SM-unstop", body="unstop"), "OptOutType": "START"}) == 204
+    assert store.receipts["SM-unstop"].keyword == Keyword.START
+    assert "+14155550101" not in store.opted_out
+
+
 def test_malformed_or_wrong_recipient_is_never_recorded() -> None:
     client, _, store = setup()
     assert send(client, {**inbound("SM-wrong"), "To": "+14155550001"}) == 422

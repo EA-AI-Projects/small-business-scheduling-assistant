@@ -148,6 +148,15 @@ def test_keyword_and_unverified_notifications_are_explained_not_sent() -> None:
     assert casey[0]["body"].startswith("Not sent: this client has no verified phone")
 
 
+def test_unstop_is_a_simulated_keyword_that_runs_no_conversation() -> None:
+    unsafe = Unsafe()
+    client = local(unsafe)
+    unstop = text(client, "client-1", "unstop")
+    assert [message["kind"] for message in unstop] == ["text", "note"]
+    assert "not simulated" in unstop[1]["body"]
+    assert unsafe.calls == 0
+
+
 def test_owner_policy_change_shows_the_owner_notification() -> None:
     repository = InMemoryCalendarRepository()
     seed_synthetic_data(repository, NOW)
