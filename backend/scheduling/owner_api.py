@@ -401,6 +401,8 @@ def create_owner_app(
                     client_id, body.phone_e164, body.participant_name,
                     body.script_version, now(),
                 )
+            except RecordConflict as exc:
+                raise _error("RECORD_CONFLICT", str(exc), 409) from exc
             except ValueError as exc:
                 raise _error("INVALID_CONSENT", str(exc), 422) from exc
 

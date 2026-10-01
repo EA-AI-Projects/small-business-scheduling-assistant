@@ -12,7 +12,13 @@ function text(form: FormData, name: string): string {
  * Create or update one client profile. Uncontrolled: the parent remounts it (by key)
  * whenever the selection changes or a refresh delivers the selected client's current data.
  */
-export function ProfileForm({ client }: { client: ClientProfile | undefined }) {
+export function ProfileForm({ client, onCreated, onPhoneDraft }: {
+  client: ClientProfile | undefined;
+  /** Called with the id after a new client is saved, to start onboarding. */
+  onCreated?: (clientId: string) => void;
+  /** Reports the phone as typed, so the consent step can wait for a saved number. */
+  onPhoneDraft?: (phone: string) => void;
+}) {
   const { data, change, selectClient } = useOwner();
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -31,18 +37,27 @@ export function ProfileForm({ client }: { client: ClientProfile | undefined }) {
     };
     if (await change(path`/clients/${id}`, "PUT", body, "Client profile saved", false)) {
       selectClient(id);
+      if (!current) onCreated?.(id);
     }
   }
 
   return (
     <section className="card">
       <h3>Profile</h3>
+      {client && (
+        <p className="hint" data-testid="phone-status">
+          {client.phone_verified_at
+            ? "Phone verified for texting (in-person consent recorded)."
+            : "Phone not verified: this client cannot text until in-person consent is recorded."}
+        </p>
+      )}
       <form className="form-stack" aria-label="Client profile" onSubmit={submit}>
         <label>Client ID <input name="client_id" required readOnly={client !== undefined}
           defaultValue={client?.client_id ?? ""} /></label>
         <label>Name <input name="name" required maxLength={200} defaultValue={client?.name ?? ""} /></label>
         <label>Phone (E.164) <input name="phone_e164" type="tel" placeholder="+14155550101" required
-          defaultValue={client?.phone_e164 ?? ""} /></label>
+          defaultValue={client?.phone_e164 ?? ""}
+          onChange={(event) => onPhoneDraft?.(event.target.value)} /></label>
         <label>Service address <input name="service_address" required maxLength={500}
           defaultValue={client?.service_address ?? ""} /></label>
         <label>Home size <select name="home_size" defaultValue={client?.home_size ?? "small"}>

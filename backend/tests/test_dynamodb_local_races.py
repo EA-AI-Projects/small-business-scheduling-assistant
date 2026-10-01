@@ -17,8 +17,10 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from scheduling.adapters.dynamodb import DynamoDBCalendarRepository
 from scheduling.adapters.outbox_aws import DynamoOutboxStore
+from scheduling.adapters.sms_dynamodb import DynamoSmsIngressStore
 from scheduling.domain.appointments import Appointment
 from scheduling.domain.calendar import CalendarStatus
+from scheduling.domain.client_records import ClientRecordService, HomeSize, RecordConflict
 from scheduling.domain.holds import OutboxIntent, RevisionConflict
 from scheduling.domain.lifecycle import (
     Action,
@@ -28,6 +30,7 @@ from scheduling.domain.lifecycle import (
     TransitionResult,
 )
 from scheduling.domain.outbox import ConsumeOutcome, ConsumeService, DispatchService, OutboxRecord
+from scheduling.domain.sms_ingress import record_in_person_consent
 
 DEV_TABLE = "scheduling-dev"
 DEV_REGION = "us-west-1"
@@ -466,3 +469,75 @@ def test_committed_outbox_dispatches_and_fake_consumer_claims_once(race_env: Rac
     assert item["delivery_state"]["S"] == "SENT"
     assert item["provider_id"]["S"] == "synthetic-provider-id"
     assert "outbox_due_pk" not in item
+
+
+def _consent_world(env: RaceEnv) -> tuple[DynamoDBCalendarRepository, DynamoSmsIngressStore,
+                                           ClientRecordService]:
+    repo = DynamoDBCalendarRepository(env.client, env.table)
+    clients = ClientRecordService(repo)
+    clients.save_profile(env.business, "consent-client", "Synthetic Client", "+14155550101",
+                         "123 Test Street", HomeSize.SMALL, 60, True, 0, 180, START)
+    return repo, DynamoSmsIngressStore(env.client, env.table), clients
+
+
+def _consent_items(env: RaceEnv) -> list[str]:
+    return [item["SK"]["S"] for item in _business_items(env)
+            if item["SK"]["S"].startswith(("SMS_CONSENT#", "SMS_CONSENT_CURRENT#"))]
+
+
+def _consent(env: RaceEnv, repo: DynamoDBCalendarRepository,
+             store: DynamoSmsIngressStore) -> None:
+    record_in_person_consent(store, repo, env.business, "consent-client", "+14155550101",
+                             "Synthetic Client", "1", START)
+
+
+def test_in_person_consent_verifies_phone_in_one_transaction(race_env: RaceEnv) -> None:
+    env = race_env
+    repo, store, _ = _consent_world(env)
+    assert repo.read_verified_phone(env.business, "+14155550101") is None
+    _consent(env, repo, store)
+    profile = repo.read_verified_phone(env.business, "+14155550101")
+    assert profile is not None and profile.version == 2
+    assert len(_consent_items(env)) == 2
+
+
+def test_profile_change_between_read_and_consent_writes_nothing(race_env: RaceEnv) -> None:
+    env = race_env
+    repo, store, clients = _consent_world(env)
+    original = repo.read_profile
+
+    def stale_read(business_id: str, client_id: str) -> Any:
+        repo.read_profile = original  # type: ignore[method-assign]  # the save below reads too
+        profile = original(business_id, client_id)
+        clients.save_profile(env.business, "consent-client", "Synthetic Client Two",
+                             "+14155550101", "123 Test Street", HomeSize.SMALL, 60, True, 1,
+                             180, START)
+        return profile
+
+    repo.read_profile = stale_read  # type: ignore[method-assign]
+    with pytest.raises(RecordConflict):
+        _consent(env, repo, store)
+    assert _consent_items(env) == []
+    assert original(env.business, "consent-client").phone_verified_at is None  # type: ignore[union-attr]
+
+
+def test_two_concurrent_consents_commit_exactly_one(race_env: RaceEnv) -> None:
+    env = race_env
+    repo, store, _ = _consent_world(env)
+    barrier = Barrier(2)
+
+    def attempt() -> bool:
+        barrier.wait(timeout=5)
+        try:
+            _consent(env, repo, store)
+        except RecordConflict:
+            return False
+        return True
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [future.result() for future in [pool.submit(attempt), pool.submit(attempt)]]
+    # Both read version 1; only one conditional profile write can win.
+    assert results.count(True) == 1
+    profile = repo.read_verified_phone(env.business, "+14155550101")
+    assert profile is not None and profile.version == 2
+    assert len(_consent_items(env)) == 2

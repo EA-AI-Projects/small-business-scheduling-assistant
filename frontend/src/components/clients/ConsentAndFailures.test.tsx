@@ -1,9 +1,9 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
-import type { SmsDeliveryFailure } from "@/api/types";
+import type { ClientProfile, SmsDeliveryFailure } from "@/api/types";
 import { OwnerProvider } from "@/owner/OwnerContext";
-import { fakeApi, type Route } from "@/test/fakeApi";
+import { CLIENT, fakeApi, type Route } from "@/test/fakeApi";
 
 import { ClientsTab } from "./ClientsTab";
 
@@ -34,6 +34,7 @@ describe("in-person text consent", () => {
     expect(within(consent()).getByLabelText("Participant name")).toHaveAttribute("readonly");
     expect(screen.getByText(/record the real name only in your private consent record/)).toBeInTheDocument();
     expect(screen.getByText(/the time saved is the consent time/)).toBeInTheDocument();
+    expect(screen.getByText("Read this number back to them: +14155550101")).toBeInTheDocument();
     expect(screen.getByText("Script version 1 (September 27, 2026)")).toBeInTheDocument();
     expect(screen.getByText(/full private consent record is kept by the owner outside this app/))
       .toBeInTheDocument();
@@ -70,6 +71,86 @@ describe("in-person text consent", () => {
     await userEvent.click(screen.getByRole("button", { name: "Record consent" }));
     await waitFor(() => expect(notify).toHaveBeenCalledWith(
       "Nothing was saved: Consent phone must match an active client profile", true));
+  });
+});
+
+const NEW: ClientProfile = { ...CLIENT, client_id: "client-9", name: "Casey Demo",
+  phone_e164: "+14155550109", version: 1 };
+
+async function createClient(route: Route) {
+  let clients: ClientProfile[] = [];
+  const result = setup((method, path, body) => {
+    if (path === "/clients") return { status: 200, body: clients };
+    if (method === "PUT") { clients = [NEW]; return { status: 200, body: NEW }; }
+    if (method === "POST") {
+      clients = [{ ...NEW, version: 2, phone_verified_at: "2026-07-02T17:30:00Z" }];
+      return { status: 200, body: {} };
+    }
+    return route(method, path, body);
+  });
+  await userEvent.click(await screen.findByRole("button", { name: "New client" }));
+  const form = within(screen.getByRole("form", { name: "Client profile" }));
+  await userEvent.type(form.getByLabelText("Client ID"), "client-9");
+  await userEvent.type(form.getByLabelText("Name"), "Casey Demo");
+  await userEvent.type(form.getByLabelText("Phone (E.164)"), "+14155550109");
+  await userEvent.type(form.getByLabelText("Service address"), "1 Example Way");
+  await userEvent.type(form.getByLabelText("Default minutes"), "60");
+  await userEvent.click(screen.getByRole("button", { name: "Save profile" }));
+  return result;
+}
+
+describe("onboarding consent step", () => {
+  it("is shown right after a new client is created, explains skipping, and ends once recorded", async () => {
+    const { calls } = await createClient(() => undefined);
+    expect(await screen.findByText("Onboarding: record in-person text consent")).toBeInTheDocument();
+    expect(screen.getByText(/record it later from this screen; until then, this client cannot text/)).toBeInTheDocument();
+    expect(screen.getByTestId("phone-status")).toHaveTextContent("Phone not verified");
+    await userEvent.click(within(consent()).getByLabelText("They clearly said yes"));
+    await userEvent.click(screen.getByRole("button", { name: "Record consent" }));
+    await waitFor(() => expect(calls.some((call) => call.method === "POST")).toBe(true));
+    await waitFor(() => expect(screen.getByTestId("phone-status")).toHaveTextContent("Phone verified"));
+    expect(screen.queryByText("Onboarding: record in-person text consent")).not.toBeInTheDocument();
+    expect(screen.getByText("Record in-person text consent")).toBeInTheDocument();
+  });
+
+  it("can be postponed with Record later, leaving the client unverified", async () => {
+    const { calls } = await createClient(() => undefined);
+    await userEvent.click(await screen.findByRole("button", { name: "Record later" }));
+    expect(screen.queryByText("Onboarding: record in-person text consent")).not.toBeInTheDocument();
+    expect(screen.getByTestId("phone-status")).toHaveTextContent("Phone not verified");
+    expect(calls.some((call) => call.method === "POST")).toBe(false);
+  });
+
+  it("shows the saved number read-only and blocks consent while the phone edit is unsaved", async () => {
+    const { calls } = setup(() => undefined);
+    await selectAvery();
+    expect(within(consent()).getByLabelText("Saved phone number")).toHaveValue("+14155550101");
+    expect(within(consent()).getByLabelText("Saved phone number")).toHaveAttribute("readonly");
+    const phone = screen.getByLabelText("Phone (E.164)");
+    await userEvent.clear(phone);
+    await userEvent.type(phone, "+14155550188");
+    expect(screen.getByRole("alert")).toHaveTextContent("Save the profile first");
+    expect(screen.getByRole("button", { name: "Record consent" })).toBeDisabled();
+    expect(within(consent()).getByLabelText("Saved phone number")).toHaveValue("+14155550101");
+    await userEvent.clear(phone);
+    await userEvent.type(phone, "+14155550101");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Record consent" })).toBeEnabled();
+    expect(calls.some((call) => call.method === "POST")).toBe(false);
+  });
+
+  it("is not shown when editing an existing client", async () => {
+    setup(() => undefined);
+    await selectAvery();
+    expect(screen.queryByText("Onboarding: record in-person text consent")).not.toBeInTheDocument();
+    expect(screen.getByTestId("phone-status")).toHaveTextContent("Phone not verified");
+  });
+
+  it("shows when the phone is verified for texting", async () => {
+    setup((method, path) => path === "/clients" ? { status: 200, body: [
+      { ...CLIENT, phone_verified_at: "2026-07-02T17:30:00Z" }] } : undefined);
+    await selectAvery();
+    expect(screen.getByTestId("phone-status")).toHaveTextContent("Phone verified for texting");
   });
 });
 

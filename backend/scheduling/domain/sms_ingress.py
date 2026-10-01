@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
@@ -83,6 +83,14 @@ class SmsIngressStore(Protocol):
     def is_opted_out(self, business_id: str, phone_e164: str) -> bool: ...
     def read_consent(self, business_id: str, phone_e164: str) -> ConsentEvidence | None: ...
     def put_consent(self, evidence: ConsentEvidence) -> None: ...
+    def put_consent_verifying_phone(self, evidence: ConsentEvidence,
+                                    verified: ClientProfile) -> None:
+        """Write consent and the verified profile together, or raise RecordConflict.
+
+        ``verified`` is the profile at version N+1; the write requires version N
+        and the same phone to still be stored.
+        """
+        ...
     def list_delivery_failures(self, business_id: str) -> tuple[SmsDeliveryStatus, ...]: ...
 
 
@@ -99,7 +107,13 @@ def record_in_person_consent(store: SmsIngressStore, clients: VerifiedClientLook
                              business_id: str, client_id: str, phone_e164: str,
                              participant_name: str, script_version: str,
                              agreed_at: datetime) -> ConsentEvidence:
-    """Trusted owner action; no automated enrollment text is sent."""
+    """Trusted owner action; no automated enrollment text is sent.
+
+    The owner and client meet in person and the owner reads the number back, so
+    this also marks the profile phone verified in the same atomic write as the
+    consent records. Nothing proves possession of the phone. A concurrent profile
+    change raises ``RecordConflict`` and records nothing.
+    """
     if agreed_at.tzinfo is None or not participant_name.strip() or not script_version.strip():
         raise ValueError("Consent needs a name, script version and aware timestamp")
     phone = normalize_phone(phone_e164)
@@ -108,7 +122,9 @@ def record_in_person_consent(store: SmsIngressStore, clients: VerifiedClientLook
         raise ValueError("Consent phone must match an active client profile")
     evidence = ConsentEvidence(business_id, client_id, participant_name.strip(),
                                phone, agreed_at.astimezone(UTC), script_version.strip())
-    store.put_consent(evidence)
+    verified = replace(profile, version=profile.version + 1,
+                       updated_at=evidence.agreed_at, phone_verified_at=evidence.agreed_at)
+    store.put_consent_verifying_phone(evidence, verified)
     return evidence
 
 
