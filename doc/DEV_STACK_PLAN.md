@@ -2,7 +2,7 @@
 
 Prepared 2026-09-29 for issue [#43](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/issues/43). This document is **review material only**. It does not authorize, and nothing in it performed, any deployment, AWS account access, spending, owner account creation, or live SMS. The commands are documentation, not instructions to run now. The checkpoint itself is described in [Pilot infrastructure plan](PILOT_INFRASTRUCTURE.md#synthetic-dev-deployment-checkpoint).
 
-Target if authorized: the **dedicated dev member account `214965372605`** (`scheduling-dev`), region `us-west-1`, stack name `scheduling-dev`, `Environment=dev`, synthetic data only. The account belongs to the owner's AWS Organization; account `339713090487` is the organization's management account and is used for billing and organization administration only, not for this stack. The operator signs in through IAM Identity Center (MFA at every sign-in). See [Dev deployment roles](PILOT_INFRASTRUCTURE.md#dev-deployment-roles).
+Target if authorized: the **dedicated dev member account `214965372605`** (`scheduling-dev`), region `us-west-1`, stack name `scheduling-dev`, `Environment=dev`, synthetic data only except authorized testers' phone numbers, messages, and consent evidence once texting is enabled ([ARCHITECTURE.md](ARCHITECTURE.md) section 8.3). The account belongs to the owner's AWS Organization; account `339713090487` is the organization's management account and is used for billing and organization administration only, not for this stack. The operator signs in through IAM Identity Center (MFA at every sign-in). See [Dev deployment roles](PILOT_INFRASTRUCTURE.md#dev-deployment-roles).
 
 ## Summary for Enrique
 
