@@ -25,7 +25,7 @@ Status, 2026-09-30 (issue #43): decisions 1 to 4 and 7 were answered by the owne
 4. **Whether rollback redeploys are pre-authorized** as part of this checkpoint, or each one needs a fresh yes (see [section 3.1](#31-stop-on-a-failed-safety-gate)).
 5. **How schedules get enabled** (see [section 2.5](#25-enabling-schedules-template-parameters-decided-issue-97)). Answered first as out-of-band `aws events enable-rule`, recorded on #43; replaced by per-schedule template parameters in #97.
 6. **The scoped deployment role.** Answered by `infra/dev-deploy-roles.yaml`, the deployer and CloudFormation execution roles for the dedicated account. Creating them still needs the owner's separate authorization; the checkpoint forbids broad administrator credentials for the deployment itself.
-7. **Whether the synthetic dev table is deleted at teardown or kept for inspection.** Answered 2026-09-30: delete the retained synthetic dev table after results are recorded (see [section 3.3](#33-full-teardown-in-order)). Superseded 2026-09-30: `dev` is kept running; the table is deleted only if teardown is later chosen ([section 5.1](#51-owner-decision-2026-09-30)).
+7. **Whether the synthetic dev table is deleted at teardown or kept for inspection.** Answered 2026-09-30: delete the retained synthetic dev table after results are recorded (see [section 3.3](#33-full-teardown-in-order)). Superseded 2026-09-30: `dev` is kept running; the table is deleted only if teardown is later chosen ([section 5.1](#51-owner-decision-2026-09-30)). This decision covered a synthetic-only table; once tester texting is enabled, see teardown step 2 (issue #91).
 
 ## 1. Cost estimate for `us-west-1`
 
@@ -381,7 +381,7 @@ Any failed gate in the checkpoint (a losing transaction that left partial data, 
    aws lambda put-function-concurrency --function-name <function> --reserved-concurrent-executions 0 --region us-west-1
    ```
 
-3. **Capture evidence before changing anything.** Save the failing invocation logs (`aws logs filter-log-events`), the DLQ depth, the alarm history, and the relevant table items (synthetic only). Record the failure on #43.
+3. **Capture evidence before changing anything.** Save the failing invocation logs (`aws logs filter-log-events`), the DLQ depth, the alarm history, and the relevant table items. Once tester texting is enabled, these can include testers' phone numbers and message bodies: redact them, and never paste table items into GitHub. Record the failure on #43.
 4. **Revert the Lambda artifact.** The stack has no alias, so redeploy the last known-good commit: check out that commit and run `scripts/dev/deploy-backend.sh` with `--param <X>ScheduleState=DISABLED` for **every schedule stopped in step 1** (otherwise the unchanged parameter can set a stopped rule back to `ENABLED` when the change set modifies it), review the change set and the schedule states it prints, then confirm. A raw `sam deploy --no-execute-changeset --role-arn <CloudFormationExecutionRoleArn>` needs the same `--parameter-overrides PermissionsBoundaryArn=<unchanged> <X>ScheduleState=DISABLED`. If a stack update itself fails, CloudFormation rolls it back automatically (`UPDATE_ROLLBACK_COMPLETE`). If the **first** creation fails, the stack ends in `ROLLBACK_COMPLETE` (or `ROLLBACK_FAILED`, for example after an interrupted event source mapping; see 3.3 step 5) and must be deleted before a retry, and a table already created survives (see the collision note in 3.3). Keep the previous zip in the artifact bucket until teardown.
 5. **Roll back the owner app separately** (admin, or the deployer once the `AmplifyAppId` grant from #94 is applied; `scripts/dev/deploy-frontend.sh` redeploys a checked-out commit). Re-upload the last known-good zip from `s3://<artifact bucket>/owner-app/<commit>.zip` (or, if it is missing, rebuild that commit with the same `NEXT_PUBLIC_*` values) with `aws amplify create-deployment --app-id <app id> --branch-name main --region us-west-1`, an HTTP PUT of the zip to `zipUploadUrl`, and `aws amplify start-deployment --app-id <app id> --branch-name main --job-id <job id> --region us-west-1`. The kept zips are removed with the bucket at teardown.
 6. **Do not roll data back automatically.** The table is retained. PITR is a last-resort recovery tool: restoring writes a new table, billed for the restored size, and must be planned rather than run reflexively.
@@ -405,7 +405,7 @@ aws cloudformation delete-stack --stack-name scheduling-dev --region us-west-1 \
 ```
 
 1. **Stop everything.** Run the section 3.1 step 1 commands. Confirm no schedule is enabled and no queue message is in flight.
-2. **Decide about the table's contents.** Confirm it holds only synthetic records:
+2. **Decide about the table's contents.** Until tester texting is enabled, confirm it holds only synthetic records. After that, the table holds testers' consent and opt-out evidence, which must be kept four years after the last program text, so deleting or exporting it needs Enrique's separate decision (issue #91):
 
    ```sh
    aws dynamodb scan --table-name scheduling-dev --select COUNT --region us-west-1
