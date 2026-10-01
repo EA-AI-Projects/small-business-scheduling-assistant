@@ -2,12 +2,22 @@
 # Enable or disable one scheduled rule of the dev stack by its logical ID, then
 # print the line to record on the issue (#43 for dev).
 #
-# Only the three listed logical IDs are accepted, and each must be an EventBridge rule of
-# the stack. Outbox dispatch (OutboxDispatch*) is refused: it stays off until live SMS is separately
-# authorized.
+# The state is a template parameter (issue #97), so this runs
+#   scripts/dev/deploy-backend.sh --param <X>ScheduleState=ENABLED|DISABLED
+# and the template stays the source of truth. That is a full backend deploy: it builds,
+# shows the change set (including the schedule states, live -> target) and asks for
+# confirmation, so it also ships any pending code. It never calls enable-rule/disable-rule.
 #
-# Usage: scripts/dev/schedules.sh enable|disable <LogicalId> [--dry-run]
+# Only the three listed logical IDs are accepted. Outbox dispatch (OutboxDispatch*) is refused:
+# it stays off until live SMS is separately authorized.
+#
+# This ships the CURRENT CHECKOUT. It prints the commit and whether the tree is dirty, and refuses
+# a dirty tree unless --allow-dirty is given. To stop a schedule in an emergency, do not use this
+# script: use the aws events disable-rule procedure in doc/DEV_STACK_PLAN.md section 3.1.
+#
+# Usage: scripts/dev/schedules.sh enable|disable <LogicalId> [--allow-dirty] [--dry-run]
 #                                 [--profile NAME | --no-profile]
+#   --allow-dirty  Deploy a dirty working tree (uncommitted changes ship too).
 #   Logical IDs: HoldExpiryFunctionSweep, NoteRetentionFunctionDaily,
 #                SmsRetentionFunctionDaily
 set -euo pipefail
@@ -20,7 +30,12 @@ usage() {
 }
 
 parse_common "$@"
-set -- "${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}"
+ALLOW_DIRTY=0
+ARGS=()
+for arg in "${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}"; do
+  if [[ "${arg}" == "--allow-dirty" ]]; then ALLOW_DIRTY=1; else ARGS+=("${arg}"); fi
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   usage
   exit 0
@@ -50,15 +65,37 @@ case "${NAME}" in
     ;;
 esac
 
-need_tool aws jq
+case "${NAME}" in
+  HoldExpiryFunctionSweep) PARAM="HoldExpiryScheduleState" ;;
+  NoteRetentionFunctionDaily) PARAM="NoteRetentionScheduleState" ;;
+  SmsRetentionFunctionDaily) PARAM="SmsRetentionScheduleState" ;;
+esac
+WANT="ENABLED"
+[[ "${ACTION}" == "enable" ]] || WANT="DISABLED"
+
+need_tool aws jq git
 pin_region
 check_identity
 
+cd "${REPO_ROOT}"
+COMMIT="$(git rev-parse HEAD)"
+info "Full deploy of the current checkout: commit ${COMMIT}."
+if [[ -n "$(git status --porcelain)" ]]; then
+  info "Working tree is DIRTY: uncommitted changes would ship too."
+  [[ "${ALLOW_DIRTY}" -eq 1 || "${DRY_RUN}" -eq 1 ]] || die "the working tree is dirty; commit or stash, or pass --allow-dirty."
+else
+  info "Working tree is clean."
+fi
+
+DEPLOY=("$(dirname "${BASH_SOURCE[0]}")/deploy-backend.sh" --param "${PARAM}=${WANT}")
+[[ "${DRY_RUN}" -ne 1 ]] || DEPLOY+=(--dry-run)
+if [[ -z "${PROFILE}" ]]; then DEPLOY+=(--no-profile); else DEPLOY+=(--profile "${PROFILE}"); fi
+
 if [[ "${DRY_RUN}" -eq 1 ]]; then
   info "+ aws events describe-rule --name <physical name of ${NAME} in ${STACK_NAME}>"
-  info "+ aws events ${ACTION}-rule --name <physical name of ${NAME}>"
+  show_cmd "${DEPLOY[@]}"
   info "+ aws events describe-rule --name <physical name of ${NAME}>"
-  info "Line to record on the issue: dev schedule ${NAME}: <before> -> <after> (scripts/dev/schedules.sh ${ACTION})"
+  info "Line to record on the issue: dev schedule ${NAME}: <before> -> ${WANT} (scripts/dev/schedules.sh ${ACTION})"
   exit 0
 fi
 
@@ -69,13 +106,20 @@ rule_state() {
   aws_cli events describe-rule --name "${RULE_NAME}" --query State --output text
 }
 BEFORE="$(rule_state)"
-aws_cli events "${ACTION}-rule" --name "${RULE_NAME}"
+PARAM_LIVE="$(stack_query "Stacks[0].Parameters[?ParameterKey=='${PARAM}'].ParameterValue | [0]")"
+if [[ "${BEFORE}" == "${WANT}" && "${PARAM_LIVE}" == "${WANT}" ]]; then
+  info "${NAME} is already ${WANT} and ${PARAM} is already ${WANT}; nothing to change."
+  exit 0
+fi
+"${DEPLOY[@]}"
 AFTER="$(rule_state)"
-
-WANT="ENABLED"
-[[ "${ACTION}" == "enable" ]] || WANT="DISABLED"
-[[ "${AFTER}" == "${WANT}" ]] || die "the rule is ${AFTER}, expected ${WANT}."
+if [[ "${AFTER}" != "${WANT}" ]]; then
+  if [[ "${PARAM_LIVE}" == "${WANT}" ]]; then
+    die "the rule is ${AFTER} but ${PARAM} was already ${WANT}: the rule drifted from the parameter (for example an emergency disable-rule), so the change set did not modify it. Fix the rule with the doc/DEV_STACK_PLAN.md section 3.1 procedure, or pass ${PARAM} explicitly with the other value in a deploy and then ${WANT}."
+  fi
+  die "the rule is ${AFTER}, expected ${WANT}; the change set was probably declined or failed."
+fi
 
 info ""
 info "Record on the issue:"
-info "dev schedule ${NAME}: ${BEFORE} -> ${AFTER} at $(date -u +%Y-%m-%dT%H:%MZ) (scripts/dev/schedules.sh ${ACTION})"
+info "dev schedule ${NAME}: ${BEFORE} -> ${AFTER} at $(date -u +%Y-%m-%dT%H:%MZ) (scripts/dev/schedules.sh ${ACTION}, parameter ${PARAM})"
