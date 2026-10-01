@@ -1,6 +1,7 @@
 """Client identity and ordinary notes, separate from appointment snapshots."""
 
 import re
+import unicodedata
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -119,6 +120,12 @@ def _utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
+def clean_phone(value: str) -> str:
+    """Drop invisible format characters and whitespace that copying a number can add."""
+    return "".join(ch for ch in value
+                   if unicodedata.category(ch) != "Cf" and not ch.isspace())
+
+
 class ClientRecordService:
     def __init__(self, repository: ClientRecordRepository) -> None:
         self._repository = repository
@@ -129,6 +136,7 @@ class ClientRecordService:
                      now: datetime) -> ClientProfile:
         if expected_version < 0 or default_duration_minutes > maximum_visit_minutes:
             raise ValueError("Profile version or visit duration is invalid")
+        phone_e164 = clean_phone(phone_e164)
         current = self._repository.read_profile(business_id, client_id)
         if (current.version if current else 0) != expected_version:
             raise RecordConflict("Client profile version changed")

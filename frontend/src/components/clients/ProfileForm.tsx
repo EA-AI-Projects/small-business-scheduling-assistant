@@ -1,7 +1,8 @@
-import type { FormEvent } from "react";
+import { useState, type FormEvent } from "react";
 
 import type { ClientProfile, ClientProfileBody, HomeSize } from "@/api/types";
 import { path } from "@/lib/api";
+import { isE164, normalizePhone } from "@/lib/phone";
 import { useOwner } from "@/owner/OwnerContext";
 
 function text(form: FormData, name: string): string {
@@ -20,16 +21,23 @@ export function ProfileForm({ client, onCreated, onPhoneDraft }: {
   onPhoneDraft?: (phone: string) => void;
 }) {
   const { data, change, selectClient } = useOwner();
+  const [phoneError, setPhoneError] = useState<string | null>(null);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const id = text(form, "client_id");
+    const phone = normalizePhone(String(form.get("phone_e164") ?? ""));
+    if (!isE164(phone)) {
+      setPhoneError("Enter the phone as + and country code, then digits, for example +14155550101.");
+      return;
+    }
+    setPhoneError(null);
     const current = data.clients.find((item) => item.client_id === id);
     const body: ClientProfileBody = {
       expected_version: current?.version ?? 0,
       name: text(form, "name"),
-      phone_e164: text(form, "phone_e164"),
+      phone_e164: phone,
       service_address: text(form, "service_address"),
       home_size: String(form.get("home_size")) as HomeSize,
       default_duration_minutes: Number(form.get("default_duration_minutes")),
@@ -57,7 +65,9 @@ export function ProfileForm({ client, onCreated, onPhoneDraft }: {
         <label>Name <input name="name" required maxLength={200} defaultValue={client?.name ?? ""} /></label>
         <label>Phone (E.164) <input name="phone_e164" type="tel" placeholder="+14155550101" required
           defaultValue={client?.phone_e164 ?? ""}
-          onChange={(event) => onPhoneDraft?.(event.target.value)} /></label>
+          aria-invalid={phoneError !== null} aria-describedby={phoneError ? "phone-error" : undefined}
+          onChange={(event) => { setPhoneError(null); onPhoneDraft?.(normalizePhone(event.target.value)); }} />
+          {phoneError && <span id="phone-error" role="alert" className="field-error">{phoneError}</span>}</label>
         <label>Service address <input name="service_address" required maxLength={500}
           defaultValue={client?.service_address ?? ""} /></label>
         <label>Home size <select name="home_size" defaultValue={client?.home_size ?? "small"}>
