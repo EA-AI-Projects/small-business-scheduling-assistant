@@ -405,7 +405,7 @@ aws cloudformation delete-stack --stack-name scheduling-dev --region us-west-1 \
 ```
 
 1. **Stop everything.** Run the section 3.1 step 1 commands. Confirm no schedule is enabled and no queue message is in flight.
-2. **Decide about the table's contents.** Until tester texting is enabled, confirm it holds only synthetic records. After that, the table holds testers' consent and opt-out evidence, which must be kept four years after the last program text. Once tester texting starts, `dev` is kept running rather than torn down while that evidence is within its retention period, and deleting or exporting the table is not part of teardown (owner decision 2026-10-01, #91). Stopping texting, schedules, and ingress (step 1) stays allowed. The count below is read-only:
+2. **Decide about the table's contents.** Until tester texting is enabled, confirm it holds only synthetic records. After that, the table holds testers' consent and opt-out evidence, which must be kept four years after the last program text. Once tester texting starts, `dev` is kept running rather than torn down while that evidence is within its retention period, and deleting or exporting the table is not part of teardown (owner decision 2026-10-01, #91). Stopping texting, schedules, and ingress (step 1) stays allowed. If tester texting has started and that evidence is within its retention period, stop here; do not continue to step 3. The count below is read-only:
 
    ```sh
    aws dynamodb scan --table-name scheduling-dev --select COUNT --region us-west-1
@@ -441,7 +441,7 @@ aws cloudformation delete-stack --stack-name scheduling-dev --region us-west-1 \
    aws cloudformation delete-stack --stack-name scheduling-dev --region us-west-1 \
      --role-arn <CloudFormationExecutionRoleArn> --retain-resources <LogicalResourceId>
    ```
-6. **Delete the retained table, if step 2 said so.** PITR recovery data is removed when PITR is disabled. Disable it first if you want no recovery data left at all, accepting that this is irreversible. The template sets no deletion protection on the table, so it can be deleted directly:
+6. **Delete the retained table, only if step 2 allowed it** (never while tester consent and opt-out evidence is within retention). PITR recovery data is removed when PITR is disabled. Disable it first if you want no recovery data left at all, accepting that this is irreversible. The template sets no deletion protection on the table, so it can be deleted directly:
 
    ```sh
    aws dynamodb update-continuous-backups --table-name scheduling-dev \
@@ -483,7 +483,7 @@ aws cloudformation delete-stack --stack-name scheduling-dev --region us-west-1 \
 11. **SSM parameters** (admin: the deployer role has no SSM access). None existed for this checkpoint; the owner created both by hand on 2026-10-01 (issue #91). Delete them: `aws ssm delete-parameter --name /scheduling/dev/twilio/auth-token --region us-west-1` and `aws ssm delete-parameter --name /scheduling/dev/openai/api-key --region us-west-1`.
 12. **Delete the role stack last**, from the admin session, not through the deployer role: `aws cloudformation delete-stack --stack-name scheduling-dev-roles --region us-west-1`. CloudFormation needs the execution role to delete the dev stack's resources, so deleting the roles earlier strands the dev stack in `DELETE_FAILED`. Then remove the deployer profile from `~/.aws/config` and confirm no role named `deploy-scheduling-dev-*` remains.
 
-**Ultimate cleanup: closing the member account.** Because `dev` has its own account, closing account `214965372605` eventually removes everything in it, including anything a step above missed, but not immediately. It is the owner's decision and is not part of this plan's authorization. Per the AWS Organizations documentation (checked when this was written), a closed member account shows as CLOSED for up to 90 days, can be reopened during that time, and its content persists until it is permanently closed; re-check the current rules before deciding. Do not treat closure as instant data deletion. The budget lives in the member account and is removed with the account's content at permanent closure (step 9); there is no management-account budget. Prefer the step-by-step teardown while the account will be reused for later checkpoints.
+**Ultimate cleanup: closing the member account.** Once tester texting has started, do not close the account while testers' consent and opt-out evidence is within its four-year retention (owner decision 2026-10-01, #91). Because `dev` has its own account, closing account `214965372605` eventually removes everything in it, including anything a step above missed, but not immediately. It is the owner's decision and is not part of this plan's authorization. Per the AWS Organizations documentation (checked when this was written), a closed member account shows as CLOSED for up to 90 days, can be reopened during that time, and its content persists until it is permanently closed; re-check the current rules before deciding. Do not treat closure as instant data deletion. The budget lives in the member account and is removed with the account's content at permanent closure (step 9); there is no management-account budget. Prefer the step-by-step teardown while the account will be reused for later checkpoints.
 
 ### 3.4 Nothing-billable-remains checklist
 
