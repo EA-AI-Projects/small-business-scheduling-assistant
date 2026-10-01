@@ -507,6 +507,7 @@ def test_profile_change_between_read_and_consent_writes_nothing(race_env: RaceEn
     original = repo.read_profile
 
     def stale_read(business_id: str, client_id: str) -> Any:
+        repo.read_profile = original  # type: ignore[method-assign]  # the save below reads too
         profile = original(business_id, client_id)
         clients.save_profile(env.business, "consent-client", "Synthetic Client Two",
                              "+14155550101", "123 Test Street", HomeSize.SMALL, 60, True, 1,
