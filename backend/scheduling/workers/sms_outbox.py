@@ -39,10 +39,6 @@ def handler(event: dict[str, Any], _context: object) -> dict[str, list[dict[str,
         DynamoDBCalendarRepository(dynamo, table), DynamoSmsIngressStore(dynamo, table),
         os.environ["BUSINESS_ID"], os.environ["TWILIO_BUSINESS_NUMBER"],
         os.environ["OWNER_NUMBER"], status_callback=os.environ.get("TWILIO_STATUS_URL"),
-        authorized_recipients=frozenset(
-            number.strip() for number in os.environ["AUTHORIZED_SMS_RECIPIENTS"].split(",")
-            if number.strip()
-        ),
     )
     consumer = ConsumeService(DynamoOutboxStore(dynamo, table), sender,
                               lambda: datetime.now(UTC))

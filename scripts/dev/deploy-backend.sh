@@ -19,10 +19,10 @@
 # or the sender mapping on stays under live-SMS authorization (#91). The conversation mapping is
 # governed by SmsConversationRequested and is not guarded here.
 #
-# Private values: OwnerNumber, AuthorizedSmsRecipients, TwilioAccountSid and TwilioBusinessNumber
+# Private values: OwnerNumber, TwilioAccountSid and TwilioBusinessNumber
 # are never passed with --param (it would leave them in shell history). Use --prompt-param <Key>:
-# the value is read with a hidden prompt, validated (E.164 phone numbers, a comma-separated E.164
-# list for the allowlist, an AC-prefixed 34-character SID), and never printed, logged or echoed
+# the value is read with a hidden prompt, validated (E.164 phone numbers, an AC-prefixed
+# 34-character SID), and never printed, logged or echoed
 # (shown as ****, also in --dry-run). A rejected value is not echoed either. The value is passed
 # to sam deploy as an argument, so it is briefly visible to other processes of the same user.
 #
@@ -35,12 +35,12 @@
 #   --allow-dirty Deploy a dirty working tree (uncommitted changes ship too).
 #   --yes        Skip the confirmation prompt (CI only, issue #95 rules).
 #   --param      Supply a parameter that the live stack does not have yet, or deliberately
-#                change one (for example HoldExpiryScheduleState=ENABLED). Not allowed for the four
+#                change one (for example HoldExpiryScheduleState=ENABLED). Not allowed for the three
 #                private keys above.
 #   --i-have-live-sms-authorization   Required whenever OutboxDispatchScheduleState or
 #                SmsSenderMappingState targets ENABLED. Pass it only with Enrique's separate
 #                live-SMS authorization (#91).
-#   --prompt-param Key   Read the value of OwnerNumber, AuthorizedSmsRecipients, TwilioAccountSid
+#   --prompt-param Key   Read the value of OwnerNumber, TwilioAccountSid
 #                or TwilioBusinessNumber from a hidden prompt. No other key is accepted. Needs a
 #                terminal. --dry-run does not prompt and shows ****.
 #   --smoke-only Run only the owner API smoke test (no build, no change set).
@@ -339,7 +339,7 @@ info "${COUNT} resource change(s)."
 [[ -z "${RISKY}" ]] || info "WARNING: removed or replaced (possibly): ${RISKY}"
 
 # Refuse parameter drift (names only, never values): any parameter not given with --param must
-# keep its live value. NoEcho values (OwnerNumber, AuthorizedSmsRecipients) come back as ****
+# keep its live value. NoEcho values (OwnerNumber) come back as ****
 # from describe-stacks and from the change set, so a pair with a masked side cannot be compared
 # and is skipped (UsePreviousValue keeps it; a prompted key is in the allowed list anyway).
 LIVE_PARAMS="$(aws_cli cloudformation describe-stacks --stack-name "${STACK_NAME}" --query 'Stacks[0].Parameters' --output json)"

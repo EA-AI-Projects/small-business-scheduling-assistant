@@ -20,7 +20,7 @@ Read `gh pr view <n>`, `gh pr diff <n>`, the linked issue with comments, and onl
    - `America/Los_Angeles` dates, daylight-saving gaps and overlaps, holidays, the 14-day horizon, and working hours
    - authorization: exact owner subject and business ID, verified phones only
 4. When the diff touches SMS, consent, opt-out, retention, notes, or workers, also check:
-   - no send path bypasses verified phone, client consent, opt-out, `SMS_SEND_ENABLED`, and the recipient allowlist
+   - no send path bypasses verified phone, client consent, opt-out, and `SMS_SEND_ENABLED`
    - retention clocks and legal holds are honored
    - no message bodies or personal data leak into logs
 5. Tests cover the behavior and the failure paths; fixtures are synthetic.

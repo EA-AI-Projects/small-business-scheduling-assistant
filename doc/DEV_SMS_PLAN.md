@@ -6,7 +6,7 @@ This packet asks Enrique to authorize texting in the synthetic `dev` environment
 
 - **What you get:** you and your testers can text the dev number to ask for times, book, approve by text, cancel, and reschedule. Testers must have given in-person consent and been entered in the owner app.
 - **What it costs:** about $7 a month in Twilio during an active test month ($3.15 of it fixed), out of your $46.41 prepaid balance and inside your $10 cap. AWS rises to about $3.85 a month, inside its $10 budget. OpenAI is capped by the budget you set there.
-- **Safety:** the app can only text numbers on an explicit allowlist that you supply at deploy time, and only people with recorded consent and a verified phone who have not opted out. Texting can be turned off within minutes (section 6).
+- **Safety:** onboarding in the owner app is the only send gate: the app texts only people whose in-person consent the owner has recorded (which also verifies the phone) and who have not opted out, and numbers in the fictional 555-0100 to 555-0199 range are always refused. Texting can be turned off within minutes (section 6).
 - **Before stage 1:** three code changes must be reviewed and merged. Two more, which need your answers on #91, must be merged before stage 3 (section 2). None of them involves a live action.
 - **Your decisions:** the two questions on #91 (phone verification, old pending texts), then go or no-go for each stage in section 4, in order.
 
@@ -26,7 +26,7 @@ This packet asks Enrique to authorize texting in the synthetic `dev` environment
 
 Before stage 1:
 1. **Delivery switches as parameters** (PR #111). The outbox dispatch schedule and the SMS sender's SQS trigger were hard-coded disabled in `template.yaml`, so outbound texts could not be turned on without a template change. Add `OutboxDispatchScheduleState` and `SmsSenderMappingState` parameters (default `DISABLED`). Extend the `deploy-backend.sh` guard so a change to either requires a matching `--param` and the live-SMS authorization flag, as it already does for the three schedules (DEV_STACK_PLAN section 2.5).
-2. **Phone-number parameters handled privately** (PR #111). Mark `AuthorizedSmsRecipients` `NoEcho`, as `OwnerNumber` already is, and let `deploy-backend.sh` read `OwnerNumber`, `AuthorizedSmsRecipients`, `TwilioAccountSid` and `TwilioBusinessNumber` from a hidden prompt instead of the command line. It must never print them. Values remain visible to account administrators in the Lambda configuration; they are never written to the repository, GitHub, or logs this project controls.
+2. **Phone-number parameters handled privately** (PR #111). Let `deploy-backend.sh` read `OwnerNumber`, `TwilioAccountSid` and `TwilioBusinessNumber` from a hidden prompt instead of the command line. It must never print them. Values remain visible to account administrators in the Lambda configuration; they are never written to the repository, GitHub, or logs this project controls.
 3. **Consent capture in the owner app** (PR #110). The deployed owner API already serves the routes that record in-person consent (`POST .../clients/{client_id}/sms-consent`) and list delivery failures, but the OpenAPI export omitted them, so the owner app has no screen for either. Export both routes, regenerate the contracts, and add a "Record in-person text consent" action on the client screen: a clear-yes checkbox, the profile's placeholder name, and script version 1 from the public consent page. Add a delivery-failures list, so failed or refused texts are visible.
 
 Before stage 3 (each waits for Enrique's answer on #91):
@@ -61,7 +61,6 @@ Expected today: 3 records (1 `seed_policy`, 2 `block_time`). `--execute` prints 
 | `TwilioAccountSid`, `TwilioBusinessNumber`, `OwnerNumber` | placeholders | real values (hidden prompt) | same |
 | `SmsSendEnabled` | disabled | disabled | authorized |
 | `EnableSmsConversations` | disabled | disabled | authorized |
-| `AuthorizedSmsRecipients` | empty | empty | owner + first tester (stage 4 adds the rest) |
 | `OutboxDispatchScheduleState`, `SmsSenderMappingState` | `DISABLED` | `DISABLED` | `ENABLED` |
 
 Stage 1 adds the resources that `EnableSmsIngress=false` leaves out: the SMS HTTP API with its stage, the ingress Lambda with its role, two Lambda permissions, its log group and its error alarm (DEV_STACK_PLAN section 2.2). The deploy also updates environment variables on the existing, still inert sender and conversation functions.
@@ -74,13 +73,13 @@ Stage 1 adds the resources that `EnableSmsIngress=false` leaves out: the SMS HTT
 
 > **Owner-phone note.** In the app, STOP from the owner number blocks every owner text, and it can't be cleared the way a client's can (owners have no consent record). So the owner phone never texts STOP. Under Twilio defaults, a bare `CANCEL` is also an opt-out on Twilio's side, which `START` reverses; that is exactly what stage 2 observes, so `CANCEL` is followed by `START`. If the app turns out to record that `CANCEL` as a STOP, stop and report it before stage 3.
 
-**Stage 3: full flow with you and one tester.** Requires prerequisites 4 and 5. Record the tester's consent in the owner app, which also marks their phone verified. Retire the old pending texts: run the dry run, then `--execute`, of "Retire pending outbox records" once, just before turning anything on. Set the allowlist to your number and that tester's, then turn on `SmsSendEnabled`, conversations, the sender trigger and outbox dispatch. Run one booking end to end: ask for times, pick one, you approve by text, the tester gets the confirmation, then cancel and reschedule.
+**Stage 3: full flow with you and one tester.** Requires prerequisites 4 and 5. Record the tester's consent in the owner app, which also marks their phone verified. Retire the old pending texts: run the dry run, then `--execute`, of "Retire pending outbox records" once, just before turning anything on. Then turn on `SmsSendEnabled`, conversations, the sender trigger and outbox dispatch. Run one booking end to end: ask for times, pick one, you approve by text, the tester gets the confirmation, then cancel and reschedule.
 
-Next, check that a client outside the allowlist is refused. Use a second tester who has given consent and verified their phone but is not yet on the allowlist (inbound texts need no allowlist, so verification works). Book a visit for them in the owner app; its confirmation must fail with `RECIPIENT_NOT_AUTHORIZED` in delivery failures, and they receive nothing. A synthetic client with a 555 number also works: record its consent in the owner app, which verifies the phone, then book a visit. Then turn texting off with section 6, steps 1 and 2, timing it, and turn it back on.
+Next, check that a client without recorded consent is refused. Use a synthetic or un-onboarded client (profile only, no consent recorded) and book a visit for them in the owner app; its confirmation must fail with `CONSENT_REQUIRED` in delivery failures, and nothing is sent. Then turn texting off with section 6, steps 1 and 2, timing it, and turn it back on.
 
 Last: the tester texts STOP and you confirm no further texts reach them. To bring them back, record a fresh in-person consent, then have them text START. *Live texts go to two numbers only.*
 
-**Stage 4: remaining testers.** For each new tester: in-person consent, a profile with a placeholder name, the consent record and phone verification. Then add their number to the allowlist with one deploy, all at once or a few at a time. *Live texts go to the listed numbers only.*
+**Stage 4: remaining testers.** For each new tester: in-person consent, a profile with a placeholder name, the consent record and phone verification. Onboarding is the only step: no deploy is needed, and the tester can receive texts as soon as the consent is recorded. *Live texts go only to people onboarded this way.*
 
 Results of each stage are recorded on #91 without numbers or message text.
 
@@ -102,7 +101,8 @@ In order of speed; the first two take effect within a minute:
 1. **Stop outbound:** disable the sender trigger. Run `aws lambda list-event-source-mappings --function-name <SmsSenderFunction>`, then `update-event-source-mapping --uuid <id> --no-enabled`. Pending texts stay pending, in the queue and in the DynamoDB outbox, and are sent when the trigger is turned back on. Before turning it back on, clear stale records with the retire tool (dry run first, see "Retire pending outbox records"); purging the queue alone does not stop them.
 2. **Stop inbound:** in the Twilio console, clear the number's incoming-message webhook (or point it back to the previous value). Twilio still answers STOP and HELP itself and blocks later texts to anyone who sent STOP, but the app records no opt-out evidence for STOPs received while the webhook is cleared.
 3. Disable the outbox dispatch rule: `aws events disable-rule`.
-4. Make it permanent with one deploy: `SmsSendEnabled=disabled`, `EnableSmsConversations=disabled`, both new states `DISABLED`, and optionally `EnableSmsIngress=false`. Record the stop on #91.
+4. **Stop one tester** before they send STOP: mark their profile inactive in the owner app. An inactive profile is refused by the sender (`CLIENT_UNAVAILABLE` for notifications, `CONSENT_REQUIRED` for conversation replies), and the verified-phone lookup returns nothing for it, so their inbound texts are stored as an unknown sender with no command body and are never run as client commands (STOP is still recorded). Pending texts to them fail permanently rather than waiting. Their stored consent evidence is kept.
+5. Make it permanent with one deploy: `SmsSendEnabled=disabled`, `EnableSmsConversations=disabled`, both new states `DISABLED`, and optionally `EnableSmsIngress=false`. Record the stop on #91.
 
 Ingress can stay on while sending is off; it only stores receipts. Turning ingress off deletes the webhook API, so stage 1 has to be repeated to turn it back on. Turning texting off never deletes data (section 1, Evidence).
 
@@ -110,7 +110,7 @@ Ingress can stay on while sending is off; it only stores receipts. Turning ingre
 
 | Risk | Handling |
 | --- | --- |
-| A text reaches someone not authorized | Checks before every send: the allowlist parameter, a verified phone and recorded consent for the client, and no opt-out. Tested in code; checked live in stage 3. |
+| A text reaches someone not authorized | Checks before every send: a verified phone and recorded consent for the client, no opt-out, and a refusal of fictional 555-0100 to 555-0199 numbers. Tested in code; checked live in stage 3. |
 | A stranger texts the number | No reply, and no scheduling change (PRD). The body is not processed. |
 | Forged webhook calls | Twilio signature required on the exact URL; checked in stages 1 and 2. A flood of rejected calls costs little (API Gateway and Lambda per-request pricing) and is visible in the ingress error alarm. |
 | Keyword surprises (for example a bare "cancel" opts someone out under Twilio defaults) | Observed in stage 2 before testers. Any fix is a separate decision. |
