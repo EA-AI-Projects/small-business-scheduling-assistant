@@ -233,7 +233,7 @@ stack_resources() {
 
 # Parameters that hold personal or account-identifying values. They are only ever set with a
 # hidden prompt (deploy-backend.sh --prompt-param) and never printed.
-PRIVATE_PARAMS=(OwnerNumber AuthorizedSmsRecipients TwilioAccountSid TwilioBusinessNumber)
+PRIVATE_PARAMS=(OwnerNumber TwilioAccountSid TwilioBusinessNumber)
 PRIVATE_FORMAT_HINT=""
 
 is_private_param() {
@@ -249,17 +249,11 @@ is_private_param() {
 valid_private_value() {
   local key="$1" value="$2"
   local e164='^\+[1-9][0-9]{7,14}$'
-  local list='^\+[1-9][0-9]{7,14}(,\+[1-9][0-9]{7,14})*$'
   local sid='^AC[0-9a-fA-F]{32}$'
   case "${key}" in
     OwnerNumber | TwilioBusinessNumber)
       PRIVATE_FORMAT_HINT="expected E.164: a plus sign and 8 to 15 digits, no spaces"
       [[ "${value}" =~ ${e164} ]]
-      ;;
-    AuthorizedSmsRecipients)
-      PRIVATE_FORMAT_HINT="expected comma-separated E.164 numbers without spaces, or empty for no recipients"
-      [[ -n "${value}" ]] || return 0
-      [[ "${value}" =~ ${list} ]]
       ;;
     TwilioAccountSid)
       PRIVATE_FORMAT_HINT="expected AC followed by 32 hexadecimal characters"

@@ -34,19 +34,10 @@ def validate(key: str, value: str) -> bool:
     ("OwnerNumber", "+0415555010", False),
     ("OwnerNumber", "", False),
     ("OwnerNumber", "+14155550101,+14155550102", False),
-    ("AuthorizedSmsRecipients", "+14155550101", True),
-    ("AuthorizedSmsRecipients", "+14155550101,+14155550102", True),
-    ("AuthorizedSmsRecipients", "", True),
-    ("AuthorizedSmsRecipients", "+14155550101,", False),
-    ("AuthorizedSmsRecipients", ",+14155550101", False),
-    ("AuthorizedSmsRecipients", "+14155550101,,+14155550102", False),
-    ("AuthorizedSmsRecipients", "+14155550101, +14155550102", False),
-    ("AuthorizedSmsRecipients", "+14155550101;+14155550102", False),
-    ("AuthorizedSmsRecipients", "+14155550101\n+14155550102", False),
-    ("AuthorizedSmsRecipients", "+14155550101 ", False),
     ("TwilioAccountSid", SID, True),
     ("TwilioAccountSid", "placeholder", False),
     ("TwilioAccountSid", SID[:-1], False),
+    ("AuthorizedSmsRecipients", "+14155550101", False),
     ("PermissionsBoundaryArn", "+14155550101", False),
 ])
 def test_validators(key: str, value: str, ok: bool) -> None:
@@ -60,7 +51,7 @@ def run_script(*args: str) -> subprocess.CompletedProcess[str]:
 
 
 def test_param_refuses_private_keys() -> None:
-    for key in ("OwnerNumber", "AuthorizedSmsRecipients", "TwilioAccountSid", "TwilioBusinessNumber"):
+    for key in ("OwnerNumber", "TwilioAccountSid", "TwilioBusinessNumber"):
         result = run_script("--dry-run", "--param", f"{key}=+14155550123")
         assert result.returncode == 1
         assert "use --prompt-param" in result.stderr
@@ -82,11 +73,11 @@ def test_drift_check_skips_masked_noecho_values(tmp_path: Path) -> None:
         {"ParameterKey": "SmsSendEnabled", "ParameterValue": "disabled"},
         {"ParameterKey": "BusinessId", "ParameterValue": "biz"},
     ]
-    # Change set: OwnerNumber masked (NoEcho), AuthorizedSmsRecipients now masked, one real change.
+    # Change set: OwnerNumber masked (NoEcho), one real change. The live stack still has the
+    # removed AuthorizedSmsRecipients; the template no longer declares it, so it is not in the change set.
     description = {
         "Parameters": [
             {"ParameterKey": "OwnerNumber", "ParameterValue": "****"},
-            {"ParameterKey": "AuthorizedSmsRecipients", "ParameterValue": "****"},
             {"ParameterKey": "SmsSendEnabled", "ParameterValue": "authorized"},
             {"ParameterKey": "BusinessId", "ParameterValue": "biz"},
         ]
@@ -111,16 +102,16 @@ aws_cli() {{ cat {tmp_path}/live.json; }}
     assert refused.returncode == 1
     assert "SmsSendEnabled" in refused.stdout
     assert "OwnerNumber" not in refused.stdout
-    assert "AuthorizedSmsRecipients" not in refused.stdout
+    assert "AuthorizedSmsRecipients" not in refused.stdout  # a live-only parameter is ignored
     assert run("SmsSendEnabled=authorized", "").returncode == 0
     # A prompted key counts as given even when its value would differ.
-    assert run("SmsSendEnabled=authorized", "AuthorizedSmsRecipients OwnerNumber").returncode == 0
+    assert run("SmsSendEnabled=authorized", "OwnerNumber").returncode == 0
 
 
 def test_empty_override_is_quoted_for_sam() -> None:
-    script = f'aws_cli() {{ return 1; }}\nsource {LIB}\nprivate_override AuthorizedSmsRecipients ""\nprivate_override OwnerNumber +14155550101'
+    script = f'aws_cli() {{ return 1; }}\nsource {LIB}\nprivate_override TwilioBusinessNumber ""\nprivate_override OwnerNumber +14155550101'
     out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False).stdout
-    assert out == 'AuthorizedSmsRecipients=""OwnerNumber=+14155550101'
+    assert out == 'TwilioBusinessNumber=""OwnerNumber=+14155550101'
 
 
 @pytest.mark.parametrize("arg", [
@@ -151,10 +142,17 @@ def test_dry_run_prompt_param_prints_stars_only() -> None:
         env = {**os.environ, "PATH": f"{d}:{os.environ['PATH']}"}
         result = subprocess.run(
             ["bash", str(SCRIPT), "--no-profile", "--dry-run", "--prompt-param", "OwnerNumber",
-             "--prompt-param", "AuthorizedSmsRecipients", "--prompt-param", "TwilioAccountSid"],
+             "--prompt-param", "TwilioAccountSid"],
             capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL, env=env,
         )
     assert result.returncode == 0, result.stderr
     assert "OwnerNumber=\\*\\*\\*\\*" in result.stdout
-    assert "AuthorizedSmsRecipients=\\*\\*\\*\\*" in result.stdout
+    assert "TwilioAccountSid=\\*\\*\\*\\*" in result.stdout
     assert "Value for" not in result.stdout + result.stderr
+
+
+def test_removed_allowlist_parameter_is_not_known_to_the_scripts() -> None:
+    result = run_script("--dry-run", "--prompt-param", "AuthorizedSmsRecipients")
+    assert result.returncode == 1
+    assert "--prompt-param accepts only" in result.stderr
+    assert "AuthorizedSmsRecipients" not in (ROOT / "template.yaml").read_text()
