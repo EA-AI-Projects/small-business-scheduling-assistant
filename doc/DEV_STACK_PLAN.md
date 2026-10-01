@@ -411,7 +411,7 @@ aws cloudformation delete-stack --stack-name scheduling-dev --region us-west-1 \
    aws dynamodb scan --table-name scheduling-dev --select COUNT --region us-west-1
    ```
 
-   Keep it (evidence for #43) or delete it. Keeping costs PITR and storage: about $0.22 per GB-month plus $0.28 per GB beyond 25 GB. Decision 7 (answered 2026-09-30): delete the retained synthetic dev table after the results are recorded on #43.
+   Before tester texting: keep it (evidence for #43) or delete it. Keeping costs PITR and storage: about $0.22 per GB-month plus $0.28 per GB beyond 25 GB. Decision 7 (answered 2026-09-30): delete the retained synthetic dev table after the results are recorded on #43.
 3. **Delete the Amplify app** (admin: the deployer's optional Amplify grant never covers deleting an app) so it stops serving:
 
    ```sh
