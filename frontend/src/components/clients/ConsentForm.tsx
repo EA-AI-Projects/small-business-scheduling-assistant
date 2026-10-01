@@ -4,6 +4,13 @@ import type { ClientProfile, InPersonConsentBody } from "@/api/types";
 import { path } from "@/lib/api";
 import { useOwner } from "@/owner/OwnerContext";
 
+/**
+ * The consent script the owner reads aloud. Keep in step with the "Script version" line in
+ * docs/sms-consent/index.html (checked by ConsentScript.test.ts).
+ */
+export const CONSENT_SCRIPT_VERSION = "1";
+export const CONSENT_SCRIPT_DATE = "September 27, 2026";
+
 const CONSENT_PAGE = "https://ea-ai-projects.github.io/small-business-scheduling-assistant/sms-consent/";
 
 /**
@@ -22,7 +29,7 @@ export function ConsentForm({ client }: { client: ClientProfile | undefined }) {
     const body: InPersonConsentBody = {
       phone_e164: client.phone_e164,
       participant_name: String(form.get("participant_name") ?? "").trim(),
-      script_version: String(form.get("script_version") ?? "").trim(),
+      script_version: CONSENT_SCRIPT_VERSION,
       clear_yes: true,
     };
     if (await change(path`/clients/${client.client_id}/sms-consent`, "POST", body,
@@ -40,8 +47,7 @@ export function ConsentForm({ client }: { client: ClientProfile | undefined }) {
       <form className="form-stack" aria-label="Record in-person text consent" onSubmit={submit}>
         <label>Participant name <input name="participant_name" required maxLength={200}
           defaultValue={client?.name ?? ""} /></label>
-        <label>Consent script version <input name="script_version" required maxLength={80}
-          placeholder="Version of the script you read" /></label>
+        <p>{`Script version ${CONSENT_SCRIPT_VERSION} (${CONSENT_SCRIPT_DATE})`}</p>
         <label className="inline"><input name="clear_yes" type="checkbox" required
           checked={clearYes} onChange={(event) => setClearYes(event.target.checked)} /> They clearly said yes</label>
         <button className="primary" type="submit" disabled={!client}>Record consent</button>

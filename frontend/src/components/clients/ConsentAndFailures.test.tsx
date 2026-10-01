@@ -31,6 +31,7 @@ describe("in-person text consent", () => {
     setup(() => undefined);
     await selectAvery();
     expect(within(consent()).getByLabelText("Participant name")).toHaveValue("Avery Example");
+    expect(screen.getByText("Script version 1 (September 27, 2026)")).toBeInTheDocument();
     expect(screen.getByText(/full private consent record is kept by the owner outside this app/))
       .toBeInTheDocument();
   });
@@ -38,7 +39,6 @@ describe("in-person text consent", () => {
   it("does not post until they clearly said yes", async () => {
     const { calls, notify } = setup(() => undefined);
     await selectAvery();
-    await userEvent.type(within(consent()).getByLabelText("Consent script version"), "script-a");
     await userEvent.click(screen.getByRole("button", { name: "Record consent" }));
     expect(within(consent()).getByLabelText("They clearly said yes")).toBeRequired();
     expect(calls.some((call) => call.method === "POST")).toBe(false);
@@ -52,20 +52,18 @@ describe("in-person text consent", () => {
     const form = within(consent());
     await userEvent.clear(form.getByLabelText("Participant name"));
     await userEvent.type(form.getByLabelText("Participant name"), "Synthetic Client");
-    await userEvent.type(form.getByLabelText("Consent script version"), "script-a");
     await userEvent.click(form.getByLabelText("They clearly said yes"));
     await userEvent.click(screen.getByRole("button", { name: "Record consent" }));
     await waitFor(() => expect(notify).toHaveBeenCalledWith("Text consent recorded", undefined));
     expect(calls.find((call) => call.method === "POST")).toEqual({ method: "POST",
       path: "/clients/client-1/sms-consent", body: { phone_e164: "+14155550101",
-        participant_name: "Synthetic Client", script_version: "script-a", clear_yes: true } });
+        participant_name: "Synthetic Client", script_version: "1", clear_yes: true } });
   });
 
   it("shows the server's reason when consent is rejected", async () => {
     const { notify } = setup((method) => method === "POST" ? { status: 422, body: { error: {
       code: "INVALID_CONSENT", message: "Consent phone must match an active client profile" } } } : undefined);
     await selectAvery();
-    await userEvent.type(within(consent()).getByLabelText("Consent script version"), "script-a");
     await userEvent.click(within(consent()).getByLabelText("They clearly said yes"));
     await userEvent.click(screen.getByRole("button", { name: "Record consent" }));
     await waitFor(() => expect(notify).toHaveBeenCalledWith(
