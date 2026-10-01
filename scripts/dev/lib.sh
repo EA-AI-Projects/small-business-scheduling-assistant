@@ -163,13 +163,15 @@ warn_if_unpushed() {
   if [[ -n "$(git remote)" ]]; then
     local grouped=0
     command -v perl >/dev/null 2>&1 && grouped=1
-    export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh} -o BatchMode=yes -o ConnectTimeout=5"
-    export GIT_TERMINAL_PROMPT=0
+    # Scoped to the fetch only; honor a configured core.sshCommand (for example a chosen key).
+    local base_ssh fetch_ssh
+    base_ssh="${GIT_SSH_COMMAND:-$(git config core.sshCommand || echo ssh)}"
+    fetch_ssh="${base_ssh} -o BatchMode=yes -o ConnectTimeout=5"
     if [[ "${grouped}" -eq 1 ]]; then
-      perl -e 'setpgrp(0, 0); exec @ARGV or exit 127' -- \
+      GIT_SSH_COMMAND="${fetch_ssh}" GIT_TERMINAL_PROMPT=0 perl -e 'setpgrp(0, 0); exec @ARGV or exit 127' -- \
         git -c credential.interactive=never fetch --quiet </dev/null >/dev/null 2>&1 &
     else
-      git -c credential.interactive=never fetch --quiet </dev/null >/dev/null 2>&1 &
+      GIT_SSH_COMMAND="${fetch_ssh}" GIT_TERMINAL_PROMPT=0 git -c credential.interactive=never fetch --quiet </dev/null >/dev/null 2>&1 &
     fi
     fetch_pid=$!
     while kill -0 "${fetch_pid}" 2>/dev/null; do
