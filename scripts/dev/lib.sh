@@ -130,6 +130,59 @@ parse_common() {
   done
 }
 
+# report_commit <allow_dirty 0|1> <enforce 0|1>: print the commit this checkout would deploy and
+# whether the tree is dirty. These scripts deploy the LOCAL checkout, not GitHub. A dirty tree is
+# refused when enforce is 1 and allow_dirty is 0; otherwise it only warns that uncommitted changes
+# will ship. Sets COMMIT and DIRTY (0|1). Run it from inside the repository.
+COMMIT=""
+DIRTY=0
+report_commit() {
+  local allow_dirty="${1:-0}" enforce="${2:-1}"
+  COMMIT="$(git rev-parse HEAD)"
+  info "Deploying the local checkout (not GitHub): commit ${COMMIT}."
+  if [[ -n "$(git status --porcelain)" ]]; then
+    DIRTY=1
+    if [[ "${enforce}" -eq 1 && "${allow_dirty}" -ne 1 ]]; then
+      die "the working tree is dirty; commit or stash, or pass --allow-dirty."
+    fi
+    info "WARNING: the working tree is dirty; uncommitted changes will ship."
+  else
+    DIRTY=0
+    info "Working tree is clean."
+  fi
+}
+
+# warn_if_unpushed: warn, never block, when HEAD is on no remote-tracking branch. First a quiet
+# git fetch bounded by GIT_FETCH_TIMEOUT seconds (default 10); if it fails or times out, warn and
+# use the local remote-tracking refs as they are.
+warn_if_unpushed() {
+  local timeout="${GIT_FETCH_TIMEOUT:-10}" fetch_pid watch_pid fetched=1 commit
+  commit="$(git rev-parse HEAD)"
+  if [[ -n "$(git remote)" ]]; then
+    GIT_TERMINAL_PROMPT=0 git fetch --quiet >/dev/null 2>&1 &
+    fetch_pid=$!
+    (
+      sleep "${timeout}"
+      kill "${fetch_pid}" 2>/dev/null
+    ) >/dev/null 2>&1 &
+    watch_pid=$!
+    wait "${fetch_pid}" 2>/dev/null || fetched=0
+    kill "${watch_pid}" 2>/dev/null || true
+    wait "${watch_pid}" 2>/dev/null || true
+    if [[ "${fetched}" -eq 0 ]]; then
+      info "WARNING: git fetch failed or timed out; checking against the local remote-tracking refs, which may be stale."
+    fi
+  else
+    info "WARNING: no git remote is configured."
+  fi
+  if [[ -z "$(git branch -r --contains HEAD 2>/dev/null)" ]]; then
+    info "WARNING: commit ${commit} is not on GitHub yet (on no remote branch); push it so the deployed code can be reviewed."
+  else
+    info "Commit is on a remote branch."
+  fi
+  return 0
+}
+
 # stack_query <JMESPath>: read the live stack with a --query.
 stack_query() {
   aws_cli cloudformation describe-stacks --stack-name "${STACK_NAME}" --query "$1" --output text

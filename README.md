@@ -82,6 +82,8 @@ scripts/dev/status.sh             # read-only: stack, schedules, deployment, ala
 scripts/dev/schedules.sh enable|disable <LogicalId>   # full deploy of this checkout (prints commit; --allow-dirty for a dirty tree) that sets the schedule's parameter; never outbox dispatch. Emergency stop: disable-rule, DEV_STACK_PLAN section 3.1
 ```
 
+These scripts deploy the **local checkout**, not what is on GitHub. Each prints the commit it deploys. Two guards apply: a dirty working tree is refused unless you pass `--allow-dirty` (then a warning says the uncommitted changes will ship; `--dry-run` and `deploy-backend.sh --smoke-only` are not blocked), and a warning, never a block, appears when `HEAD` is on no remote branch ("commit <sha> is not on GitHub yet"; a quiet `git fetch` runs first, and if it fails the local remote-tracking refs are used). `schedules.sh` passes `--allow-dirty` on to `deploy-backend.sh`.
+
 No parameter value is read into the repository or printed. Details and the IAM grant are in [Deploy to dev with scripts](doc/PILOT_INFRASTRUCTURE.md#deploy-to-dev-with-scripts).
 
 ## Local backend
