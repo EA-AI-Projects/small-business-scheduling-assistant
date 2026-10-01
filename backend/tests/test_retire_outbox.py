@@ -258,3 +258,31 @@ def test_cli_requires_a_cutoff_with_an_offset() -> None:
     with pytest.raises(SystemExit):
         retire_outbox.main([*ARGS[:-1], "2026-10-02T00:00:00"],
                            client_factory=lambda: FakeTable())
+
+
+def test_dev_client_refuses_the_wrong_aws_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    created: list[str] = []
+
+    class Sts:
+        def get_caller_identity(self) -> dict[str, str]:
+            return {"Account": "000000000000"}
+
+    def fake_client(service: str, **_: Any) -> Any:
+        created.append(service)
+        return Sts()
+
+    monkeypatch.setattr(retire_outbox.boto3, "client", fake_client)
+    lines: list[str] = []
+    assert retire_outbox.main(ARGS, out=lines.append) == 2
+    assert created == ["sts"]  # never got as far as building a DynamoDB client
+    assert "caller account" in "\n".join(lines)
+
+
+def test_dev_client_refuses_when_the_account_cannot_be_verified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_client(service: str, **_: Any) -> Any:
+        raise RuntimeError("no credentials")
+
+    monkeypatch.setattr(retire_outbox.boto3, "client", fake_client)
+    assert retire_outbox.main(ARGS, out=lambda _: None) == 2

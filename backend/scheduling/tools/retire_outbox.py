@@ -28,10 +28,18 @@ from scheduling.adapters.outbox_aws import (
 DEV_TABLE = "scheduling-dev"
 DEV_REGION = "us-west-1"
 DEV_ENDPOINT = "https://dynamodb.us-west-1.amazonaws.com"
+# The dedicated dev account; duplicated from EXPECTED_ACCOUNT in scripts/dev/lib.sh.
+DEV_ACCOUNT = "214965372605"
 
 
 def dev_client() -> Any:
     """Standard credential chain (for example AWS_PROFILE=scheduling-dev-admin)."""
+    try:
+        account = boto3.client("sts", region_name=DEV_REGION).get_caller_identity()["Account"]
+    except Exception as error:  # no credentials, expired SSO session, network
+        raise ValueError(f"could not verify the AWS account ({type(error).__name__})") from error
+    if account != DEV_ACCOUNT:
+        raise ValueError(f"caller account is not {DEV_ACCOUNT}")
     client = boto3.client("dynamodb", region_name=DEV_REGION)
     # Also catches AWS_ENDPOINT_URL_DYNAMODB and a profile-level endpoint_url.
     if client.meta.endpoint_url != DEV_ENDPOINT:

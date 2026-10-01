@@ -39,18 +39,22 @@ Before stage 3 (each waits for Enrique's answer on #91):
 
 `backend/scheduling/tools/retire_outbox.py` moves every unsent outbox record of one business that was created before a cutoff to the terminal `FAILED` state with error code `RETIRED_BEFORE_LIVE_SMS` (and `retired_at`). It removes the due-index keys, so the dispatcher never queues them and the consumer never claims them. Each write is conditional on the state and due times it read and on there being no lease. A record that is `SENDING` holds a lease and is reported and left alone; a record another worker changed first is reported as a conflict. Delivery-failure status items (`SMS_STATUS#`, written from Twilio callbacks) are separate and are not created.
 
-The tool refuses unless the table is `scheduling-dev`, the region is `us-west-1` and the DynamoDB endpoint is exactly `https://dynamodb.us-west-1.amazonaws.com`. It prints each candidate's last 8 outbox-ID characters, template, recipient role, state, created and due times, and never reads or prints phone numbers or message bodies. It is run once, just before stage 3, from the repository root with Enrique's admin profile (pick the cutoff as the current UTC time):
+The tool refuses unless the table is `scheduling-dev`, the region is `us-west-1` and the DynamoDB endpoint is exactly `https://dynamodb.us-west-1.amazonaws.com`, and the caller's AWS account is `214965372605` (the same account check as `scripts/dev/lib.sh`). It prints each candidate's last 8 outbox-ID characters, template, recipient role, state, created and due times, and never reads or prints phone numbers or message bodies. It is run once, just before stage 3, from the repository root with Enrique's admin profile (pick the cutoff as the current UTC time):
 
 ```sh
 export AWS_PROFILE=scheduling-dev-admin
 CUTOFF=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)
-(cd backend && python -m scheduling.tools.retire_outbox --table scheduling-dev \
+(cd backend && .venv/bin/python -m scheduling.tools.retire_outbox --table scheduling-dev \
   --business-id dev-synthetic --cutoff "$CUTOFF")             # dry run, the default; writes nothing
-(cd backend && python -m scheduling.tools.retire_outbox --table scheduling-dev \
+(cd backend && .venv/bin/python -m scheduling.tools.retire_outbox --table scheduling-dev \
   --business-id dev-synthetic --cutoff "$CUTOFF" --execute)   # same CUTOFF value
 ```
 
-Expected today: 3 records (1 `seed_policy`, 2 `block_time`). `--execute` prints a result per record and a summary, then re-queries the due index and exits non-zero if any unsent record before the cutoff remains. Re-running is safe. The same command clears stale records before re-enabling after an outage (section 6).
+Expected today: 3 records (1 `seed_policy`, 2 `block_time`). `--execute` prints a result per record and a summary, then re-queries the due index and exits non-zero if any unsent record before the cutoff remains.
+
+If the output shows `SKIPPED_LEASED` or `CONFLICT`, or the exit code is 1, stop and report it on #91. Do not re-run with a later cutoff.
+
+**Audit trail.** Each retired record stays in the table as `FAILED` with `last_error_code` `RETIRED_BEFORE_LIVE_SMS` and `retired_at`; that retained record is the audit trail. The summary of the run (counts only, no numbers or text) is recorded on #91.
 
 ## 3. What changes in AWS
 
@@ -98,7 +102,7 @@ Results of each stage are recorded on #91 without numbers or message text.
 ## 6. Turning texting off (runbook, verified once in stage 3)
 
 In order of speed; the first two take effect within a minute:
-1. **Stop outbound:** disable the sender trigger. Run `aws lambda list-event-source-mappings --function-name <SmsSenderFunction>`, then `update-event-source-mapping --uuid <id> --no-enabled`. Pending texts stay pending, in the queue and in the DynamoDB outbox, and are sent when the trigger is turned back on. Before turning it back on, clear stale records with the retire tool (dry run first, see "Retire pending outbox records"); purging the queue alone does not stop them.
+1. **Stop outbound:** disable the sender trigger. Run `aws lambda list-event-source-mappings --function-name <SmsSenderFunction>`, then `update-event-source-mapping --uuid <id> --no-enabled`. Pending texts stay pending, in the queue and in the DynamoDB outbox, and are sent when the trigger is turned back on. Before turning it back on, count due records through `OutboxDueIndex` and decide whether to retire any (prerequisite 5); purging the queue alone does not stop them. The retire tool is scoped to the one-off pre-stage-3 retirement; retiring anything after stage 3 is a separate decision on #91.
 2. **Stop inbound:** in the Twilio console, clear the number's incoming-message webhook (or point it back to the previous value). Twilio still answers STOP and HELP itself and blocks later texts to anyone who sent STOP, but the app records no opt-out evidence for STOPs received while the webhook is cleared.
 3. Disable the outbox dispatch rule: `aws events disable-rule`.
 4. **Stop one tester** before they send STOP: mark their profile inactive in the owner app. An inactive profile is refused by the sender (`CLIENT_UNAVAILABLE` for notifications, `CONSENT_REQUIRED` for conversation replies), and the verified-phone lookup returns nothing for it, so their inbound texts are stored as an unknown sender with no command body and are never run as client commands (STOP is still recorded). Pending texts to them fail permanently rather than waiting. Their stored consent evidence is kept.
