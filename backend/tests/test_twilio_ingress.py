@@ -148,6 +148,10 @@ def test_bare_cancel_is_an_opt_out_but_cancel_phrases_reach_scheduling() -> None
     assert store.receipts["SM-cancel"].body is None
     assert store.receipts["SM-cancel"].authorized_for_commands is False
     assert "+14155550101" in store.opted_out
+    service.record_in_person_consent("client-1", "+14155550101", "Synthetic Client",
+                                     "pilot-v1", NOW + timedelta(seconds=1))
+    assert send(client, {**inbound("SM-restart", body="start"), "OptOutType": "START"}) == 204
+    assert "+14155550101" not in store.opted_out
     client, service, store = setup()
     service.record_in_person_consent("client-1", "+14155550101", "Synthetic Client",
                                      "pilot-v1", NOW)
