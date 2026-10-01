@@ -6,10 +6,16 @@
 # value (UsePreviousValue), so NoEcho values such as OwnerNumber stay untouched.
 # Only PermissionsBoundaryArn is passed explicitly, read from the live stack.
 #
+# Schedule guard: before the prompt, every EventBridge rule the change set modifies or replaces
+# has its live state (events:DescribeRule) compared with the state the deploy would set (the
+# *ScheduleState parameter value; rules without a parameter are always DISABLED). The deploy is
+# refused, even with --yes, if a state would change and its parameter was not given with --param.
+#
 # Usage: scripts/dev/deploy-backend.sh [--yes] [--smoke-only] [--dry-run] [--param Key=Value]...
 #                                      [--profile NAME | --no-profile]
 #   --yes        Skip the confirmation prompt (CI only, issue #95 rules).
-#   --param      Supply a parameter that the live stack does not have yet.
+#   --param      Supply a parameter that the live stack does not have yet, or deliberately
+#                change one (for example HoldExpiryScheduleState=ENABLED).
 #   --smoke-only Run only the owner API smoke test (no build, no change set).
 #   --dry-run    Print the commands without calling AWS (read-only identity check only).
 set -euo pipefail
@@ -71,7 +77,7 @@ else
       for kv in "${EXTRA_PARAMS[@]+"${EXTRA_PARAMS[@]}"}"; do
         [[ "${kv%%=*}" == "${key}" ]] && supplied=1
       done
-      [[ "${supplied}" -eq 1 ]] || die "template parameter ${key} is not on the live stack yet; pass --param ${key}=<value>"
+      [[ "${supplied}" -eq 1 ]] || die "template parameter ${key} is not on the live stack yet; pass --param ${key}=<value>. For a schedule state parameter (*ScheduleState) pass the schedule's CURRENT live state (see scripts/dev/status.sh), so the deploy does not change it."
     fi
   done
 fi
@@ -159,6 +165,7 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
   info "+ (all other parameters keep their live values via UsePreviousValue)"
   info "+ take the change set ARN from SAM's output, then aws cloudformation describe-change-set: print action, logical ID, type, replacement"
   info "+ refuse if any parameter not given with --param would differ from the live stack"
+  info "+ schedule guard: for each modified or replaced AWS::Events::Rule, aws events describe-rule (live State) vs the target state; refuse (even with --yes) if it would change without --param <X>ScheduleState"
   info "+ ask y/N (skipped with --yes), then aws cloudformation execute-change-set and wait stack-update-complete"
   info "+ an exit trap deletes the change set unless execution started"
   info "+ smoke test: GET /v1/owner/businesses/<BusinessId>/policy without a token expects 401; CORS preflights"
@@ -225,6 +232,56 @@ if [[ -n "${CHANGED_PARAMS}" ]]; then
   die "refusing: parameters would change that were not given with --param (names only): ${CHANGED_PARAMS}"
 fi
 info "Parameters: unchanged from the live stack."
+
+# Schedule guard: a deploy must never silently change an EventBridge rule's state. Compare each
+# modified or replaced rule's live state with the state this change set would set. The target
+# is the *ScheduleState parameter value in the change set (the live value, or the --param
+# override). Rules without a parameter (outbox dispatch) are hard-coded DISABLED.
+schedule_parameter() {
+  case "$1" in
+    HoldExpiryFunctionSweep) printf 'HoldExpiryScheduleState' ;;
+    NoteRetentionFunctionDaily) printf 'NoteRetentionScheduleState' ;;
+    SmsRetentionFunctionDaily) printf 'SmsRetentionScheduleState' ;;
+    *) printf '' ;;
+  esac
+}
+RULE_ROWS="$(jq -r '.Changes[].ResourceChange
+  | select(.ResourceType == "AWS::Events::Rule" and (.Action == "Modify" or .Replacement == "True" or .Replacement == "Conditional"))
+  | [.LogicalResourceId, (.PhysicalResourceId // "")] | @tsv' <<<"${DESCRIPTION}")"
+if [[ -n "${RULE_ROWS}" ]]; then
+  info ""
+  info "Schedule states (live -> target):"
+  SCHEDULE_REFUSED=""
+  while IFS=$'\t' read -r logical physical; do
+    [[ -n "${logical}" ]] || continue
+    [[ -n "${physical}" ]] || die "refusing: change set gives no physical rule name for ${logical}, so its live state cannot be checked."
+    live_state="$(aws_cli events describe-rule --name "${physical}" --query State --output text)"
+    param="$(schedule_parameter "${logical}")"
+    if [[ -n "${param}" ]]; then
+      target_state="$(jq -r --arg k "${param}" '.Parameters[] | select(.ParameterKey == $k) | .ParameterValue' <<<"${DESCRIPTION}")"
+      [[ -n "${target_state}" ]] || die "refusing: change set has no ${param} value, so the target state of ${logical} is unknown."
+    else
+      target_state="DISABLED"
+    fi
+    note=""
+    if [[ "${live_state}" != "${target_state}" ]]; then
+      explicit=0
+      for kv in "${EXTRA_PARAMS[@]+"${EXTRA_PARAMS[@]}"}"; do
+        [[ -n "${param}" && "${kv%%=*}" == "${param}" ]] && explicit=1
+      done
+      if [[ "${explicit}" -eq 1 ]]; then
+        note="  (state change, requested with --param ${param})"
+      else
+        note="  (REFUSED: state would change without --param ${param:-<none: hard-coded>})"
+        SCHEDULE_REFUSED="${SCHEDULE_REFUSED:+${SCHEDULE_REFUSED}, }${logical}"
+      fi
+    fi
+    info "  ${logical}: ${live_state} -> ${target_state}${note}"
+  done <<<"${RULE_ROWS}"
+  if [[ -n "${SCHEDULE_REFUSED}" ]]; then
+    die "refusing: schedule state would change without an explicit --param: ${SCHEDULE_REFUSED}. Pass the matching *ScheduleState parameter with the state you intend (the live state keeps it). A hard-coded rule (outbox dispatch) cannot be changed by a deploy."
+  fi
+fi
 
 if [[ "${COUNT}" -eq 0 ]]; then
   info "The change set has no changes. It is deleted on exit."

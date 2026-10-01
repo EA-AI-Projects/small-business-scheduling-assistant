@@ -17,13 +17,13 @@ Two terms, once. A **change set** is CloudFormation's preview of what a deployme
 
 ## Decisions Enrique must make (open, not decided here)
 
-Status, 2026-09-30 (issue #43): decisions 1 to 4 and 7 were answered by the owner. The owner then chose a **dedicated member account** for `dev` (replacing the shared account `339713090487`, which held other proof-of-concept projects) and signs in through IAM Identity Center with MFA at every sign-in. Decision 5 was answered: schedules are enabled out of band with `aws events enable-rule`, recorded on #43 (see [section 2.5](#25-technical-question-for-review-enabling-schedules) and [section 5.6](#56-current-state)). Decision 6 is answered by `infra/dev-deploy-roles.yaml` in this repository, which still needs the owner's separate authorization to create. The provisioning, budget, rollback and teardown answers carry over to the new account. Decision 7 is superseded by the owner's 2026-09-30 decision to keep `dev` running ([section 5.1](#51-owner-decision-2026-09-30)).
+Status, 2026-09-30 (issue #43): decisions 1 to 4 and 7 were answered by the owner. The owner then chose a **dedicated member account** for `dev` (replacing the shared account `339713090487`, which held other proof-of-concept projects) and signs in through IAM Identity Center with MFA at every sign-in. Decision 5 was answered: schedules were first enabled out of band with `aws events enable-rule`, recorded on #43, and are now template parameters (#97; see [section 2.5](#25-enabling-schedules-template-parameters-decided-issue-97) and [section 5.6](#56-current-state)). Decision 6 is answered by `infra/dev-deploy-roles.yaml` in this repository, which still needs the owner's separate authorization to create. The provisioning, budget, rollback and teardown answers carry over to the new account. Decision 7 is superseded by the owner's 2026-09-30 decision to keep `dev` running ([section 5.1](#51-owner-decision-2026-09-30)).
 
 1. **Monthly budget amount and alert thresholds.** Approved: $10 per month, see [section 1.6](#16-approved-aws-budget-scoped-to-the-dedicated-account).
 2. **The owner-monitored alarm mailbox** (`AlarmEmail`). No address is recorded in the repository.
 3. **Provisioning authorization.** It covers, each a separate billable or account-changing step: creating the artifact bucket (private, versioned, encrypted) and uploading the build; **creating the change set** (uses credentials, uploads billable artifacts, and leaves the stack in `REVIEW_IN_PROGRESS`); executing the change set; creating the owner test user, the Amplify app, and the budget.
 4. **Whether rollback redeploys are pre-authorized** as part of this checkpoint, or each one needs a fresh yes (see [section 3.1](#31-stop-on-a-failed-safety-gate)).
-5. **How schedules get enabled** (see [section 2.5](#25-technical-question-for-review-enabling-schedules)). The template hard-codes them off and has no parameter to turn one on. Answered: out-of-band `aws events enable-rule`, recorded on #43.
+5. **How schedules get enabled** (see [section 2.5](#25-enabling-schedules-template-parameters-decided-issue-97)). Answered first as out-of-band `aws events enable-rule`, recorded on #43; replaced by per-schedule template parameters in #97.
 6. **The scoped deployment role.** Answered by `infra/dev-deploy-roles.yaml`, the deployer and CloudFormation execution roles for the dedicated account. Creating them still needs the owner's separate authorization; the checkpoint forbids broad administrator credentials for the deployment itself.
 7. **Whether the synthetic dev table is deleted at teardown or kept for inspection.** Answered 2026-09-30: delete the retained synthetic dev table after results are recorded (see [section 3.3](#33-full-teardown-in-order)). Superseded 2026-09-30: `dev` is kept running; the table is deleted only if teardown is later chosen ([section 5.1](#51-owner-decision-2026-09-30)).
 
@@ -282,6 +282,7 @@ Placeholders are inert. A real value for `AlarmEmail` is supplied on the command
 | `AuthorizedSmsRecipients` | `` (empty) | Would be personal data | Empty allowlist at the checkpoint |
 | `SmsSendEnabled` | `disabled` | No | Default |
 | `EnableSmsConversations` | `disabled` | No | Default |
+| `HoldExpiryScheduleState`, `NoteRetentionScheduleState`, `SmsRetentionScheduleState` | The schedule's current live state on the first deploy (`ENABLED` for all three on `dev` today) | No | `ENABLED` or `DISABLED`, default `DISABLED`. Pass explicitly with `--param`; see [section 2.5](#25-enabling-schedules-template-parameters-decided-issue-97). Outbox dispatch has no parameter and stays disabled |
 
 **Order of creation** (every step needs the owner's authorization for that specific action; nothing here is authorized by this document):
 
@@ -344,13 +345,17 @@ This packet uses a **dedicated artifact bucket** that is created by hand first. 
 
 **Scripted since #94.** `scripts/dev/deploy-frontend.sh` runs the steps above (build with the stack outputs, `check:export`, zip, keep the zip in S3, create, upload, start, wait for `SUCCEED`, verify headers), and `scripts/dev/deploy-backend.sh` runs the change-set deploy with a y/N confirmation. See "Deploy to dev with scripts" in `doc/PILOT_INFRASTRUCTURE.md`. The commands in this section remain the reference. The deployer role can run the frontend script only after the owner applies the optional `AmplifyAppId` role-stack change (a reviewed change set); until then use `--profile scheduling-dev-admin`.
 
-### 2.5 Technical question for review: enabling schedules
+### 2.5 Enabling schedules: template parameters (decided, issue #97)
 
-The template hard-codes `Enabled: false` on every schedule and the sender mapping, and has no parameter to change that. The checkpoint asks to "enable that schedule alone" (hold expiry, then retention). Two ways to do that:
-- **Out-of-band toggle** (`aws events enable-rule`). No code change, but it creates drift: a later deploy that leaves the rule's properties unchanged does not reset it, so the state must be recorded and explicitly disabled at stop or teardown.
-- **A reviewed template change** adding per-schedule enable parameters, then a deploy.
+Decision: the state of the hold-expiry, note-retention and SMS-retention schedules is a template parameter (`HoldExpiryScheduleState`, `NoteRetentionScheduleState`, `SmsRetentionScheduleState`; `ENABLED` or `DISABLED`, default `DISABLED`), wired to each rule's `State`. This replaces the out-of-band `aws events enable-rule` toggle for `dev`. The earlier toggle created drift: the first deploy after #93 produced a change set that modified all four rules, which would have reset the three enabled schedules to disabled (nothing was executed).
 
-This packet assumes the out-of-band toggle for the dev checkpoint only, and flags it for review. It is not a business rule, but it changes how the deployed stack differs from the template.
+- **Outbox dispatch and both event source mappings stay hard-coded disabled**, with no parameter. Enabling either stays a separate reviewed change under live-SMS authorization (#91).
+- **Changing a schedule** is a deploy: `scripts/dev/schedules.sh enable|disable <LogicalId>` runs `scripts/dev/deploy-backend.sh --param <X>ScheduleState=<STATE>` (a full deploy, so it ships pending code too) and the owner reviews the change set.
+- **Guard.** Before the prompt, `deploy-backend.sh` compares the live state (`events:DescribeRule`) of every modified or replaced rule with the state the deploy would set, and refuses, even with `--yes`, if a state would change without the matching `--param`. It prints each rule's logical ID with live and target state. A hard-coded rule always targets `DISABLED`.
+- **First deploy after this change.** The new parameters are not on the live stack, so pass each with the schedule's current live state (`scripts/dev/status.sh`): `--param HoldExpiryScheduleState=ENABLED --param NoteRetentionScheduleState=ENABLED --param SmsRetentionScheduleState=ENABLED`. Later deploys keep the live values.
+- **Emergency stop.** `aws events disable-rule` (section 3.1) stays available for a failed gate. It makes the live state differ from the parameter, so the next deploy is refused until the matching parameter is passed explicitly: record the stop and set the parameter to `DISABLED` in a following deploy.
+
+SAM's `Schedule` event accepts `State` (`ENABLED` or `DISABLED`) with an intrinsic function; the translated rule carries `State: !Ref <Parameter>` (checked with the SAM translator).
 
 ## 3. Rollback and data cleanup
 

@@ -65,6 +65,27 @@ Parameters:
       Optional IAM permissions boundary for the Lambda roles this stack creates.
       Required when deploying through the scoped dev execution role
       (infra/dev-deploy-roles.yaml, LambdaRoleBoundaryArn output). Empty keeps the roles unbounded.
+  HoldExpiryScheduleState:
+    Type: String
+    AllowedValues: [ENABLED, DISABLED]
+    Default: DISABLED
+    Description: >-
+      State of the hold-expiry schedule. Pass the current live state on the first deploy so a
+      deploy never changes it silently (scripts/dev/deploy-backend.sh enforces this).
+  NoteRetentionScheduleState:
+    Type: String
+    AllowedValues: [ENABLED, DISABLED]
+    Default: DISABLED
+    Description: >-
+      State of the note-retention schedule. Pass the current live state on the first deploy so a
+      deploy never changes it silently (scripts/dev/deploy-backend.sh enforces this).
+  SmsRetentionScheduleState:
+    Type: String
+    AllowedValues: [ENABLED, DISABLED]
+    Default: DISABLED
+    Description: >-
+      State of the SMS-retention schedule. Pass the current live state on the first deploy so a
+      deploy never changes it silently (scripts/dev/deploy-backend.sh enforces this).
 
 Conditions:
   UsePermissionsBoundary: !Not [!Equals [!Ref PermissionsBoundaryArn, '']]
@@ -463,7 +484,7 @@ Resources:
           Type: Schedule
           Properties:
             Schedule: rate(5 minutes)
-            Enabled: false
+            State: !Ref HoldExpiryScheduleState
   HoldExpiryLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -518,7 +539,7 @@ Resources:
           Type: Schedule
           Properties:
             Schedule: cron(0 9 * * ? *)
-            Enabled: false
+            State: !Ref NoteRetentionScheduleState
   NoteRetentionLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -539,7 +560,7 @@ Resources:
           Type: Schedule
           Properties:
             Schedule: cron(0 10 * * ? *)
-            Enabled: false
+            State: !Ref SmsRetentionScheduleState
   SmsRetentionLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
