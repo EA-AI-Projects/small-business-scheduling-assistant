@@ -138,6 +138,30 @@ def test_stop_help_and_start_never_run_scheduling_command() -> None:
     assert "+14155550101" not in store.opted_out
 
 
+def test_bare_cancel_is_an_opt_out_but_cancel_phrases_reach_scheduling() -> None:
+    client, service, store = setup()
+    service.record_in_person_consent("client-1", "+14155550101", "Synthetic Client",
+                                     "pilot-v1", NOW)
+    # Twilio treats a bare CANCEL as an opt-out, so the app must record it too.
+    assert send(client, inbound("SM-cancel", body="  Cancel ")) == 204
+    assert store.receipts["SM-cancel"].keyword == Keyword.STOP
+    assert store.receipts["SM-cancel"].body is None
+    assert store.receipts["SM-cancel"].authorized_for_commands is False
+    assert "+14155550101" in store.opted_out
+    client, service, store = setup()
+    service.record_in_person_consent("client-1", "+14155550101", "Synthetic Client",
+                                     "pilot-v1", NOW)
+    assert send(client, inbound("SM-visit", body="cancel my visit")) == 204
+    assert store.receipts["SM-visit"].keyword == Keyword.OTHER
+    assert store.receipts["SM-visit"].body == "cancel my visit"
+    assert store.receipts["SM-visit"].authorized_for_commands is True
+    assert send(client, inbound("SM-owner", "+14155559999", "CANCEL ab12cd34")) == 204
+    assert store.receipts["SM-owner"].keyword == Keyword.OTHER
+    assert store.receipts["SM-owner"].body == "CANCEL ab12cd34"
+    assert store.receipts["SM-owner"].authorized_for_commands is True
+    assert not store.opted_out
+
+
 def test_provider_start_tag_is_honoured_only_for_reserved_opt_in_words() -> None:
     client, service, store = setup()
     service.record_in_person_consent("client-1", "+14155550101", "Synthetic Client",

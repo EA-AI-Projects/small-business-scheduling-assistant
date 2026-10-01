@@ -134,6 +134,8 @@ def test_offline_mode_prompts_for_commands_and_private_data_is_rejected() -> Non
 def test_keyword_and_unverified_notifications_are_explained_not_sent() -> None:
     client = local()
     stop = text(client, "client-1", "STOP")
+    cancel = text(client, "client-1", "cancel")  # Twilio opts out a bare CANCEL.
+    assert [message["kind"] for message in cancel] == ["text", "note"]
     assert [message["kind"] for message in stop] == ["text", "note"]
     assert "not simulated" in stop[1]["body"]
     revision = client.get(f"{BASE}/policy", headers=AUTH).json()["calendar_revision"]

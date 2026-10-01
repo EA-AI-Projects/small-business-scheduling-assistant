@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from scheduling.domain.sms_status import SmsDeliveryStatus
 
 PHONE = re.compile(r"^\+[1-9][0-9]{1,14}$")
-STOP_WORDS = frozenset({"STOP", "STOPALL", "UNSUBSCRIBE", "END", "QUIT", "REVOKE", "OPTOUT"})
+STOP_WORDS = frozenset({"STOP", "CANCEL", "STOPALL", "UNSUBSCRIBE", "END", "QUIT", "REVOKE", "OPTOUT"})
 HELP_WORDS = frozenset({"HELP", "INFO"})
 START_WORDS = frozenset({"START", "UNSTOP"})
 
