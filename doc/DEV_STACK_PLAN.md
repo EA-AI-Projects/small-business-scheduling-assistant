@@ -25,7 +25,7 @@ Status, 2026-09-30 (issue #43): decisions 1 to 4 and 7 were answered by the owne
 4. **Whether rollback redeploys are pre-authorized** as part of this checkpoint, or each one needs a fresh yes (see [section 3.1](#31-stop-on-a-failed-safety-gate)).
 5. **How schedules get enabled** (see [section 2.5](#25-enabling-schedules-template-parameters-decided-issue-97)). Answered first as out-of-band `aws events enable-rule`, recorded on #43; replaced by per-schedule template parameters in #97.
 6. **The scoped deployment role.** Answered by `infra/dev-deploy-roles.yaml`, the deployer and CloudFormation execution roles for the dedicated account. Creating them still needs the owner's separate authorization; the checkpoint forbids broad administrator credentials for the deployment itself.
-7. **Whether the synthetic dev table is deleted at teardown or kept for inspection.** Answered 2026-09-30: delete the retained synthetic dev table after results are recorded (see [section 3.3](#33-full-teardown-in-order)). Superseded 2026-09-30: `dev` is kept running; the table is deleted only if teardown is later chosen ([section 5.1](#51-owner-decision-2026-09-30)). This decision covered a synthetic-only table; once tester texting is enabled, see teardown step 2 (issue #91).
+7. **Whether the synthetic dev table is deleted at teardown or kept for inspection.** Answered 2026-09-30: delete the retained synthetic dev table after results are recorded (see [section 3.3](#33-full-teardown-in-order)). Superseded 2026-09-30: `dev` is kept running; the table is deleted only if teardown is later chosen ([section 5.1](#51-owner-decision-2026-09-30)). This decision covered a synthetic-only table; once tester texting starts, full teardown is not chosen while testers' evidence is retained (owner decision 2026-10-01, #91; see teardown step 2).
 
 ## 1. Cost estimate for `us-west-1`
 
@@ -405,7 +405,7 @@ aws cloudformation delete-stack --stack-name scheduling-dev --region us-west-1 \
 ```
 
 1. **Stop everything.** Run the section 3.1 step 1 commands. Confirm no schedule is enabled and no queue message is in flight.
-2. **Decide about the table's contents.** Until tester texting is enabled, confirm it holds only synthetic records. After that, the table holds testers' consent and opt-out evidence, which must be kept four years after the last program text, so deleting or exporting it needs Enrique's separate decision (issue #91):
+2. **Decide about the table's contents.** Until tester texting is enabled, confirm it holds only synthetic records. After that, the table holds testers' consent and opt-out evidence, which must be kept four years after the last program text. Once tester texting starts, `dev` is kept running rather than torn down while that evidence is within its retention period, and deleting or exporting the table is not part of teardown (owner decision 2026-10-01, #91). Stopping texting, schedules, and ingress (step 1) stays allowed. If tester texting has started and that evidence is within its retention period, stop here; do not continue to step 3. The count below is read-only:
 
    ```sh
    aws dynamodb scan --table-name scheduling-dev --select COUNT --region us-west-1
@@ -441,7 +441,7 @@ aws cloudformation delete-stack --stack-name scheduling-dev --region us-west-1 \
    aws cloudformation delete-stack --stack-name scheduling-dev --region us-west-1 \
      --role-arn <CloudFormationExecutionRoleArn> --retain-resources <LogicalResourceId>
    ```
-6. **Delete the retained table, if step 2 said so.** PITR recovery data is removed when PITR is disabled. Disable it first if you want no recovery data left at all, accepting that this is irreversible. The template sets no deletion protection on the table, so it can be deleted directly:
+6. **Delete the retained table, only if step 2 allowed it** (never while tester consent and opt-out evidence is within retention). PITR recovery data is removed when PITR is disabled. Disable it first if you want no recovery data left at all, accepting that this is irreversible. The template sets no deletion protection on the table, so it can be deleted directly:
 
    ```sh
    aws dynamodb update-continuous-backups --table-name scheduling-dev \
@@ -483,7 +483,7 @@ aws cloudformation delete-stack --stack-name scheduling-dev --region us-west-1 \
 11. **SSM parameters** (admin: the deployer role has no SSM access). None existed for this checkpoint; the owner created both by hand on 2026-10-01 (issue #91). Delete them: `aws ssm delete-parameter --name /scheduling/dev/twilio/auth-token --region us-west-1` and `aws ssm delete-parameter --name /scheduling/dev/openai/api-key --region us-west-1`.
 12. **Delete the role stack last**, from the admin session, not through the deployer role: `aws cloudformation delete-stack --stack-name scheduling-dev-roles --region us-west-1`. CloudFormation needs the execution role to delete the dev stack's resources, so deleting the roles earlier strands the dev stack in `DELETE_FAILED`. Then remove the deployer profile from `~/.aws/config` and confirm no role named `deploy-scheduling-dev-*` remains.
 
-**Ultimate cleanup: closing the member account.** Because `dev` has its own account, closing account `214965372605` eventually removes everything in it, including anything a step above missed, but not immediately. It is the owner's decision and is not part of this plan's authorization. Per the AWS Organizations documentation (checked when this was written), a closed member account shows as CLOSED for up to 90 days, can be reopened during that time, and its content persists until it is permanently closed; re-check the current rules before deciding. Do not treat closure as instant data deletion. The budget lives in the member account and is removed with the account's content at permanent closure (step 9); there is no management-account budget. Prefer the step-by-step teardown while the account will be reused for later checkpoints.
+**Ultimate cleanup: closing the member account.** Once tester texting has started, do not close the account while testers' consent and opt-out evidence is within its four-year retention (owner decision 2026-10-01, #91). Because `dev` has its own account, closing account `214965372605` eventually removes everything in it, including anything a step above missed, but not immediately. It is the owner's decision and is not part of this plan's authorization. Per the AWS Organizations documentation (checked when this was written), a closed member account shows as CLOSED for up to 90 days, can be reopened during that time, and its content persists until it is permanently closed; re-check the current rules before deciding. Do not treat closure as instant data deletion. The budget lives in the member account and is removed with the account's content at permanent closure (step 9); there is no management-account budget. Prefer the step-by-step teardown while the account will be reused for later checkpoints.
 
 ### 3.4 Nothing-billable-remains checklist
 
@@ -527,7 +527,7 @@ Source: issue #43 comments. All data is synthetic; no addresses, subject IDs, ap
 
 ### 5.1 Owner decision (2026-09-30)
 
-Keep the synthetic `dev` environment running indefinitely, within the $10/month budget, as a pre-production test environment. The hold-expiry and retention schedules stay enabled. Outbox dispatch and the SMS sender stay disabled until live SMS is separately authorized. The budget alerts remain the guard. Teardown (section 3) remains documented and available but is no longer the planned next step.
+Keep the synthetic `dev` environment running indefinitely, within the $10/month budget, as a pre-production test environment. The hold-expiry and retention schedules stay enabled. Outbox dispatch and the SMS sender stay disabled until live SMS is separately authorized. The budget alerts remain the guard. Teardown (section 3) remains documented and available but is no longer the planned next step. Once tester texting starts, full teardown is not chosen while testers' consent and opt-out evidence is within its four-year retention period (owner decision 2026-10-01, #91); stopping texting, schedules, and ingress stays allowed.
 
 ### 5.2 What was proven
 
