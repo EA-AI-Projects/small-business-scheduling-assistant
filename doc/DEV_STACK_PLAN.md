@@ -276,7 +276,7 @@ Placeholders are inert. A real value for `AlarmEmail` is supplied on the command
 | `EnableSmsIngress` | `false` | No | Default |
 | `TwilioAccountSid` | `placeholder` | No | Default. Not a real SID |
 | `TwilioBusinessNumber` | `+14155550000` | No | Default; fictional 555 number |
-| `OwnerNumber` | `+14155559999` | Sensitive (`NoEcho`) in a real pilot | Default; fictional number |
+| `OwnerNumber` | `+14155550199` | Sensitive (`NoEcho`) in a real pilot | Default; a fictional-range number the sender always refuses (`FICTIONAL_NUMBER`), so the default can never be texted |
 | `TwilioInboundUrl` | `https://example.invalid/webhooks/sms/inbound` | No | Default |
 | `TwilioStatusUrl` | `https://example.invalid/webhooks/sms/status` | No | Default |
 | `SmsSendEnabled` | `disabled` | No | Default |
@@ -393,7 +393,7 @@ Decision 4 (answered 2026-09-30): a redeploy of a previously deployed version of
 
 ### 3.2 Code rollback without a gate failure
 
-Use the same steps 1 and 4 to 5. Roll back code and data independently, and keep database changes backward-compatible per the architecture.
+Use the same steps 1 and 4 to 5. Roll back code and data independently, and keep database changes backward-compatible per the architecture. Rolling back to a commit from before #114 re-declares the `AuthorizedSmsRecipients` parameter, which the live stack no longer has, so it must be supplied once with `deploy-backend.sh --prompt-param AuthorizedSmsRecipients` and an empty value. The old sender with an empty allowlist refuses every send (it fails closed), so this is safe.
 
 ### 3.3 Full teardown in order
 

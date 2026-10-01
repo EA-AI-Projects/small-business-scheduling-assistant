@@ -38,7 +38,7 @@ Parameters:
   OwnerNumber:
     Type: String
     NoEcho: true
-    Default: '+14155559999'
+    Default: '+14155550199'
   TwilioInboundUrl:
     Type: String
     Default: https://example.invalid/webhooks/sms/inbound

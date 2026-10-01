@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from scheduling.adapters.sms_twilio import TwilioSmsSender
+from scheduling.adapters.sms_twilio import FICTIONAL_NUMBER, TwilioSmsSender
 from scheduling.domain.appointments import Appointment
 from scheduling.domain.calendar import CalendarStatus
 from scheduling.domain.client_records import ClientProfile, HomeSize
@@ -89,7 +89,7 @@ def record(recipient: str = "client", template: str = "hold-pending",
 def setup() -> tuple[TwilioSmsSender, Messages, Consent, Records]:
     messages, consent, records = Messages(), Consent(), Records()
     sender = TwilioSmsSender(messages, records, consent, "pilot", "+14155550000",
-                             "+14155559999")
+                             "+15005550009")
     return sender, messages, consent, records
 
 
@@ -112,7 +112,7 @@ def test_client_destination_is_from_verified_profile_with_consent() -> None:
 def test_callback_identifies_committed_outbox_intent() -> None:
     messages, consent, records = Messages(), Consent(), Records()
     sender = TwilioSmsSender(
-        messages, records, consent, "pilot", "+14155550000", "+14155559999",
+        messages, records, consent, "pilot", "+14155550000", "+15005550009",
         status_callback="https://sms.example.test/webhooks/sms/status",
     )
     sender.deliver(record())
@@ -128,7 +128,7 @@ def test_unknown_or_stale_intent_never_sends() -> None:
             sender.deliver(intent)
     assert messages.calls == []
     assert sender.deliver(record("owner", "hold-request")) == "SM-synthetic"
-    assert messages.calls[0]["to"] == "+14155559999"
+    assert messages.calls[0]["to"] == "+15005550009"
 
 
 def test_consented_verified_client_is_sent_to_without_any_allowlist() -> None:
@@ -154,12 +154,27 @@ def test_fictional_numbers_never_reach_twilio(number: str) -> None:
     assert messages.calls == []
 
 
-def test_numbers_just_outside_the_fictional_range_are_sent() -> None:
-    for number in ("+15005550200", "+15005550099"):
-        sender, messages, _, records = setup()
-        records.profile = replace(records.profile, phone_e164=number)
-        assert sender.deliver(record()) == "SM-synthetic"
-        assert messages.calls[0]["to"] == number
+@pytest.mark.parametrize(("number", "fictional"), [
+    ("+14155550100", True), ("+14155550199", True), ("+12125550150", True),
+    ("+14155550099", False), ("+14155550200", False), ("+14155551100", False),
+    ("+15005550006", False), ("+4155550150", False), ("+141555501500", False),
+])
+def test_fictional_pattern_boundaries(number: str, fictional: bool) -> None:
+    assert bool(FICTIONAL_NUMBER.fullmatch(number)) is fictional
+
+
+def test_fictional_client_number_on_conversation_reply_is_refused() -> None:
+    sender, messages, consent, records = setup()
+    records.profile = replace(records.profile, phone_e164="+14155550150")
+    consent.reply_receipt = InboundReceipt(
+        "pilot", "SM-in", "+14155550150", "+14155550000",
+        "Book 2026-10-01", NOW, SenderRole.CLIENT, "client-1", Keyword.OTHER, True)
+    consent.reply_text = "Please send one exact date and time."
+    reply = OutboxRecord("pilot", "sms-reply#SM-in", "SM-in", "client",
+                         "conversation-reply", 0, DeliveryState.SENDING, NOW, NOW, NOW)
+    with pytest.raises(PermanentDeliveryFailure, match="FICTIONAL_NUMBER"):
+        sender.deliver(reply)
+    assert messages.calls == []
 
 
 def test_fictional_owner_number_is_refused() -> None:
@@ -225,3 +240,21 @@ def test_block_notice_ignores_appointment_version_like_before() -> None:
     assert messages.calls[0]["body"].startswith("Owner calendar updated (block_time)")
     with pytest.raises(PermanentDeliveryFailure, match="TEMPLATE_RECIPIENT_MISMATCH"):
         sender.deliver(record("client", "block_time", version=2))
+
+
+def test_template_phone_defaults_cannot_be_texted() -> None:
+    # OwnerNumber is a recipient, so its default must be in the refused fictional range.
+    # TwilioBusinessNumber is a From number, not a recipient; its default is a 555-0000 placeholder.
+    import re
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parents[2] / "template.yaml").read_text()
+
+    def default(name: str) -> str:
+        match = re.search(rf"^  {name}:\n(?:    .*\n)*?    Default: '([^']*)'", text, re.MULTILINE)
+        assert match is not None
+        return match.group(1)
+
+    assert FICTIONAL_NUMBER.fullmatch(default("OwnerNumber"))
+    assert default("TwilioBusinessNumber") == "+14155550000"
+    assert set(re.findall(r"'(\+\d{8,15})'", text)) == {"+14155550199", "+14155550000"}

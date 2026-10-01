@@ -87,7 +87,7 @@ def signed(values: dict[str, str]) -> dict[str, str]:
 def test_consent_marks_phone_verified_and_client_can_text() -> None:
     repository, _, store = world()
     service = SmsIngressService(store, repository, "pilot", "+14155550000",  # type: ignore[arg-type]
-                                "+14155559999")
+                                "+15005550009")
     api = TestClient(create_twilio_ingress_app(service, TOKEN, URL, lambda: NOW))
     values = {"MessageSid": "SM-1", "From": PHONE, "To": "+14155550000", "Body": "Tuesday at 9"}
 
@@ -135,7 +135,7 @@ def test_sender_refuses_until_consent_then_sends() -> None:
     repository, _, store = world()
     messages = Messages()
     sender = TwilioSmsSender(messages, Records(repository), store,  # type: ignore[arg-type]
-                             "pilot", "+14155550000", "+14155559999")
+                             "pilot", "+14155550000", "+15005550009")
     intent = OutboxRecord("pilot", "outbox-1", "visit-12345678", "client", "hold-pending", 1,
                           DeliveryState.SENDING, NOW, NOW, NOW)
     with pytest.raises(PermanentDeliveryFailure, match="CONSENT_REQUIRED"):
