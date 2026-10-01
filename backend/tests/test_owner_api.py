@@ -170,3 +170,26 @@ def test_owner_policy_edit_uses_persisted_version_and_revision() -> None:
     }}, headers=headers("different"))
     assert stale.status_code == 409
     assert repository.read_revision("pilot") == 2
+
+
+def test_consent_route_returns_409_when_the_profile_changed() -> None:
+    from scheduling.domain.client_records import RecordConflict
+
+    repository = InMemoryCalendarRepository()
+    ClientRecordService(repository).save_profile(
+        "pilot", "client-1", "Synthetic Client", "+14155550101", "123 Test Street",
+        HomeSize.SMALL, 60, True, 0, 180, NOW,
+    )
+
+    class ConflictStore:
+        def put_consent_verifying_phone(self, evidence: ConsentEvidence, verified: object) -> None:
+            raise RecordConflict("Client profile changed; nothing was recorded")
+
+    api = TestClient(create_owner_app(repository, lambda token: OwnerPrincipal("owner-1", "pilot")
+                                      if token == "verified-owner" else None,  # type: ignore[arg-type]
+                                      lambda: NOW, sms_store=ConflictStore()))  # type: ignore[arg-type]
+    response = api.post(f"{BASE}/clients/client-1/sms-consent", headers=headers(), json={
+        "phone_e164": "+14155550101", "participant_name": "Synthetic Client",
+        "script_version": "pilot-v1", "clear_yes": True})
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "RECORD_CONFLICT"

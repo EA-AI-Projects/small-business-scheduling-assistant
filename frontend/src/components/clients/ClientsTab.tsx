@@ -13,6 +13,7 @@ import { ProfileForm } from "./ProfileForm";
 export function ClientsTab() {
   const { data, stamp, selectedClientId, selectClient, selectionVersion } = useOwner();
   const [blank, setBlank] = useState(0);
+  const [phoneDraft, setPhoneDraft] = useState<{ key: string; phone: string } | null>(null);
   const [onboardingId, setOnboardingId] = useState<string | null>(null);
   const client = data.clients.find((item) => item.client_id === selectedClientId);
   const clientId = client?.client_id ?? null;
@@ -20,6 +21,9 @@ export function ClientsTab() {
     && client.phone_verified_at === null;
   // Remount the profile form with current values after each refresh, as the old page did.
   const profileKey = client ? `client:${client.client_id}:${stamp.version}` : `new:${blank}`;
+
+  const phoneUnsaved = client !== undefined && phoneDraft?.key === profileKey
+    && phoneDraft.phone.trim() !== client.phone_e164;
 
   return (
     <>
@@ -34,8 +38,9 @@ export function ClientsTab() {
           <DeliveryFailures />
         </div>
         <div className="stack">
-          <ProfileForm key={profileKey} client={client} onCreated={setOnboardingId} />
-          <ConsentForm key={`consent:${profileKey}`} client={client} onboarding={onboarding}
+          <ProfileForm key={profileKey} client={client} onCreated={setOnboardingId}
+            onPhoneDraft={(phone) => setPhoneDraft({ key: profileKey, phone })} />
+          <ConsentForm key={`consent:${profileKey}`} client={client} onboarding={onboarding} phoneUnsaved={phoneUnsaved}
             onSkip={() => setOnboardingId(null)} />
           <section className="card">
             <h3>Notes</h3>

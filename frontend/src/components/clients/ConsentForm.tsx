@@ -17,10 +17,12 @@ const CONSENT_PAGE = "https://ea-ai-projects.github.io/small-business-scheduling
  * Record that a client clearly said yes in person to receiving texts. No text is sent.
  * Remounted by key when the selection or the client's data changes.
  */
-export function ConsentForm({ client, onboarding = false, onSkip }: {
+export function ConsentForm({ client, onboarding = false, phoneUnsaved = false, onSkip }: {
   client: ClientProfile | undefined;
   /** True right after the owner created this client: show the step as part of onboarding. */
   onboarding?: boolean;
+  /** The profile form's phone differs from the saved one; consent must wait for a save. */
+  phoneUnsaved?: boolean;
   onSkip?: () => void;
 }) {
   const { change, notify } = useOwner();
@@ -29,6 +31,7 @@ export function ConsentForm({ client, onboarding = false, onSkip }: {
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!client) { notify("Select a client first", true); return; }
+    if (phoneUnsaved) { notify("Save the profile first", true); return; }
     if (!clearYes) { notify("Record consent only after they clearly said yes", true); return; }
     const body: InPersonConsentBody = {
       phone_e164: client.phone_e164,
@@ -46,8 +49,8 @@ export function ConsentForm({ client, onboarding = false, onSkip }: {
       {onboarding && (
         <p className="hint" role="status">
           Last step for this new client. Recording consent also marks their phone verified, which
-          lets them text. You can skip it now; until it is recorded, this client cannot text.{" "}
-          <button type="button" onClick={onSkip}>Skip for now</button>
+          lets them text. You can record it later from this screen; until then, this client cannot text.{" "}
+          <button type="button" onClick={onSkip}>Record later</button>
         </p>
       )}
       <p className="hint">
@@ -60,12 +63,20 @@ export function ConsentForm({ client, onboarding = false, onSkip }: {
           value={client?.name ?? ""} /></label>
         <p className="hint">In dev this is the profile&apos;s placeholder name; record the real name
           only in your private consent record.</p>
-        <p className="hint">Read the number back to them before recording consent.</p>
+        <label>Saved phone number <input name="saved_phone" readOnly
+          value={client?.phone_e164 ?? ""} /></label>
+        <p className="hint">{`Read this number back to them: ${client?.phone_e164 ?? ""}`}</p>
+        {phoneUnsaved && (
+          <p className="hint" role="alert">
+            The phone has unsaved changes. Save the profile first; consent is recorded for the
+            saved number.
+          </p>
+        )}
         <p className="hint">Record this right after they say yes; the time saved is the consent time.</p>
         <p>{`Script version ${CONSENT_SCRIPT_VERSION} (${CONSENT_SCRIPT_DATE})`}</p>
         <label className="inline"><input name="clear_yes" type="checkbox" required
           checked={clearYes} onChange={(event) => setClearYes(event.target.checked)} /> They clearly said yes</label>
-        <button className="primary" type="submit" disabled={!client}>Record consent</button>
+        <button className="primary" type="submit" disabled={!client || phoneUnsaved}>Record consent</button>
       </form>
     </section>
   );
