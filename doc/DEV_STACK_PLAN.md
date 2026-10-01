@@ -17,15 +17,15 @@ Two terms, once. A **change set** is CloudFormation's preview of what a deployme
 
 ## Decisions Enrique must make (open, not decided here)
 
-Status, 2026-09-30 (issue #43): decisions 1 to 4 and 7 were answered by the owner. The owner then chose a **dedicated member account** for `dev` (replacing the shared account `339713090487`, which held other proof-of-concept projects) and signs in through IAM Identity Center with MFA at every sign-in. Decision 5 is still open. Decision 6 is answered by `infra/dev-deploy-roles.yaml` in this repository, which still needs the owner's separate authorization to create. The provisioning, budget, rollback and teardown answers carry over to the new account.
+Status, 2026-09-30 (issue #43): decisions 1 to 4 and 7 were answered by the owner. The owner then chose a **dedicated member account** for `dev` (replacing the shared account `339713090487`, which held other proof-of-concept projects) and signs in through IAM Identity Center with MFA at every sign-in. Decision 5 was answered: schedules are enabled out of band with `aws events enable-rule`, recorded on #43 (see [section 2.5](#25-technical-question-for-review-enabling-schedules) and [section 5.6](#56-current-state)). Decision 6 is answered by `infra/dev-deploy-roles.yaml` in this repository, which still needs the owner's separate authorization to create. The provisioning, budget, rollback and teardown answers carry over to the new account. Decision 7 is superseded by the owner's 2026-09-30 decision to keep `dev` running ([section 5.1](#51-owner-decision-2026-09-30)).
 
 1. **Monthly budget amount and alert thresholds.** Approved: $10 per month, see [section 1.6](#16-approved-aws-budget-scoped-to-the-dedicated-account).
 2. **The owner-monitored alarm mailbox** (`AlarmEmail`). No address is recorded in the repository.
 3. **Provisioning authorization.** It covers, each a separate billable or account-changing step: creating the artifact bucket (private, versioned, encrypted) and uploading the build; **creating the change set** (uses credentials, uploads billable artifacts, and leaves the stack in `REVIEW_IN_PROGRESS`); executing the change set; creating the owner test user, the Amplify app, and the budget.
 4. **Whether rollback redeploys are pre-authorized** as part of this checkpoint, or each one needs a fresh yes (see [section 3.1](#31-stop-on-a-failed-safety-gate)).
-5. **How schedules get enabled** (see [section 2.5](#25-technical-question-for-review-enabling-schedules)). The template hard-codes them off and has no parameter to turn one on.
+5. **How schedules get enabled** (see [section 2.5](#25-technical-question-for-review-enabling-schedules)). The template hard-codes them off and has no parameter to turn one on. Answered: out-of-band `aws events enable-rule`, recorded on #43.
 6. **The scoped deployment role.** Answered by `infra/dev-deploy-roles.yaml`, the deployer and CloudFormation execution roles for the dedicated account. Creating them still needs the owner's separate authorization; the checkpoint forbids broad administrator credentials for the deployment itself.
-7. **Whether the synthetic dev table is deleted at teardown or kept for inspection.** Answered 2026-09-30: delete the retained synthetic dev table after results are recorded (see [section 3.3](#33-full-teardown-in-order)).
+7. **Whether the synthetic dev table is deleted at teardown or kept for inspection.** Answered 2026-09-30: delete the retained synthetic dev table after results are recorded (see [section 3.3](#33-full-teardown-in-order)). Superseded 2026-09-30: `dev` is kept running; the table is deleted only if teardown is later chosen ([section 5.1](#51-owner-decision-2026-09-30)).
 
 ## 1. Cost estimate for `us-west-1`
 
@@ -509,8 +509,10 @@ Run after teardown. Each check should show nothing for `scheduling-dev`. The dep
 
 ## 4. What this packet does not do
 
-- It does not deploy, and it did not contact the AWS account. The resource list came from an offline translator run and the prices came from anonymous public HTTP requests.
-- It does not record the fake SQS consumer and DLQ harness result. The harness is `backend/tests/test_dev_outbox_queue.py` (issue #87); its deployed run is recorded in [section 5](#5-checkpoint-results-2026-09-30). Outbox dispatch stays disabled until live SMS is separately authorized.
+As written for the original packet on 2026-09-29:
+
+- When written, it did not deploy and did not contact the AWS account. The resource list came from an offline translator run and the prices came from anonymous public HTTP requests.
+- The fake SQS consumer and DLQ harness is `backend/tests/test_dev_outbox_queue.py` (issue #87). Its deployed run is recorded in [section 5.2](#52-what-was-proven). Outbox dispatch stays disabled until live SMS is separately authorized.
 - It does not include Twilio, OpenAI, or custom-domain costs.
 
 ## 5. Checkpoint results (2026-09-30)
@@ -532,14 +534,14 @@ Keep the synthetic `dev` environment running indefinitely, within the $10/month 
 | Transaction races | Against the deployed table, 3 runs, 15 of 15 passed (#80/#81). |
 | Due GSIs and IAM | Verified. |
 | Hold-expiry proof | Report of 4 examined, 3 expired, 1 stale (#84/#85). |
-| Scheduled hold-expiry runs | 0 errors; about 180 ms warm and 988 ms cold; 92 MB. |
-| Retention proof | 7 of 7 passed. Notes deleted 1; SMS bodies 1 and evidence 2. Owner partition unchanged at 11 items (#86/#88). |
+| Scheduled hold-expiry runs | 0 errors across 2 observed scheduled runs (22:37Z to 22:45Z); about 180 ms warm and 988 ms cold; 92 MB. |
+| Retention proof | 7 of 7 passed. Notes deleted 1; SMS bodies 1 and evidence 2. Legally held and unexpired notes, SMS bodies and evidence were kept. Owner partition unchanged at 11 items (#86/#88). |
 | Outbox SQS/DLQ gate | 9 of 9 passed; the real sender was never invoked (#87/#89). |
 
 ### 5.3 Deviations from the original plan
 
-- A dedicated member account instead of the shared account (#17 superseded). The budget lives in the member account.
-- Three first-run execution-role permission fixes: the SAM transform (#73), stage tagging and mapping reads (#74), and a failed rollback recovered with a verified `--retain-resources` (#75).
+- A dedicated member account instead of the shared account (#17 superseded for `dev`). The budget lives in the member account.
+- Two first-run execution-role permission fixes: the SAM transform (#73) and stage tagging and mapping reads (#74). The failed rollback was recovered without widening the role, by deleting with `--retain-resources` for the one mapping that did not exist. That case is documented in section 3.3 step 5 (#75).
 - The Amplify manual deploy (#76).
 - App fixes found in testing: the policy seed UI (#77/#78) and hosted UI logout on 401 (#82/#83).
 - The Identity Center interactive session is 8 hours, not the recommended 1 to 4.
@@ -547,12 +549,12 @@ Keep the synthetic `dev` environment running indefinitely, within the $10/month 
 
 ### 5.4 Running cost observations
 
-Budget actual spend is $0.00. Cost Explorer daily cost for 2026-09-29 and 2026-09-30 is $0.00 (estimated). Cost data lags; the next check is on the first full billing day. For comparison, the estimate in section 1.5 is about $1 per month idle and about $3.20 in the checkpoint worst case.
+Read-only reading at 2026-10-01T00:27Z (posted on #43): the AWS Budget `scheduling-dev` shows actual spend of $0.0 USD for the month, and Cost Explorer `UnblendedCost` for 2026-09-30 (the member account's first day) is $0 (estimated). Cost data lags by hours to a day, so this is not a steady-state reading. Expected steady state with these schedules enabled: between $1.14 (scenario (a), idle) and $3.20 (scenario (c), all schedules all month) per month at list price, or $0.11 to $0.75 after always-free allowances (section 1.5).
 
 ### 5.5 Rollback and cleanup evidence
 
 - The failed first creation recovery is the rollback evidence: the stack was deleted via the execution role, the retained empty table was deleted with PITR off and 0 backups, and a fresh change set followed.
-- Test users were deleted.
+- The second synthetic test user was deleted after each different-subject check. The owner test user remains.
 - Every harness run's leftover sweep returned 0.
 
 ### 5.6 Current state
