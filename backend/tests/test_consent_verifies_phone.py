@@ -29,7 +29,8 @@ from scheduling.domain.sms_ingress import (
 from scheduling.twilio_webhooks import create_twilio_ingress_app
 
 NOW = datetime(2026, 9, 28, 17, tzinfo=UTC)
-PHONE = "+14155552671"
+# Twilio magic test number: belongs to no person and is not in the refused fictional range.
+PHONE = "+15005550006"
 URL = "https://sms.example.test/webhooks/sms/inbound"
 TOKEN = "synthetic-auth-token"
 

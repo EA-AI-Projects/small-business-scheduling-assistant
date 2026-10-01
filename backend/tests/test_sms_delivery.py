@@ -18,6 +18,8 @@ from scheduling.domain.outbox import (
 )
 from scheduling.domain.sms_ingress import ConsentEvidence, InboundReceipt, Keyword, SenderRole
 
+# Sendable numbers are Twilio magic test numbers (+1500555xxxx): they belong to no person and are not
+# in the fictional 555-0100 to 555-0199 range the sender refuses.
 NOW = datetime(2026, 9, 28, 17, tzinfo=UTC)
 
 
@@ -25,7 +27,7 @@ class Records:
     def __init__(self) -> None:
         self.appointment = Appointment("visit-12345678", "pilot", "client-1", NOW, NOW.replace(hour=18),
                                        CalendarStatus.PENDING_APPROVAL, NOW.replace(hour=19), 60, 0, 1)
-        self.profile = ClientProfile("pilot", "client-1", "Synthetic Client", "+14155552671",
+        self.profile = ClientProfile("pilot", "client-1", "Synthetic Client", "+15005550006",
                                      "123 Test Street", HomeSize.SMALL, 60, True, 1,
                                      NOW, NOW, NOW)
 
@@ -153,7 +155,7 @@ def test_fictional_numbers_never_reach_twilio(number: str) -> None:
 
 
 def test_numbers_just_outside_the_fictional_range_are_sent() -> None:
-    for number in ("+14155550200", "+14155550099"):
+    for number in ("+15005550200", "+15005550099"):
         sender, messages, _, records = setup()
         records.profile = replace(records.profile, phone_e164=number)
         assert sender.deliver(record()) == "SM-synthetic"
@@ -186,13 +188,13 @@ def test_owner_stop_blocks_owner_notifications() -> None:
 def test_conversation_reply_uses_persisted_verified_receipt_and_current_consent() -> None:
     sender, messages, consent, _ = setup()
     consent.reply_receipt = InboundReceipt(
-        "pilot", "SM-in", "+14155552671", "+14155550000",
+        "pilot", "SM-in", "+15005550006", "+14155550000",
         "Book 2026-10-01", NOW, SenderRole.CLIENT, "client-1", Keyword.OTHER, True)
     consent.reply_text = "Please send one exact date and time."
     reply = OutboxRecord("pilot", "sms-reply#SM-in", "SM-in", "client",
                          "conversation-reply", 0, DeliveryState.SENDING, NOW, NOW, NOW)
     assert sender.deliver(reply) == "SM-synthetic"
-    assert messages.calls[0]["to"] == "+14155552671"
+    assert messages.calls[0]["to"] == "+15005550006"
     assert messages.calls[0]["body"] == consent.reply_text
     consent.opted_out = True
     with pytest.raises(PermanentDeliveryFailure, match="OPTED_OUT"):
@@ -207,7 +209,7 @@ def test_conversation_reply_uses_persisted_verified_receipt_and_current_consent(
 def test_conversation_reply_rejects_missing_body_or_forged_destination() -> None:
     sender, messages, consent, _ = setup()
     consent.reply_receipt = InboundReceipt(
-        "pilot", "SM-in", "+14155552671", "+14155550000",
+        "pilot", "SM-in", "+15005550006", "+14155550000",
         "Book 2026-10-01", NOW, SenderRole.CLIENT, "client-1", Keyword.OTHER, True)
     consent.reply_text = "Safe clarification"
     reply = OutboxRecord("pilot", "sms-reply#SM-in", "SM-in", "owner",
