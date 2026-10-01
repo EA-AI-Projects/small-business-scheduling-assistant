@@ -25,10 +25,9 @@ export function ConsentForm({ client }: { client: ClientProfile | undefined }) {
     event.preventDefault();
     if (!client) { notify("Select a client first", true); return; }
     if (!clearYes) { notify("Record consent only after they clearly said yes", true); return; }
-    const form = new FormData(event.currentTarget);
     const body: InPersonConsentBody = {
       phone_e164: client.phone_e164,
-      participant_name: String(form.get("participant_name") ?? "").trim(),
+      participant_name: client.name,
       script_version: CONSENT_SCRIPT_VERSION,
       clear_yes: true,
     };
@@ -45,8 +44,11 @@ export function ConsentForm({ client }: { client: ClientProfile | undefined }) {
         consent record is kept by the owner outside this app.
       </p>
       <form className="form-stack" aria-label="Record in-person text consent" onSubmit={submit}>
-        <label>Participant name <input name="participant_name" required maxLength={200}
-          defaultValue={client?.name ?? ""} /></label>
+        <label>Participant name <input name="participant_name" readOnly
+          value={client?.name ?? ""} /></label>
+        <p className="hint">In dev this is the profile&apos;s placeholder name; record the real name
+          only in your private consent record.</p>
+        <p className="hint">Record this right after they say yes; the time saved is the consent time.</p>
         <p>{`Script version ${CONSENT_SCRIPT_VERSION} (${CONSENT_SCRIPT_DATE})`}</p>
         <label className="inline"><input name="clear_yes" type="checkbox" required
           checked={clearYes} onChange={(event) => setClearYes(event.target.checked)} /> They clearly said yes</label>

@@ -31,6 +31,9 @@ describe("in-person text consent", () => {
     setup(() => undefined);
     await selectAvery();
     expect(within(consent()).getByLabelText("Participant name")).toHaveValue("Avery Example");
+    expect(within(consent()).getByLabelText("Participant name")).toHaveAttribute("readonly");
+    expect(screen.getByText(/record the real name only in your private consent record/)).toBeInTheDocument();
+    expect(screen.getByText(/the time saved is the consent time/)).toBeInTheDocument();
     expect(screen.getByText("Script version 1 (September 27, 2026)")).toBeInTheDocument();
     expect(screen.getByText(/full private consent record is kept by the owner outside this app/))
       .toBeInTheDocument();
@@ -50,14 +53,13 @@ describe("in-person text consent", () => {
       method === "POST" && path === "/clients/client-1/sms-consent" ? { status: 200, body: {} } : undefined);
     await selectAvery();
     const form = within(consent());
-    await userEvent.clear(form.getByLabelText("Participant name"));
-    await userEvent.type(form.getByLabelText("Participant name"), "Synthetic Client");
+    expect(form.getByLabelText("Participant name")).toHaveAttribute("readonly");
     await userEvent.click(form.getByLabelText("They clearly said yes"));
     await userEvent.click(screen.getByRole("button", { name: "Record consent" }));
     await waitFor(() => expect(notify).toHaveBeenCalledWith("Text consent recorded", undefined));
     expect(calls.find((call) => call.method === "POST")).toEqual({ method: "POST",
       path: "/clients/client-1/sms-consent", body: { phone_e164: "+14155550101",
-        participant_name: "Synthetic Client", script_version: "1", clear_yes: true } });
+        participant_name: "Avery Example", script_version: "1", clear_yes: true } });
   });
 
   it("shows the server's reason when consent is rejected", async () => {
