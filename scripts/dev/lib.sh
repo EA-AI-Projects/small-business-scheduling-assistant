@@ -230,3 +230,57 @@ stack_resources() {
   aws_cli cloudformation list-stack-resources --stack-name "${STACK_NAME}" --output json |
     jq -r --arg type "$1" '.StackResourceSummaries[] | select(.ResourceType == $type) | [.LogicalResourceId, .PhysicalResourceId] | @tsv'
 }
+
+# Parameters that hold personal or account-identifying values. They are only ever set with a
+# hidden prompt (deploy-backend.sh --prompt-param) and never printed.
+PRIVATE_PARAMS=(OwnerNumber AuthorizedSmsRecipients TwilioAccountSid TwilioBusinessNumber)
+PRIVATE_FORMAT_HINT=""
+
+is_private_param() {
+  local k
+  for k in "${PRIVATE_PARAMS[@]}"; do
+    [[ "$1" == "${k}" ]] && return 0
+  done
+  return 1
+}
+
+# valid_private_value <key> <value>: format check only; never prints the value. Sets
+# PRIVATE_FORMAT_HINT to the expected format (no value in it).
+valid_private_value() {
+  local key="$1" value="$2" item
+  local e164='^\+[1-9][0-9]{7,14}$'
+  local sid='^AC[0-9a-fA-F]{32}$'
+  case "${key}" in
+    OwnerNumber | TwilioBusinessNumber)
+      PRIVATE_FORMAT_HINT="expected E.164: a plus sign and 8 to 15 digits, no spaces"
+      [[ "${value}" =~ ${e164} ]]
+      ;;
+    AuthorizedSmsRecipients)
+      PRIVATE_FORMAT_HINT="expected comma-separated E.164 numbers without spaces, or empty for no recipients"
+      [[ -n "${value}" ]] || return 0
+      [[ "${value}" != *, && "${value}" != ,* && "${value}" != *,,* ]] || return 1
+      local IFS=','
+      # shellcheck disable=SC2086
+      set -- ${value}
+      for item in "$@"; do
+        [[ "${item}" =~ ${e164} ]] || return 1
+      done
+      ;;
+    TwilioAccountSid)
+      PRIVATE_FORMAT_HINT="expected AC followed by 32 hexadecimal characters"
+      [[ "${value}" =~ ${sid} ]]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# sender_mapping_state <uuid>: the live mapping State folded to ENABLED or DISABLED.
+sender_mapping_state() {
+  local s
+  s="$(aws_cli lambda get-event-source-mapping --uuid "$1" --query State --output text)"
+  case "${s}" in
+    Enabled | Enabling) printf 'ENABLED' ;;
+    Disabled | Disabling) printf 'DISABLED' ;;
+    *) die "refusing: the sender mapping is in state ${s}; wait for it to settle." ;;
+  esac
+}
