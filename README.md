@@ -79,7 +79,7 @@ The long-lived synthetic `dev` environment (#43) has helper scripts in [`scripts
 scripts/dev/deploy-backend.sh     # sam build, change set, readable summary, schedule-state guard, y/N, execute, smoke test
 scripts/dev/deploy-frontend.sh    # build with stack outputs, keep the zip in S3, Amplify deploy, header check
 scripts/dev/status.sh             # read-only: stack, schedules, deployment, alarms, budget
-scripts/dev/schedules.sh enable|disable <LogicalId>   # sets the schedule's template parameter via deploy-backend.sh; never outbox dispatch
+scripts/dev/schedules.sh enable|disable <LogicalId>   # full deploy of this checkout (prints commit; --allow-dirty for a dirty tree) that sets the schedule's parameter; never outbox dispatch. Emergency stop: disable-rule, DEV_STACK_PLAN section 3.1
 ```
 
 No parameter value is read into the repository or printed. Details and the IAM grant are in [Deploy to dev with scripts](doc/PILOT_INFRASTRUCTURE.md#deploy-to-dev-with-scripts).

@@ -11,8 +11,13 @@
 # Only the three listed logical IDs are accepted. Outbox dispatch (OutboxDispatch*) is refused:
 # it stays off until live SMS is separately authorized.
 #
-# Usage: scripts/dev/schedules.sh enable|disable <LogicalId> [--dry-run]
+# This ships the CURRENT CHECKOUT. It prints the commit and whether the tree is dirty, and refuses
+# a dirty tree unless --allow-dirty is given. To stop a schedule in an emergency, do not use this
+# script: use the aws events disable-rule procedure in doc/DEV_STACK_PLAN.md section 3.1.
+#
+# Usage: scripts/dev/schedules.sh enable|disable <LogicalId> [--allow-dirty] [--dry-run]
 #                                 [--profile NAME | --no-profile]
+#   --allow-dirty  Deploy a dirty working tree (uncommitted changes ship too).
 #   Logical IDs: HoldExpiryFunctionSweep, NoteRetentionFunctionDaily,
 #                SmsRetentionFunctionDaily
 set -euo pipefail
@@ -25,7 +30,12 @@ usage() {
 }
 
 parse_common "$@"
-set -- "${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}"
+ALLOW_DIRTY=0
+ARGS=()
+for arg in "${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}"; do
+  if [[ "${arg}" == "--allow-dirty" ]]; then ALLOW_DIRTY=1; else ARGS+=("${arg}"); fi
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   usage
   exit 0
@@ -63,9 +73,19 @@ esac
 WANT="ENABLED"
 [[ "${ACTION}" == "enable" ]] || WANT="DISABLED"
 
-need_tool aws jq
+need_tool aws jq git
 pin_region
 check_identity
+
+cd "${REPO_ROOT}"
+COMMIT="$(git rev-parse HEAD)"
+info "Full deploy of the current checkout: commit ${COMMIT}."
+if [[ -n "$(git status --porcelain)" ]]; then
+  info "Working tree is DIRTY: uncommitted changes would ship too."
+  [[ "${ALLOW_DIRTY}" -eq 1 || "${DRY_RUN}" -eq 1 ]] || die "the working tree is dirty; commit or stash, or pass --allow-dirty."
+else
+  info "Working tree is clean."
+fi
 
 DEPLOY=("$(dirname "${BASH_SOURCE[0]}")/deploy-backend.sh" --param "${PARAM}=${WANT}")
 [[ "${DRY_RUN}" -ne 1 ]] || DEPLOY+=(--dry-run)
@@ -86,9 +106,19 @@ rule_state() {
   aws_cli events describe-rule --name "${RULE_NAME}" --query State --output text
 }
 BEFORE="$(rule_state)"
+PARAM_LIVE="$(stack_query "Stacks[0].Parameters[?ParameterKey=='${PARAM}'].ParameterValue | [0]")"
+if [[ "${BEFORE}" == "${WANT}" && "${PARAM_LIVE}" == "${WANT}" ]]; then
+  info "${NAME} is already ${WANT} and ${PARAM} is already ${WANT}; nothing to change."
+  exit 0
+fi
 "${DEPLOY[@]}"
 AFTER="$(rule_state)"
-[[ "${AFTER}" == "${WANT}" ]] || die "the rule is ${AFTER}, expected ${WANT} (was the change set declined?)."
+if [[ "${AFTER}" != "${WANT}" ]]; then
+  if [[ "${PARAM_LIVE}" == "${WANT}" ]]; then
+    die "the rule is ${AFTER} but ${PARAM} was already ${WANT}: the rule drifted from the parameter (for example an emergency disable-rule), so the change set did not modify it. Fix the rule with the doc/DEV_STACK_PLAN.md section 3.1 procedure, or pass ${PARAM} explicitly with the other value in a deploy and then ${WANT}."
+  fi
+  die "the rule is ${AFTER}, expected ${WANT}; the change set was probably declined or failed."
+fi
 
 info ""
 info "Record on the issue:"
