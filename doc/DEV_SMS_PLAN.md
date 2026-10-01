@@ -59,7 +59,7 @@ Stage 1 adds the resources that `EnableSmsIngress=false` leaves out: the SMS HTT
 
 **Stage 3: full flow with you and one tester.** Requires prerequisites 4 and 5. Record the tester's consent in the owner app and verify their phone. Retire the old pending texts. Set the allowlist to your number and that tester's, then turn on `SmsSendEnabled`, conversations, the sender trigger and outbox dispatch. Run one booking end to end: ask for times, pick one, you approve by text, the tester gets the confirmation, then cancel and reschedule.
 
-Next, check that a client outside the allowlist is refused. Book a visit in the owner app for a synthetic client with a 555 number, recorded consent and a verified phone; its confirmation must fail with `RECIPIENT_NOT_AUTHORIZED` in delivery failures. Then turn texting off with section 6, steps 1 and 2, timing it, and turn it back on.
+Next, check that a client outside the allowlist is refused. Use a second tester who has given consent and verified their phone but is not yet on the allowlist (inbound texts need no allowlist, so verification works). Book a visit for them in the owner app; its confirmation must fail with `RECIPIENT_NOT_AUTHORIZED` in delivery failures, and they receive nothing. Under option (b) on #91, a synthetic client with a 555 number would also do. Then turn texting off with section 6, steps 1 and 2, timing it, and turn it back on.
 
 Last: the tester texts STOP and you confirm no further texts reach them. To bring them back, record a fresh in-person consent, then have them text START. *Live texts go to two numbers only.*
 
