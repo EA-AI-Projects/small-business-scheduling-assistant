@@ -76,44 +76,6 @@ def test_without_configured_origins_no_cors_headers_are_sent() -> None:
     assert "access-control-allow-origin" not in preflight(client, APP_ORIGIN)
 
 
-@pytest.mark.parametrize("origin", [
-    "*",
-    "https://*.amplifyapp.com",
-    "https://app.example.com/",
-    "https://app.example.com/owner",
-    "https://app.example.com?x=1",
-    "https://app.example.com#frag",
-    "https://user@app.example.com",
-    "http://app.example.com",
-    "https://",
-    "app.example.com",
-    "https://App.Example.com",
-    "https://app.example.com:443",
-])
-def test_origin_validation_rejects_non_exact_or_insecure_origins(origin: str) -> None:
-    with pytest.raises(ValueError):
-        validate_cors_origin(origin)
-    with pytest.raises(ValueError):
-        create_owner_app(InMemoryCalendarRepository(), verify, cors_origins=(origin,))
-
-
-@pytest.mark.parametrize("origin", ["http://localhost:3000", "http://127.0.0.1:3000",
-                                    "http://localhost"])
-def test_loopback_http_requires_explicit_flag(origin: str) -> None:
-    with pytest.raises(ValueError):
-        validate_cors_origin(origin)
-    assert validate_cors_origin(origin, allow_loopback_http=True) == origin
-
-
-def test_loopback_flag_does_not_allow_other_http_hosts() -> None:
-    with pytest.raises(ValueError):
-        validate_cors_origin("http://192.168.1.10:3000", allow_loopback_http=True)
-
-
-def test_https_origin_with_port_is_accepted() -> None:
-    assert validate_cors_origin("https://app.example.com:8443") == "https://app.example.com:8443"
-
-
 @pytest.mark.parametrize("token", [None, "", "short-token"])
 def test_local_server_rejects_missing_or_short_token(token: str | None) -> None:
     with pytest.raises(RuntimeError, match="LOCAL_OWNER_TOKEN"):

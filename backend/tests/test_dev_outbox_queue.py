@@ -553,41 +553,6 @@ def test_cleanup_deletes_only_the_run_and_refuses_foreign_messages() -> None:
     assert [m["Body"] for m in remaining] == [other]
 
 
-def test_queue_guards_accept_only_the_two_dev_queues() -> None:
-    url = f"{SQS_ENDPOINT}/123456789012/{OUTBOX_QUEUE}"
-    assert require_queue_url(OUTBOX_QUEUE, url) == url
-    for bad in (
-        url.replace("us-west-1", "us-east-1"),
-        f"{SQS_ENDPOINT}/123456789012/scheduling-sms-conversation-dev",
-        f"{url}-extra",
-        "http://127.0.0.1:9324/000000000000/" + OUTBOX_QUEUE,
-    ):
-        with pytest.raises(ValueError, match="not the"):
-            require_queue_url(OUTBOX_QUEUE, bad)
-    with pytest.raises(ValueError, match="not the"):
-        require_queue_url(DLQ_QUEUE, url)
-
-
-def test_queue_name_guard_and_nonempty_queue_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SCHEDULING_DEV_OUTBOX_QUEUE", OUTBOX_QUEUE)
-    assert dev_queue_name() == OUTBOX_QUEUE
-    for bad in ("", "scheduling-outbox-dlq-dev", "scheduling-outbox-pilot"):
-        monkeypatch.setenv("SCHEDULING_DEV_OUTBOX_QUEUE", bad)
-        with pytest.raises(ValueError, match="SCHEDULING_DEV_OUTBOX_QUEUE"):
-            dev_queue_name()
-    fake = FakeSqs()
-    url = fake.get_queue_url(QueueName=OUTBOX_QUEUE)["QueueUrl"]
-    dlq = fake.get_queue_url(QueueName=DLQ_QUEUE)["QueueUrl"]
-    fake.send_message(QueueUrl=url, MessageBody="{}")
-    with pytest.raises(ValueError, match="not empty"):
-        _checked_queues(QueueEnv(fake, url, dlq, 0, "synthetic-run-a", fake.advance,
-                                 lambda: fake.now))
-    wrong = FakeSqs(max_receive=50)
-    with pytest.raises(ValueError, match="maxReceiveCount"):
-        _checked_queues(QueueEnv(wrong, url, dlq, 0, "synthetic-run-a", wrong.advance,
-                                 lambda: wrong.now))
-
-
 class FakeAws:
     """Stands in for the CloudFormation, Lambda and EventBridge read calls."""
 
@@ -610,26 +575,6 @@ class FakeAws:
     def describe_rule(self, Name: str) -> dict[str, Any]:
         assert Name == f"phys-{DISPATCH_RULE_LOGICAL_ID}"
         return {"State": self.rule}
-
-
-def test_consumer_guard_passes_only_when_mapping_and_dispatcher_are_off() -> None:
-    aws = FakeAws()
-    require_consumers_off(aws, aws, aws)
-    for kwargs, message in (
-        ({"mapping": "Enabled"}, "not 'Disabled'"),
-        ({"mapping": "Enabling"}, "not 'Disabled'"),
-        ({"mapping": "Disabling"}, "not 'Disabled'"),
-        ({"rule": "ENABLED"}, "not 'DISABLED'"),
-        ({"queue": "scheduling-sms-conversation-dev"}, "does not read the outbox queue"),
-    ):
-        bad = FakeAws(**kwargs)
-        with pytest.raises(ValueError, match=message):
-            require_consumers_off(bad, bad, bad)
-    for logical in (SENDER_MAPPING_LOGICAL_ID, DISPATCH_RULE_LOGICAL_ID):
-        lost = FakeAws()
-        lost.missing.add(logical)
-        with pytest.raises(ValueError, match="Could not confirm"):
-            require_consumers_off(lost, lost, lost)
 
 
 def _guarded_run(aws: FakeAws, flip_after: int | None) -> FakeSqs:

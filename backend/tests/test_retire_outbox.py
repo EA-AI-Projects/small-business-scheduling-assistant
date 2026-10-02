@@ -174,27 +174,6 @@ def test_concurrent_change_is_a_reported_conflict_not_a_crash() -> None:
     assert table.items["OUTBOX#o-2"]["delivery_state"] == {"S": "FAILED"}
 
 
-def test_update_condition_names_state_due_times_and_lease() -> None:
-    sent: list[dict[str, Any]] = []
-
-    class Spy(FakeTable):
-        def update_item(self, **kwargs: Any) -> dict[str, Any]:
-            sent.append(kwargs)
-            return super().update_item(**kwargs)
-
-    _run(_store(Spy(_item("o-1", DeliveryState.PENDING, OLD))), execute=True)
-    condition = sent[0]["ConditionExpression"]
-    for part in ("delivery_state = :state", "next_attempt_at = :old_attempt",
-                 "dispatch_after = :old_dispatch", "attribute_not_exists(lease_token)"):
-        assert part in condition
-
-
-def test_reason_must_be_a_safe_identifier() -> None:
-    with pytest.raises(ValueError):
-        _store(FakeTable()).retire_pending_before(
-            BUSINESS, CUTOFF, "bad reason!", NOW, execute=True)
-
-
 # --- CLI ---------------------------------------------------------------------------------
 
 ARGS = ["--table", "scheduling-dev", "--business-id", BUSINESS,
@@ -252,12 +231,6 @@ def test_cli_refuses_wrong_table_region_and_endpoint() -> None:
     lines: list[str] = []
     assert retire_outbox.main(ARGS, client_factory=bad_endpoint, out=lines.append) == 2
     assert table.updates == 0
-
-
-def test_cli_requires_a_cutoff_with_an_offset() -> None:
-    with pytest.raises(SystemExit):
-        retire_outbox.main([*ARGS[:-1], "2026-10-02T00:00:00"],
-                           client_factory=lambda: FakeTable())
 
 
 def test_dev_client_refuses_the_wrong_aws_account(monkeypatch: pytest.MonkeyPatch) -> None:

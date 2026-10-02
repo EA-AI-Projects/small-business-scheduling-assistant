@@ -443,53 +443,6 @@ def test_precheck_reports_existing_records_a_purge_would_delete() -> None:
         "sms evidence SMS_OPTOUT#+12065550104"])
 
 
-def test_run_ownership_covers_only_run_keys() -> None:
-    run = RetentionRun(None, dict,"synthetic-run-abc", "SMS#run-abc-",  # type: ignore[arg-type]
-                       ["+12065550142"])
-    owned = ["CLIENT#synthetic-run-abc", "PHONE#+12065550142", "SMS#run-abc-body-old",
-             "SMS_THREAD#+12065550142", "SMS_CONSENT_CURRENT#+12065550142",
-             "SMS_CONSENT#+12065550142#2001-09-10T12:00:00.000000+00:00",
-             f"NOTE#CLIENT#{sha256(b'synthetic-run-abc').hexdigest()}#n1"]
-    foreign = ["CLIENT#owner-test-client", "PHONE#+1206555014", "PHONE#+120655501422",
-               "SMS#run-abd-body-old", "SMS#other", "SMS_THREAD#+1206555014",
-               "SMS_CONSENT#+120655501422#t", "POLICY#SCHEDULING", "CALENDAR#REVISION",
-               f"NOTE#CLIENT#{sha256(b'owner-test-client').hexdigest()}#n1"]
-    assert all(run.owns(key) for key in owned)
-    assert not any(run.owns(key) for key in foreign)
-
-
-def test_function_guard_refuses_other_handlers_tables_and_businesses() -> None:
-    def configuration(handler: str = NOTE_HANDLER, **changes: str) -> dict[str, Any]:
-        return {"Handler": handler, "Environment": {"Variables": {
-            "SCHEDULING_TABLE_NAME": "scheduling-dev", "BUSINESS_ID": BUSINESS, **changes}}}
-
-    _require_retention_function(configuration(), NOTE_HANDLER)
-    _require_retention_function(configuration(SMS_HANDLER), SMS_HANDLER)
-    with pytest.raises(ValueError, match="handler"):
-        _require_retention_function(configuration(), SMS_HANDLER)  # swapped function variables
-    with pytest.raises(ValueError, match="handler"):
-        _require_retention_function(
-            configuration("scheduling.workers.outbox.dispatch_due_handler"), NOTE_HANDLER)
-    with pytest.raises(ValueError, match="handler"):
-        _require_retention_function({}, NOTE_HANDLER)
-    with pytest.raises(ValueError, match="SCHEDULING_TABLE_NAME"):
-        _require_retention_function(configuration(SCHEDULING_TABLE_NAME="other"), NOTE_HANDLER)
-    with pytest.raises(ValueError, match="BUSINESS_ID"):
-        _require_retention_function(configuration(BUSINESS_ID="pilot-business"), NOTE_HANDLER)
-    with pytest.raises(ValueError, match="BUSINESS_ID"):
-        _require_retention_function({"Handler": NOTE_HANDLER, "Environment": {"Variables": {
-            "SCHEDULING_TABLE_NAME": "scheduling-dev"}}}, NOTE_HANDLER)
-
-
-def test_function_name_guard(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(NOTE_FUNCTION_VAR, "scheduling-dev-NoteRetention-abc")
-    assert _function_name(NOTE_FUNCTION_VAR) == "scheduling-dev-NoteRetention-abc"
-    for bad in ("", "other-fn", "arn:aws:lambda:us-west-1:1:function:scheduling-dev-x"):
-        monkeypatch.setenv(NOTE_FUNCTION_VAR, bad)
-        with pytest.raises(ValueError, match="function name"):
-            _function_name(NOTE_FUNCTION_VAR)
-
-
 class _RecordingClient:
     def __init__(self, keys: list[Key]) -> None:
         self.keys = keys

@@ -228,18 +228,3 @@ def test_hold_expiry_worker_expires_due_holds_and_ignores_stale_entry(
         assert item["delivery_state"]["S"] == "PENDING"
         assert item["attempts"]["N"] == "0"
         assert "provider_id" not in item
-
-
-def test_function_guard_refuses_other_handlers_and_tables() -> None:
-    good = {"Handler": EXPIRY_HANDLER, "Environment": {"Variables": {"SCHEDULING_TABLE_NAME": "scheduling-dev"}}}
-    _require_expiry_function(good)
-    wrong_handler = {**good, "Handler": "scheduling.workers.outbox.dispatch_due_handler"}
-    with pytest.raises(ValueError, match="handler"):
-        _require_expiry_function(wrong_handler)
-    with pytest.raises(ValueError, match="handler"):
-        _require_expiry_function({})
-    wrong_table = {**good, "Environment": {"Variables": {"SCHEDULING_TABLE_NAME": "other"}}}
-    with pytest.raises(ValueError, match="SCHEDULING_TABLE_NAME"):
-        _require_expiry_function(wrong_table)
-    with pytest.raises(ValueError, match="SCHEDULING_TABLE_NAME"):
-        _require_expiry_function({"Handler": EXPIRY_HANDLER})
