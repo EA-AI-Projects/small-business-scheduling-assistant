@@ -44,10 +44,15 @@ textarea { min-height: 85px; resize: vertical; }
 .hint { font-size: .85rem; }
 .meta { color: #5a6f60; font-size: .83rem; }
 .badge { display: inline-block; border-radius: 999px; padding: .12rem .5rem; background: #e6efe8; color: #2c6040; font-size: .76rem; font-weight: 700; }
-.notice:empty { display: none; }
-.notice { margin: 0 0 1rem; padding: .7rem .9rem; border-radius: 8px; background: #e8f1e9; color: #245339; }
+.notice { display: flex; align-items: flex-start; gap: .75rem; margin: 0 0 1rem; padding: .7rem .9rem; border-radius: 8px; border: 1px solid #c9dccd; background: #e8f1e9; color: #245339; }
+/* Nothing to show: keep the live region in the page (so the next message is announced) but take no space. */
+.notice.idle { margin: 0; padding: 0; border: 0; height: 0; overflow: hidden; }
+.notice-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+/* Rejections stay pinned below the menu layer so a failed save is seen beside the control that caused it. */
+.notice.pinned { position: sticky; top: .5rem; z-index: 5; box-shadow: 0 4px 14px #20392926; }
+.notice-dismiss { flex: none; padding: .25rem .6rem; font-size: .85rem; background: #fff; color: inherit; border-color: currentColor; }
 .field-error { color: #8e2d31; font-weight: 400; }
-.notice.error { background: #fbe9e9; color: #8e2d31; }
+.notice.error { border-color: #ecc4c6; background: #fbe9e9; color: #8e2d31; }
 footer { max-width: 1300px; margin: auto; padding: 0 clamp(1rem, 3vw, 3rem) 2rem; color: #7b8b7e; font-size: .78rem; }
 @media (max-width: 850px) { .split { grid-template-columns: 1fr; } .toolbar .calendar-zone { width: 100%; margin-left: 0; } }
 @media (max-width: 520px) { .topbar { align-items: start; } .top-actions { flex-direction: column; align-items: end; gap: .3rem; } .welcome { margin: 2rem auto; padding: 2rem 1rem; } .two-col { grid-template-columns: 1fr; } }
@@ -57,7 +62,7 @@ code { font-size: .9em; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .app-header { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem .9rem; padding: .5rem .75rem; margin-bottom: 1.2rem; background: #fff; border: 1px solid #dde5dc; border-radius: 16px; position: relative; }
 .app-name { margin: 0; font-size: 1.25rem; font-weight: 500; color: #24312d; }
-.app-header-menu { position: relative; }
+.app-header-menu { position: relative; z-index: 11; }
 .icon-button { display: inline-grid; place-items: center; position: relative; width: 2.5rem; height: 2.5rem; padding: 0; border: 0; border-radius: 50%; background: transparent; font-size: 1.5rem; line-height: 1; font-weight: 400; }
 .hamburger, .hamburger::before, .hamburger::after { display: block; width: 1.15rem; height: 2px; background: currentColor; border-radius: 1px; }
 .hamburger { position: relative; }
@@ -96,6 +101,8 @@ code { font-size: .9em; }
 .cal-now::before { content: ""; position: absolute; left: -5px; top: -6px; width: 10px; height: 10px; border-radius: 50%; background: #c0392b; }
 .cal-event { position: absolute; z-index: 1; display: block; overflow: hidden; min-height: 1.4rem; padding: .15rem .3rem; border-radius: 6px; border: 1px solid #fff; border-left-width: 4px; text-align: left; font-size: .78rem; font-weight: 400; line-height: 1.25; }
 .cal-event strong { display: block; text-transform: capitalize; }
+/* Week columns are narrow on phones: shrink the label there only so UNAVAILABLE fits; Day keeps normal labels. */
+@media (max-width: 520px) { .cal-grid.week .cal-event strong { font-size: .62rem; overflow-wrap: anywhere; } }
 .cal-event span { display: block; }
 .cal-event.confirmed { background: #d5eadb; border-left-color: #2f7853; color: #14301f; }
 .cal-event.pending { background: #fcefd2; border-left-color: #c88c2e; border-style: dashed; border-width: 1px 1px 1px 4px; border-color: #c88c2e; border-left-style: solid; color: #4a3410; }

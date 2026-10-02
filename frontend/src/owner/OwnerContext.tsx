@@ -111,6 +111,7 @@ export function OwnerProvider({ api, notify, children }: {
 
   const change = useCallback<OwnerContextValue["change"]>(
     async (path, method, body, success, idempotent = true) => {
+      safeNotify(""); // a new action starts: the previous result no longer applies
       try {
         await api.request(path, { method, body, idempotent });
       } catch (error) {
@@ -151,10 +152,11 @@ export function OwnerProvider({ api, notify, children }: {
   }, [loaded, pickedDate, data.zone, view]);
 
   const resolveLocal = useCallback(async (value: string) => {
+    safeNotify(""); // first step of a save: clear the previous result
     if (!value) throw new Error("Choose a local date and time");
     const result = await api.get<{ instant: string }>(`/local-time?value=${encodeURIComponent(value)}`);
     return result.instant;
-  }, [api]);
+  }, [api, safeNotify]);
 
   const selectClient = useCallback((clientId: string | null, appointmentId: string | null = null) => {
     setSelectedClientId(clientId);

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { Workspace } from "@/components/Workspace";
 import { OwnerApi } from "@/lib/api";
@@ -16,7 +16,9 @@ function loadConfig(): OwnerConfig | ConfigError {
 
 const config = loadConfig();
 
-interface Notice { message: string; error: boolean }
+interface Notice { id: number; message: string; error: boolean }
+
+let noticeCount = 0;
 
 export default function OwnerPage() {
   if (config instanceof ConfigError) {
@@ -32,13 +34,15 @@ export function OwnerSession({ config }: { config: OwnerConfig }) {
   const [notice, setNotice] = useState<Notice | null>(null);
   const [completing, setCompleting] = useState(true);
 
-  const notify = useCallback((message: string, error = false) => setNotice({ message, error }), []);
+  // An empty message clears the notice. Each notice gets a new id so a repeated message is announced again.
+  const notify = useCallback((message: string, error = false) =>
+    setNotice(message ? { id: ++noticeCount, message, error } : null), []);
 
   const endSession = useCallback((message: string | null) => {
     setToken(null);
     setSession((value) => value + 1);
     clearPendingSignIn();
-    setNotice(message ? { message, error: true } : null);
+    setNotice(message ? { id: ++noticeCount, message, error: true } : null);
   }, []);
 
   useEffect(() => {
@@ -101,9 +105,7 @@ export function OwnerSession({ config }: { config: OwnerConfig }) {
 
   return (
     <Shell signedIn={api !== null} onAuth={api ? signOut : config.authMode === "cognito" ? signIn : null}>
-      <div className={`notice${notice?.error ? " error" : ""}`} role="status" aria-live="polite">
-        {notice?.message}
-      </div>
+      <NoticeBar notice={notice} onDismiss={() => setNotice(null)} />
       {api ? (
         <OwnerProvider key={session} api={api} notify={notify}><Workspace onSignOut={signOut} /></OwnerProvider>
       ) : completing ? (
@@ -118,6 +120,58 @@ export function OwnerSession({ config }: { config: OwnerConfig }) {
         </section>
       )}
     </Shell>
+  );
+}
+
+/**
+ * Live region for save results and rejections. Errors stay pinned to the top of the viewport and
+ * can be dismissed; successes scroll with the page. While an error is pinned, the document's
+ * scroll padding covers its height so keyboard focus is never scrolled underneath it.
+ */
+function NoticeBar({ notice, onDismiss }: { notice: Notice | null; onDismiss: () => void }) {
+  const bar = useRef<HTMLDivElement>(null);
+  const dismiss = useRef<HTMLButtonElement>(null);
+  const before = useRef<HTMLElement | null>(null);
+  const pinned = notice?.error === true;
+
+  useLayoutEffect(() => {
+    const root = document.documentElement;
+    const element = bar.current;
+    if (!pinned || !element) { root.style.removeProperty("scroll-padding-top"); return; }
+    const apply = () => root.style.setProperty("scroll-padding-top", `${element.offsetHeight + 24}px`);
+    apply();
+    window.addEventListener("resize", apply);
+    return () => { window.removeEventListener("resize", apply); root.style.removeProperty("scroll-padding-top"); };
+  }, [pinned, notice?.id]);
+
+  return (
+    <div ref={bar} className={`notice${notice ? "" : " idle"}${notice?.error ? " error" : ""}${pinned ? " pinned" : ""}`}>
+      {/* The live region persists; the keyed child makes an identical repeated message announce again. */}
+      <div role="status" aria-live="polite" className="notice-text">
+        {notice && <span key={notice.id}>{notice.message}</span>}
+      </div>
+      {pinned && (
+        <button ref={dismiss} type="button" className="notice-dismiss" aria-label="Dismiss message"
+          onFocus={(event) => {
+            const from = event.relatedTarget;
+            before.current = from instanceof HTMLElement ? from : null;
+          }}
+          onClick={(event) => {
+            // Chrome focuses buttons on pointer press too; only keyboard activation
+            // (detail === 0) should move focus when the button disappears.
+            const keyboard = event.detail === 0 && document.activeElement === dismiss.current;
+            const target = before.current;
+            onDismiss();
+            if (!keyboard) return;
+            queueMicrotask(() => {
+              const fallback = document.querySelector<HTMLElement>(".app-header-menu button");
+              (target?.isConnected ? target : fallback)?.focus({ preventScroll: true });
+            });
+          }}>
+          Dismiss
+        </button>
+      )}
+    </div>
   );
 }
 
