@@ -1,3 +1,5 @@
+import { useEffect, useRef } from "react";
+
 import { rangeTitle } from "@/lib/time";
 import { useOwner, type Tab } from "@/owner/OwnerContext";
 
@@ -18,6 +20,12 @@ const SECTIONS: { id: Tab; label: string }[] = [
 export function Workspace({ onSignOut }: { onSignOut: () => void }) {
   const { tab, setTab, data, loaded, date, view, setView, goToday, stepRange } = useOwner();
   const pending = data.requests.length;
+  // A section opened from deep in another (e.g. "Open client" below the calendar) starts at its top.
+  const first = useRef(true);
+  useEffect(() => {
+    if (first.current) { first.current = false; return; }
+    window.scrollTo?.(0, 0);
+  }, [tab]);
   const current = SECTIONS.find((item) => item.id === tab);
   return (
     <div>
