@@ -115,6 +115,7 @@ An AI-assisted SMS interface that identifies intent, gathers required details, e
 ### 6.7 Calendar/admin view
 
 Minimal authenticated owner interface:
+- The owner UI redesign starts with Day and Week calendar views. Use a modern, calendar-first layout with date navigation and a compact menu for owner sections. Evaluate these two views with the owner before planning Month, Schedule, or Year views. A client-facing view is outside this redesign; keep the owner UI structure extensible for one later.
 - View appointments, pending holds, and unavailable blocks in a calendar/list.
 - Create/edit/cancel appointments and unavailable blocks.
 - Review and act on pending requests.

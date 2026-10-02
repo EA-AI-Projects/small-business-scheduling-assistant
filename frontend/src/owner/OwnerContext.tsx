@@ -3,7 +3,9 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 
 import type { Appointment, CalendarSnapshot, ClientProfile, PolicyState } from "@/api/types";
 import { ApiError, type OwnerApi, type RequestOptions } from "@/lib/api";
+import { stepDate, todayKey } from "@/lib/time";
 
+export type CalendarView = "day" | "week";
 export type Tab = "schedule" | "requests" | "clients" | "settings";
 
 export interface OwnerData {
@@ -41,6 +43,12 @@ interface OwnerContextValue {
   notify: Notify;
   tab: Tab;
   setTab: (tab: Tab) => void;
+  /** Selected calendar date (YYYY-MM-DD, business timezone); follows today until moved. */
+  date: string;
+  view: CalendarView;
+  setView: (view: CalendarView) => void;
+  goToday: () => void;
+  stepRange: (direction: -1 | 1) => void;
   selectedClientId: string | null;
   selectClient: (clientId: string | null, noteAppointmentId?: string | null) => void;
   /** Visit to prefill on the next client note, set when opening notes from the schedule. */
@@ -66,6 +74,8 @@ export function OwnerProvider({ api, notify, children }: {
   const [loaded, setLoaded] = useState(false);
   const [stamp, setStamp] = useState<RefreshStamp>({ version: 0, preserveSelection: false });
   const [tab, setTab] = useState<Tab>("schedule");
+  const [pickedDate, setPickedDate] = useState<string | null>(null);
+  const [view, setView] = useState<CalendarView>("day");
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
   const [noteAppointmentId, setNoteAppointmentId] = useState<string | null>(null);
   const [selectionVersion, setSelectionVersion] = useState(0);
@@ -132,6 +142,13 @@ export function OwnerProvider({ api, notify, children }: {
       return true;
     }, [api, refresh, safeNotify]);
 
+  // Until the owner navigates, the date is today in the business timezone (UTC until policy loads).
+  const date = pickedDate ?? todayKey(data.zone);
+  const goToday = useCallback(() => setPickedDate(null), []);
+  const stepRange = useCallback((direction: -1 | 1) =>
+    setPickedDate(stepDate(pickedDate ?? todayKey(data.zone), view, direction)),
+  [pickedDate, data.zone, view]);
+
   const resolveLocal = useCallback(async (value: string) => {
     if (!value) throw new Error("Choose a local date and time");
     const result = await api.get<{ instant: string }>(`/local-time?value=${encodeURIComponent(value)}`);
@@ -151,9 +168,10 @@ export function OwnerProvider({ api, notify, children }: {
 
   const value = useMemo<OwnerContextValue>(() => ({
     api, data, loaded, stamp, refresh, change, resolveLocal, notify: safeNotify, tab, setTab,
+    date, view, setView, goToday, stepRange,
     selectedClientId, selectClient, noteAppointmentId, selectionVersion,
   }), [api, data, loaded, stamp, refresh, change, resolveLocal, safeNotify, tab,
-    selectedClientId, selectClient, noteAppointmentId, selectionVersion]);
+    date, view, goToday, stepRange, selectedClientId, selectClient, noteAppointmentId, selectionVersion]);
 
   return <OwnerContext.Provider value={value}>{children}</OwnerContext.Provider>;
 }

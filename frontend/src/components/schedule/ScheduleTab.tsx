@@ -9,14 +9,9 @@ import { BlockForm } from "./BlockForm";
 import { EventDetail } from "./EventDetail";
 
 export function ScheduleTab() {
-  const { data, loaded, stamp, refresh, notify } = useOwner();
-  const [date, setDate] = useState("");
-  const [view, setView] = useState<"day" | "week">("day");
+  const { data, stamp, refresh, notify, date, view } = useOwner();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [handledStamp, setHandledStamp] = useState(stamp.version);
-
-  // Default to today in the business timezone once the policy's zone is known.
-  if (loaded && !date) setDate(dayKey(new Date().toISOString(), data.zone));
 
   // A normal refresh clears the selection; a conflict refresh keeps it if still present.
   if (stamp.version !== handledStamp) {
@@ -40,18 +35,9 @@ export function ScheduleTab() {
           Refresh
         </button>
       </SectionHeading>
-      <div className="toolbar card">
-        <label>Start date <input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label>
-        <label>View{" "}
-          <select value={view} onChange={(event) => setView(event.target.value === "week" ? "week" : "day")}>
-            <option value="day">Day</option>
-            <option value="week">Week</option>
-          </select>
-        </label>
-        {data.calendar && (
-          <span className="calendar-zone">Times in {data.zone} · revision {data.calendar.revision}</span>
-        )}
-      </div>
+      {data.calendar && (
+        <p className="calendar-zone">Times in {data.zone} · revision {data.calendar.revision}</p>
+      )}
       <div className="split">
         <div className="calendar-days">
           {data.calendar && datesForView(date, view).map((day) => (
