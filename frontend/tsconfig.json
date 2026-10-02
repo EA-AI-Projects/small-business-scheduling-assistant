@@ -14,7 +14,7 @@
     "isolatedModules": true,
     "jsx": "react-jsx",
     "incremental": true,
-    "types": ["vitest/globals", "@testing-library/jest-dom"],
+    "types": ["vitest/globals"],
     "paths": { "@/*": ["./src/*"] }
   },
   "include": ["next-env.d.ts", "src/**/*.ts", "src/**/*.tsx", "*.ts"],
