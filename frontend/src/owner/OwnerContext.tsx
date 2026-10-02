@@ -3,9 +3,8 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 
 import type { Appointment, CalendarSnapshot, ClientProfile, PolicyState } from "@/api/types";
 import { ApiError, type OwnerApi, type RequestOptions } from "@/lib/api";
-import { stepDate, todayKey } from "@/lib/time";
+import { stepDate, todayKey, type CalendarView } from "@/lib/time";
 
-export type CalendarView = "day" | "week";
 export type Tab = "schedule" | "requests" | "clients" | "settings";
 
 export interface OwnerData {
@@ -142,12 +141,14 @@ export function OwnerProvider({ api, notify, children }: {
       return true;
     }, [api, refresh, safeNotify]);
 
-  // Until the owner navigates, the date is today in the business timezone (UTC until policy loads).
-  const date = pickedDate ?? todayKey(data.zone);
+  // Until the owner navigates, the date is today in the business timezone. Before the first
+  // load the zone is unknown, so there is no date ("") and navigation does nothing.
+  const date = pickedDate ?? (loaded ? todayKey(data.zone) : "");
   const goToday = useCallback(() => setPickedDate(null), []);
-  const stepRange = useCallback((direction: -1 | 1) =>
-    setPickedDate(stepDate(pickedDate ?? todayKey(data.zone), view, direction)),
-  [pickedDate, data.zone, view]);
+  const stepRange = useCallback((direction: -1 | 1) => {
+    if (!loaded) return;
+    setPickedDate(stepDate(pickedDate ?? todayKey(data.zone), view, direction));
+  }, [loaded, pickedDate, data.zone, view]);
 
   const resolveLocal = useCallback(async (value: string) => {
     if (!value) throw new Error("Choose a local date and time");

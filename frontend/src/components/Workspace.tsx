@@ -16,7 +16,7 @@ const SECTIONS: { id: Tab; label: string }[] = [
 ];
 
 export function Workspace({ onSignOut }: { onSignOut: () => void }) {
-  const { tab, setTab, data, date, view, setView, goToday, stepRange } = useOwner();
+  const { tab, setTab, data, loaded, date, view, setView, goToday, stepRange } = useOwner();
   const pending = data.requests.length;
   const current = SECTIONS.find((item) => item.id === tab);
   return (
@@ -29,7 +29,7 @@ export function Workspace({ onSignOut }: { onSignOut: () => void }) {
           <button type="button" onClick={onSignOut}>Sign out</button>
         </>}>
         {tab === "schedule" ? (
-          <CalendarControls title={rangeTitle(date, view)} view={view} onToday={goToday}
+          <CalendarControls title={loaded ? rangeTitle(date, view) : "Loading…"} view={view} disabled={!loaded} onToday={goToday}
             onStep={stepRange} onView={setView} />
         ) : (
           <span className="range-title">{current?.label}</span>

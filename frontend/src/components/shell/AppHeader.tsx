@@ -46,7 +46,11 @@ export function AppHeader({ appName, items, current, onSelect, menuFooter, badge
   const pending = badgeTotal ?? 0;
   return (
     <header className="app-header">
-      <div className="app-header-menu" ref={root}>
+      <div className="app-header-menu" ref={root} onBlur={(event) => {
+          // Close when focus moves out of the menu (button and panel).
+          const next = event.relatedTarget;
+          if (open && next && !event.currentTarget.contains(next)) setOpen(false);
+        }}>
         <button ref={button} type="button" className="icon-button" aria-expanded={open}
           aria-controls={menuId} aria-label={pending > 0 ? `Menu, ${pending} pending` : "Menu"}
           onClick={() => setOpen((value) => !value)}>
@@ -57,7 +61,7 @@ export function AppHeader({ appName, items, current, onSelect, menuFooter, badge
           {items.map((item) => (
             <button key={item.id} type="button" className="menu-item"
               aria-current={item.id === current ? "page" : undefined}
-              onClick={() => { onSelect(item.id); setOpen(false); }}>
+              onClick={() => { onSelect(item.id); setOpen(false); button.current?.focus(); }}>
               <span>{item.label}</span>
               {item.badge !== undefined && item.badge > 0 && (
                 <span className="badge" aria-label={`${item.badge} pending`}>{item.badge}</span>

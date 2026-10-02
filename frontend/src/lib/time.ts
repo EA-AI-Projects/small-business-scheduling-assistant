@@ -1,5 +1,7 @@
 /** Business-timezone display helpers. Instants are ISO strings from the API. */
 
+export type CalendarView = "day" | "week";
+
 function parts(instant: string, zone: string, options: Intl.DateTimeFormatOptions): Record<string, string> {
   return Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: zone, ...options })
     .formatToParts(new Date(instant))
@@ -55,12 +57,12 @@ export function addDays(date: string, days: number): string {
 }
 
 /** Previous (-1) or next (1) day or week for the selected view. */
-export function stepDate(date: string, view: "day" | "week", direction: -1 | 1): string {
+export function stepDate(date: string, view: CalendarView, direction: -1 | 1): string {
   return addDays(date, direction * (view === "week" ? 7 : 1));
 }
 
 /** Header title: "October 2, 2026" for a day; "Sep – Oct 2026" or "Oct 2026" for a week. */
-export function rangeTitle(date: string, view: "day" | "week"): string {
+export function rangeTitle(date: string, view: CalendarView): string {
   const format = (value: string, options: Intl.DateTimeFormatOptions) =>
     new Date(`${value}T12:00:00Z`).toLocaleDateString("en-US", { timeZone: "UTC", ...options });
   if (view === "day") return format(date, { month: "long", day: "numeric", year: "numeric" });
