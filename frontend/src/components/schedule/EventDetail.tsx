@@ -83,6 +83,9 @@ function AppointmentEditor({ appointment }: { appointment: Appointment }) {
         if (!client) { notify("Client profile is not available", true); return; }
         selectClient(client.client_id, appointment.appointment_id);
         setTab("clients");
+        // Once the Clients section is shown, move focus to its heading so keyboard and screen-reader users land there.
+        window.setTimeout(() => document.querySelector<HTMLElement>("[aria-label=Clients] h2")
+          ?.focus({ preventScroll: true }), 0);
       }}>Open client and visit notes</button>
       {appointment.status === "CONFIRMED" && (
         <>

@@ -23,7 +23,9 @@ export function ScheduleTab() {
   // On narrow screens the detail card sits below the calendar; bring it into view on selection.
   const detailRef = useRef<HTMLElement>(null);
   useEffect(() => {
-    if (selectedId) detailRef.current?.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
+    if (!selectedId) return;
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    detailRef.current?.scrollIntoView?.({ block: "nearest", behavior: reduce ? "auto" : "smooth" });
   }, [selectedId]);
 
   const events = data.calendar?.events ?? [];
@@ -33,7 +35,7 @@ export function ScheduleTab() {
   return (
     <>
       <SectionHeading eyebrow="CALENDAR" title="Schedule">
-        <button type="button" onClick={() => refresh().catch((error: unknown) => notify(errorMessage(error), true))}>
+        <button type="button" onClick={() => { notify(""); refresh().catch((error: unknown) => notify(errorMessage(error), true)); }}>
           Refresh
         </button>
       </SectionHeading>

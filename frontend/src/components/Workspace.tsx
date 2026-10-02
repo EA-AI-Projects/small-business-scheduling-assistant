@@ -18,14 +18,16 @@ const SECTIONS: { id: Tab; label: string }[] = [
 ];
 
 export function Workspace({ onSignOut }: { onSignOut: () => void }) {
-  const { tab, setTab, data, loaded, date, view, setView, goToday, stepRange } = useOwner();
+  const { tab, setTab, notify, data, loaded, date, view, setView, goToday, stepRange } = useOwner();
   const pending = data.requests.length;
   // A section opened from deep in another (e.g. "Open client" below the calendar) starts at its top.
+  // The previous section's result message is cleared too.
   const first = useRef(true);
   useEffect(() => {
     if (first.current) { first.current = false; return; }
+    notify("");
     window.scrollTo?.(0, 0);
-  }, [tab]);
+  }, [tab, notify]);
   const current = SECTIONS.find((item) => item.id === tab);
   return (
     <div>
@@ -56,7 +58,8 @@ export function SectionHeading({ eyebrow, title, children }: {
 }) {
   return (
     <div className="section-heading">
-      <div><span className="eyebrow">{eyebrow}</span><h2>{title}</h2></div>
+      {/* tabIndex -1 lets code move focus here when a section is opened from another one. */}
+      <div><span className="eyebrow">{eyebrow}</span><h2 tabIndex={-1}>{title}</h2></div>
       {children}
     </div>
   );
