@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 
-import type { CalendarEvent } from "@/api/types";
-import { datesForView, dayKey, dayTitle, localTime, statusLabel } from "@/lib/time";
+import { layoutDay } from "@/lib/calendarLayout";
+import { datesForView } from "@/lib/time";
 import { errorMessage, useOwner } from "@/owner/OwnerContext";
 
 import { SectionHeading } from "../Workspace";
 import { BlockForm } from "./BlockForm";
+import { CalendarGrid } from "./CalendarGrid";
 import { EventDetail } from "./EventDetail";
 
 export function ScheduleTab() {
@@ -26,6 +27,7 @@ export function ScheduleTab() {
   }, [selectedId]);
 
   const events = data.calendar?.events ?? [];
+  const days = datesForView(date, view);
   const selected = selectedId ? events.find((event) => event.event_id === selectedId) : undefined;
 
   return (
@@ -39,11 +41,18 @@ export function ScheduleTab() {
         <p className="calendar-zone">Times in {data.zone} · revision {data.calendar.revision}</p>
       )}
       <div className="split">
-        <div className="calendar-days">
-          {data.calendar && datesForView(date, view).map((day) => (
-            <CalendarDay key={day} date={day} zone={data.zone} onSelect={setSelectedId}
-              events={events.filter((event) => dayKey(event.start_at, data.zone) === day)} />
-          ))}
+        <div className="calendar-pane">
+          {!data.calendar ? (
+            <p className="empty" role="status">Calendar not loaded yet. If it does not appear, use Refresh.</p>
+          ) : (
+            <>
+              <CalendarGrid days={days} events={events} zone={data.zone}
+                selectedId={selectedId} onSelect={setSelectedId} />
+              {!days.some((day) => layoutDay(events, day, data.zone).length > 0) && (
+                <p className="empty" role="status">No scheduled items in this {view === "week" ? "week" : "day"}.</p>
+              )}
+            </>
+          )}
         </div>
         <aside className="stack">
           <section className="card" ref={detailRef} aria-live="polite">
@@ -63,24 +72,5 @@ export function ScheduleTab() {
         </aside>
       </div>
     </>
-  );
-}
-
-function CalendarDay({ date, zone, events, onSelect }: {
-  date: string; zone: string; events: CalendarEvent[]; onSelect: (id: string) => void;
-}) {
-  const sorted = [...events].sort((a, b) => a.start_at.localeCompare(b.start_at));
-  return (
-    <section className="card day" aria-label={dayTitle(date)}>
-      <h3>{dayTitle(date)}</h3>
-      {sorted.length === 0 && <p className="empty">No scheduled items</p>}
-      {sorted.map((event) => (
-        <button key={event.event_id} type="button" onClick={() => onSelect(event.event_id)}
-          className={`event ${event.status.toLowerCase().split("_")[0]}`}>
-          <strong>{localTime(event.start_at, zone)}–{localTime(event.end_at, zone)}</strong>
-          <span>{statusLabel(event.status)}</span>
-        </button>
-      ))}
-    </section>
   );
 }
