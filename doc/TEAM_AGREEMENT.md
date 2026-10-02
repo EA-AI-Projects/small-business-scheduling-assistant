@@ -43,6 +43,12 @@ An answer on GitHub is enough to hand work back to the manager. If Enrique answe
 4. Report meaningful user-facing progress as a checkpoint: what changed in the app, how it can be seen or tried, the remaining limitations, and the next step. Do not request a product review or approval for every PR. Ask Enrique only for a material business decision, priority tradeoff, blocker he can resolve, or separate authorization for deployment, live SMS, spending, publication, or another consequential external action.
 5. PRs use Enrique's `ealemank` GitHub identity, so he cannot submit a formal GitHub approval on his own PR. The independent agent's review is recorded in the PR discussion; the manager remains accountable for the merge decision.
 
+## Testing strategy for new work
+
+- Do not add isolated unit tests by default. For each feature or fix, choose focused checks at the behavior boundary: a scheduling workflow across actions, an API or adapter integration, or a functional or end-to-end flow. Existing unit-test removal is tracked in #133; adding functional and end-to-end automation is a later effort.
+- Keep a small set of in-process checks for booking, cancellation, rescheduling, expiry, duplicate requests, and similar state changes where one action affects the next. A fake repository or scripted model is acceptable for these checks; describe the boundary and what the check does not cover. See `doc/HLD.md` section 11.
+- A PR states which behavior was checked, how it was checked, and any gap that remains. Run applicable retained checks and quality gates. Do not add tests solely to mirror implementation details or meet a test-count target.
+
 ## Working rules
 
 1. Work in dependency order, while allowing policy-independent work to proceed when an owner decision is pending. Do not invent a business policy to remove a blocker.
