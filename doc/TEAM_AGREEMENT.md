@@ -45,7 +45,7 @@ An answer on GitHub is enough to hand work back to the manager. If Enrique answe
 
 ## Testing strategy for new work
 
-- Do not add isolated unit tests by default. For each feature or fix, choose focused checks at the behavior boundary: a scheduling workflow across actions, an API or adapter integration, or a functional or end-to-end flow. Existing unit-test removal is tracked in #133; adding functional and end-to-end automation is a later effort.
+- Do not add isolated unit tests by default. For each feature or fix, choose focused checks at the behavior boundary: a scheduling workflow across actions, an API or adapter integration, or a functional or end-to-end flow. The retained backend and frontend suites cover selected workflows and boundaries; adding functional and end-to-end automation is a later effort (#133).
 - Keep a small set of in-process checks for booking, cancellation, rescheduling, expiry, duplicate requests, and similar state changes where one action affects the next. A fake repository or scripted model is acceptable for these checks; describe the boundary and what the check does not cover. See `doc/HLD.md` section 11.
 - A PR states which behavior was checked, how it was checked, and any gap that remains. Run applicable retained checks and quality gates. Do not add tests solely to mirror implementation details or meet a test-count target.
 

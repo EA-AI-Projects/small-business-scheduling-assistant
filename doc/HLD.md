@@ -254,7 +254,7 @@ Operational essentials:
 
 ## 11. Testing strategy
 
-- Keep a small set of in-process workflow checks for booking, cancellation, rescheduling, expiry, duplicate requests, and other state changes where one action affects the next. Remove isolated unit tests and most mocked frontend component tests; this removal is a separate effort from adding functional or end-to-end coverage (owner decision, 2026-10-02).
+- Keep a small set of in-process workflow checks for booking, cancellation, rescheduling, expiry, duplicate requests, and other state changes where one action affects the next. The retained backend suite checks these workflows and selected HTTP, provider, queue, and DynamoDB boundaries. The retained frontend suite checks owner API requests, generated policy fields, consent-page version, and hosting configuration. These checks use synthetic data and do not replace functional or end-to-end coverage, which is a later effort (owner decision, 2026-10-02; #133).
 - Property/concurrency tests proving no overlapping active reservations can be committed.
 - Integration tests for scheduling transactions and outbox delivery semantics.
 - Webhook tests for signature validation, duplicate delivery, out-of-order events, and provider retry.

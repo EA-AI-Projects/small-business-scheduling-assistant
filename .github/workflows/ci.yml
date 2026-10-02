@@ -95,7 +95,7 @@ jobs:
       - name: Type-check
         run: npm run typecheck
 
-      - name: Unit tests
+      - name: Retained boundary checks
         run: npm test
 
       - name: Static export
