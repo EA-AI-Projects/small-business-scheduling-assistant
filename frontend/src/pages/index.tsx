@@ -105,7 +105,7 @@ export function OwnerSession({ config }: { config: OwnerConfig }) {
         {notice?.message}
       </div>
       {api ? (
-        <OwnerProvider key={session} api={api} notify={notify}><Workspace /></OwnerProvider>
+        <OwnerProvider key={session} api={api} notify={notify}><Workspace onSignOut={signOut} /></OwnerProvider>
       ) : completing ? (
         <p className="muted">Checking sign-in…</p>
       ) : config.authMode === "local" ? (
@@ -144,13 +144,16 @@ function Shell({ signedIn, onAuth, children }: {
 }) {
   return (
     <>
-      <header className="topbar">
-        <div><span className="eyebrow">OWNER WORKSPACE</span><h1>Scheduling</h1></div>
-        <div className="top-actions">
-          <span>{signedIn ? "Owner signed in" : "Signed out"}</span>
-          {onAuth && <button type="button" onClick={onAuth}>{signedIn ? "Sign out" : "Sign in"}</button>}
-        </div>
-      </header>
+      {/* Signed in, the workspace renders the calendar header with the menu (and sign out). */}
+      {!signedIn && (
+        <header className="topbar">
+          <div><span className="eyebrow">OWNER WORKSPACE</span><h1>Scheduling</h1></div>
+          <div className="top-actions">
+            <span>Signed out</span>
+            {onAuth && <button type="button" onClick={onAuth}>Sign in</button>}
+          </div>
+        </header>
+      )}
       <main>{children}</main>
       <footer>Scheduling pilot · Changes appear only after the server confirms them.</footer>
     </>

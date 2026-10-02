@@ -1,34 +1,44 @@
+import { rangeTitle } from "@/lib/time";
 import { useOwner, type Tab } from "@/owner/OwnerContext";
 
 import { ClientsTab } from "./clients/ClientsTab";
 import { RequestsTab } from "./requests/RequestsTab";
 import { ScheduleTab } from "./schedule/ScheduleTab";
 import { SettingsTab } from "./settings/SettingsTab";
+import { AppHeader } from "./shell/AppHeader";
+import { CalendarControls } from "./shell/CalendarControls";
 
-const TABS: { id: Tab; label: string }[] = [
+const SECTIONS: { id: Tab; label: string }[] = [
   { id: "schedule", label: "Schedule" },
   { id: "requests", label: "Requests" },
   { id: "clients", label: "Clients" },
   { id: "settings", label: "Settings" },
 ];
 
-export function Workspace() {
-  const { tab, setTab, data } = useOwner();
+export function Workspace({ onSignOut }: { onSignOut: () => void }) {
+  const { tab, setTab, data, loaded, date, view, setView, goToday, stepRange } = useOwner();
+  const pending = data.requests.length;
+  const current = SECTIONS.find((item) => item.id === tab);
   return (
     <div>
-      <nav className="tabs" aria-label="Owner workspace" role="tablist">
-        {TABS.map((item) => (
-          <button key={item.id} type="button" role="tab" aria-selected={tab === item.id}
-            className={tab === item.id ? "active" : ""} onClick={() => setTab(item.id)}>
-            {item.label}
-            {item.id === "requests" && data.requests.length > 0 ? ` (${data.requests.length})` : ""}
-          </button>
-        ))}
-      </nav>
-      <section className="tab-panel" role="tabpanel" hidden={tab !== "schedule"}><ScheduleTab /></section>
-      <section className="tab-panel" role="tabpanel" hidden={tab !== "requests"}><RequestsTab /></section>
-      <section className="tab-panel" role="tabpanel" hidden={tab !== "clients"}><ClientsTab /></section>
-      <section className="tab-panel" role="tabpanel" hidden={tab !== "settings"}><SettingsTab /></section>
+      <AppHeader appName="Scheduling" current={tab} badgeTotal={pending}
+        items={SECTIONS.map((item) => ({ ...item, badge: item.id === "requests" ? pending : undefined }))}
+        onSelect={(id) => setTab(id as Tab)}
+        menuFooter={<>
+          <span className="meta">Owner signed in</span>
+          <button type="button" onClick={onSignOut}>Sign out</button>
+        </>}>
+        {tab === "schedule" ? (
+          <CalendarControls title={loaded ? rangeTitle(date, view) : "Loading…"} view={view} disabled={!loaded} onToday={goToday}
+            onStep={stepRange} onView={setView} />
+        ) : (
+          <span className="range-title">{current?.label}</span>
+        )}
+      </AppHeader>
+      <section className="tab-panel" aria-label="Schedule" hidden={tab !== "schedule"}><ScheduleTab /></section>
+      <section className="tab-panel" aria-label="Requests" hidden={tab !== "requests"}><RequestsTab /></section>
+      <section className="tab-panel" aria-label="Clients" hidden={tab !== "clients"}><ClientsTab /></section>
+      <section className="tab-panel" aria-label="Settings" hidden={tab !== "settings"}><SettingsTab /></section>
     </div>
   );
 }
