@@ -61,6 +61,11 @@ describe("layoutDay", () => {
       ["a", 600, 720, 0, 2], ["b", 660, 780, 1, 2], ["c", 720, 840, 0, 2], ["d", 960, 1020, 0, 1]]);
   });
 
+  it("draws a late-starting item at its true start, clipped at the end of the day", () => {
+    const items = layoutDay([event("a", "2026-10-03T06:45:00Z", "2026-10-03T06:50:00Z")], "2026-10-02", la);
+    expect(shape(items)).toEqual([["a", 1425, 1440, 0, 1]]);
+  });
+
   it("gives short items a minimum extent that counts for overlap", () => {
     const items = layoutDay([event("a", "2026-10-02T17:00:00Z", "2026-10-02T17:05:00Z"),
       event("b", "2026-10-02T17:15:00Z", "2026-10-02T18:00:00Z")], "2026-10-02", la);

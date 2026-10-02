@@ -11,7 +11,7 @@ export interface PlacedEvent {
   event: CalendarEvent;
   /** Minutes after local midnight where the item starts on this day (0 if it began earlier). */
   startMinute: number;
-  /** Drawn end in minutes (at least MIN_DRAWN_MINUTES after start; 1440 if it runs past midnight). */
+  /** Drawn end in minutes (at least MIN_DRAWN_MINUTES after start, clipped to the day; 1440 if it runs past midnight). */
   endMinute: number;
   /** Zero-based side-by-side column within its overlap group, and the group's column count. */
   lane: number;
@@ -49,9 +49,8 @@ export function layoutDay(events: CalendarEvent[], day: string, zone: string): P
       const real = Math.round((Date.parse(event.end_at) - Date.parse(event.start_at)) / 60000);
       end = startMinute + Math.max(real, 0);
     }
-    const start = Math.min(startMinute, MINUTES_PER_DAY - MIN_DRAWN_MINUTES);
-    const endMinute = Math.min(MINUTES_PER_DAY, Math.max(end, start + MIN_DRAWN_MINUTES));
-    items.push({ event, startMinute: start, endMinute, continuesBefore, continuesAfter });
+    const endMinute = Math.min(MINUTES_PER_DAY, Math.max(end, startMinute + MIN_DRAWN_MINUTES));
+    items.push({ event, startMinute, endMinute, continuesBefore, continuesAfter });
   }
   items.sort((a, b) => a.startMinute - b.startMinute || b.endMinute - a.endMinute
     || a.event.event_id.localeCompare(b.event.event_id));

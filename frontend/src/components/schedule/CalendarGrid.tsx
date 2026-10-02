@@ -38,7 +38,7 @@ export function CalendarGrid({ days, events, zone, selectedId, onSelect }: {
   }, []);
   // Open near working hours whenever the range changes.
   useEffect(() => {
-    if (scroller.current) scroller.current.scrollTop = OPEN_HOUR * HOUR_PX;
+    if (scroller.current) scroller.current.scrollTop = Math.max(0, (OPEN_HOUR - 0.5) * HOUR_PX);
   }, [first, count]);
 
   const today = todayKey(zone, now);
@@ -48,7 +48,8 @@ export function CalendarGrid({ days, events, zone, selectedId, onSelect }: {
   })();
 
   return (
-    <div className="cal-scroll" ref={scroller} tabIndex={-1}>
+    <div className="cal-scroll" ref={scroller} tabIndex={0} role="region"
+      aria-label={count > 1 ? `Calendar, week of ${dayTitle(first ?? "")}` : `Calendar, ${dayTitle(first ?? "")}`}>
       <div className={`cal-grid ${count > 1 ? "week" : "day"}`}
         style={{ ["--cal-days" as string]: count, ["--hour-px" as string]: `${HOUR_PX}px` }}>
         <div className="cal-head">
@@ -70,7 +71,7 @@ export function CalendarGrid({ days, events, zone, selectedId, onSelect }: {
           </div>
           {days.map((day) => (
             <div key={day} className={`cal-col${day === today ? " today" : ""}`} role="group"
-              aria-label={dayTitle(day)}>
+              aria-label={day === today ? `${dayTitle(day)}, today` : dayTitle(day)}>
               {layoutDay(events, day, zone).map((placed) => (
                 <EventBlock key={placed.event.event_id} placed={placed} zone={zone} day={day}
                   selected={placed.event.event_id === selectedId} onSelect={onSelect} />
@@ -93,7 +94,7 @@ function EventBlock({ placed, zone, day, selected, onSelect }: {
   const { event, startMinute, endMinute, lane, lanes } = placed;
   const kind = event.status.toLowerCase().split("_")[0];
   return (
-    <button type="button" aria-label={eventLabel(placed, zone, day)} aria-pressed={selected}
+    <button type="button" aria-label={eventLabel(placed, zone, day)} aria-current={selected ? "true" : undefined}
       className={`cal-event ${kind}${selected ? " selected" : ""}${placed.continuesBefore ? " cont-before" : ""}${
         placed.continuesAfter ? " cont-after" : ""}`}
       onClick={() => onSelect(event.event_id)}

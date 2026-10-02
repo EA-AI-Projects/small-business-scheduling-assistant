@@ -43,7 +43,7 @@ export function ScheduleTab() {
       <div className="split">
         <div className="calendar-pane">
           {!data.calendar ? (
-            <p className="empty" role="status">Loading calendar…</p>
+            <p className="empty" role="status">Calendar not loaded yet. If it does not appear, use Refresh.</p>
           ) : (
             <>
               <CalendarGrid days={days} events={events} zone={data.zone}
