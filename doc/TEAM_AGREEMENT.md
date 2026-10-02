@@ -7,6 +7,13 @@ This agreement governs work on the Small Business Scheduling Assistant. Enrique 
 - The [GitHub Project board](https://github.com/orgs/EA-AI-Projects/projects/2), issues, and pull requests are the source of truth for work state. An issue states the outcome, acceptance checks, dependencies, and next owner. A pull request shows the proposed change and validation.
 - The PRD, HLD, architecture, and scheduling contracts record accepted product and technical decisions. A chat discussion or issue comment that changes a decision must be reflected in the relevant document.
 - Chats are for coordination. The dedicated implementation-manager chat runs the project workflow; it does not replace GitHub records.
+- Keep questions, issues, documents, and progress updates concise. Use short sentences and only the detail needed to make the outcome, decision, or next action clear.
+
+## Product planning
+
+- Clarify a large requirement with focused questions before splitting it into work. Record accepted product decisions in the relevant documents.
+- Propose one parent issue for the overall outcome and small sub-issues for reviewable stages. State dependencies between sub-issues explicitly; parentage alone does not imply order.
+- Enrique reviews the requirement and issue breakdown once before the issues are published. After approval, create the issues, link the hierarchy, and add them to the Project board. Routine implementation follows the ownership and merge rules below.
 
 ## Ownership and handoff
 
