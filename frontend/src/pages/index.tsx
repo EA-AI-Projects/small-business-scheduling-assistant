@@ -156,15 +156,16 @@ function NoticeBar({ notice, onDismiss }: { notice: Notice | null; onDismiss: ()
             const from = event.relatedTarget;
             before.current = from instanceof HTMLElement ? from : null;
           }}
-          onClick={() => {
-            const hadFocus = document.activeElement === dismiss.current;
+          onClick={(event) => {
+            // Chrome focuses buttons on pointer press too; only keyboard activation
+            // (detail === 0) should move focus when the button disappears.
+            const keyboard = event.detail === 0 && document.activeElement === dismiss.current;
             const target = before.current;
             onDismiss();
-            if (!hadFocus) return;
-            // The button is about to disappear: hand focus back to where the user was.
+            if (!keyboard) return;
             queueMicrotask(() => {
               const fallback = document.querySelector<HTMLElement>(".app-header-menu button");
-              (target?.isConnected ? target : fallback)?.focus();
+              (target?.isConnected ? target : fallback)?.focus({ preventScroll: true });
             });
           }}>
           Dismiss
