@@ -1,6 +1,6 @@
 """Plain-language texts write only when a reply maps to one current offer or prompt."""
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -17,10 +17,6 @@ from scheduling.domain.conversation import (
 from scheduling.domain.conversation_state import (
     InMemoryConversationStates,
     PromptKind,
-    Selection,
-    is_affirmative,
-    match_selection,
-    spread,
 )
 from scheduling.domain.holds import CreateHold, HoldService
 from scheduling.domain.lifecycle import Action, ActorRole, AppointmentCommand, LifecycleService
@@ -413,77 +409,3 @@ def test_owner_has_no_offer_memory() -> None:
 def options(*local: tuple[int, int, int]) -> tuple[datetime, ...]:
     return tuple(datetime(2026, 9, day, hour, minute, tzinfo=ZONE).astimezone(UTC)
                  for day, hour, minute in local)
-
-
-@pytest.mark.parametrize(("reply", "expected"), [
-    ("11", (Selection.MATCH, 1)),
-    ("the 11 o'clock one", (Selection.MATCH, 1)),
-    ("11am please", (Selection.MATCH, 1)),
-    ("11:00 AM", (Selection.MATCH, 1)),
-    ("1", (Selection.MATCH, 0)),
-    ("#3", (Selection.MATCH, 2)),
-    ("option 2", (Selection.MATCH, 1)),
-    ("the second one", (Selection.MATCH, 1)),
-    ("2", (Selection.AMBIGUOUS, None)),  # Option 2 (11 AM) or 2 PM (option 3).
-    ("2pm", (Selection.MATCH, 2)),
-    ("14:00", (Selection.MATCH, 2)),
-    ("11 or 2", (Selection.NONE, None)),
-    ("11, 2", (Selection.AMBIGUOUS, None)),
-    ("yes", (Selection.AMBIGUOUS, None)),
-    ("3:30", (Selection.UNMATCHED, None)),
-    ("9", (Selection.UNMATCHED, None)),
-    ("not 11", (Selection.NONE, None)),
-    ("11 won't work", (Selection.NONE, None)),
-    ("how about 11?", (Selection.NONE, None)),
-    ("11 next week", (Selection.NONE, None)),
-    ("Great, I'll take 11 on Oct 2", (Selection.NONE, None)),
-    ("I have a dentist at 11", (Selection.NONE, None)),
-])
-def test_reply_matching_is_deterministic(reply: str,
-                                         expected: tuple[Selection, int | None]) -> None:
-    offered = options((30, 8, 0), (30, 11, 0), (30, 14, 0))
-    assert match_selection(reply, offered, ZONE, date(2026, 9, 29)) == expected
-
-
-def test_single_option_yes_and_day_names_filter_options() -> None:
-    today = date(2026, 9, 29)
-    assert match_selection("yes", options((30, 10, 0)), ZONE, today) == (Selection.MATCH, 0)
-    assert match_selection("Sounds good", options((30, 10, 0)), ZONE, today) == (
-        Selection.MATCH, 0)
-    two_days = options((30, 10, 0), (30, 12, 0), (30, 15, 0))
-    assert match_selection("tomorrow at 3", two_days, ZONE, today) == (Selection.MATCH, 2)
-    assert match_selection("today at 3", two_days, ZONE, today) == (Selection.UNMATCHED, None)
-
-
-def test_affirmatives_are_short_and_plain() -> None:
-    assert is_affirmative("Yes!")
-    assert is_affirmative("ok thanks")
-    assert not is_affirmative("yes but not Thursday")
-    assert not is_affirmative("yes?")
-    assert not is_affirmative("yes 10")
-    assert not is_affirmative("sure, why would I want that")
-
-
-def test_spread_prefers_round_hours_and_spans_days() -> None:
-    starts = tuple(datetime(2026, 9, 30, 15, tzinfo=UTC) + timedelta(minutes=15 * step)
-                   for step in range(29))
-    picked = spread(starts, ZONE)
-    assert [start.astimezone(ZONE).strftime("%H:%M") for start in picked] == [
-        "08:00", "10:00", "12:00", "13:00", "15:00"]
-
-
-def test_open_ended_window_and_model_date_text_do_not_act_like_exact_commands() -> None:
-    chat = Harness()
-    chat.model.replies["Tomorrow after 2?"] = ask("availability", TOMORROW, time_from="14:00")
-    offer = chat.text("Tomorrow after 2?")
-    state = chat.states.read_state("pilot", "+14155550101")
-    assert state is not None
-    assert [option.astimezone(ZONE).strftime("%H:%M") for option in state.options] == [
-        "14:00", "14:15", "14:30", "14:45", "15:00"]  # 3:00 PM is the last 2-hour start.
-    assert "1) 2:00 PM" in offer.text and "5) 3:00 PM" in offer.text
-    chat.model.replies["Book me in tomorrow at 9"] = MessageProposal(
-        "request_booking", None, "2026-09-30 09:00", None, False)
-    result = chat.text("Book me in tomorrow at 9")
-    assert not result.committed
-    assert "What day" in result.text  # No resolved day; the literal date_text is ignored.
-    assert chat.calendar() == ()

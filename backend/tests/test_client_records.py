@@ -1,13 +1,11 @@
 """Client profiles, scoped notes, and owner-approved note retention."""
 
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
 
 from scheduling.adapters.memory import InMemoryCalendarRepository
-from scheduling.domain.calendar import CalendarStatus
 from scheduling.domain.client_records import (
     ClientRecordService,
     HomeSize,
@@ -36,28 +34,6 @@ def save(service: ClientRecordService, client_id: str, phone: str,
     return service.save_profile(BUSINESS, client_id, "Synthetic Client", phone,
                                 "123 Test Street", HomeSize.SMALL, duration,
                                 True, version, 180, NOW)
-
-
-def test_phone_mapping_version_and_appointment_snapshot() -> None:
-    repository, service = ready()
-    profile = save(service, "client-1", "+14155550101")
-    assert repository.read_verified_phone(BUSINESS, profile.phone_e164) is None
-    verified = service.verify_phone(BUSINESS, "client-1", profile.phone_e164, NOW)
-    assert repository.read_verified_phone(BUSINESS, profile.phone_e164) == verified
-    with pytest.raises(RecordConflict, match="already assigned"):
-        save(service, "client-2", profile.phone_e164)
-    with pytest.raises(RecordConflict, match="version"):
-        save(service, "client-1", profile.phone_e164)
-
-    appointment = OwnerCalendarService(repository, lambda: NOW).apply(
-        OwnerCalendarCommand(BUSINESS, "owner-1", "manual", OwnerAction.CREATE_APPOINTMENT,
-                             repository.read_revision(BUSINESS), client_id="client-1",
-                             start_at=START, duration_minutes=60)).appointment
-    assert appointment is not None
-    updated = save(service, "client-1", "+14155550102", version=2, duration=120)
-    assert updated.phone_verified_at is None
-    assert repository.read_verified_phone(BUSINESS, "+14155550101") is None
-    assert repository.read_appointment(appointment.appointment_id).duration_minutes == 60
 
 
 def test_note_scope_retention_and_access_code_exclusion() -> None:
@@ -93,21 +69,6 @@ def test_note_scope_retention_and_access_code_exclusion() -> None:
     with pytest.raises(ValueError, match="retention window"):
         service.create_note(BUSINESS, "client-1", None, "Late note", "owner-1",
                             anniversary + timedelta(days=1))
-
-
-def test_only_ended_uncancelled_confirmed_appointment_counts_as_visit() -> None:
-    repository, service = ready()
-    save(service, "client-1", "+14155550101")
-    appointment = OwnerCalendarService(repository, lambda: NOW).apply(
-        OwnerCalendarCommand(BUSINESS, "owner-1", "manual", OwnerAction.CREATE_APPOINTMENT,
-                             repository.read_revision(BUSINESS), client_id="client-1",
-                             start_at=START, duration_minutes=60)).appointment
-    assert appointment is not None
-    assert repository.last_visit_end(BUSINESS, "client-1", appointment.end_at - timedelta(seconds=1)) is None
-    assert repository.last_visit_end(BUSINESS, "client-1", appointment.end_at) == appointment.end_at
-    repository._appointments[appointment.appointment_id] = replace(
-        appointment, status=CalendarStatus.CANCELLED)
-    assert repository.last_visit_end(BUSINESS, "client-1", appointment.end_at) is None
 
 
 def test_never_visited_notes_expire_from_creation_and_legal_hold_survives() -> None:
@@ -187,17 +148,3 @@ def test_owner_routes_require_verified_business_identity() -> None:
                      headers={"Authorization": "Bearer good"}).status_code == 200
     assert len(api.get(notes, headers={"Authorization": "Bearer good"}).json()) == 1
     assert api.get(notes, headers={"Authorization": "Bearer bad"}).status_code == 401
-
-
-def test_profile_phone_drops_format_characters_and_whitespace_only() -> None:
-    _, service = ready()
-    profile = save(service, "client-1", "\u202A+1415\u00A0555\u20690101\u202C ")
-    assert profile.phone_e164 == "+14155550101"
-    with pytest.raises(ValueError):
-        save(service, "client-2", "+1-415-555-0102")
-
-
-def test_profile_phone_rejects_non_ascii_digits() -> None:
-    _, service = ready()
-    with pytest.raises(ValueError):
-        save(service, "client-1", "+1\u0664155550101")

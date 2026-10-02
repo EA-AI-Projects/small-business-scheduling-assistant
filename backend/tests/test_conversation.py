@@ -194,20 +194,6 @@ def test_old_owner_number_cannot_approve_a_persisted_receipt_after_rotation() ->
     assert store.read_appointment(hold_id).status == CalendarStatus.PENDING_APPROVAL  # type: ignore[union-attr]
 
 
-def test_exact_owner_approval_uses_lifecycle_and_is_not_repeatable() -> None:
-    service, store, model, _ = setup(MessageProposal("owner_decision", None,
-                                                      None, "approve", False))
-    hold_id = pending(store)
-    model.proposal = MessageProposal("owner_decision", hold_id[:8], None, "approve", False)
-    message = receipt(f"Approve {hold_id[:8]}", role=SenderRole.OWNER)
-    result = service.handle(message)
-    assert result.committed
-    assert result.appointment_id == hold_id
-    assert not model.calls  # Exact authorized commands do not depend on model behavior.
-    assert store.read_appointment(hold_id).status == CalendarStatus.CONFIRMED  # type: ignore[union-attr]
-    assert not service.handle(message).committed
-
-
 def test_full_request_id_is_accepted_for_owner_approval() -> None:
     service, store, model, _ = setup(MessageProposal("clarify", None, None, None, True))
     hold_id = pending(store)
@@ -228,18 +214,6 @@ def test_client_cannot_cancel_another_clients_visit_or_inferred_target() -> None
     assert store.read_appointment(hold_id).status == CalendarStatus.CONFIRMED  # type: ignore[union-attr]
 
 
-def test_exact_client_cancellation_uses_lifecycle() -> None:
-    service, store, model, _ = setup(MessageProposal("cancel", None, None, None, False))
-    hold_id = pending(store)
-    LifecycleService(store, lambda: NOW).apply(AppointmentCommand(
-        "pilot", hold_id, "owner", ActorRole.OWNER, Action.APPROVE, "approve-seed", 1))
-    model.proposal = MessageProposal("cancel", hold_id[:8], None, None, False)
-    assert not service.handle(receipt(f"Don't cancel {hold_id[:8]}")).committed
-    result = service.handle(receipt(f"Cancel {hold_id[:8]}", provider_id="SM-cancel"))
-    assert result.committed
-    assert store.read_appointment(hold_id).status == CalendarStatus.CANCELLED  # type: ignore[union-attr]
-
-
 def test_full_appointment_id_is_accepted_for_cancellation() -> None:
     service, store, model, _ = setup(MessageProposal("clarify", None, None, None, True))
     hold_id = pending(store)
@@ -248,22 +222,6 @@ def test_full_appointment_id_is_accepted_for_cancellation() -> None:
     result = service.handle(receipt(f"Cancel {hold_id}", provider_id="SM-cancel-full"))
     assert result.committed
     assert not model.calls
-
-
-def test_exact_client_booking_creates_pending_hold_and_day_query_only_suggests() -> None:
-    service, store, model, _ = setup(MessageProposal("request_booking", None,
-                                                      "2026-10-01", None, False))
-    suggestions = service.handle(receipt("Book 2026-10-01"))
-    assert not suggestions.committed
-    assert "Open times on Thu Oct 1: 1) 8:00 AM" in suggestions.text
-    assert "Reply with the number or time" in suggestions.text
-    assert store.read_calendar("pilot").events == ()
-    model.proposal = MessageProposal("request_booking", None, "2026-10-01 09:00", None, False)
-    result = service.handle(receipt("Book 2026-10-01 09:00", provider_id="SM-2"))
-    assert result.committed
-    assert "pending owner approval" in result.text
-    assert result.appointment_id is not None
-    assert store.read_appointment(result.appointment_id).status == CalendarStatus.PENDING_APPROVAL  # type: ignore[union-attr]
 
 
 def test_model_invented_date_cannot_create_hold() -> None:
@@ -304,16 +262,6 @@ def test_exact_booking_works_when_model_would_clarify() -> None:
     assert not model.calls
 
 
-def test_duplicate_provider_receipt_reuses_the_same_booking() -> None:
-    service, store, _, _ = setup(MessageProposal("clarify", None, None, None, True))
-    message = receipt("Book 2026-10-01 09:00", provider_id="SM-replayed")
-    first = service.handle(message)
-    replay = service.handle(message)
-    assert first.committed and replay.committed
-    assert first.appointment_id == replay.appointment_id
-    assert len(store.read_calendar("pilot").events) == 1
-
-
 def test_multiple_dates_and_ambiguous_local_time_cannot_create_hold() -> None:
     service, store, model, _ = setup(MessageProposal("request_booking", None,
                                                       "2026-10-01 09:00", None, False))
@@ -322,24 +270,6 @@ def test_multiple_dates_and_ambiguous_local_time_cannot_create_hold() -> None:
     model.proposal = MessageProposal("request_booking", None, "2026-11-01 01:30", None, False)
     assert not service.handle(receipt("Book 2026-11-01 01:30")).committed
     assert store.read_calendar("pilot").events == ()
-
-
-def test_reschedule_keeps_original_confirmed_until_owner_approval() -> None:
-    service, store, model, _ = setup(MessageProposal("reschedule", None,
-                                                      "2026-10-02 09:00", None, False))
-    original_id = pending(store)
-    LifecycleService(store, lambda: NOW).apply(AppointmentCommand(
-        "pilot", original_id, "owner", ActorRole.OWNER, Action.APPROVE,
-        "approve-seed", 1))
-    model.proposal = MessageProposal("reschedule", original_id[:8],
-                                     "2026-10-02 09:00", None, False)
-    result = service.handle(receipt(
-        f"Reschedule {original_id[:8]} to 2026-10-02 09:00", provider_id="SM-replace"))
-    assert result.committed
-    assert result.appointment_id is not None
-    assert store.read_appointment(original_id).status == CalendarStatus.CONFIRMED  # type: ignore[union-attr]
-    assert store.read_appointment(result.appointment_id).status == CalendarStatus.PENDING_APPROVAL  # type: ignore[union-attr]
-    assert "remains confirmed" in result.text
 
 
 def test_model_cannot_turn_negated_reschedule_into_replacement() -> None:

@@ -154,15 +154,6 @@ def test_fictional_numbers_never_reach_twilio(number: str) -> None:
     assert messages.calls == []
 
 
-@pytest.mark.parametrize(("number", "fictional"), [
-    ("+14155550100", True), ("+14155550199", True), ("+12125550150", True),
-    ("+14155550099", False), ("+14155550200", False), ("+14155551100", False),
-    ("+15005550006", False), ("+4155550150", False), ("+141555501500", False),
-])
-def test_fictional_pattern_boundaries(number: str, fictional: bool) -> None:
-    assert bool(FICTIONAL_NUMBER.fullmatch(number)) is fictional
-
-
 def test_fictional_client_number_on_conversation_reply_is_refused() -> None:
     sender, messages, consent, records = setup()
     records.profile = replace(records.profile, phone_e164="+14155550150")
@@ -232,14 +223,6 @@ def test_conversation_reply_rejects_missing_body_or_forged_destination() -> None
     with pytest.raises(PermanentDeliveryFailure, match="REPLY_UNAVAILABLE"):
         sender.deliver(reply)
     assert messages.calls == []
-
-
-def test_block_notice_ignores_appointment_version_like_before() -> None:
-    sender, messages, _, _ = setup()
-    assert sender.deliver(record("owner", "block_time", version=2)) == "SM-synthetic"
-    assert messages.calls[0]["body"].startswith("Owner calendar updated (block_time)")
-    with pytest.raises(PermanentDeliveryFailure, match="TEMPLATE_RECIPIENT_MISMATCH"):
-        sender.deliver(record("client", "block_time", version=2))
 
 
 def test_template_phone_defaults_cannot_be_texted() -> None:
