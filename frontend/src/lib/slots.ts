@@ -2,11 +2,11 @@
  * Empty-slot prefill for the "block time" card. Times are business-local wall-clock strings
  * ("YYYY-MM-DDTHH:mm", the datetime-local format); the server resolves them to instants.
  */
-import { localInput } from "./time";
+import { addDays, localInput } from "./time";
 
 export const SLOT_MINUTES = 30;
 export const DEFAULT_BLOCK_MINUTES = 60;
-/** Start used for the "Block time" control on a day other than today. */
+/** Neutral starting value for the "Block time" control on a day other than today. */
 export const DEFAULT_START_MINUTE = 9 * 60;
 const SLOTS_PER_DAY = (24 * 60) / SLOT_MINUTES;
 
@@ -73,14 +73,15 @@ export function slotAtFraction(day: string, fraction: number, zone: string): Slo
 }
 
 /**
- * Prefill for the "Block time" control. Today: the next 30-minute slot after now (the latest slot
- * of the day if it is late). Another day: 09:00, the start of a typical working morning; this is
- * only a starting value the owner edits, not a scheduling rule.
+ * Prefill for the "Block time" control. Today: the next 30-minute slot after now, crossing into
+ * the next day's 00:00 after 23:30 so it never starts in the past. Another day: 09:00, a neutral
+ * starting value the owner edits; it carries no working-hours meaning and reads no policy.
  */
 export function nextSlotOn(day: string, now: Date, zone: string): SlotRange {
   const local = localInput(now.toISOString(), zone);
   if (local.slice(0, 10) !== day) return rangeFrom(wallOf(day, DEFAULT_START_MINUTE), zone);
   const minute = Number(local.slice(11, 13)) * 60 + Number(local.slice(14, 16));
   const next = (Math.floor(minute / SLOT_MINUTES) + 1) * SLOT_MINUTES;
-  return rangeFrom(wallOf(day, Math.min(next, 24 * 60 - SLOT_MINUTES)), zone);
+  if (next >= 24 * 60) return rangeFrom(wallOf(addDays(day, 1), 0), zone);
+  return rangeFrom(wallOf(day, next), zone);
 }

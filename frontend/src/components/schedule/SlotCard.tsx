@@ -3,7 +3,6 @@ import { useState } from "react";
 import type { SlotRange } from "@/lib/slots";
 import { errorMessage, useOwner } from "@/owner/OwnerContext";
 
-import { BusyButton } from "../BusyButton";
 import { PopoverCard, type CardAnchor } from "../PopoverCard";
 
 /**
@@ -29,25 +28,31 @@ function SlotForm({ range, onClose }: { range: SlotRange; onClose: () => void })
   const { data, change, resolveLocal, notify } = useOwner();
   const [start, setStart] = useState(range.start);
   const [end, setEnd] = useState(range.end);
+  const [busy, setBusy] = useState(false);
+  const save = async () => {
+    if (busy) return;
+    if (!data.calendar) { notify("The calendar has not loaded yet", true); return; }
+    setBusy(true);
+    try {
+      const body = {
+        expected_revision: data.calendar.revision,
+        start_at: await resolveLocal(start),
+        end_at: await resolveLocal(end),
+      };
+      if (await change("/blocks", "POST", body, "Unavailable time added")) onClose();
+    } catch (error) {
+      notify(`Nothing was saved: ${errorMessage(error)}`, true);
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
-    <div className="form-stack">
+    <form className="form-stack" onSubmit={(event) => { event.preventDefault(); void save(); }}>
       <label>Start <input type="datetime-local" value={start} required onChange={(e) => setStart(e.target.value)} /></label>
       <label>End <input type="datetime-local" value={end} required onChange={(e) => setEnd(e.target.value)} /></label>
       <div className="row-actions">
-        <BusyButton className="primary" onClick={async () => {
-          if (!data.calendar) { notify("The calendar has not loaded yet", true); return; }
-          try {
-            const body = {
-              expected_revision: data.calendar.revision,
-              start_at: await resolveLocal(start),
-              end_at: await resolveLocal(end),
-            };
-            if (await change("/blocks", "POST", body, "Unavailable time added")) onClose();
-          } catch (error) {
-            notify(`Nothing was saved: ${errorMessage(error)}`, true);
-          }
-        }}>Add block</BusyButton>
+        <button className="primary" type="submit" disabled={busy}>Add block</button>
       </div>
-    </div>
+    </form>
   );
 }

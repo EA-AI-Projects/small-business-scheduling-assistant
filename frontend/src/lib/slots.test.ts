@@ -42,8 +42,11 @@ describe("slot prefill", () => {
     expect(nextSlotOn("2026-11-01", new Date("2026-11-01T07:45:00Z"), la).start).toBe("2026-11-01T01:00");
     // 01:15 PST (second pass of the repeated hour): next slot 01:30.
     expect(nextSlotOn("2026-11-01", new Date("2026-11-01T09:15:00Z"), la).start).toBe("2026-11-01T01:30");
-    // 23:50 local: stays on the day at the last slot.
-    expect(nextSlotOn("2026-10-02", new Date("2026-10-03T06:50:00Z"), la).start).toBe("2026-10-02T23:30");
+    // 23:50 local: the next slot is tomorrow 00:00, never in the past.
+    expect(nextSlotOn("2026-10-02", new Date("2026-10-03T06:50:00Z"), la))
+      .toEqual({ start: "2026-10-03T00:00", end: "2026-10-03T01:00" });
+    // 23:15 local: still today at 23:30.
+    expect(nextSlotOn("2026-10-02", new Date("2026-10-03T06:15:00Z"), la).start).toBe("2026-10-02T23:30");
   });
 
   it("uses 09:00 on a day other than today, and the business zone's today", () => {

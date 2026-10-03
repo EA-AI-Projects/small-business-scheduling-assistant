@@ -162,6 +162,8 @@ export function PopoverCard({ title, getAnchor, onClose, onAnchorPress, onSlotPr
       const target = event.target;
       if (target instanceof Node && card.current?.contains(target)) return;
       const hit = elementAt(event.clientX, event.clientY);
+      // The pinned error notice (and its Dismiss) must not close the card and lose the owner's entry.
+      if (hit?.closest(".notice.pinned")) return;
       const anchor = hit?.closest<HTMLElement>("[data-popover-anchor]");
       const column = hit?.closest<HTMLElement>("[data-slot-column]");
       if (anchor && latest.current.onAnchorPress) latest.current.onAnchorPress(anchor);
