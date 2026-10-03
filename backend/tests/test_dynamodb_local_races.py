@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from threading import Barrier
 from time import monotonic, sleep
 from typing import Any
@@ -222,6 +223,47 @@ def _seed(env: RaceEnv, appointments: tuple[Appointment, ...],
                   "replacement_id": {"S": "replacement"},
                   "expires_at": {"S": EXPIRY.isoformat(timespec="microseconds")}},
         )
+
+
+def test_client_erasure_releases_reservations_and_removes_linked_records(
+    race_env: RaceEnv,
+) -> None:
+    env = race_env
+    repo = DynamoDBCalendarRepository(env.client, env.table)
+    ClientRecordService(repo).save_profile(
+        env.business, "synthetic-client", "Synthetic Client", "+14155550101",
+        "123 Test Street", HomeSize.SMALL, 60, True, 0, 180, START,
+    )
+    confirmed = _appointment(env, "erasure-confirmed", CalendarStatus.CONFIRMED)
+    pending = _appointment(env, "erasure-pending", CalendarStatus.PENDING_APPROVAL)
+    _seed(env, (confirmed, pending))
+    env.client.put_item(TableName=env.table, Item={
+        **repo._business_key(env.business, "NOTE#CLIENT#" +
+                             sha256(b"synthetic-client").hexdigest() +
+                             "#synthetic-note"),
+        "client_id": {"S": "synthetic-client"}, "body": {"S": "Synthetic note"},
+    })
+    env.client.put_item(TableName=env.table, Item={
+        **repo._business_key(env.business, "SMS#synthetic-receipt"),
+        "client_id": {"S": "synthetic-client"}, "sender": {"S": "+14155550101"},
+        "body": {"S": "Synthetic request"},
+    })
+    env.client.put_item(TableName=env.table, Item={
+        **repo._business_key(env.business, "OUTBOX#synthetic-notice"),
+        "appointment_id": {"S": confirmed.appointment_id},
+    })
+
+    repo.erase_client(env.business, "synthetic-client")
+    repo.erase_client(env.business, "synthetic-client")  # safe replay
+    assert repo.read_profile(env.business, "synthetic-client") is None
+    assert repo.read_appointment(confirmed.appointment_id) is None
+    assert repo.read_appointment(pending.appointment_id) is None
+    assert repo.read_calendar(env.business).events == ()
+    remaining = repo._scan_items()
+    assert not any(item["SK"]["S"].startswith(("NOTE#", "SMS#", "OUTBOX#"))
+                   for item in remaining if item["PK"]["S"] == f"BUSINESS#{env.business}")
+    assert not any(item["PK"]["S"].startswith(f"VISITS#{env.business}#")
+                   for item in remaining)
 
 
 def _commit(env: RaceEnv, before: Appointment, after: Appointment, action: Action,

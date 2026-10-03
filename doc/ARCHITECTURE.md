@@ -309,6 +309,10 @@ Cognito is preferred for password and token management. Do not use SMS OTP as th
 8. The owner approved deleting SMS message bodies 90 days after the last scheduling exchange and ordinary client/appointment notes 12 months after the last visit; keep minimal consent/opt-out evidence four years after the last program text, with documented legal holds as an exception. Entry/access codes are excluded from the MVP.
 9. The owner decided on 2026-10-03 that explicit client deletion overrides those retention periods and legal holds: cancel future appointments and pending requests, release reserved time, remove all client-associated records including consent and opt-out evidence, and require new onboarding and consent if the client returns. Implementation is pending.
 
+### Proposed deletion fence for issue #189 (decision pending)
+
+The draft backend deletion transaction creates `BUSINESS#<business>/ERASURE#<sha256(client_id)>` with `state=ERASING` and the phone number only while deletion is running. It also creates a temporary `ERASURE_PHONE#<phone>` item. On completion it removes the phone item and phone attribute, leaving the client-ID hash key and `state=COMPLETE` without a TTL. The permanent hash is pseudonymous client-associated data; whether this minimal operational marker is allowed under the full-erasure decision is unresolved. Without it, delayed commands can recreate data if a deleted client ID is reused. The current draft does not yet prove that in-flight SMS sends and conversation state writes are quiescent before the API returns success. Do not merge #189 until these questions and races are resolved.
+
 ## 13. References
 
 ### Internal reference project inspected

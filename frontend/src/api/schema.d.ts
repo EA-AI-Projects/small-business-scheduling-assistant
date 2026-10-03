@@ -138,7 +138,8 @@ export interface paths {
         /** Save Client */
         put: operations["save_client_v1_owner_businesses__business_id__clients__client_id__put"];
         post?: never;
-        delete?: never;
+        /** Erase Client */
+        delete: operations["erase_client_v1_owner_businesses__business_id__clients__client_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -957,6 +958,36 @@ export interface operations {
                 content: {
                     "application/json": unknown;
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    erase_client_v1_owner_businesses__business_id__clients__client_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                business_id: string;
+                client_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {

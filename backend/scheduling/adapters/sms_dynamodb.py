@@ -1,6 +1,7 @@
 """Conditional SMS ingress and consent records in the business table."""
 
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from typing import Any, Protocol
 
 from scheduling.adapters.dynamodb import _command_sort_key, _record_transaction_conflict
@@ -53,6 +54,20 @@ class DynamoSmsIngressStore(SmsIngressStore):
         return self._client.get_item(TableName=self._table,
                                      Key=self._key(business_id, sort_key),
                                      ConsistentRead=True).get("Item")
+
+    def _erasure_check(self, business_id: str, client_id: str) -> dict[str, Any]:
+        return {"ConditionCheck": {
+            "TableName": self._table,
+            "Key": self._key(business_id, f"ERASURE#{sha256(client_id.encode()).hexdigest()}"),
+            "ConditionExpression": "attribute_not_exists(PK)",
+        }}
+
+    def _phone_erasure_check(self, business_id: str, phone: str) -> dict[str, Any]:
+        return {"ConditionCheck": {
+            "TableName": self._table,
+            "Key": self._key(business_id, f"ERASURE_PHONE#{phone}"),
+            "ConditionExpression": "attribute_not_exists(PK)",
+        }}
 
     def read_received(self, business_id: str, provider_id: str) -> InboundReceipt | None:
         item = self._get(business_id, f"SMS#{provider_id}")
@@ -185,6 +200,9 @@ class DynamoSmsIngressStore(SmsIngressStore):
                     "Key": self._key(receipt.business_id, key),
                     "ConditionExpression": "attribute_not_exists(PK)",
                 }} for key in self._command_keys(receipt)),
+                *([self._erasure_check(receipt.business_id, receipt.client_id)]
+                  if receipt.client_id is not None else []),
+                self._phone_erasure_check(receipt.business_id, receipt.sender),
             ])
         except Exception as exc:
             if self.read_reply_text(receipt.business_id, receipt.provider_id) is not None:
@@ -217,6 +235,9 @@ class DynamoSmsIngressStore(SmsIngressStore):
             "TableName": self._table, "Item": item,
             "ConditionExpression": "attribute_not_exists(PK)",
         }}]
+        if receipt.client_id is not None:
+            writes.append(self._erasure_check(receipt.business_id, receipt.client_id))
+        writes.append(self._phone_erasure_check(receipt.business_id, receipt.sender))
         if receipt.keyword == Keyword.STOP:
             writes.append({"Put": {
                 "TableName": self._table,
@@ -451,7 +472,11 @@ class DynamoSmsIngressStore(SmsIngressStore):
                 return False
 
     def put_consent(self, evidence: ConsentEvidence) -> None:
-        self._client.transact_write_items(TransactItems=self._consent_writes(evidence))
+        self._client.transact_write_items(TransactItems=[
+            *self._consent_writes(evidence),
+            self._erasure_check(evidence.business_id, evidence.client_id),
+            self._phone_erasure_check(evidence.business_id, evidence.phone_e164),
+        ])
 
     def put_consent_verifying_phone(self, evidence: ConsentEvidence,
                                     verified: ClientProfile,
@@ -511,6 +536,10 @@ class DynamoSmsIngressStore(SmsIngressStore):
                 },
                 "ConditionExpression": "attribute_not_exists(PK)",
             }})
+        writes.extend([
+            self._erasure_check(evidence.business_id, evidence.client_id),
+            self._phone_erasure_check(evidence.business_id, evidence.phone_e164),
+        ])
         try:
             self._client.transact_write_items(TransactItems=writes)
         except Exception as exc:

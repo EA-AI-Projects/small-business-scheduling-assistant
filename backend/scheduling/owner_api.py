@@ -376,6 +376,12 @@ def create_owner_app(
             raise _error("NOT_FOUND", "Client was not found", 404)
         return profile
 
+    @app.delete("/v1/owner/businesses/{business_id}/clients/{client_id}", status_code=204)
+    def erase_client(business_id: str, client_id: str,
+                     owner: Annotated[OwnerPrincipal, Depends(principal)]) -> None:
+        del owner
+        return cast(DynamoDBCalendarRepository, repository).erase_client(business_id, client_id)
+
     @app.put("/v1/owner/businesses/{business_id}/clients/{client_id}")
     def save_client(business_id: str, client_id: str, body: ClientProfileBody,
                     owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:

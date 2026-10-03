@@ -214,7 +214,10 @@ def test_dynamodb_writes_consent_and_verification_in_one_transaction() -> None:
         evidence, profile)
     assert len(dynamo.transactions) == 1
     items = dynamo.transactions[0]
-    assert [next(iter(item)) for item in items] == ["Put", "Update", "Update"]
+    assert [next(iter(item)) for item in items] == [
+        "Put", "Update", "Update", "ConditionCheck", "ConditionCheck"]
+    assert items[3]["ConditionCheck"]["Key"]["SK"]["S"].startswith("ERASURE#")
+    assert items[4]["ConditionCheck"]["Key"]["SK"]["S"].startswith("ERASURE_PHONE#")
     update = items[2]["Update"]
     assert update["Key"]["SK"]["S"] == "CLIENT#client-1"
     assert "version = :old_version" in update["ConditionExpression"]

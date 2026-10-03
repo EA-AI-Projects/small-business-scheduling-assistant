@@ -9,7 +9,13 @@ from scheduling.adapters.outbox_aws import due_keys
 from scheduling.domain.appointments import Appointment, ReplacementGuard
 from scheduling.domain.availability import AvailabilityPolicy, HolidayCalendar, LocalWindow
 from scheduling.domain.calendar import CalendarEvent, CalendarSnapshot, CalendarStatus
-from scheduling.domain.client_records import ClientNote, ClientProfile, HomeSize, RecordConflict
+from scheduling.domain.client_records import (
+    ClientNote,
+    ClientProfile,
+    HomeSize,
+    RecordConflict,
+    RecordNotFound,
+)
 from scheduling.domain.holds import (
     CreateHold,
     HoldCommit,
@@ -53,6 +59,8 @@ class DynamoClient(Protocol):
     def transact_write_items(self, **kwargs: Any) -> dict[str, Any]: ...
 
     def update_item(self, **kwargs: Any) -> dict[str, Any]: ...
+
+    def delete_item(self, **kwargs: Any) -> dict[str, Any]: ...
 
 
 def _instant(value: datetime) -> str:
@@ -201,6 +209,13 @@ class DynamoDBCalendarRepository:
             "ConditionExpression": "attribute_not_exists(PK) OR attribute_exists(cleared_at)",
         }}]
 
+    def _erasure_check(self, business_id: str, client_id: str) -> dict[str, Any]:
+        return {"ConditionCheck": {
+            "TableName": self._table,
+            "Key": self._business_key(business_id, f"ERASURE#{sha256(client_id.encode()).hexdigest()}"),
+            "ConditionExpression": "attribute_not_exists(PK)",
+        }}
+
     @staticmethod
     def _business_key(business_id: str, sort_key: str) -> dict[str, dict[str, str]]:
         return {"PK": {"S": f"BUSINESS#{business_id}"}, "SK": {"S": sort_key}}
@@ -229,13 +244,252 @@ class DynamoDBCalendarRepository:
         )
 
     def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None:
+        if self._get(self._business_key(
+                business_id, f"ERASURE#{sha256(client_id.encode()).hexdigest()}")) is not None:
+            return None
         item = self._get(self._business_key(business_id, f"CLIENT#{client_id}"))
         return self._profile_from_item(item) if item else None
 
     def list_profiles(self, business_id: str) -> tuple[ClientProfile, ...]:
         items = self._query(business_id, "PK = :pk AND begins_with(SK, :prefix)",
                             {":prefix": {"S": "CLIENT#"}})
-        return tuple(self._profile_from_item(item) for item in items)
+        return tuple(profile for item in items
+                     if (profile := self.read_profile(business_id, item["client_id"]["S"])))
+
+    def _scan_items(self) -> tuple[dict[str, Any], ...]:
+        """Strongly read every partition; deletion is rare and must find old projections."""
+        items: list[dict[str, Any]] = []
+        last: dict[str, Any] | None = None
+        while True:
+            kwargs: dict[str, Any] = {"TableName": self._table, "ConsistentRead": True}
+            if last is not None:
+                kwargs["ExclusiveStartKey"] = last
+            page = self._client.scan(**kwargs)
+            items.extend(page.get("Items", ()))
+            last = page.get("LastEvaluatedKey")
+            if last is None:
+                return tuple(items)
+
+    def erase_client(self, business_id: str, client_id: str) -> None:
+        """Fence new work, release reservations, and resume a partial purge on retry.
+
+        The completed fence deliberately survives with a SHA-256 client ID key.
+        Whether that minimal marker is permitted by the product deletion rule is
+        an open decision; callers must not interpret this as certified erasure.
+        """
+        fence_key = self._business_key(
+            business_id, f"ERASURE#{sha256(client_id.encode()).hexdigest()}")
+        fence = self._get(fence_key)
+        if fence is not None and fence.get("state", {}).get("S") == "COMPLETE":
+            return
+        if fence is None:
+            profile = self.read_profile(business_id, client_id)
+            if profile is None:
+                raise RecordNotFound("Client was not found")
+            try:
+                self._client.transact_write_items(TransactItems=[
+                    {"ConditionCheck": {
+                        "TableName": self._table,
+                        "Key": self._business_key(business_id, f"CLIENT#{client_id}"),
+                        "ConditionExpression": "version = :version",
+                        "ExpressionAttributeValues": {":version": {"N": str(profile.version)}},
+                    }},
+                    {"Put": {
+                        "TableName": self._table,
+                        "Item": {**fence_key, "state": {"S": "ERASING"},
+                                 "phone_e164": {"S": profile.phone_e164}},
+                        "ConditionExpression": "attribute_not_exists(PK)",
+                    }},
+                    {"Put": {
+                        "TableName": self._table,
+                        "Item": self._business_key(
+                            business_id, f"ERASURE_PHONE#{profile.phone_e164}"),
+                        "ConditionExpression": "attribute_not_exists(PK)",
+                    }},
+                ])
+            except Exception as exc:
+                if not _record_transaction_conflict(exc):
+                    raise
+                fence = self._get(fence_key)
+                if fence is None:
+                    raise RecordConflict("Client changed before deletion") from exc
+            else:
+                fence = self._get(fence_key)
+        assert fence is not None
+        phone = fence["phone_e164"]["S"]
+
+        # Release each active reservation in a revision-guarded transaction.
+        # This also removes the confirmed-visit index before its metadata is erased.
+        for item in self._scan_items():
+            if (item.get("PK", {}).get("S", "").startswith("APPOINTMENT#")
+                    and item.get("SK", {}).get("S") == "META"
+                    and item.get("business_id", {}).get("S") == business_id
+                    and item.get("client_id", {}).get("S") == client_id):
+                appointment = self.read_appointment(item["PK"]["S"].removeprefix("APPOINTMENT#"))
+                if appointment is None or appointment.status not in (
+                        CalendarStatus.PENDING_APPROVAL, CalendarStatus.CONFIRMED):
+                    continue
+                for _ in range(5):
+                    revision = self.read_revision(business_id)
+                    event_key = self._business_key(
+                        business_id,
+                        f"EVENT#{_instant(appointment.start_at)}#{appointment.appointment_id}")
+                    if self._get(event_key) is None:
+                        break  # A previous attempt already released this reservation.
+                    writes: list[dict[str, Any]] = [
+                        {"Update": {
+                            "TableName": self._table,
+                            "Key": self._business_key(business_id, "CALENDAR#REVISION"),
+                            "UpdateExpression": "SET revision = :next",
+                            "ConditionExpression": "revision = :old",
+                            "ExpressionAttributeValues": {
+                                ":old": {"N": str(revision)},
+                                ":next": {"N": str(revision + 1)},
+                            },
+                        }},
+                        {"Delete": {
+                            "TableName": self._table, "Key": event_key,
+                            "ConditionExpression": "#version = :version",
+                            "ExpressionAttributeNames": {"#version": "version"},
+                            "ExpressionAttributeValues": {
+                                ":version": {"N": str(appointment.version)}},
+                        }},
+                    ]
+                    if appointment.status == CalendarStatus.CONFIRMED:
+                        writes.append({"Delete": {
+                            "TableName": self._table,
+                            "Key": {key: value for key, value in self._visit_item(appointment).items()
+                                    if key in ("PK", "SK")},
+                        }})
+                    try:
+                        self._client.transact_write_items(TransactItems=writes)
+                        break
+                    except Exception as exc:
+                        if not _record_transaction_conflict(exc):
+                            raise
+                else:
+                    raise RecordConflict("Calendar changed during client deletion")
+
+        # Re-scan after releasing time. Delete in small transactions so a failed
+        # request can resume without ever lifting the fence.
+        for _ in range(5):
+            items = self._scan_items()
+            appointment_ids = {
+                item["PK"]["S"].removeprefix("APPOINTMENT#") for item in items
+                if item.get("PK", {}).get("S", "").startswith("APPOINTMENT#")
+                and item.get("business_id", {}).get("S") == business_id
+                and item.get("client_id", {}).get("S") == client_id
+            }
+            receipt_ids = {
+                item["SK"]["S"].removeprefix("SMS#") for item in items
+                if item.get("PK", {}).get("S") == f"BUSINESS#{business_id}"
+                and item.get("SK", {}).get("S", "").startswith("SMS#")
+                and (item.get("client_id", {}).get("S") == client_id
+                     or item.get("sender", {}).get("S") == phone)
+            }
+            outbound_ids = {
+                item["SK"]["S"].removeprefix("SMS_OUT#") for item in items
+                if item.get("PK", {}).get("S") == f"BUSINESS#{business_id}"
+                and item.get("SK", {}).get("S", "").startswith("SMS_OUT#")
+                and item.get("recipient", {}).get("S") == phone
+            }
+            client_hash = sha256(client_id.encode()).hexdigest()
+            linked: list[dict[str, Any]] = []
+            for item in items:
+                pk = item["PK"]["S"]
+                sk = item["SK"]["S"]
+                if pk == fence_key["PK"]["S"] and sk in (
+                        fence_key["SK"]["S"], f"ERASURE_PHONE#{phone}"):
+                    continue
+                if pk == f"VISITS#{business_id}#{client_hash}":
+                    linked.append(item)
+                    continue
+                if pk.startswith("APPOINTMENT#"):
+                    if pk.removeprefix("APPOINTMENT#") in appointment_ids:
+                        linked.append(item)
+                    continue
+                if pk != f"BUSINESS#{business_id}":
+                    continue
+                fields = {name: value.get("S") for name, value in item.items()
+                          if isinstance(value, dict)}
+                if (sk == f"CLIENT#{client_id}" or sk == f"PHONE#{phone}"
+                        or sk.startswith((f"NOTE#CLIENT#{client_hash}#",
+                                          f"SMS_CONSENT#{phone}#",
+                                          f"SMS_OPTOUT_EVENT#{phone}#"))
+                        or sk in {f"SMS_THREAD#{phone}", f"SMS_STATE#{phone}",
+                                  f"SMS_OPTOUT#{phone}", f"SMS_SUPPRESS#{phone}",
+                                  f"SMS_CONSENT_CURRENT#{phone}"}
+                        or sk in {f"SMS#{receipt}" for receipt in receipt_ids}
+                        or sk in {f"SMS_OUT#{receipt}" for receipt in receipt_ids}
+                        or sk in {f"SMS_STATUS#{provider}" for provider in outbound_ids}
+                        or fields.get("client_id") == client_id
+                        or fields.get("actor_id") == client_id
+                        or any(fields.get(name) in appointment_ids for name in (
+                            "appointment_id", "hold_id", "entity_id", "event_id", "replacement_id"))
+                        or fields.get("entity_id") in receipt_ids
+                        or (sk.startswith("SMS_OUT#") and fields.get("recipient") == phone)
+                        or (sk.startswith("IDEMPOTENCY#") and any(
+                            f'"{identity}"' in (fields.get("response") or "")
+                            for identity in (client_id, *appointment_ids)))
+                        or any(appointment_id in sk for appointment_id in appointment_ids)
+                        or any(receipt_id in sk for receipt_id in receipt_ids)):
+                    linked.append(item)
+            if not linked:
+                break
+            # Keep the discovery anchors until all dependent records are gone.
+            linked.sort(key=lambda item: (
+                item["PK"]["S"].startswith("APPOINTMENT#")
+                or item["SK"]["S"].startswith(("SMS#", "SMS_OUT#")),
+                item["PK"]["S"], item["SK"]["S"],
+            ))
+            for offset in range(0, len(linked), 24):
+                batch = linked[offset:offset + 24]
+                def guarded_delete(item: dict[str, Any]) -> dict[str, Any]:
+                    stable = ("version", "client_id", "phone_e164", "created_at",
+                              "provider_id", "appointment_id", "hold_id", "entity_id",
+                              "event_id", "recipient", "delivery_state")
+                    values = {f":v{index}": item[name] for index, name in enumerate(stable)
+                              if name in item}
+                    names = {f"#a{index}": name for index, name in enumerate(stable)
+                             if name in item}
+                    clauses = [f"#a{index} = :v{index}" for index, name in enumerate(stable)
+                               if name in item]
+                    action: dict[str, Any] = {
+                        "TableName": self._table,
+                        "Key": {"PK": item["PK"], "SK": item["SK"]},
+                        "ConditionExpression": "attribute_exists(PK)" + (
+                            " AND " + " AND ".join(clauses) if clauses else ""),
+                    }
+                    if values:
+                        action["ExpressionAttributeValues"] = values
+                        action["ExpressionAttributeNames"] = names
+                    return {"Delete": action}
+                self._client.transact_write_items(TransactItems=[
+                    {"ConditionCheck": {
+                        "TableName": self._table, "Key": fence_key,
+                        "ConditionExpression": "#state = :erasing",
+                        "ExpressionAttributeNames": {"#state": "state"},
+                        "ExpressionAttributeValues": {":erasing": {"S": "ERASING"}},
+                    }},
+                    *(guarded_delete(item) for item in batch),
+                ])
+        else:
+            raise RecordConflict("Client data kept changing during deletion")
+        self._client.transact_write_items(TransactItems=[
+            {"Update": {
+                "TableName": self._table, "Key": fence_key,
+                "UpdateExpression": "SET #state = :complete REMOVE phone_e164",
+                "ConditionExpression": "#state = :erasing",
+                "ExpressionAttributeNames": {"#state": "state"},
+                "ExpressionAttributeValues": {":erasing": {"S": "ERASING"},
+                                               ":complete": {"S": "COMPLETE"}},
+            }},
+            {"Delete": {
+                "TableName": self._table,
+                "Key": self._business_key(business_id, f"ERASURE_PHONE#{phone}"),
+                "ConditionExpression": "attribute_exists(PK)",
+            }},
+        ])
 
     def read_verified_phone(self, business_id: str, phone_e164: str) -> ClientProfile | None:
         index = self._get(self._business_key(business_id, f"PHONE#{phone_e164}"))
@@ -273,7 +527,15 @@ class DynamoDBCalendarRepository:
         if expected_version:
             profile_put["ExpressionAttributeValues"] = {
                 ":old_version": {"N": str(expected_version)}}
-        writes: list[dict[str, Any]] = [{"Put": profile_put}]
+        writes: list[dict[str, Any]] = [{"Put": profile_put},
+                                        self._erasure_check(profile.business_id, profile.client_id),
+                                        {"ConditionCheck": {
+                                            "TableName": self._table,
+                                            "Key": self._business_key(
+                                                profile.business_id,
+                                                f"ERASURE_PHONE#{profile.phone_e164}"),
+                                            "ConditionExpression": "attribute_not_exists(PK)",
+                                        }}]
         if previous_phone != profile.phone_e164:
             phone_put = {
                 "TableName": self._table,
@@ -345,7 +607,7 @@ class DynamoDBCalendarRepository:
             self._client.transact_write_items(TransactItems=[{"Put": {
                 "TableName": self._table, "Item": item,
                 "ConditionExpression": "attribute_not_exists(PK)",
-            }}])
+            }}, self._erasure_check(note.business_id, note.client_id)])
         except Exception as exc:
             if not _record_transaction_conflict(exc):
                 raise
@@ -589,6 +851,7 @@ class DynamoDBCalendarRepository:
                 "ExpressionAttributeValues": {":old_version": {"N": str(before.version)}},
             }})
         elif appointment is not None:
+            writes.append(self._erasure_check(business_id, appointment.client_id))
             writes.append(fresh_put(self._appointment_item(appointment)))
             writes.append(fresh_put(self._event_item(appointment)))
             writes.append(fresh_put(self._visit_item(appointment)))
@@ -1007,7 +1270,8 @@ class DynamoDBCalendarRepository:
                 "event_version": {"N": "1"},
             }) for intent in commit.outbox
         ]
-        writes = [{"Update": revision_update}, put(metadata), put(event_item), put(idempotency), put(audit), *outbox]
+        writes = [{"Update": revision_update}, put(metadata), put(event_item), put(idempotency), put(audit), *outbox,
+                  self._erasure_check(hold.business_id, hold.client_id)]
         if hold.replaces_appointment_id is not None:
             writes.append({"Put": {
                 "TableName": self._table,
@@ -1162,6 +1426,7 @@ class DynamoDBCalendarRepository:
         writes: list[dict[str, Any]] = [
             revision_update,
             guarded_put(self._appointment_item(after), before),
+            self._erasure_check(before.business_id, before.client_id),
         ]
         same_event_key = before.start_at == after.start_at
         if after.status == CalendarStatus.CONFIRMED and same_event_key:
