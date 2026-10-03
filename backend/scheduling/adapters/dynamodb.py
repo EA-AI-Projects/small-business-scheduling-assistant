@@ -4,6 +4,7 @@ import json
 from datetime import UTC, date, datetime, time, timedelta
 from hashlib import sha256
 from typing import Any, Protocol
+from uuid import uuid4
 
 from scheduling.adapters.outbox_aws import due_keys
 from scheduling.domain.appointments import Appointment, ReplacementGuard
@@ -216,6 +217,36 @@ class DynamoDBCalendarRepository:
             "ConditionExpression": "attribute_not_exists(PK)",
         }}
 
+    def acquire_client_send(self, business_id: str, client_id: str) -> str:
+        """Serialize an external send with deletion; a crashed lease blocks erasure."""
+        token = uuid4().hex
+        lease_key = self._business_key(
+            business_id, f"CLIENT_SEND#{sha256(client_id.encode()).hexdigest()}")
+        try:
+            self._client.transact_write_items(TransactItems=[
+                {"Put": {"TableName": self._table,
+                         "Item": {**lease_key, "token": {"S": token}},
+                         "ConditionExpression": "attribute_not_exists(PK)"}},
+                self._erasure_check(business_id, client_id),
+            ])
+        except Exception as exc:
+            if not _record_transaction_conflict(exc):
+                raise
+            if self._get(self._business_key(
+                    business_id, f"ERASURE#{sha256(client_id.encode()).hexdigest()}")) is not None:
+                raise RecordNotFound("Client was deleted") from exc
+            raise RecordConflict("Another client send is in progress") from exc
+        return token
+
+    def release_client_send(self, business_id: str, client_id: str, token: str) -> None:
+        self._client.delete_item(
+            TableName=self._table,
+            Key=self._business_key(
+                business_id, f"CLIENT_SEND#{sha256(client_id.encode()).hexdigest()}"),
+            ConditionExpression="token = :token",
+            ExpressionAttributeValues={":token": {"S": token}},
+        )
+
     @staticmethod
     def _business_key(business_id: str, sort_key: str) -> dict[str, dict[str, str]]:
         return {"PK": {"S": f"BUSINESS#{business_id}"}, "SK": {"S": sort_key}}
@@ -293,6 +324,12 @@ class DynamoDBCalendarRepository:
                         "Key": self._business_key(business_id, f"CLIENT#{client_id}"),
                         "ConditionExpression": "version = :version",
                         "ExpressionAttributeValues": {":version": {"N": str(profile.version)}},
+                    }},
+                    {"ConditionCheck": {
+                        "TableName": self._table,
+                        "Key": self._business_key(
+                            business_id, f"CLIENT_SEND#{sha256(client_id.encode()).hexdigest()}"),
+                        "ConditionExpression": "attribute_not_exists(PK)",
                     }},
                     {"Put": {
                         "TableName": self._table,
@@ -372,7 +409,7 @@ class DynamoDBCalendarRepository:
 
         # Re-scan after releasing time. Delete in small transactions so a failed
         # request can resume without ever lifting the fence.
-        for _ in range(5):
+        while True:
             items = self._scan_items()
             appointment_ids = {
                 item["PK"]["S"].removeprefix("APPOINTMENT#") for item in items
@@ -392,6 +429,11 @@ class DynamoDBCalendarRepository:
                 if item.get("PK", {}).get("S") == f"BUSINESS#{business_id}"
                 and item.get("SK", {}).get("S", "").startswith("SMS_OUT#")
                 and item.get("recipient", {}).get("S") == phone
+            }
+            client_command_keys = {
+                _command_sort_key(client_id, operation, receipt_id)
+                for receipt_id in receipt_ids
+                for operation in ("create_hold", "approve", "decline", "cancel")
             }
             client_hash = sha256(client_id.encode()).hexdigest()
             linked: list[dict[str, Any]] = []
@@ -422,6 +464,8 @@ class DynamoDBCalendarRepository:
                         or sk in {f"SMS#{receipt}" for receipt in receipt_ids}
                         or sk in {f"SMS_OUT#{receipt}" for receipt in receipt_ids}
                         or sk in {f"SMS_STATUS#{provider}" for provider in outbound_ids}
+                        or (sk.startswith("SMS_STATUS#") and fields.get("recipient") == phone)
+                        or sk in client_command_keys
                         or fields.get("client_id") == client_id
                         or fields.get("actor_id") == client_id
                         or any(fields.get(name) in appointment_ids for name in (
@@ -473,8 +517,6 @@ class DynamoDBCalendarRepository:
                     }},
                     *(guarded_delete(item) for item in batch),
                 ])
-        else:
-            raise RecordConflict("Client data kept changing during deletion")
         self._client.transact_write_items(TransactItems=[
             {"Update": {
                 "TableName": self._table, "Key": fence_key,
@@ -872,6 +914,7 @@ class DynamoDBCalendarRepository:
             ),
             "request_hash": {"S": commit.request_hash},
             "response": {"S": json.dumps(response, sort_keys=True)},
+            **({"client_id": {"S": appointment.client_id}} if appointment else {}),
         }))
         writes.append(fresh_put({
             **self._business_key(business_id, f"AUDIT#{commit.audit_id}"),
@@ -1246,6 +1289,7 @@ class DynamoDBCalendarRepository:
             ),
             "request_hash": {"S": commit.request_hash},
             "response": {"S": json.dumps(_hold_payload(hold), sort_keys=True)},
+            "client_id": {"S": hold.client_id},
         }
         audit = {
             **self._business_key(hold.business_id, f"AUDIT#{commit.audit_id}"),
@@ -1497,6 +1541,7 @@ class DynamoDBCalendarRepository:
             ),
             "request_hash": {"S": commit.request_hash},
             "response": {"S": json.dumps(result_payload, sort_keys=True)},
+            "client_id": {"S": before.client_id},
         }))
         writes.append(fresh_put({
             **self._business_key(before.business_id, f"AUDIT#{commit.audit_id}"),

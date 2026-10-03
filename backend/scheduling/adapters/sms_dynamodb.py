@@ -583,21 +583,25 @@ class DynamoSmsIngressStore(SmsIngressStore):
             expression += ", error_code = :error"
             values[":error"] = {"S": status.error_code}
         try:
-            self._client.update_item(
-                TableName=self._table,
-                Key=self._key(status.business_id, f"SMS_STATUS#{status.provider_id}"),
-                UpdateExpression=expression,
-                ConditionExpression=("attribute_not_exists(status_rank) OR "
-                                     "status_rank < :rank OR "
-                                     "(status_rank = :rank AND delivery_status = :status)"),
-                ExpressionAttributeValues=values,
-            )
+            self._client.transact_write_items(TransactItems=[
+                {"ConditionCheck": {
+                    "TableName": self._table,
+                    "Key": self._key(status.business_id, f"OUTBOX#{status.outbox_id}"),
+                    "ConditionExpression": "attribute_exists(PK)",
+                }},
+                {"Update": {
+                    "TableName": self._table,
+                    "Key": self._key(status.business_id, f"SMS_STATUS#{status.provider_id}"),
+                    "UpdateExpression": expression,
+                    "ConditionExpression": ("attribute_not_exists(status_rank) OR "
+                                         "status_rank < :rank OR "
+                                         "(status_rank = :rank AND delivery_status = :status)"),
+                    "ExpressionAttributeValues": values,
+                }},
+            ])
         except Exception as exc:
-            response = getattr(exc, "response", {})
-            if isinstance(response, dict) and response.get("Error", {}).get("Code") == (
-                "ConditionalCheckFailedException"
-            ):
-                return  # Stale or conflicting callback; first terminal result wins.
+            if _record_transaction_conflict(exc):
+                return  # Deleted outbox or stale callback; never recreate evidence.
             raise
 
     def list_delivery_failures(self, business_id: str) -> tuple[SmsDeliveryStatus, ...]:
@@ -680,6 +684,7 @@ class DynamoSmsIngressStore(SmsIngressStore):
                             "ConditionExpression": "attribute_not_exists(PK)",
                         }})
                     actions.extend([
+                        self._phone_erasure_check(business_id, phone),
                         {"ConditionCheck": {
                             "TableName": self._table,
                             "Key": self._key(business_id, thread_key),

@@ -16,12 +16,14 @@ import boto3
 import pytest
 from botocore.exceptions import BotoCoreError, ClientError
 
-from scheduling.adapters.dynamodb import DynamoDBCalendarRepository
+from scheduling.adapters.conversation_state_dynamodb import DynamoConversationStates
+from scheduling.adapters.dynamodb import DynamoDBCalendarRepository, _command_sort_key
 from scheduling.adapters.outbox_aws import DynamoOutboxStore, due_keys
 from scheduling.adapters.sms_dynamodb import DynamoSmsIngressStore
 from scheduling.domain.appointments import Appointment
 from scheduling.domain.calendar import CalendarStatus
 from scheduling.domain.client_records import ClientRecordService, HomeSize, RecordConflict
+from scheduling.domain.conversation_state import ConversationState, PromptKind
 from scheduling.domain.holds import OutboxIntent, RevisionConflict
 from scheduling.domain.lifecycle import (
     Action,
@@ -38,6 +40,7 @@ from scheduling.domain.outbox import (
     OutboxRecord,
 )
 from scheduling.domain.sms_ingress import ConsentEvidence, record_in_person_consent
+from scheduling.domain.sms_status import SmsDeliveryStatus
 
 DEV_TABLE = "scheduling-dev"
 DEV_REGION = "us-west-1"
@@ -252,6 +255,16 @@ def test_client_erasure_releases_reservations_and_removes_linked_records(
         **repo._business_key(env.business, "OUTBOX#synthetic-notice"),
         "appointment_id": {"S": confirmed.appointment_id},
     })
+    command_key = _command_sort_key("synthetic-client", "cancel", "synthetic-receipt")
+    env.client.put_item(TableName=env.table, Item={
+        **repo._business_key(env.business, command_key),
+        "request_hash": {"S": "synthetic-hash"},
+    })
+
+    lease = repo.acquire_client_send(env.business, "synthetic-client")
+    with pytest.raises(RecordConflict):
+        repo.erase_client(env.business, "synthetic-client")
+    repo.release_client_send(env.business, "synthetic-client", lease)
 
     repo.erase_client(env.business, "synthetic-client")
     repo.erase_client(env.business, "synthetic-client")  # safe replay
@@ -264,6 +277,17 @@ def test_client_erasure_releases_reservations_and_removes_linked_records(
                    for item in remaining if item["PK"]["S"] == f"BUSINESS#{env.business}")
     assert not any(item["PK"]["S"].startswith(f"VISITS#{env.business}#")
                    for item in remaining)
+    assert not any(item["SK"]["S"] == command_key for item in remaining)
+    DynamoSmsIngressStore(env.client, env.table).put_status(SmsDeliveryStatus(
+        env.business, "synthetic-notice", "SM-synthetic-late", "undelivered",
+        "+14155550101", START, "30007"))
+    assert repo._get(repo._business_key(env.business, "SMS_STATUS#SM-synthetic-late")) is None
+    state = ConversationState(env.business, "+14155550101", "synthetic-receipt",
+                              PromptKind.OFFER, START, START + timedelta(minutes=30),
+                              (START,), client_id="synthetic-client")
+    with pytest.raises(ClientError):
+        DynamoConversationStates(env.client, env.table).put_state(state)
+    assert repo._get(repo._business_key(env.business, "SMS_STATE#+14155550101")) is None
 
 
 def _commit(env: RaceEnv, before: Appointment, after: Appointment, action: Action,

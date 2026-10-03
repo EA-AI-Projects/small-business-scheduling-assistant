@@ -9,7 +9,7 @@ import pytest
 from scheduling.adapters.sms_twilio import FICTIONAL_NUMBER, TwilioSmsSender
 from scheduling.domain.appointments import Appointment
 from scheduling.domain.calendar import CalendarStatus
-from scheduling.domain.client_records import ClientProfile, HomeSize
+from scheduling.domain.client_records import ClientProfile, HomeSize, RecordConflict, RecordNotFound
 from scheduling.domain.outbox import (
     DeliveryFailure,
     DeliveryState,
@@ -30,12 +30,23 @@ class Records:
         self.profile = ClientProfile("pilot", "client-1", "Synthetic Client", "+15005550006",
                                      "123 Test Street", HomeSize.SMALL, 60, True, 1,
                                      NOW, NOW, NOW)
+        self.send_claimed = False
 
     def read_appointment(self, appointment_id: str) -> Appointment | None:
         return self.appointment if appointment_id == self.appointment.appointment_id else None
 
     def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None:
         return self.profile if business_id == "pilot" and client_id == "client-1" else None
+
+    def acquire_client_send(self, business_id: str, client_id: str) -> str:
+        assert business_id == "pilot" and client_id == "client-1"
+        assert not self.send_claimed
+        self.send_claimed = True
+        return "synthetic-token"
+
+    def release_client_send(self, business_id: str, client_id: str, token: str) -> None:
+        assert business_id == "pilot" and client_id == "client-1" and token == "synthetic-token"
+        self.send_claimed = False
 
 
 class Consent:
@@ -107,6 +118,29 @@ def test_client_destination_is_from_verified_profile_with_consent() -> None:
     consent.approved = False
     with pytest.raises(PermanentDeliveryFailure, match="CONSENT_REQUIRED"):
         sender.deliver(record())
+
+
+def test_client_send_claim_blocks_deletion_race_and_is_released_on_failure() -> None:
+    sender, messages, _, records = setup()
+    def erasing(_business_id: str, _client_id: str) -> str:
+        raise RecordConflict("Erasing")
+    records.acquire_client_send = erasing  # type: ignore[method-assign]
+    with pytest.raises(DeliveryFailure, match="CLIENT_SEND_BUSY"):
+        sender.deliver(record())
+    assert messages.calls == []
+
+    def deleted(_business_id: str, _client_id: str) -> str:
+        raise RecordNotFound("Deleted")
+    records.acquire_client_send = deleted  # type: ignore[method-assign]
+    with pytest.raises(PermanentDeliveryFailure, match="CLIENT_UNAVAILABLE"):
+        sender.deliver(record())
+    assert messages.calls == []
+
+    sender, messages, _, records = setup()
+    messages.fail = True
+    with pytest.raises(DeliveryFailure, match="PROVIDER_SEND_ERROR"):
+        sender.deliver(record())
+    assert records.send_claimed is False
 
 
 def test_callback_identifies_committed_outbox_intent() -> None:

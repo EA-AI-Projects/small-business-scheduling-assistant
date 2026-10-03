@@ -7,6 +7,7 @@ reply cannot erase a newer offer.
 """
 
 from datetime import datetime
+from hashlib import sha256
 from typing import Any, Protocol
 
 from scheduling.domain.conversation_state import ConversationState, PromptKind
@@ -41,6 +42,7 @@ class DynamoConversationStates:
                   for value in item.get("options", {}).get("L", ())),
             item.get("appointment_id", {}).get("S"),
             int(item["appointment_version"]["N"]) if "appointment_version" in item else None,
+            item.get("client_id", {}).get("S"),
         )
 
     def put_state(self, state: ConversationState) -> None:
@@ -58,14 +60,25 @@ class DynamoConversationStates:
             item["appointment_id"] = {"S": state.appointment_id}
         if state.appointment_version is not None:
             item["appointment_version"] = {"N": str(state.appointment_version)}
-        self._client.transact_write_items(TransactItems=[
-            {"Put": {"TableName": self._table, "Item": item}},
-            {"ConditionCheck": {
+        if state.client_id is not None:
+            item["client_id"] = {"S": state.client_id}
+        checks: list[dict[str, Any]] = []
+        if state.client_id is not None:
+            checks.append({"ConditionCheck": {
                 "TableName": self._table,
                 "Key": {"PK": {"S": f"BUSINESS#{state.business_id}"},
-                        "SK": {"S": f"ERASURE_PHONE#{state.sender}"}},
+                        "SK": {"S": f"ERASURE#{sha256(state.client_id.encode()).hexdigest()}"}},
                 "ConditionExpression": "attribute_not_exists(PK)",
-            }},
+            }})
+        checks.append({"ConditionCheck": {
+            "TableName": self._table,
+            "Key": {"PK": {"S": f"BUSINESS#{state.business_id}"},
+                    "SK": {"S": f"ERASURE_PHONE#{state.sender}"}},
+            "ConditionExpression": "attribute_not_exists(PK)",
+        }})
+        self._client.transact_write_items(TransactItems=[
+            {"Put": {"TableName": self._table, "Item": item}},
+            *checks,
         ])
 
     def clear_state(self, business_id: str, sender: str, state_id: str) -> None:

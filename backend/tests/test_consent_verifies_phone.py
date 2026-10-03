@@ -131,6 +131,12 @@ class Records:
     def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None:
         return self.repository.read_profile(business_id, client_id)
 
+    def acquire_client_send(self, business_id: str, client_id: str) -> str:
+        return "synthetic-token"
+
+    def release_client_send(self, business_id: str, client_id: str, token: str) -> None:
+        assert token == "synthetic-token"
+
 
 def test_sender_refuses_until_consent_then_sends() -> None:
     repository, _, store = world()
