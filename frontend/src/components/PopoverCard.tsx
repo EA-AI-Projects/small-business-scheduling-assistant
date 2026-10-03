@@ -217,8 +217,9 @@ export function PopoverCard({ title, variant = "anchored", getAnchor, onClose, o
       onKeyDown={(event) => {
         if (event.key !== "Tab") return;
         // Collapsed accordion bodies are hidden but still in the DOM; skip what cannot take focus.
+        // Roving-tabindex items (tabIndex -1, e.g. inactive date cells) are not Tab stops either.
         const items = [...(card.current?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? [])]
-          .filter((item) => item.getClientRects().length > 0);
+          .filter((item) => item.tabIndex >= 0 && item.getClientRects().length > 0);
         const first = items[0];
         const last = items[items.length - 1];
         if (!first || !last) { event.preventDefault(); return; }
