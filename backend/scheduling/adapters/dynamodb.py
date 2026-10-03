@@ -243,7 +243,8 @@ class DynamoDBCalendarRepository:
             TableName=self._table,
             Key=self._business_key(
                 business_id, f"CLIENT_SEND#{sha256(client_id.encode()).hexdigest()}"),
-            ConditionExpression="token = :token",
+            ConditionExpression="#token = :token",
+            ExpressionAttributeNames={"#token": "token"},
             ExpressionAttributeValues={":token": {"S": token}},
         )
 
