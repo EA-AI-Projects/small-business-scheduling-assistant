@@ -54,6 +54,11 @@ interface OwnerContextValue {
   noteAppointmentId: string | null;
   /** Increments on every selectClient call, so forms can reset per selection event. */
   selectionVersion: number;
+  /** Ask the Clients page to open this client's details with Notes expanded (from a calendar card). */
+  openClientNotes: (clientId: string, appointmentId: string) => void;
+  /** Client whose Notes the Clients page should open next; cleared once the page has taken it. */
+  notesRequest: string | null;
+  clearNotesRequest: () => void;
 }
 
 const OwnerContext = createContext<OwnerContextValue | null>(null);
@@ -78,6 +83,7 @@ export function OwnerProvider({ api, notify, children }: {
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
   const [noteAppointmentId, setNoteAppointmentId] = useState<string | null>(null);
   const [selectionVersion, setSelectionVersion] = useState(0);
+  const [notesRequest, setNotesRequest] = useState<string | null>(null);
   // The provider is keyed by session; once unmounted, late responses must not notify.
   const alive = useRef(true);
   useEffect(() => {
@@ -164,6 +170,13 @@ export function OwnerProvider({ api, notify, children }: {
     setSelectionVersion((current) => current + 1);
   }, []);
 
+  const openClientNotes = useCallback((clientId: string, appointmentId: string) => {
+    selectClient(clientId, appointmentId);
+    setNotesRequest(clientId);
+    setTab("clients");
+  }, [selectClient]);
+  const clearNotesRequest = useCallback(() => setNotesRequest(null), []);
+
   useEffect(() => {
     refresh().catch((error: unknown) =>
       safeNotify(error instanceof Error ? error.message : String(error), true));
@@ -173,8 +186,10 @@ export function OwnerProvider({ api, notify, children }: {
     api, data, loaded, stamp, refresh, change, resolveLocal, notify: safeNotify, tab, setTab,
     date, view, setView, goToday, stepRange,
     selectedClientId, selectClient, noteAppointmentId, selectionVersion,
+    openClientNotes, notesRequest, clearNotesRequest,
   }), [api, data, loaded, stamp, refresh, change, resolveLocal, safeNotify, tab,
-    date, view, goToday, stepRange, selectedClientId, selectClient, noteAppointmentId, selectionVersion]);
+    date, view, goToday, stepRange, selectedClientId, selectClient, noteAppointmentId, selectionVersion,
+    openClientNotes, notesRequest, clearNotesRequest]);
 
   return <OwnerContext.Provider value={value}>{children}</OwnerContext.Provider>;
 }

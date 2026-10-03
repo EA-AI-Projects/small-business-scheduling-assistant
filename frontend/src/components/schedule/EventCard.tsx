@@ -88,7 +88,7 @@ function BlockEditor({ block }: { block: UnavailableBlock }) {
 }
 
 function AppointmentEditor({ appointment, onClose }: { appointment: Appointment; onClose: () => void }) {
-  const { data, change, resolveLocal, notify, selectClient, setTab } = useOwner();
+  const { data, change, resolveLocal, notify, openClientNotes } = useOwner();
   const [start, setStart] = useState(() => localInput(appointment.start_at, data.zone));
   const [duration, setDuration] = useState(String(appointment.duration_minutes));
   const client = data.clients.find((item) => item.client_id === appointment.client_id);
@@ -102,11 +102,7 @@ function AppointmentEditor({ appointment, onClose }: { appointment: Appointment;
       <button type="button" onClick={() => {
         if (!client) { notify("Client profile is not available", true); return; }
         onClose();
-        selectClient(client.client_id, appointment.appointment_id);
-        setTab("clients");
-        // Once the Clients section is shown, move focus to its heading so keyboard and screen-reader users land there.
-        window.setTimeout(() => document.querySelector<HTMLElement>("[aria-label=Clients] h2")
-          ?.focus({ preventScroll: true }), 0);
+        openClientNotes(client.client_id, appointment.appointment_id);
       }}>Open client and visit notes</button>
       {appointment.status === "CONFIRMED" && (
         <>

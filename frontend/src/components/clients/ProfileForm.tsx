@@ -50,8 +50,7 @@ export function ProfileForm({ client, onCreated, onPhoneDraft }: {
   }
 
   return (
-    <section className="card">
-      <h3>Profile</h3>
+    <div className="stack">
       {client && (
         <p className="hint" data-testid="phone-status">
           {client.phone_verified_at
@@ -81,6 +80,6 @@ export function ProfileForm({ client, onCreated, onPhoneDraft }: {
           defaultChecked={client?.active ?? true} /> Active</label>
         <button className="primary" type="submit">Save profile</button>
       </form>
-    </section>
+    </div>
   );
 }

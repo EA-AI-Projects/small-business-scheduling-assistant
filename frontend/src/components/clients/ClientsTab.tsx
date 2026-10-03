@@ -1,60 +1,71 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-import { normalizePhone } from "@/lib/phone";
 import { useOwner } from "@/owner/OwnerContext";
 
+import { PopoverCard } from "../PopoverCard";
 import { SectionHeading } from "../Workspace";
+import { ClientDetails } from "./ClientDetails";
 import { ClientList } from "./ClientList";
-import { ConsentForm } from "./ConsentForm";
 import { DeliveryFailures } from "./DeliveryFailures";
-import { NoteForm } from "./NoteForm";
-import { NoteList } from "./NoteList";
-import { ProfileForm } from "./ProfileForm";
+
+/** What the pop-up shows. `token` changes per opening, so the sections reset only then. */
+type Open = { token: number; clientId: string | null; section: "profile" | "notes" };
 
 export function ClientsTab() {
-  const { data, stamp, selectedClientId, selectClient, selectionVersion } = useOwner();
-  const [blank, setBlank] = useState(0);
-  const [phoneDraft, setPhoneDraft] = useState<{ key: string; phone: string } | null>(null);
-  const [onboardingId, setOnboardingId] = useState<string | null>(null);
-  const client = data.clients.find((item) => item.client_id === selectedClientId);
-  const clientId = client?.client_id ?? null;
-  const onboarding = client !== undefined && client.client_id === onboardingId
-    && client.phone_verified_at === null;
-  // Remount the profile form with current values after each refresh, as the old page did.
-  const profileKey = client ? `client:${client.client_id}:${stamp.version}` : `new:${blank}`;
+  const { data, stamp, selectClient, notesRequest, clearNotesRequest } = useOwner();
+  const [open, setOpen] = useState<Open | null>(null);
+  const tokens = useRef(0);
+  const newButton = useRef<HTMLButtonElement>(null);
+  const client = open?.clientId ? data.clients.find((item) => item.client_id === open.clientId) : undefined;
 
-  const phoneUnsaved = client !== undefined && phoneDraft?.key === profileKey
-    && normalizePhone(phoneDraft.phone) !== client.phone_e164;
+  // "Open client and visit notes" from a calendar card lands here with a request to take.
+  useEffect(() => {
+    if (notesRequest === null) return;
+    clearNotesRequest();
+    tokens.current += 1;
+    setOpen({ token: tokens.current, clientId: notesRequest, section: "notes" });
+  }, [notesRequest, clearNotesRequest]);
+
+  const openClient = (clientId: string | null) => {
+    selectClient(clientId);
+    tokens.current += 1;
+    setOpen({ token: tokens.current, clientId, section: "profile" });
+  };
+
+  const openId = open?.clientId;
+  const returnFocus = useCallback(() => {
+    // Looked up at close time: the list may have re-rendered while the pop-up was open.
+    return (openId ? document.querySelector<HTMLElement>(`[data-client-id="${CSS.escape(openId)}"]`) : null)
+      ?? newButton.current;
+  }, [openId]);
+  const getAnchor = useCallback(() => null, []);
+
+  // The record went away while open: nothing left to show.
+  // Clear the open state too, so the pop-up cannot reappear later from another tab.
+  const gone = openId != null && client === undefined;
+  if (gone) setOpen(null);
 
   return (
     <>
       <SectionHeading eyebrow="CLIENT RECORDS" title="Clients">
-        <button type="button" onClick={() => { selectClient(null); setBlank((value) => value + 1); }}>
+        <button type="button" ref={newButton} aria-haspopup="dialog" onClick={() => openClient(null)}>
           New client
         </button>
       </SectionHeading>
-      <div className="split">
-        <div className="stack">
-          <ClientList clients={data.clients} onSelect={(id) => selectClient(id)} />
-          <DeliveryFailures />
-        </div>
-        <div className="stack">
-          <ProfileForm key={profileKey} client={client} onCreated={setOnboardingId}
-            onPhoneDraft={(phone) => setPhoneDraft({ key: profileKey, phone })} />
-          {client ? (
-            <ConsentForm key={`consent:${profileKey}`} client={client} onboarding={onboarding}
-              phoneUnsaved={phoneUnsaved} onSkip={() => setOnboardingId(null)} />
-          ) : (
-            <p className="hint">Save the profile to record text consent.</p>
-          )}
-          <section className="card">
-            <h3>Notes</h3>
-            <p className="hint">Select a client first. Do not enter access codes.</p>
-            <NoteList clientId={clientId} />
-            <NoteForm key={`${clientId ?? ""}:${selectionVersion}`} clientId={clientId} />
-          </section>
-        </div>
+      <div className="stack">
+        <ClientList clients={data.clients} onSelect={openClient} />
+        <DeliveryFailures />
       </div>
+      {open && !gone && (
+        <PopoverCard variant="modal" title={client?.name ?? "New client"} getAnchor={getAnchor}
+          onClose={() => setOpen(null)} returnFocus={returnFocus}
+          refocusKey={`${open.clientId ?? "new"}:${stamp.version}`}>
+          <p className="eyebrow">CLIENT DETAILS</p>
+          <ClientDetails key={open.token} client={client} blankKey={open.token}
+            initialSection={open.section}
+            onCreated={(id) => setOpen((current) => current && { ...current, clientId: id })} />
+        </PopoverCard>
+      )}
     </>
   );
 }

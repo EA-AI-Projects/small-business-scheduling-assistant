@@ -44,8 +44,8 @@ export function ConsentForm({ client, onboarding = false, phoneUnsaved = false, 
   }
 
   return (
-    <section className="card">
-      <h3>{onboarding ? "Onboarding: record in-person text consent" : "Record in-person text consent"}</h3>
+    <div className="stack">
+      <h5>{onboarding ? "Onboarding: record in-person text consent" : "Record in-person text consent"}</h5>
       {onboarding && (
         <p className="hint" role="status">
           Last step for this new client. Recording consent also marks their phone verified, which
@@ -78,6 +78,6 @@ export function ConsentForm({ client, onboarding = false, phoneUnsaved = false, 
           checked={clearYes} onChange={(event) => setClearYes(event.target.checked)} /> They clearly said yes</label>
         <button className="primary" type="submit" disabled={!client || phoneUnsaved}>Record consent</button>
       </form>
-    </section>
+    </div>
   );
 }
