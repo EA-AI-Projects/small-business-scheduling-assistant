@@ -7,7 +7,7 @@ import { errorMessage, useOwner } from "@/owner/OwnerContext";
 
 import { BusyButton } from "../BusyButton";
 import { ConfirmButton } from "../ConfirmButton";
-import { PopoverCard } from "../PopoverCard";
+import { PopoverCard, type CardAnchor } from "../PopoverCard";
 
 type Detail = { kind: "block"; block: UnavailableBlock } | { kind: "appointment"; appointment: Appointment };
 
@@ -15,13 +15,15 @@ type Detail = { kind: "block"; block: UnavailableBlock } | { kind: "appointment"
  * The pop-up card for one calendar item. The card stays open across a refresh; its content is
  * remounted (keyed on the refresh) so it always shows the exact current record.
  */
-export function EventCard({ event, getAnchor, onClose }: {
-  event: CalendarEvent; getAnchor: () => HTMLElement | null; onClose: () => void;
+export function EventCard({ event, getAnchor, onClose, onAnchorPress, returnFocus }: {
+  event: CalendarEvent; getAnchor: () => CardAnchor | null; onClose: () => void;
+  onAnchorPress: (element: HTMLElement) => void; returnFocus: () => HTMLElement | null;
 }) {
   const { stamp } = useOwner();
   const title = event.status === "UNAVAILABLE" ? "Unavailable time" : "Appointment";
   return (
-    <PopoverCard title={title} getAnchor={getAnchor} onClose={onClose} refocusKey={stamp.version}>
+    <PopoverCard title={title} getAnchor={getAnchor} onClose={onClose} onAnchorPress={onAnchorPress}
+      returnFocus={returnFocus} refocusKey={`${event.event_id}:${stamp.version}`}>
       <EventDetail key={`${event.event_id}:${stamp.version}`} event={event} onClose={onClose} />
     </PopoverCard>
   );

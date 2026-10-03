@@ -1,11 +1,19 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties,
   type ReactNode } from "react";
+import { createPortal } from "react-dom";
+
+import { placeCard, type Box } from "@/lib/popoverPlacement";
 
 const GAP = 8;
 const CARD_WIDTH = 22 * 16;
 const PHONE_QUERY = "(max-width: 520px)";
 const FOCUSABLE = "a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), "
   + "textarea:not([disabled]), [tabindex]:not([tabindex='-1'])";
+/** Page regions made inert while the card is open. The single live region sits outside them. */
+const BACKGROUND = "main, footer";
+
+/** Anything with a rectangle can anchor the card: an element, or a DOMRect-like object for an empty slot. */
+export interface CardAnchor { getBoundingClientRect(): Box }
 
 function isPhone(): boolean {
   return window.matchMedia?.(PHONE_QUERY).matches ?? false;
@@ -17,36 +25,37 @@ function topLimit(): number {
   for (const element of document.querySelectorAll(".app-header, .notice.pinned")) {
     bottom = Math.max(bottom, element.getBoundingClientRect().bottom);
   }
-  return bottom + GAP;
+  return bottom;
 }
 
-/** Place the card beside the anchor (right, else left), clamped inside the visible viewport. */
-function place(anchor: DOMRect, height: number): CSSProperties {
-  const vw = document.documentElement.clientWidth;
-  const vh = window.innerHeight;
-  const minTop = topLimit();
-  const width = Math.min(CARD_WIDTH, vw - 2 * GAP);
-  let left: number;
-  if (anchor.right + GAP + width <= vw - GAP) left = anchor.right + GAP;
-  else if (anchor.left - GAP - width >= GAP) left = anchor.left - GAP - width;
-  else left = Math.min(Math.max(anchor.left, GAP), vw - width - GAP);
-  const maxHeight = Math.max(vh - minTop - GAP, 120);
-  const top = Math.min(Math.max(anchor.top, minTop), Math.max(vh - Math.min(height, maxHeight) - GAP, minTop));
-  return { left, top, width, maxHeight };
+/** The anchor element under a viewport point. Inert elements are not hit-tested, so look at rectangles. */
+function anchorAt(x: number, y: number): HTMLElement | null {
+  const anchors = [...document.querySelectorAll<HTMLElement>("[data-popover-anchor]")].reverse();
+  return anchors.find((element) => {
+    const r = element.getBoundingClientRect();
+    if (x < r.left || x > r.right || y < r.top || y > r.bottom) return false;
+    const clip = element.closest("[data-popover-clip]")?.getBoundingClientRect();
+    return !clip || (x >= clip.left && x <= clip.right && y >= clip.top && y <= clip.bottom);
+  }) ?? null;
 }
 
 /**
  * A pop-up card shared by the calendar item card and, later, the empty-slot card.
  *
- * It is modal: Tab stays inside, and Escape, the close button, or a press outside close it. The
- * opener returns focus to the item. `getAnchor` finds the item the card points at; on phones the
- * card is a bottom sheet instead. `refocusKey` changes when the content was rebuilt (for example
- * after a refresh); if that dropped focus, it returns to the card itself.
+ * It is modal: the page behind it is inert, Tab stays inside, and Escape, the close button, or a
+ * press outside close it. A press on another anchor element (`data-popover-anchor`) goes to
+ * `onAnchorPress` instead, so the opener can switch items. On close, focus goes to `returnFocus`
+ * unless the user already moved it to a control. `getAnchor` gives the rectangle to point at; on
+ * phones the card is a bottom sheet instead. `refocusKey` changes when the content was rebuilt or
+ * the card moved to another item; if that left focus outside the card, it returns to the card.
  */
-export function PopoverCard({ title, getAnchor, onClose, refocusKey, children }: {
+export function PopoverCard({ title, getAnchor, onClose, onAnchorPress, returnFocus, refocusKey, children }: {
   title: string;
-  getAnchor: () => HTMLElement | null;
+  getAnchor: () => CardAnchor | null;
   onClose: () => void;
+  onAnchorPress?: (element: HTMLElement) => void;
+  /** Element, or a function finding it at close time, that gets focus back. */
+  returnFocus?: HTMLElement | null | (() => HTMLElement | null);
   refocusKey?: unknown;
   children: ReactNode;
 }) {
@@ -54,6 +63,8 @@ export function PopoverCard({ title, getAnchor, onClose, refocusKey, children }:
   const card = useRef<HTMLDivElement>(null);
   const [style, setStyle] = useState<CSSProperties>({ opacity: 0 });
   const [phone, setPhone] = useState(false);
+  const latest = useRef({ onClose, onAnchorPress, returnFocus });
+  useEffect(() => { latest.current = { onClose, onAnchorPress, returnFocus }; });
 
   const reposition = useCallback(() => {
     const element = card.current;
@@ -62,9 +73,15 @@ export function PopoverCard({ title, getAnchor, onClose, refocusKey, children }:
     setPhone(onPhone);
     const anchor = onPhone ? null : getAnchor();
     if (!onPhone && !anchor) return;
-    const next = anchor ? place(anchor.getBoundingClientRect(), element.offsetHeight) : {};
+    const next = anchor ? placeCard({
+      viewport: { width: document.documentElement.clientWidth, height: window.innerHeight },
+      topLimit: topLimit(), anchor: anchor.getBoundingClientRect(),
+      card: { width: CARD_WIDTH, height: element.offsetHeight }, gap: GAP,
+    }) : null;
+    const css: CSSProperties = next
+      ? { left: next.left, top: next.top, width: next.width, maxHeight: next.maxHeight } : {};
     // Keep the old object when nothing moved, so repositioning on every render cannot loop.
-    setStyle((current) => JSON.stringify(current) === JSON.stringify(next) ? current : next);
+    setStyle((current) => JSON.stringify(current) === JSON.stringify(css) ? current : css);
   }, [getAnchor]);
 
   useLayoutEffect(() => { reposition(); });
@@ -86,32 +103,54 @@ export function PopoverCard({ title, getAnchor, onClose, refocusKey, children }:
     };
   }, [reposition]);
 
-  // Focus moves into the card on open.
-  useEffect(() => { card.current?.focus({ preventScroll: true }); }, []);
-  // Rebuilt content can drop the focused control; keep focus inside the card.
+  // Modal: everything behind the card is inert while it is open, and focus returns afterwards.
+  // Removed on any unmount: close, item gone, sign-out.
   useEffect(() => {
-    const element = card.current;
-    if (element && !element.contains(document.activeElement)) element.focus({ preventScroll: true });
+    const regions = [...document.querySelectorAll<HTMLElement>(BACKGROUND)];
+    const before = regions.map((region) => region.inert);
+    regions.forEach((region) => { region.inert = true; });
+    return () => {
+      regions.forEach((region, index) => { region.inert = before[index] ?? false; });
+      const target = latest.current.returnFocus;
+      // After the click's own focus change, which would otherwise drop focus on the page body.
+      window.setTimeout(() => {
+        const active = document.activeElement;
+        if (active && active !== document.body && document.body.contains(active)) return;
+        (typeof target === "function" ? target() : target)?.focus({ preventScroll: true });
+      }, 0);
+    };
+  }, []);
+
+  // Focus moves into the card on open, and back into it if rebuilt content or an item switch dropped it.
+  useEffect(() => {
+    const focusCard = () => {
+      const element = card.current;
+      if (element && !element.contains(document.activeElement)) element.focus({ preventScroll: true });
+    };
+    focusCard();
+    const timer = window.setTimeout(focusCard, 0);
+    return () => window.clearTimeout(timer);
   }, [refocusKey]);
 
-  // Escape or a press outside closes the card. A press on a calendar item is handled by the opener (switch or toggle).
+  // Escape or a press outside closes the card.
   useEffect(() => {
     const down = (event: PointerEvent) => {
       const target = event.target;
-      if (!(target instanceof Element) || card.current?.contains(target)) return;
-      if (target.closest("[data-popover-anchor]")) return;
-      onClose();
+      if (target instanceof Node && card.current?.contains(target)) return;
+      const anchor = anchorAt(event.clientX, event.clientY);
+      if (anchor && latest.current.onAnchorPress) latest.current.onAnchorPress(anchor);
+      else latest.current.onClose();
     };
-    const key = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    const key = (event: KeyboardEvent) => { if (event.key === "Escape") latest.current.onClose(); };
     document.addEventListener("pointerdown", down);
     document.addEventListener("keydown", key);
     return () => {
       document.removeEventListener("pointerdown", down);
       document.removeEventListener("keydown", key);
     };
-  }, [onClose]);
+  }, []);
 
-  return (
+  return createPortal(
     <div ref={card} role="dialog" aria-modal="true" aria-labelledby={headingId} tabIndex={-1}
       className={`popover-card${phone ? " sheet" : ""}`} style={style}
       onKeyDown={(event) => {
@@ -131,6 +170,7 @@ export function PopoverCard({ title, getAnchor, onClose, refocusKey, children }:
         </button>
       </div>
       {children}
-    </div>
+    </div>,
+    document.body,
   );
 }

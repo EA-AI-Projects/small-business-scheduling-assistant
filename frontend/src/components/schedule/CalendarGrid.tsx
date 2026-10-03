@@ -48,7 +48,7 @@ export function CalendarGrid({ days, events, zone, selectedId, onSelect }: {
   })();
 
   return (
-    <div className="cal-scroll" ref={scroller} tabIndex={0} role="region" data-calendar-scroll=""
+    <div className="cal-scroll" ref={scroller} tabIndex={0} role="region" data-calendar-scroll="" data-popover-clip=""
       aria-label={count > 1 ? `Calendar, week of ${dayTitle(first ?? "")}` : `Calendar, ${dayTitle(first ?? "")}`}>
       <div className={`cal-grid ${count > 1 ? "week" : "day"}`}
         style={{ ["--cal-days" as string]: count, ["--hour-px" as string]: `${HOUR_PX}px` }}>

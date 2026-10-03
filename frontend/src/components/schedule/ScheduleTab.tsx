@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 
 import { layoutDay } from "@/lib/calendarLayout";
 import { datesForView } from "@/lib/time";
@@ -46,21 +46,15 @@ export function ScheduleTab() {
   };
 
   // After the card closes, put focus back on the item, or on the calendar if the item is gone.
-  const lastId = useRef<string | null>(null);
-  useEffect(() => {
-    const previous = lastId.current;
-    lastId.current = selectedId;
-    if (!previous || selectedId) return;
-    // Skipped when focus ends up somewhere deliberate (for example a clicked control). The check runs
-    // after the click's own focus change, which would otherwise drop focus on the page body.
-    const timer = window.setTimeout(() => {
-      const active = document.activeElement;
-      if (active && active !== document.body && document.body.contains(active)) return;
-      (findItem(previous) ?? document.querySelector<HTMLElement>("[data-calendar-scroll]"))
-        ?.focus({ preventScroll: true });
-    }, 0);
-    return () => window.clearTimeout(timer);
-  }, [selectedId, findItem]);
+  // Where focus goes when the card closes: the item, or the calendar if the item is gone.
+  const returnFocus = useCallback(
+    () => (selectedId ? findItem(selectedId) : null) ?? document.querySelector<HTMLElement>("[data-calendar-scroll]"),
+    [findItem, selectedId]);
+  // A press on another item switches the card to it; a press on the open item closes it.
+  const pressItem = (element: HTMLElement) => {
+    const id = element.dataset.eventId;
+    if (id) select(id, element); else close();
+  };
 
   const days = datesForView(date, view);
 
@@ -87,7 +81,8 @@ export function ScheduleTab() {
           </>
         )}
       </div>
-      {selected && <EventCard event={selected} getAnchor={getAnchor} onClose={close} />}
+      {selected && <EventCard event={selected} getAnchor={getAnchor} onClose={close} onAnchorPress={pressItem}
+        returnFocus={returnFocus} />}
       {/* Temporary home for the block form until the empty-slot card replaces it (#153). */}
       <section className="card block-card">
         <h3>Block unavailable time</h3>
