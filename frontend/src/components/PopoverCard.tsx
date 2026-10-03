@@ -82,7 +82,7 @@ export function PopoverCard({ title, variant = "anchored", getAnchor, onClose, o
   title: string;
   /**
    * "dropdown" opens directly under the anchor at a fixed width, on phones too (no bottom sheet),
-   * with the title visually hidden and a visually hidden Close button. Used by the header date picker.
+   * with the title visually hidden and no close button (Escape, an outside press, or a pick closes it). Used by the header date picker.
    */
   variant?: "anchored" | "modal" | "dropdown";
   /** Not used by the modal variant. */
@@ -239,11 +239,6 @@ export function PopoverCard({ title, variant = "anchored", getAnchor, onClose, o
         </div>
       )}
       {children}
-      {variant === "dropdown" && (
-        // Hidden until it has keyboard focus, so screen-reader users get an explicit exit
-        // without an invisible focus stop (WCAG 2.4.7). Placed last so Tab order starts in the grid.
-        <button type="button" className="dropdown-close" onClick={onClose}>Close</button>
-      )}
     </div>
     </>,
     document.body,
