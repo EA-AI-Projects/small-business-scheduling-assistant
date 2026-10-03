@@ -229,7 +229,6 @@ export function PopoverCard({ title, variant = "anchored", getAnchor, onClose, o
       {variant === "dropdown" ? (
         <>
           <h3 id={headingId} className="visually-hidden">{title}</h3>
-          <button type="button" className="visually-hidden" onClick={onClose}>Close</button>
         </>
       ) : (
         <div className="popover-head">
@@ -240,6 +239,11 @@ export function PopoverCard({ title, variant = "anchored", getAnchor, onClose, o
         </div>
       )}
       {children}
+      {variant === "dropdown" && (
+        // Hidden until it has keyboard focus, so screen-reader users get an explicit exit
+        // without an invisible focus stop (WCAG 2.4.7). Placed last so Tab order starts in the grid.
+        <button type="button" className="dropdown-close" onClick={onClose}>Close</button>
+      )}
     </div>
     </>,
     document.body,
