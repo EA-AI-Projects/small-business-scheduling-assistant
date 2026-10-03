@@ -39,6 +39,18 @@ describe("owner client deletion flow", () => {
     expect(steps.notify).not.toHaveBeenCalled();
   });
 
+  it.each([200, 202])("does not report deletion complete for HTTP %i", async (status) => {
+    const steps = actions();
+    const api = new OwnerApi(config, "tok", () => undefined,
+      async () => new Response("{}", { status }));
+    const result = await deleteClientFlow(api, "client", steps);
+    expect(result).toContain(`expected 204`);
+    expect(steps.clearSelection).not.toHaveBeenCalled();
+    expect(steps.close).not.toHaveBeenCalled();
+    expect(steps.refresh).not.toHaveBeenCalled();
+    expect(steps.notify).not.toHaveBeenCalled();
+  });
+
   it("reports a failed refresh as deleted without claiming the view is current", async () => {
     const steps = actions();
     steps.refresh.mockRejectedValueOnce(new Error("offline"));

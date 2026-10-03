@@ -60,7 +60,7 @@ describe("Delete client confirmation", () => {
     await click("Delete client");
     expect(request).not.toHaveBeenCalled();
     await click("Permanently delete client");
-    expect(request).toHaveBeenCalledWith("/clients/synthetic-client", { method: "DELETE" });
+    expect(request).toHaveBeenCalledWith("/clients/synthetic-client", { method: "DELETE", expectedStatus: 204 });
     expect(selectClient).toHaveBeenCalledWith(null);
     expect(onDeleted).toHaveBeenCalledOnce();
     expect(refresh).toHaveBeenCalledOnce();

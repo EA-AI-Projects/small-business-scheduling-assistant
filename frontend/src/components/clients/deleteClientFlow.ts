@@ -9,7 +9,7 @@ export async function deleteClientFlow(api: OwnerApi, clientId: string, actions:
   notify: (message: string, error?: boolean) => void;
 }): Promise<string | null> {
   try {
-    await api.request(path`/clients/${clientId}`, { method: "DELETE" });
+    await api.request(path`/clients/${clientId}`, { method: "DELETE", expectedStatus: 204 });
   } catch (error) {
     return `Deletion could not be confirmed: ${error instanceof Error ? error.message : String(error)}. Refresh the client list before retrying if the connection was interrupted.`;
   }

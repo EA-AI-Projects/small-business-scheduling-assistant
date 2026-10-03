@@ -12,6 +12,8 @@ export interface RequestOptions {
   body?: unknown;
   /** Send a fresh Idempotency-Key; required by scheduling commands and note creation. */
   idempotent?: boolean;
+  /** Require an exact success status when the endpoint's completion contract demands one. */
+  expectedStatus?: number;
 }
 
 export type Fetcher = typeof fetch;
@@ -47,6 +49,10 @@ export class OwnerApi {
       const error = (data as { error?: { code?: string; message?: string } } | null)?.error;
       throw new ApiError(error?.message || `Server returned ${response.status}`, response.status,
         error?.code ?? null, (data as { current?: unknown } | null)?.current);
+    }
+    if (options.expectedStatus !== undefined && response.status !== options.expectedStatus) {
+      throw new ApiError(`Server returned ${response.status}; expected ${options.expectedStatus} to confirm completion`,
+        response.status, null, undefined);
     }
     return data as T;
   }
