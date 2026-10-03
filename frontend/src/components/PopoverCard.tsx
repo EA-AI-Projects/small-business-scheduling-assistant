@@ -2,9 +2,10 @@ import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type 
   type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
-import { placeCard, type Box } from "@/lib/popoverPlacement";
+import { placeBelow, placeCard, type Box } from "@/lib/popoverPlacement";
 
 const GAP = 8;
+const DROPDOWN_WIDTH = 20 * 16;
 const CARD_WIDTH = 22 * 16;
 const MODAL_WIDTH = 36 * 16;
 const PHONE_QUERY = "(max-width: 520px)";
@@ -79,7 +80,11 @@ export function elementAt(x: number, y: number): Element | null {
  */
 export function PopoverCard({ title, variant = "anchored", getAnchor, onClose, onAnchorPress, onSlotPress, returnFocus, refocusKey, children }: {
   title: string;
-  variant?: "anchored" | "modal";
+  /**
+   * "dropdown" opens directly under the anchor at a fixed width, on phones too (no bottom sheet),
+   * with the title visually hidden and a visually hidden Close button. Used by the header date picker.
+   */
+  variant?: "anchored" | "modal" | "dropdown";
   /** Not used by the modal variant. */
   getAnchor: () => CardAnchor | null;
   onClose: () => void;
@@ -101,9 +106,10 @@ export function PopoverCard({ title, variant = "anchored", getAnchor, onClose, o
   const reposition = useCallback(() => {
     const element = card.current;
     if (!element) return;
-    const onPhone = isPhone();
+    const onPhone = variant !== "dropdown" && isPhone();
     setPhone(onPhone);
     const modal = variant === "modal";
+    const dropdown = variant === "dropdown";
     const anchor = onPhone || modal ? null : getAnchor();
     if (!onPhone && !modal && !anchor) return;
     if (modal && !onPhone) {
@@ -119,7 +125,10 @@ export function PopoverCard({ title, variant = "anchored", getAnchor, onClose, o
       setStyle((current) => JSON.stringify(current) === JSON.stringify(css) ? current : css);
       return;
     }
-    const next = anchor ? placeCard({
+    const viewport = { width: document.documentElement.clientWidth, height: window.innerHeight };
+    const next = anchor && dropdown ? placeBelow({ viewport, topLimit: topLimit(),
+      anchor: anchor.getBoundingClientRect(), card: { width: DROPDOWN_WIDTH, height: element.offsetHeight }, gap: GAP })
+      : anchor ? placeCard({
       viewport: { width: document.documentElement.clientWidth, height: window.innerHeight },
       topLimit: topLimit(), anchor: anchor.getBoundingClientRect(),
       card: { width: CARD_WIDTH, height: element.offsetHeight }, gap: GAP,
@@ -204,7 +213,7 @@ export function PopoverCard({ title, variant = "anchored", getAnchor, onClose, o
     <>
     {variant === "modal" && <div className="popover-scrim" aria-hidden="true" />}
     <div ref={card} role="dialog" aria-modal="true" aria-labelledby={headingId} tabIndex={-1}
-      className={`popover-card${variant === "modal" ? " modal" : ""}${phone ? " sheet" : ""}`} style={style}
+      className={`popover-card${variant === "modal" ? " modal" : ""}${variant === "dropdown" ? " dropdown" : ""}${phone ? " sheet" : ""}`} style={style}
       onKeyDown={(event) => {
         if (event.key !== "Tab") return;
         // Collapsed accordion bodies are hidden but still in the DOM; skip what cannot take focus.
@@ -217,12 +226,19 @@ export function PopoverCard({ title, variant = "anchored", getAnchor, onClose, o
         if (event.shiftKey && (active === first || active === card.current)) { event.preventDefault(); last.focus(); }
         else if (!event.shiftKey && active === last) { event.preventDefault(); first.focus(); }
       }}>
-      <div className="popover-head">
-        <h3 id={headingId}>{title}</h3>
-        <button type="button" className="icon-button popover-close" aria-label="Close" onClick={onClose}>
-          <span aria-hidden="true">×</span>
-        </button>
-      </div>
+      {variant === "dropdown" ? (
+        <>
+          <h3 id={headingId} className="visually-hidden">{title}</h3>
+          <button type="button" className="visually-hidden" onClick={onClose}>Close</button>
+        </>
+      ) : (
+        <div className="popover-head">
+          <h3 id={headingId}>{title}</h3>
+          <button type="button" className="icon-button popover-close" aria-label="Close" onClick={onClose}>
+            <span aria-hidden="true">×</span>
+          </button>
+        </div>
+      )}
       {children}
     </div>
     </>,

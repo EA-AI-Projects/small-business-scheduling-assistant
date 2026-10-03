@@ -1,16 +1,31 @@
-import type { CalendarView } from "@/lib/time";
+import { useCallback, useRef, useState } from "react";
 
-/** Today, previous/next, range title and Day/Week selector. State lives with the caller. */
-export function CalendarControls({ title, view, disabled = false, onToday, onStep, onView }: {
+import type { CalendarView } from "@/lib/time";
+import { PopoverCard } from "../PopoverCard";
+import { MiniCalendar } from "./MiniCalendar";
+
+/** Today, previous/next, range title (opens a date picker) and Day/Week selector. State lives with the caller. */
+export function CalendarControls({ title, shortTitle, view, date, today, disabled = false, onToday, onStep, onView, onPick }: {
   title: string;
+  /** Compact title for narrow screens; defaults to `title`. */
+  shortTitle?: string;
   /** Disable every control, e.g. while the business timezone is still loading. */
   disabled?: boolean;
   view: CalendarView;
+  /** Selected date and today's date (YYYY-MM-DD, business timezone). */
+  date: string;
+  today: string;
   onToday: () => void;
   onStep: (direction: -1 | 1) => void;
   onView: (view: CalendarView) => void;
+  /** A day chosen in the date picker. */
+  onPick: (date: string) => void;
 }) {
   const unit = view === "week" ? "week" : "day";
+  const [picking, setPicking] = useState(false);
+  const titleButton = useRef<HTMLButtonElement>(null);
+  const getAnchor = useCallback(() => titleButton.current, []);
+  const returnFocus = useCallback(() => titleButton.current, []);
   return (
     <div className="calendar-controls" role="group" aria-label="Calendar navigation">
       <button type="button" className="pill" disabled={disabled} aria-label="Today" onClick={onToday}>
@@ -27,7 +42,25 @@ export function CalendarControls({ title, view, disabled = false, onToday, onSte
         <button type="button" className="icon-button" aria-label={`Next ${unit}`}
           disabled={disabled} onClick={() => onStep(1)}>›</button>
       </span>
-      <h2 className="range-title" aria-live="polite" title={title}>{title}</h2>
+      <h2 className="range-title" title={title}>
+        <button ref={titleButton} type="button" className="range-title-button" disabled={disabled}
+          aria-haspopup="dialog" aria-expanded={picking} aria-label={`${title}, choose date`}
+          // While the picker is open the header is inert, so a press on the title is an outside
+          // press: the picker closes and the click never reaches this button, so it cannot reopen.
+          onClick={() => setPicking(true)}>
+          <span className="range-title-text range-title-long">{title}</span>
+          <span className="range-title-text range-title-short" aria-hidden="true">{shortTitle ?? title}</span>
+          <span className="range-title-caret" aria-hidden="true" />
+        </button>
+      </h2>
+      <span className="visually-hidden" aria-live="polite">{title}</span>
+      {picking && (
+        <PopoverCard title="Choose a date" getAnchor={getAnchor} returnFocus={returnFocus}
+          variant="dropdown" onClose={() => setPicking(false)}>
+          <MiniCalendar date={date} today={today} view={view}
+            onPick={(next) => { setPicking(false); onPick(next); }} />
+        </PopoverCard>
+      )}
       <label className="view-select">
         <span className="visually-hidden">Calendar view</span>
         <select className="pill" value={view} disabled={disabled}

@@ -47,13 +47,13 @@ interface OwnerContextValue {
   view: CalendarView;
   setView: (view: CalendarView) => void;
   goToday: () => void;
+  /** Jump to a calendar date (YYYY-MM-DD, business timezone); the view shows it or its week. */
+  goToDate: (date: string) => void;
   stepRange: (direction: -1 | 1) => void;
   selectedClientId: string | null;
   selectClient: (clientId: string | null, noteAppointmentId?: string | null) => void;
   /** Visit to prefill on the next client note, set when opening notes from the schedule. */
   noteAppointmentId: string | null;
-  /** Increments on every selectClient call, so forms can reset per selection event. */
-  selectionVersion: number;
   /** Ask the Clients page to open this client's details with Notes expanded (from a calendar card). */
   openClientNotes: (clientId: string, appointmentId: string) => void;
   /** Client whose Notes the Clients page should open next; cleared once the page has taken it. */
@@ -82,7 +82,6 @@ export function OwnerProvider({ api, notify, children }: {
   const [view, setView] = useState<CalendarView>("day");
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
   const [noteAppointmentId, setNoteAppointmentId] = useState<string | null>(null);
-  const [selectionVersion, setSelectionVersion] = useState(0);
   const [notesRequest, setNotesRequest] = useState<string | null>(null);
   // The provider is keyed by session; once unmounted, late responses must not notify.
   const alive = useRef(true);
@@ -152,6 +151,7 @@ export function OwnerProvider({ api, notify, children }: {
   // load the zone is unknown, so there is no date ("") and navigation does nothing.
   const date = pickedDate ?? (loaded ? todayKey(data.zone) : "");
   const goToday = useCallback(() => setPickedDate(null), []);
+  const goToDate = useCallback((next: string) => { if (loaded) setPickedDate(next); }, [loaded]);
   const stepRange = useCallback((direction: -1 | 1) => {
     if (!loaded) return;
     setPickedDate(stepDate(pickedDate ?? todayKey(data.zone), view, direction));
@@ -167,7 +167,6 @@ export function OwnerProvider({ api, notify, children }: {
   const selectClient = useCallback((clientId: string | null, appointmentId: string | null = null) => {
     setSelectedClientId(clientId);
     setNoteAppointmentId(appointmentId);
-    setSelectionVersion((current) => current + 1);
   }, []);
 
   const openClientNotes = useCallback((clientId: string, appointmentId: string) => {
@@ -184,11 +183,11 @@ export function OwnerProvider({ api, notify, children }: {
 
   const value = useMemo<OwnerContextValue>(() => ({
     api, data, loaded, stamp, refresh, change, resolveLocal, notify: safeNotify, tab, setTab,
-    date, view, setView, goToday, stepRange,
-    selectedClientId, selectClient, noteAppointmentId, selectionVersion,
+    date, view, setView, goToday, goToDate, stepRange,
+    selectedClientId, selectClient, noteAppointmentId,
     openClientNotes, notesRequest, clearNotesRequest,
   }), [api, data, loaded, stamp, refresh, change, resolveLocal, safeNotify, tab,
-    date, view, goToday, stepRange, selectedClientId, selectClient, noteAppointmentId, selectionVersion,
+    date, view, goToday, goToDate, stepRange, selectedClientId, selectClient, noteAppointmentId,
     openClientNotes, notesRequest, clearNotesRequest]);
 
   return <OwnerContext.Provider value={value}>{children}</OwnerContext.Provider>;

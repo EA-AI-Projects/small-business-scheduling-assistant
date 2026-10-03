@@ -1,6 +1,6 @@
 import { useEffect, useRef, type ReactNode } from "react";
 
-import { rangeTitle } from "@/lib/time";
+import { rangeTitle, rangeTitleShort, todayKey } from "@/lib/time";
 import { useOwner, type Tab } from "@/owner/OwnerContext";
 
 import { ClientsTab } from "./clients/ClientsTab";
@@ -18,7 +18,7 @@ const SECTIONS: { id: Tab; label: string }[] = [
 ];
 
 export function Workspace({ onSignOut, notice }: { onSignOut: () => void; notice?: ReactNode }) {
-  const { tab, setTab, notify, data, loaded, date, view, setView, goToday, stepRange } = useOwner();
+  const { tab, setTab, notify, data, loaded, date, view, setView, goToday, goToDate, stepRange } = useOwner();
   const pending = data.requests.length;
   // A section opened from deep in another (e.g. "Open client" below the calendar) starts at its top.
   // The previous section's result message is cleared too.
@@ -39,8 +39,9 @@ export function Workspace({ onSignOut, notice }: { onSignOut: () => void; notice
           <button type="button" onClick={onSignOut}>Sign out</button>
         </>}>
         {tab === "schedule" ? (
-          <CalendarControls title={loaded ? rangeTitle(date, view) : "Loading…"} view={view} disabled={!loaded} onToday={goToday}
-            onStep={stepRange} onView={setView} />
+          <CalendarControls title={loaded ? rangeTitle(date, view) : "Loading…"}
+            shortTitle={loaded ? rangeTitleShort(date, view) : undefined} view={view} disabled={!loaded} onToday={goToday}
+            date={date} today={loaded ? todayKey(data.zone) : ""} onPick={goToDate} onStep={stepRange} onView={setView} />
         ) : (
           <span className="range-title">{current?.label}</span>
         )}

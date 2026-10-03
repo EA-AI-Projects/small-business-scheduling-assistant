@@ -42,3 +42,13 @@ export function placeCard({ viewport, topLimit, anchor, card, gap = 8 }: Placeme
   const top = Math.min(Math.max(anchor.top, minTop), Math.max(viewport.height - height - gap, minTop));
   return { left, top, width, maxHeight, side };
 }
+
+/** Place a card directly under its anchor, left edges aligned, kept inside the viewport. */
+export function placeBelow({ viewport, anchor, card, gap = 8 }: PlacementInput): Omit<Placement, "side"> {
+  const width = Math.min(card.width, viewport.width - 2 * gap);
+  const left = Math.min(Math.max(anchor.left, gap), viewport.width - width - gap);
+  // The anchor sits in the sticky header, so below it is already clear of the header and notice.
+  const top = anchor.bottom + gap;
+  const maxHeight = Math.max(viewport.height - top - gap, MIN_MAX_HEIGHT);
+  return { left, top, width, maxHeight };
+}

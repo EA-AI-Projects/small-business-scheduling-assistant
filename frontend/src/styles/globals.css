@@ -215,3 +215,32 @@ code { font-size: .9em; }
 .popover-card h4 { margin: 0; }
 @media (max-width: 520px) { .popover-card.modal { max-width: none; } }
 .popover-card h5 { margin: 0; }
+
+/* ---- Header date picker (#161): title button and mini month calendar ---- */
+.range-title-button { display: inline-flex; align-items: center; gap: .35rem; max-width: 100%; min-height: 2.25rem; padding: .2rem .5rem; margin: 0 0 0 -.5rem; border: 0; border-radius: 8px; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.range-title-button:hover:not(:disabled) { background: var(--color-surface-subtle); }
+.range-title-button[aria-expanded="true"] { background: var(--color-primary-faint); color: var(--color-primary-faint-ink); }
+.range-title-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.range-title-caret { flex: none; width: 0; height: 0; border: 5px solid transparent; border-top-color: currentColor; border-bottom-width: 0; }
+.range-title { min-width: 0; }
+.range-title-short { display: none; }
+.popover-card.dropdown { padding: .5rem .75rem .75rem; gap: 0; }
+@media (max-width: 520px) {
+  .range-title-button { padding: .2rem .25rem; gap: .2rem; margin-left: 0; }
+  .range-title-long { display: none; }
+  .range-title-short { display: block; }
+  .popover-card.dropdown { right: auto; bottom: auto; border-width: 1px; border-radius: 12px; padding: .4rem .5rem .6rem; visibility: visible; }
+}
+.mini-cal-head { display: flex; align-items: center; gap: .1rem; }
+.mini-cal-title { flex: 1; padding-left: .25rem; font-weight: 500; }
+.mini-cal-grid { display: grid; gap: 2px; }
+.mini-cal-row { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; justify-items: center; }
+.mini-cal-weekday { padding: .3rem 0; font-size: .75rem; color: var(--color-text-subtle); }
+.mini-cal-day { display: grid; place-items: center; width: 2.25rem; height: 2.25rem; max-width: 100%; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--color-text); font: inherit; font-size: .85rem; cursor: pointer; }
+.mini-cal-day:hover { background: var(--color-surface-subtle); }
+.mini-cal-day.outside { color: var(--color-text-subtle); opacity: .7; }
+.mini-cal-day.selected { background: var(--color-primary-soft); color: var(--color-primary-faint-ink); opacity: 1; font-weight: 600; }
+.mini-cal-day.today { background: var(--color-primary); color: var(--color-on-primary); opacity: 1; }
+.mini-cal-day.today.selected { box-shadow: 0 0 0 2px var(--color-surface), 0 0 0 4px var(--color-primary); }
+.mini-cal-day:focus-visible { outline: 3px solid var(--color-focus); outline-offset: 1px; }
+.mini-cal-day.today:focus-visible { outline-color: var(--color-focus-on-fill); }

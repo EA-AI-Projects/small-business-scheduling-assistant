@@ -77,6 +77,13 @@ export function rangeTitle(date: string, view: CalendarView): string {
   return startMonth === endMonth ? `${startMonth} ${endYear}` : `${startMonth} – ${endMonth} ${endYear}`;
 }
 
+/** Compact header title for narrow screens: "Fri, Oct 2" for a day; the week title is already short. */
+export function rangeTitleShort(date: string, view: CalendarView): string {
+  if (view === "week") return rangeTitle(date, view);
+  return new Date(`${date}T12:00:00Z`).toLocaleDateString("en-US", {
+    weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
+}
+
 export function dayTitle(date: string): string {
   return new Date(`${date}T12:00:00Z`).toLocaleDateString("en-US", {
     weekday: "long", month: "short", day: "numeric", timeZone: "UTC" });

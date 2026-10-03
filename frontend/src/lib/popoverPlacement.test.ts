@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { placeCard } from "./popoverPlacement";
+import { placeBelow, placeCard } from "./popoverPlacement";
 
 const viewport = { width: 1440, height: 900 };
 const card = { width: 352, height: 300 };
@@ -48,5 +48,19 @@ describe("placeCard", () => {
       anchor: { left: 166, right: 330, top: 100, bottom: 160 }, card: { width: 352, height: 900 } });
     expect(p.maxHeight).toBe(400 - 63 - 8);
     expect(p.top).toBe(63);
+  });
+});
+
+describe("placeBelow", () => {
+  it("aligns under the anchor's left edge", () => {
+    const p = placeBelow({ viewport, topLimit: 55, anchor: { left: 445, right: 700, top: 20, bottom: 60 }, card: { width: 320, height: 300 } });
+    expect(p).toMatchObject({ left: 445, top: 68, width: 320 });
+  });
+
+  it("is pulled back inside a narrow viewport", () => {
+    const p = placeBelow({ viewport: { width: 320, height: 640 }, topLimit: 50, anchor: { left: 150, right: 250, top: 5, bottom: 45 }, card: { width: 320, height: 300 } });
+    expect(p.width).toBe(304);
+    expect(p.left).toBe(8);
+    expect(p.left + p.width).toBeLessThanOrEqual(312);
   });
 });
