@@ -23,9 +23,11 @@ function eventLabel(placed: PlacedEvent, zone: string, day: string): string {
     dayTitle(day)}${extra}`;
 }
 
-export function CalendarGrid({ days, events, zone, selectedId, onSelect }: {
+export function CalendarGrid({ days, events, zone, selectedId, onSelect, onSlotPress }: {
   days: string[]; events: CalendarEvent[]; zone: string; selectedId: string | null;
   onSelect: (id: string, element: HTMLElement) => void;
+  /** A press on an empty part of a day column (not on an item, heading, or the gutter). */
+  onSlotPress: (column: HTMLElement, x: number, y: number) => void;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const [now, setNow] = useState(() => new Date());
@@ -71,6 +73,11 @@ export function CalendarGrid({ days, events, zone, selectedId, onSelect }: {
           </div>
           {days.map((day) => (
             <div key={day} className={`cal-col${day === today ? " today" : ""}`} role="group"
+              data-slot-column="" data-day={day}
+              // Items are buttons inside the column, so only a press on the column itself is empty.
+              onClick={(click) => {
+                if (click.target === click.currentTarget) onSlotPress(click.currentTarget, click.clientX, click.clientY);
+              }}
               aria-label={day === today ? `${dayTitle(day)}, today` : dayTitle(day)}>
               {layoutDay(events, day, zone).map((placed) => (
                 <EventBlock key={placed.event.event_id} placed={placed} zone={zone} day={day}

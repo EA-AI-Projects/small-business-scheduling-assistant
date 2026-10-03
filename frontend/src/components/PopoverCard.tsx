@@ -28,32 +28,58 @@ function topLimit(): number {
   return bottom;
 }
 
-/** The anchor element under a viewport point. Inert elements are not hit-tested, so look at rectangles. */
-function anchorAt(x: number, y: number): HTMLElement | null {
-  const anchors = [...document.querySelectorAll<HTMLElement>("[data-popover-anchor]")].reverse();
-  return anchors.find((element) => {
-    const r = element.getBoundingClientRect();
-    if (x < r.left || x > r.right || y < r.top || y > r.bottom) return false;
-    const clip = element.closest("[data-popover-clip]")?.getBoundingClientRect();
-    return !clip || (x >= clip.left && x <= clip.right && y >= clip.top && y <= clip.bottom);
-  }) ?? null;
+// Cards open at once, and the page regions made inert for them. One owner for all cards, so a
+// second card (or an overlapping unmount) can never leave `main` inert.
+let openCards = 0;
+let savedInert: [HTMLElement, boolean][] = [];
+
+function lockBackground(): void {
+  if (openCards === 0) {
+    savedInert = [...document.querySelectorAll<HTMLElement>(BACKGROUND)].map((region) => [region, region.inert]);
+  }
+  openCards += 1;
+  savedInert.forEach(([region]) => { region.inert = true; });
+}
+
+function unlockBackground(): void {
+  openCards = Math.max(0, openCards - 1);
+  if (openCards > 0) return;
+  savedInert.forEach(([region, before]) => { region.inert = before; });
+  savedInert = [];
 }
 
 /**
- * A pop-up card shared by the calendar item card and, later, the empty-slot card.
+ * The real topmost element under a viewport point. Inert regions are skipped by hit-testing, so
+ * clear `inert`, ask the browser, and restore it, all synchronously (no paint or event in between).
+ * Sticky headings, the gutter, the app header and a pinned notice therefore win over an item under them.
+ */
+export function elementAt(x: number, y: number): Element | null {
+  savedInert.forEach(([region]) => { region.inert = false; });
+  try {
+    return document.elementFromPoint(x, y);
+  } finally {
+    savedInert.forEach(([region]) => { region.inert = true; });
+  }
+}
+
+/**
+ * A pop-up card shared by the calendar item card and the empty-slot card.
  *
  * It is modal: the page behind it is inert, Tab stays inside, and Escape, the close button, or a
- * press outside close it. A press on another anchor element (`data-popover-anchor`) goes to
- * `onAnchorPress` instead, so the opener can switch items. On close, focus goes to `returnFocus`
+ * press outside close it. The press is hit-tested for the topmost element: one inside an anchor
+ * element (`data-popover-anchor`) goes to `onAnchorPress` so the opener can switch items, and one
+ * on a slot column (`data-slot-column`) goes to `onSlotPress`; anything else closes. On close, focus goes to `returnFocus`
  * unless the user already moved it to a control. `getAnchor` gives the rectangle to point at; on
  * phones the card is a bottom sheet instead. `refocusKey` changes when the content was rebuilt or
  * the card moved to another item; if that left focus outside the card, it returns to the card.
  */
-export function PopoverCard({ title, getAnchor, onClose, onAnchorPress, returnFocus, refocusKey, children }: {
+export function PopoverCard({ title, getAnchor, onClose, onAnchorPress, onSlotPress, returnFocus, refocusKey, children }: {
   title: string;
   getAnchor: () => CardAnchor | null;
   onClose: () => void;
   onAnchorPress?: (element: HTMLElement) => void;
+  /** A press on an empty slot of a day column: the column and the viewport point. */
+  onSlotPress?: (column: HTMLElement, x: number, y: number) => void;
   /** Element, or a function finding it at close time, that gets focus back. */
   returnFocus?: HTMLElement | null | (() => HTMLElement | null);
   refocusKey?: unknown;
@@ -63,8 +89,8 @@ export function PopoverCard({ title, getAnchor, onClose, onAnchorPress, returnFo
   const card = useRef<HTMLDivElement>(null);
   const [style, setStyle] = useState<CSSProperties>({ opacity: 0 });
   const [phone, setPhone] = useState(false);
-  const latest = useRef({ onClose, onAnchorPress, returnFocus });
-  useEffect(() => { latest.current = { onClose, onAnchorPress, returnFocus }; });
+  const latest = useRef({ onClose, onAnchorPress, onSlotPress, returnFocus });
+  useEffect(() => { latest.current = { onClose, onAnchorPress, onSlotPress, returnFocus }; });
 
   const reposition = useCallback(() => {
     const element = card.current;
@@ -106,11 +132,9 @@ export function PopoverCard({ title, getAnchor, onClose, onAnchorPress, returnFo
   // Modal: everything behind the card is inert while it is open, and focus returns afterwards.
   // Removed on any unmount: close, item gone, sign-out.
   useEffect(() => {
-    const regions = [...document.querySelectorAll<HTMLElement>(BACKGROUND)];
-    const before = regions.map((region) => region.inert);
-    regions.forEach((region) => { region.inert = true; });
+    lockBackground();
     return () => {
-      regions.forEach((region, index) => { region.inert = before[index] ?? false; });
+      unlockBackground();
       const target = latest.current.returnFocus;
       // After the click's own focus change, which would otherwise drop focus on the page body.
       window.setTimeout(() => {
@@ -137,9 +161,13 @@ export function PopoverCard({ title, getAnchor, onClose, onAnchorPress, returnFo
     const down = (event: PointerEvent) => {
       const target = event.target;
       if (target instanceof Node && card.current?.contains(target)) return;
-      const anchor = anchorAt(event.clientX, event.clientY);
+      const hit = elementAt(event.clientX, event.clientY);
+      const anchor = hit?.closest<HTMLElement>("[data-popover-anchor]");
+      const column = hit?.closest<HTMLElement>("[data-slot-column]");
       if (anchor && latest.current.onAnchorPress) latest.current.onAnchorPress(anchor);
-      else latest.current.onClose();
+      else if (column && hit === column && latest.current.onSlotPress) {
+        latest.current.onSlotPress(column, event.clientX, event.clientY);
+      } else latest.current.onClose();
     };
     const key = (event: KeyboardEvent) => { if (event.key === "Escape") latest.current.onClose(); };
     document.addEventListener("pointerdown", down);

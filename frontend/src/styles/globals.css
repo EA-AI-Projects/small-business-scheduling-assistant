@@ -71,6 +71,7 @@ p { margin: .35rem 0 1rem; }
 .card { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 12px; padding: 1.1rem; box-shadow: 0 2px 8px var(--color-shadow); }
 .tab-panel { min-height: 50vh; margin-top: 1.2rem; }
 .section-heading { display: flex; justify-content: space-between; align-items: end; gap: 1rem; margin-bottom: 1rem; }
+.heading-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .5rem; }
 .section-heading h2 { margin: .1rem 0 0; }
 .toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: 1rem; margin-bottom: 1rem; }
 .toolbar label { min-width: 145px; }
@@ -183,7 +184,6 @@ code { font-size: .9em; }
 .cal-event.selected { outline: 3px solid var(--color-focus-on-fill); outline-offset: 1px; z-index: 2; }
 .cal-event:focus-visible { outline: 3px solid var(--color-focus-on-fill); outline-offset: 1px; z-index: 2; }
 /* Pop-up card: anchored beside the item on desktop (position set from script), a bottom sheet on phones. */
-.block-card { margin-top: 1rem; max-width: 26rem; }
 .popover-card { position: fixed; z-index: 8; overflow-y: auto; overscroll-behavior: contain; padding: 1rem; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 12px; box-shadow: 0 8px 28px var(--color-shadow-strong); display: grid; gap: .5rem; align-content: start; }
 .popover-card:focus-visible { outline: 3px solid var(--color-focus); outline-offset: -3px; }
 .popover-card p { margin: 0; }
