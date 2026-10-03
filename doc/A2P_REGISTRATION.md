@@ -30,7 +30,7 @@ Campaign **Opt-in Keywords** and **Opt-in Message** should be blank if there is 
 
 Suggested confirmation text after in-person consent and campaign approval:
 
-> Small Business Scheduling Assistant: You're enrolled for appointment scheduling texts. Message frequency varies. Message and data rates may apply. Reply HELP for help or STOP to opt out.
+> Smart Scheduling Assistant: You're enrolled for appointment scheduling texts. Message frequency varies. Message and data rates may apply. Reply HELP for help or STOP to opt out.
 
 If custom replies are enabled in the Messaging Service, examples to review against the registered sender are:
 
