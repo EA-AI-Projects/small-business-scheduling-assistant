@@ -103,11 +103,13 @@ export function OwnerSession({ config }: { config: OwnerConfig }) {
     if (url) window.location.assign(url);
   }, [config, endSession]);
 
+  // Signed in, the notice renders right under the sticky header (inside Workspace); signed out there is no header.
+  const noticeBar = <NoticeBar notice={notice} onDismiss={() => setNotice(null)} />;
   return (
     <Shell signedIn={api !== null} onAuth={api ? signOut : config.authMode === "cognito" ? signIn : null}>
-      <NoticeBar notice={notice} onDismiss={() => setNotice(null)} />
+      {!api && noticeBar}
       {api ? (
-        <OwnerProvider key={session} api={api} notify={notify}><Workspace onSignOut={signOut} /></OwnerProvider>
+        <OwnerProvider key={session} api={api} notify={notify}><Workspace onSignOut={signOut} notice={noticeBar} /></OwnerProvider>
       ) : completing ? (
         <p className="muted">Checking sign-in…</p>
       ) : config.authMode === "local" ? (

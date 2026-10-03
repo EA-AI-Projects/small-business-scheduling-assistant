@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 
 import { rangeTitle } from "@/lib/time";
 import { useOwner, type Tab } from "@/owner/OwnerContext";
@@ -17,7 +17,7 @@ const SECTIONS: { id: Tab; label: string }[] = [
   { id: "settings", label: "Settings" },
 ];
 
-export function Workspace({ onSignOut }: { onSignOut: () => void }) {
+export function Workspace({ onSignOut, notice }: { onSignOut: () => void; notice?: ReactNode }) {
   const { tab, setTab, notify, data, loaded, date, view, setView, goToday, stepRange } = useOwner();
   const pending = data.requests.length;
   // A section opened from deep in another (e.g. "Open client" below the calendar) starts at its top.
@@ -45,6 +45,7 @@ export function Workspace({ onSignOut }: { onSignOut: () => void }) {
           <span className="range-title">{current?.label}</span>
         )}
       </AppHeader>
+      {notice}
       <section className="tab-panel" aria-label="Schedule" hidden={tab !== "schedule"}><ScheduleTab /></section>
       <section className="tab-panel" aria-label="Requests" hidden={tab !== "requests"}><RequestsTab /></section>
       <section className="tab-panel" aria-label="Clients" hidden={tab !== "clients"}><ClientsTab /></section>
