@@ -5,6 +5,7 @@ import { normalizePhone } from "@/lib/phone";
 import { useOwner } from "@/owner/OwnerContext";
 
 import { ConsentForm } from "./ConsentForm";
+import { deleteClientFlow } from "./deleteClientFlow";
 import { NoteForm } from "./NoteForm";
 import { NoteList } from "./NoteList";
 import { ProfileForm } from "./ProfileForm";
@@ -47,14 +48,18 @@ function Accordion({ title, open, onToggle, disabledReason, children }: {
  * Mounted once per opening (keyed by the parent), so the expanded sections survive refreshes.
  * `client` is undefined while a new profile has not been saved yet.
  */
-export function ClientDetails({ client, blankKey, initialSection, onCreated }: {
+export function ClientDetails({ client, blankKey, initialSection, onCreated, onDeleted }: {
   client: ClientProfile | undefined;
   blankKey: number;
   initialSection: SectionName;
   /** Called with the new client's id once its first save succeeds. */
   onCreated: (clientId: string) => void;
+  onDeleted: () => void;
 }) {
-  const { stamp } = useOwner();
+  const { api, refresh, notify, selectClient, stamp } = useOwner();
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [open, setOpen] = useState<Record<SectionName, boolean>>({
     profile: initialSection === "profile", consent: initialSection === "consent",
     notes: initialSection === "notes",
@@ -71,6 +76,17 @@ export function ClientDetails({ client, blankKey, initialSection, onCreated }: {
   const toggle = (name: SectionName) => setOpen((current) => ({ ...current, [name]: !current[name] }));
   const waiting = "Save the profile first.";
 
+  async function deleteClient() {
+    if (!client || deleting) return;
+    setDeleting(true);
+    setDeleteError(null);
+    const error = await deleteClientFlow(api, client.client_id, {
+      clearSelection: () => selectClient(null), close: onDeleted, refresh, notify,
+    });
+    if (error) setDeleteError(error);
+    setDeleting(false);
+  }
+
   return (
     <div className="accordion-stack">
       <Accordion title="Profile" open={open.profile} onToggle={() => toggle("profile")}>
@@ -82,6 +98,28 @@ export function ClientDetails({ client, blankKey, initialSection, onCreated }: {
           }}
           onPhoneDraft={(phone) => setPhoneDraft({ key: profileKey, phone })} />
       </Accordion>
+      {client && <section className="stack" aria-label="Delete client">
+        {!confirmDelete ? (
+          <button type="button" className="danger" onClick={() => setConfirmDelete(true)}>
+            Delete client
+          </button>
+        ) : (
+          <div className="stack">
+            <p><strong>Delete {client.name} permanently?</strong></p>
+            <p className="hint">This removes their profile, notes, appointment history, text conversations, and consent records, including records under legal hold. Future appointments and pending requests are cancelled, and reserved time is released. This cannot be undone. If they return, create a new profile and record fresh in-person consent.</p>
+            {deleteError && <p role="alert" className="field-error">{deleteError}</p>}
+            <div className="row-actions">
+              <button type="button" className="danger" disabled={deleting} onClick={deleteClient}>
+                {deleting ? "Deleting…" : "Permanently delete client"}
+              </button>
+              <button type="button" disabled={deleting} onClick={() => {
+                setConfirmDelete(false);
+                setDeleteError(null);
+              }}>Cancel</button>
+            </div>
+          </div>
+        )}
+      </section>}
       <Accordion title="Text Consent" open={open.consent} onToggle={() => toggle("consent")}
         disabledReason={client ? undefined : `${waiting} Text consent is recorded for a saved client.`}>
         {client && (

@@ -63,6 +63,7 @@ export function ClientsTab() {
           <p className="eyebrow">CLIENT DETAILS</p>
           <ClientDetails key={open.token} client={client} blankKey={open.token}
             initialSection={open.section}
+            onDeleted={() => setOpen(null)}
             onCreated={(id) => setOpen((current) => current && { ...current, clientId: id })} />
         </PopoverCard>
       )}
