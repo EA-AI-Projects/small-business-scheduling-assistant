@@ -99,8 +99,11 @@ class TwilioSmsSender:
         if (profile.phone_verified_at is None or evidence is None
                 or evidence.client_id != profile.client_id):
             raise PermanentDeliveryFailure("CONSENT_REQUIRED")
-        # Any profile change after the consent write (such as a new phone) supersedes it.
-        if record.event_version != profile.version:
+        # The welcome is stamped with the consent time, which is also the verification
+        # time. A phone change clears verification and new consent resets it, so a
+        # mismatch means the number consented to is no longer the profile's number.
+        # Other profile edits (such as an address fix) do not block it.
+        if profile.phone_verified_at != record.created_at:
             raise PermanentDeliveryFailure("EVENT_SUPERSEDED")
         if self._consent.is_opted_out(record.business_id, to):
             raise PermanentDeliveryFailure("OPTED_OUT")

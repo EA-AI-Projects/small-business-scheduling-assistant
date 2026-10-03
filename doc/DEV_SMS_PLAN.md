@@ -50,7 +50,7 @@ CUTOFF=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)
   --business-id dev-synthetic --cutoff "$CUTOFF" --execute)   # same CUTOFF value
 ```
 
-Expected today: 3 records (1 `seed_policy`, 2 `block_time`). `--execute` prints a result per record and a summary, then re-queries the due index and exits non-zero if any unsent record before the cutoff remains.
+Expected today: 3 records (1 `seed_policy`, 2 `block_time`), provided no consent has been recorded yet (recording consent queues a welcome text, which would be retired and add to the count). `--execute` prints a result per record and a summary, then re-queries the due index and exits non-zero if any unsent record before the cutoff remains.
 
 If the output shows `SKIPPED_LEASED` or `CONFLICT`, or the exit code is 1, stop and report it on #91. Do not re-run with a later cutoff.
 
@@ -77,7 +77,7 @@ Stage 1 adds the resources that `EnableSmsIngress=false` leaves out: the SMS HTT
 
 > **Owner-phone note.** In the app, STOP from the owner number blocks every owner text, and it can't be cleared the way a client's can (owners have no consent record). So the owner phone never texts STOP. With CANCEL removed from the Advanced Opt-Out keywords, a bare `CANCEL` is no longer an opt-out on Twilio's side and is not a STOP in the app. If the app records that `CANCEL` as a STOP, stop and report it before stage 3.
 
-**Stage 3: full flow with you and one tester.** Requires prerequisites 4 and 5. Record the tester's consent in the owner app, which also marks their phone verified. Retire the old pending texts: run the dry run, then `--execute`, of "Retire pending outbox records" once, just before turning anything on. Then turn on `SmsSendEnabled`, conversations, the sender trigger and outbox dispatch. Run one booking end to end: ask for times, pick one, you approve by text, the tester gets the confirmation, then cancel and reschedule.
+**Stage 3: full flow with you and one tester.** Requires prerequisites 4 and 5. Retire the old pending texts first: run the dry run, then `--execute`, of "Retire pending outbox records" once, before recording any consent. Then record the tester's consent in the owner app, which also marks their phone verified and queues the tester's one welcome text (do not retire after this step, or the welcome would be retired). Then turn on `SmsSendEnabled`, conversations, the sender trigger and outbox dispatch. Run one booking end to end: ask for times, pick one, you approve by text, the tester gets the confirmation, then cancel and reschedule.
 
 Next, check that a client without recorded consent is refused. Use a synthetic or un-onboarded client (profile only, no consent recorded) and book a visit for them in the owner app; its confirmation must fail with `CONSENT_REQUIRED` in delivery failures, and nothing is sent. Then turn texting off with section 6, steps 1 and 2, timing it, and turn it back on.
 

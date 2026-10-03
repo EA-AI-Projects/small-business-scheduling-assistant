@@ -421,6 +421,30 @@ class DynamoSmsIngressStore(SmsIngressStore):
                                                       for key, value in attrs.items()}}},
         ]
 
+    def _client_has_consent(self, business_id: str, client_id: str) -> bool:
+        """Any consent record for this client, under any phone they ever had."""
+        start: dict[str, Any] | None = None
+        while True:
+            arguments: dict[str, Any] = {
+                "TableName": self._table,
+                "KeyConditionExpression": "PK = :pk AND begins_with(SK, :prefix)",
+                "FilterExpression": "client_id = :client",
+                "ExpressionAttributeValues": {
+                    ":pk": {"S": f"BUSINESS#{business_id}"},
+                    ":prefix": {"S": "SMS_CONSENT_CURRENT#"},
+                    ":client": {"S": client_id},
+                },
+                "ConsistentRead": True,
+            }
+            if start is not None:
+                arguments["ExclusiveStartKey"] = start
+            page = self._client.query(**arguments)
+            if page.get("Items"):
+                return True
+            start = page.get("LastEvaluatedKey")
+            if start is None:
+                return False
+
     def put_consent(self, evidence: ConsentEvidence) -> None:
         self._client.transact_write_items(TransactItems=self._consent_writes(evidence))
 
@@ -429,8 +453,10 @@ class DynamoSmsIngressStore(SmsIngressStore):
                                     welcome: OutboxRecord | None = None) -> None:
         """One transaction: consent records, the profile's verification, optional welcome.
 
-        A welcome whose outbox ID already exists is dropped, so a client is welcomed
-        once. The conditional Put and the profile version check close the race.
+        A welcome is dropped when its outbox ID already exists or when any earlier
+        consent record names this client (a client enrolled before welcome texts
+        existed), so only a first enrollment is welcomed. The conditional Put and
+        the profile version check close the race.
         """
         if (verified.phone_verified_at is None or verified.version < 2
                 or verified.business_id != evidence.business_id
@@ -458,8 +484,9 @@ class DynamoSmsIngressStore(SmsIngressStore):
                 welcome.business_id != evidence.business_id
                 or welcome.entity_id != evidence.client_id):
             raise ValueError("Welcome must belong to the consenting client")
-        if welcome is not None and self._get(
-                welcome.business_id, f"OUTBOX#{welcome.outbox_id}") is None:
+        if (welcome is not None
+                and self._get(welcome.business_id, f"OUTBOX#{welcome.outbox_id}") is None
+                and not self._client_has_consent(welcome.business_id, welcome.entity_id)):
             instant = _instant(welcome.created_at)
             writes.append({"Put": {
                 "TableName": self._table,
