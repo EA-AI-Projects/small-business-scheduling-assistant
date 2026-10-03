@@ -78,13 +78,15 @@ export function elementAt(x: number, y: number): Element | null {
  * `refocusKey` changes when the content was rebuilt or
  * the card moved to another item; if that left focus outside the card, it returns to the card.
  */
-export function PopoverCard({ title, variant = "anchored", getAnchor, onClose, onAnchorPress, onSlotPress, returnFocus, refocusKey, children }: {
+export function PopoverCard({ title, variant = "anchored", align, getAnchor, onClose, onAnchorPress, onSlotPress, returnFocus, refocusKey, children }: {
   title: string;
   /**
    * "dropdown" opens directly under the anchor at a fixed width, on phones too (no bottom sheet),
-   * with the title visually hidden and no close button (Escape, an outside press, or a pick closes it). Used by the header date picker.
+   * with the title visually hidden and no close button (Escape, an outside press, or a pick closes it). Used by the header date picker and the account pop-up.
    */
   variant?: "anchored" | "modal" | "dropdown";
+  /** Dropdown only: line the card's right edge up with the anchor's (a trigger at the right of the header). */
+  align?: "start" | "end";
   /** Not used by the modal variant. */
   getAnchor: () => CardAnchor | null;
   onClose: () => void;
@@ -127,7 +129,7 @@ export function PopoverCard({ title, variant = "anchored", getAnchor, onClose, o
     }
     const viewport = { width: document.documentElement.clientWidth, height: window.innerHeight };
     const next = anchor && dropdown ? placeBelow({ viewport, topLimit: topLimit(),
-      anchor: anchor.getBoundingClientRect(), card: { width: DROPDOWN_WIDTH, height: element.offsetHeight }, gap: GAP })
+      anchor: anchor.getBoundingClientRect(), card: { width: DROPDOWN_WIDTH, height: element.offsetHeight }, gap: GAP, align })
       : anchor ? placeCard({
       viewport: { width: document.documentElement.clientWidth, height: window.innerHeight },
       topLimit: topLimit(), anchor: anchor.getBoundingClientRect(),
@@ -137,7 +139,7 @@ export function PopoverCard({ title, variant = "anchored", getAnchor, onClose, o
       ? { left: next.left, top: next.top, width: next.width, maxHeight: next.maxHeight } : {};
     // Keep the old object when nothing moved, so repositioning on every render cannot loop.
     setStyle((current) => JSON.stringify(current) === JSON.stringify(css) ? current : css);
-  }, [getAnchor, variant]);
+  }, [getAnchor, variant, align]);
 
   useLayoutEffect(() => { reposition(); });
   useEffect(() => {

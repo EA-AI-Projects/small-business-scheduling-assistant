@@ -63,4 +63,13 @@ describe("placeBelow", () => {
     expect(p.left).toBe(8);
     expect(p.left + p.width).toBeLessThanOrEqual(312);
   });
+
+  it("aligns the right edges with align end, and stays inside the viewport", () => {
+    const base = { viewport: { width: 1440, height: 900 }, topLimit: 55, card: { width: 320, height: 200 } };
+    const p = placeBelow({ ...base, anchor: { left: 1380, right: 1420, top: 8, bottom: 48 }, align: "end" });
+    expect(p).toMatchObject({ left: 1100, top: 56, width: 320 });
+    const narrow = placeBelow({ viewport: { width: 320, height: 640 }, topLimit: 50, card: base.card,
+      anchor: { left: 276, right: 316, top: 5, bottom: 45 }, align: "end" });
+    expect(narrow).toMatchObject({ left: 8, width: 304 });
+  });
 });

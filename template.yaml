@@ -241,7 +241,7 @@ Resources:
       GenerateSecret: false
       AllowedOAuthFlowsUserPoolClient: true
       AllowedOAuthFlows: [code]
-      AllowedOAuthScopes: [openid]
+      AllowedOAuthScopes: [openid, email]
       CallbackURLs: [!Sub '${OwnerAppOrigin}/']
       LogoutURLs: [!Sub '${OwnerAppOrigin}/']
       SupportedIdentityProviders: [COGNITO]

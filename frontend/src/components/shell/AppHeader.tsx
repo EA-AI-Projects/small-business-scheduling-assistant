@@ -9,17 +9,18 @@ export interface MenuItem {
 
 /**
  * Shared app header: menu button, app name, then caller-supplied controls. The compact menu
- * lists the sections and any footer content (such as sign out). Not owner-specific, so a
+ * lists the sections and any footer content. Not owner-specific, so a
  * later client-facing shell can reuse it.
  */
-export function AppHeader({ appName, items, current, onSelect, menuFooter, badgeTotal, children }: {
+export function AppHeader({ appName, items, current, onSelect, badgeTotal, trailing, children }: {
   appName: string;
   items: MenuItem[];
   current: string;
   onSelect: (id: string) => void;
-  menuFooter?: ReactNode;
   /** Count surfaced on the menu button while the menu is closed. */
   badgeTotal?: number;
+  /** Rendered at the far right of the header, e.g. the account button. */
+  trailing?: ReactNode;
   children?: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
@@ -87,11 +88,11 @@ export function AppHeader({ appName, items, current, onSelect, menuFooter, badge
               )}
             </button>
           ))}
-          {menuFooter && <div className="menu-footer">{menuFooter}</div>}
         </nav>
       </div>
       <h1 className="app-name">{appName}</h1>
       {children}
+      {trailing}
     </header>
   );
 }

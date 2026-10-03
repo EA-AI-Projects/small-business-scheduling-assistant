@@ -30,6 +30,8 @@ export default function OwnerPage() {
 export function OwnerSession({ config }: { config: OwnerConfig }) {
   // The access token lives only in React state: never in storage, cookies, or the URL.
   const [token, setToken] = useState<string | null>(null);
+  // The signed-in email, for display only. The ID token it came from is not kept.
+  const [email, setEmail] = useState<string | null>(null);
   const [session, setSession] = useState(0);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [completing, setCompleting] = useState(true);
@@ -40,6 +42,7 @@ export function OwnerSession({ config }: { config: OwnerConfig }) {
 
   const endSession = useCallback((message: string | null) => {
     setToken(null);
+    setEmail(null);
     setSession((value) => value + 1);
     clearPendingSignIn();
     setNotice(message ? { id: ++noticeCount, message, error: true } : null);
@@ -50,8 +53,8 @@ export function OwnerSession({ config }: { config: OwnerConfig }) {
     if (url.search) window.history.replaceState(null, "", url.pathname);
     const pendingNotice = takeSessionRejected();
     completeSignIn(config, url)
-      .then((accessToken) => { if (pendingNotice) notify(pendingNotice, true); return accessToken; })
-      .then((accessToken) => { if (accessToken) setToken(accessToken); })
+      .then((result) => { if (pendingNotice) notify(pendingNotice, true); return result; })
+      .then((result) => { if (result) { setEmail(result.email); setToken(result.accessToken); } })
       .catch((error: unknown) => notify(errorMessage(error), true))
       .finally(() => setCompleting(false));
   }, [config, notify]);
@@ -109,7 +112,7 @@ export function OwnerSession({ config }: { config: OwnerConfig }) {
     <Shell announcement={notice} signedIn={api !== null} onAuth={api ? signOut : config.authMode === "cognito" ? signIn : null}>
       {!api && noticeBar}
       {api ? (
-        <OwnerProvider key={session} api={api} notify={notify}><Workspace onSignOut={signOut} notice={noticeBar} /></OwnerProvider>
+        <OwnerProvider key={session} api={api} notify={notify}><Workspace onSignOut={signOut} account={{ email, local: config.authMode === "local" }} notice={noticeBar} /></OwnerProvider>
       ) : completing ? (
         <p className="muted">Checking sign-in…</p>
       ) : config.authMode === "local" ? (
@@ -205,7 +208,7 @@ function Shell({ signedIn, onAuth, announcement = null, children }: {
       <div role="status" aria-live="polite" className="visually-hidden">
         {announcement && <span key={announcement.id}>{announcement.message}</span>}
       </div>
-      {/* Signed in, the workspace renders the calendar header with the menu (and sign out). */}
+      {/* Signed in, the workspace renders the calendar header with the menu and the account button (sign out). */}
       {!signedIn && (
         <header className="topbar">
           <div><span className="eyebrow">OWNER WORKSPACE</span><h1>Scheduling</h1></div>
