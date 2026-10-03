@@ -25,7 +25,7 @@ function eventLabel(placed: PlacedEvent, zone: string, day: string): string {
 
 export function CalendarGrid({ days, events, zone, selectedId, onSelect }: {
   days: string[]; events: CalendarEvent[]; zone: string; selectedId: string | null;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, element: HTMLElement) => void;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const [now, setNow] = useState(() => new Date());
@@ -48,7 +48,7 @@ export function CalendarGrid({ days, events, zone, selectedId, onSelect }: {
   })();
 
   return (
-    <div className="cal-scroll" ref={scroller} tabIndex={0} role="region"
+    <div className="cal-scroll" ref={scroller} tabIndex={0} role="region" data-calendar-scroll="" data-popover-clip=""
       aria-label={count > 1 ? `Calendar, week of ${dayTitle(first ?? "")}` : `Calendar, ${dayTitle(first ?? "")}`}>
       <div className={`cal-grid ${count > 1 ? "week" : "day"}`}
         style={{ ["--cal-days" as string]: count, ["--hour-px" as string]: `${HOUR_PX}px` }}>
@@ -89,15 +89,16 @@ export function CalendarGrid({ days, events, zone, selectedId, onSelect }: {
 }
 
 function EventBlock({ placed, zone, day, selected, onSelect }: {
-  placed: PlacedEvent; zone: string; day: string; selected: boolean; onSelect: (id: string) => void;
+  placed: PlacedEvent; zone: string; day: string; selected: boolean; onSelect: (id: string, element: HTMLElement) => void;
 }) {
   const { event, startMinute, endMinute, lane, lanes } = placed;
   const kind = event.status.toLowerCase().split("_")[0];
   return (
     <button type="button" aria-label={eventLabel(placed, zone, day)} aria-current={selected ? "true" : undefined}
+      aria-haspopup="dialog" data-popover-anchor="" data-event-id={event.event_id}
       className={`cal-event ${kind}${selected ? " selected" : ""}${placed.continuesBefore ? " cont-before" : ""}${
         placed.continuesAfter ? " cont-after" : ""}`}
-      onClick={() => onSelect(event.event_id)}
+      onClick={(click) => onSelect(event.event_id, click.currentTarget)}
       style={{
         top: `${(startMinute / MINUTES_PER_DAY) * 100}%`,
         height: `${((endMinute - startMinute) / MINUTES_PER_DAY) * 100}%`,

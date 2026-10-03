@@ -92,7 +92,7 @@ textarea { min-height: 85px; resize: vertical; }
 .meta { color: var(--color-text-subtle); font-size: .83rem; }
 .badge { display: inline-block; border-radius: 999px; padding: .12rem .5rem; background: var(--color-primary-soft); color: var(--color-primary-faint-ink); font-size: .76rem; font-weight: 700; }
 .notice { display: flex; align-items: flex-start; gap: .75rem; margin: 0 0 1rem; padding: .7rem .9rem; border-radius: 8px; border: 1px solid var(--color-primary-soft); background: var(--color-primary-faint); color: var(--color-primary-faint-ink); }
-/* Nothing to show: keep the live region in the page (so the next message is announced) but take no space. */
+/* Nothing to show: the idle bar takes no space. (Announcements come from the single hidden live region in the shell.) */
 /* The header has no bottom margin; the tab panel supplies the space, so a visible notice must not add a second gap. */
 .app-header + .notice { margin-bottom: 0; }
 .notice.idle { margin: 0; padding: 0; border: 0; height: 0; overflow: hidden; }
@@ -182,3 +182,16 @@ code { font-size: .9em; }
 .cal-event.cont-after { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
 .cal-event.selected { outline: 3px solid var(--color-focus-on-fill); outline-offset: 1px; z-index: 2; }
 .cal-event:focus-visible { outline: 3px solid var(--color-focus-on-fill); outline-offset: 1px; z-index: 2; }
+/* Pop-up card: anchored beside the item on desktop (position set from script), a bottom sheet on phones. */
+.block-card { margin-top: 1rem; max-width: 26rem; }
+.popover-card { position: fixed; z-index: 8; overflow-y: auto; overscroll-behavior: contain; padding: 1rem; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 12px; box-shadow: 0 8px 28px var(--color-shadow-strong); display: grid; gap: .5rem; align-content: start; }
+.popover-card:focus-visible { outline: 3px solid var(--color-focus); outline-offset: -3px; }
+.popover-card p { margin: 0; }
+.popover-card .form-stack, .popover-card label { margin: 0; }
+.popover-head { display: flex; align-items: start; justify-content: space-between; gap: .5rem; }
+.popover-head h3 { margin: .25rem 0 0; }
+.popover-close { flex: none; margin: -.4rem -.4rem 0 0; }
+.popover-card .row-actions { margin-top: .3rem; }
+@media (max-width: 520px) {
+  .popover-card.sheet, .popover-card { left: 0; right: 0; bottom: 0; top: auto; width: auto; max-height: calc(100vh - var(--header-height, 0px) - var(--notice-height, 0px) - 1rem); max-height: calc(100dvh - var(--header-height, 0px) - var(--notice-height, 0px) - 1rem); border-width: 1px 0 0; border-radius: 16px 16px 0 0; padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px)); visibility: visible !important; }
+}

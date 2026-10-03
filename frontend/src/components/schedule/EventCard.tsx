@@ -7,11 +7,30 @@ import { errorMessage, useOwner } from "@/owner/OwnerContext";
 
 import { BusyButton } from "../BusyButton";
 import { ConfirmButton } from "../ConfirmButton";
+import { PopoverCard, type CardAnchor } from "../PopoverCard";
 
 type Detail = { kind: "block"; block: UnavailableBlock } | { kind: "appointment"; appointment: Appointment };
 
-/** Loads the exact current record for one calendar event. Remounted after every refresh. */
-export function EventDetail({ event }: { event: CalendarEvent }) {
+/**
+ * The pop-up card for one calendar item. The card stays open across a refresh; its content is
+ * remounted (keyed on the refresh) so it always shows the exact current record.
+ */
+export function EventCard({ event, getAnchor, onClose, onAnchorPress, returnFocus }: {
+  event: CalendarEvent; getAnchor: () => CardAnchor | null; onClose: () => void;
+  onAnchorPress: (element: HTMLElement) => void; returnFocus: () => HTMLElement | null;
+}) {
+  const { stamp } = useOwner();
+  const title = event.status === "UNAVAILABLE" ? "Unavailable time" : "Appointment";
+  return (
+    <PopoverCard title={title} getAnchor={getAnchor} onClose={onClose} onAnchorPress={onAnchorPress}
+      returnFocus={returnFocus} refocusKey={`${event.event_id}:${stamp.version}`}>
+      <EventDetail key={`${event.event_id}:${stamp.version}`} event={event} onClose={onClose} />
+    </PopoverCard>
+  );
+}
+
+/** Loads the exact current record for one calendar event. */
+function EventDetail({ event, onClose }: { event: CalendarEvent; onClose: () => void }) {
   const { api, data, notify } = useOwner();
   const [detail, setDetail] = useState<Detail | null>(null);
   const isBlock = event.status === "UNAVAILABLE";
@@ -33,7 +52,7 @@ export function EventDetail({ event }: { event: CalendarEvent }) {
       <p>{localStamp(event.start_at, data.zone)}–{localTime(event.end_at, data.zone)}</p>
       {!detail ? <p className="muted">Loading…</p>
         : detail.kind === "block" ? <BlockEditor block={detail.block} />
-          : <AppointmentEditor appointment={detail.appointment} />}
+          : <AppointmentEditor appointment={detail.appointment} onClose={onClose} />}
     </div>
   );
 }
@@ -67,7 +86,7 @@ function BlockEditor({ block }: { block: UnavailableBlock }) {
   );
 }
 
-function AppointmentEditor({ appointment }: { appointment: Appointment }) {
+function AppointmentEditor({ appointment, onClose }: { appointment: Appointment; onClose: () => void }) {
   const { data, change, resolveLocal, notify, selectClient, setTab } = useOwner();
   const [start, setStart] = useState(() => localInput(appointment.start_at, data.zone));
   const [duration, setDuration] = useState(String(appointment.duration_minutes));
@@ -81,6 +100,7 @@ function AppointmentEditor({ appointment }: { appointment: Appointment }) {
       </p>
       <button type="button" onClick={() => {
         if (!client) { notify("Client profile is not available", true); return; }
+        onClose();
         selectClient(client.client_id, appointment.appointment_id);
         setTab("clients");
         // Once the Clients section is shown, move focus to its heading so keyboard and screen-reader users land there.
