@@ -106,7 +106,7 @@ export function OwnerSession({ config }: { config: OwnerConfig }) {
   // Signed in, the notice renders right under the sticky header (inside Workspace); signed out there is no header.
   const noticeBar = <NoticeBar notice={notice} onDismiss={() => setNotice(null)} />;
   return (
-    <Shell signedIn={api !== null} onAuth={api ? signOut : config.authMode === "cognito" ? signIn : null}>
+    <Shell announcement={notice} signedIn={api !== null} onAuth={api ? signOut : config.authMode === "cognito" ? signIn : null}>
       {!api && noticeBar}
       {api ? (
         <OwnerProvider key={session} api={api} notify={notify}><Workspace onSignOut={signOut} notice={noticeBar} /></OwnerProvider>
@@ -126,7 +126,7 @@ export function OwnerSession({ config }: { config: OwnerConfig }) {
 }
 
 /**
- * Live region for save results and rejections. Errors stay pinned to the top of the viewport and
+ * Visible bar for save results and rejections. Errors stay pinned to the top of the viewport and
  * can be dismissed; successes scroll with the page. It sits directly below the
  * sticky header; the document's scroll padding (see globals.css) covers header plus notice so
  * keyboard focus is never scrolled underneath either.
@@ -149,10 +149,8 @@ function NoticeBar({ notice, onDismiss }: { notice: Notice | null; onDismiss: ()
 
   return (
     <div ref={bar} className={`notice${notice ? "" : " idle"}${notice?.error ? " error" : ""}${pinned ? " pinned" : ""}`}>
-      {/* The live region persists; the keyed child makes an identical repeated message announce again. */}
-      <div role="status" aria-live="polite" className="notice-text">
-        {notice && <span key={notice.id}>{notice.message}</span>}
-      </div>
+      {/* Presentational: the single live region is in Shell, so nothing is announced twice. */}
+      <div className="notice-text">{notice?.message}</div>
       {pinned && (
         <button ref={dismiss} type="button" className="notice-dismiss" aria-label="Dismiss message"
           onFocus={(event) => {
@@ -196,11 +194,17 @@ function LocalSignIn({ onToken }: { onToken: (token: string) => void }) {
   );
 }
 
-function Shell({ signedIn, onAuth, children }: {
-  signedIn: boolean; onAuth: (() => void) | null; children: React.ReactNode;
+function Shell({ signedIn, onAuth, announcement = null, children }: {
+  signedIn: boolean; onAuth: (() => void) | null; announcement?: Notice | null; children: React.ReactNode;
 }) {
   return (
     <>
+      {/* The only live region on the page. It stays mounted across sign-in and sign-out so a message set
+          while the visible bar changes place (for example "session ended") is still announced. The keyed
+          child makes an identical repeated message announce again. */}
+      <div role="status" aria-live="polite" className="visually-hidden">
+        {announcement && <span key={announcement.id}>{announcement.message}</span>}
+      </div>
       {/* Signed in, the workspace renders the calendar header with the menu (and sign out). */}
       {!signedIn && (
         <header className="topbar">
