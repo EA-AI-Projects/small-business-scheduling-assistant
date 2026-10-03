@@ -6,7 +6,7 @@ from typing import Any, Protocol
 from scheduling.adapters.dynamodb import _command_sort_key, _record_transaction_conflict
 from scheduling.adapters.outbox_aws import due_keys
 from scheduling.domain.client_records import ClientProfile, RecordConflict
-from scheduling.domain.outbox import DeliveryState
+from scheduling.domain.outbox import DeliveryState, OutboxRecord
 from scheduling.domain.sms_ingress import (
     ConsentEvidence,
     InboundReceipt,
@@ -421,12 +421,48 @@ class DynamoSmsIngressStore(SmsIngressStore):
                                                       for key, value in attrs.items()}}},
         ]
 
+    def _client_has_consent(self, business_id: str, client_id: str) -> bool:
+        """Any permanent consent history record for this client, under any phone.
+
+        Uses the append-only SMS_CONSENT# history rather than SMS_CONSENT_CURRENT#,
+        which is keyed by phone and is overwritten when another client consents
+        on the same number.
+        """
+        start: dict[str, Any] | None = None
+        while True:
+            arguments: dict[str, Any] = {
+                "TableName": self._table,
+                "KeyConditionExpression": "PK = :pk AND begins_with(SK, :prefix)",
+                "FilterExpression": "client_id = :client",
+                "ExpressionAttributeValues": {
+                    ":pk": {"S": f"BUSINESS#{business_id}"},
+                    ":prefix": {"S": "SMS_CONSENT#"},
+                    ":client": {"S": client_id},
+                },
+                "ConsistentRead": True,
+            }
+            if start is not None:
+                arguments["ExclusiveStartKey"] = start
+            page = self._client.query(**arguments)
+            if page.get("Items"):
+                return True
+            start = page.get("LastEvaluatedKey")
+            if start is None:
+                return False
+
     def put_consent(self, evidence: ConsentEvidence) -> None:
         self._client.transact_write_items(TransactItems=self._consent_writes(evidence))
 
     def put_consent_verifying_phone(self, evidence: ConsentEvidence,
-                                    verified: ClientProfile) -> None:
-        """One transaction: both consent records plus the profile's verification."""
+                                    verified: ClientProfile,
+                                    welcome: OutboxRecord | None = None) -> None:
+        """One transaction: consent records, the profile's verification, optional welcome.
+
+        A welcome is dropped when its outbox ID already exists or when any earlier
+        consent record names this client (a client enrolled before welcome texts
+        existed), so only a first enrollment is welcomed. The conditional Put and
+        the profile version check close the race.
+        """
         if (verified.phone_verified_at is None or verified.version < 2
                 or verified.business_id != evidence.business_id
                 or verified.client_id != evidence.client_id
@@ -448,9 +484,35 @@ class DynamoSmsIngressStore(SmsIngressStore):
                 ":active": {"BOOL": True},
             },
         }}
+        writes = [*self._consent_writes(evidence), profile_update]
+        if welcome is not None and (
+                welcome.business_id != evidence.business_id
+                or welcome.entity_id != evidence.client_id):
+            raise ValueError("Welcome must belong to the consenting client")
+        if (welcome is not None
+                and self._get(welcome.business_id, f"OUTBOX#{welcome.outbox_id}") is None
+                and not self._client_has_consent(welcome.business_id, welcome.entity_id)):
+            instant = _instant(welcome.created_at)
+            writes.append({"Put": {
+                "TableName": self._table,
+                "Item": {
+                    **self._key(welcome.business_id, f"OUTBOX#{welcome.outbox_id}"),
+                    **due_keys(DeliveryState.PENDING, welcome.created_at, welcome.outbox_id),
+                    "outbox_id": {"S": welcome.outbox_id},
+                    "entity_id": {"S": welcome.entity_id},
+                    "recipient": {"S": welcome.recipient},
+                    "template": {"S": welcome.template},
+                    "delivery_state": {"S": "PENDING"},
+                    "created_at": {"S": instant},
+                    "next_attempt_at": {"S": instant},
+                    "dispatch_after": {"S": instant},
+                    "attempts": {"N": "0"},
+                    "event_version": {"N": str(welcome.event_version)},
+                },
+                "ConditionExpression": "attribute_not_exists(PK)",
+            }})
         try:
-            self._client.transact_write_items(
-                TransactItems=[*self._consent_writes(evidence), profile_update])
+            self._client.transact_write_items(TransactItems=writes)
         except Exception as exc:
             if not _record_transaction_conflict(exc):
                 raise

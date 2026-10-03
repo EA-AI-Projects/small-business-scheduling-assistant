@@ -10,7 +10,15 @@ from zoneinfo import ZoneInfo
 from scheduling.domain.appointments import Appointment
 from scheduling.domain.client_records import ClientProfile
 from scheduling.domain.outbox import DeliveryFailure, OutboxRecord, PermanentDeliveryFailure
-from scheduling.domain.sms_ingress import Keyword, SenderRole, SmsIngressStore, normalize_phone
+from scheduling.domain.sms_ingress import (
+    WELCOME_TEMPLATE,
+    WELCOME_TEXT,
+    Keyword,
+    SenderRole,
+    SmsIngressStore,
+    normalize_phone,
+    welcome_outbox_id,
+)
 
 FICTIONAL_NUMBER = re.compile(r"\+1[2-9][0-9]{2}55501[0-9]{2}")
 BLOCK_TEMPLATES = frozenset({"block_time", "edit_block", "remove_block"})
@@ -57,6 +65,8 @@ class TwilioSmsSender:
             raise PermanentDeliveryFailure("RECIPIENT_UNKNOWN")
         if record.template == "conversation-reply":
             return self._deliver_reply(record)
+        if record.template == WELCOME_TEMPLATE:
+            return self._deliver_welcome(record)
         appointment = self._records.read_appointment(record.entity_id)
         if appointment is not None and appointment.business_id != record.business_id:
             raise PermanentDeliveryFailure("ENTITY_MISMATCH")
@@ -76,6 +86,28 @@ class TwilioSmsSender:
             raise PermanentDeliveryFailure("OPTED_OUT")
         body = self._render(record, appointment, profile)
         return self._send(record, to, body)
+
+    def _deliver_welcome(self, record: OutboxRecord) -> str:
+        """First enrollment text: only to the phone verified by the consent that queued it."""
+        if (record.recipient != "client" or record.outbox_id != welcome_outbox_id(record.entity_id)):
+            raise PermanentDeliveryFailure("WELCOME_UNAVAILABLE")
+        profile = self._records.read_profile(record.business_id, record.entity_id)
+        if profile is None or not profile.active:
+            raise PermanentDeliveryFailure("CLIENT_UNAVAILABLE")
+        to = normalize_phone(profile.phone_e164)
+        evidence = self._consent.read_consent(record.business_id, to)
+        if (profile.phone_verified_at is None or evidence is None
+                or evidence.client_id != profile.client_id):
+            raise PermanentDeliveryFailure("CONSENT_REQUIRED")
+        # The welcome is stamped with the consent time, which is also the verification
+        # time. A phone change clears verification and new consent resets it, so a
+        # mismatch means the number consented to is no longer the profile's number.
+        # Other profile edits (such as an address fix) do not block it.
+        if profile.phone_verified_at != record.created_at:
+            raise PermanentDeliveryFailure("EVENT_SUPERSEDED")
+        if self._consent.is_opted_out(record.business_id, to):
+            raise PermanentDeliveryFailure("OPTED_OUT")
+        return self._send(record, to, WELCOME_TEXT)
 
     def _deliver_reply(self, record: OutboxRecord) -> str:
         receipt = self._consent.read_received(record.business_id, record.entity_id)

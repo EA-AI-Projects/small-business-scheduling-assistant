@@ -45,7 +45,7 @@ def test_owner_routes_reject_missing_invalid_and_cross_business_credentials() ->
     }).status_code == 422
 
 
-def test_owner_records_in_person_yes_without_sending_enrollment_sms() -> None:
+def test_owner_records_in_person_yes_and_queues_one_welcome_for_a_new_client() -> None:
     repository = InMemoryCalendarRepository()
     ClientRecordService(repository).save_profile(
         "pilot", "client-1", "Synthetic Client", "+14155550101", "123 Test Street",
@@ -58,9 +58,11 @@ def test_owner_records_in_person_yes_without_sending_enrollment_sms() -> None:
         def put_consent(self, evidence: ConsentEvidence) -> None:
             self.evidence = evidence
 
-        def put_consent_verifying_phone(self, evidence: ConsentEvidence, verified: object) -> None:
+        def put_consent_verifying_phone(self, evidence: ConsentEvidence, verified: object,
+                                        welcome: object = None) -> None:
             self.evidence = evidence
             self.verified = verified
+            self.welcome = welcome
 
         def list_delivery_failures(self, business_id: str) -> tuple[()]:
             return ()
@@ -80,6 +82,7 @@ def test_owner_records_in_person_yes_without_sending_enrollment_sms() -> None:
     assert store.evidence.method == "in_person"
     assert store.evidence.agreed_at == NOW
     assert store.verified.phone_verified_at == NOW  # type: ignore[attr-defined]
+    assert store.welcome.outbox_id == "welcome#client-1"  # type: ignore[attr-defined]
     failures_path = f"{BASE}/sms-delivery-failures"
     assert api.get(failures_path).status_code == 401
     assert api.get(failures_path, headers=headers()).json() == []
@@ -182,7 +185,8 @@ def test_consent_route_returns_409_when_the_profile_changed() -> None:
     )
 
     class ConflictStore:
-        def put_consent_verifying_phone(self, evidence: ConsentEvidence, verified: object) -> None:
+        def put_consent_verifying_phone(self, evidence: ConsentEvidence, verified: object,
+                                        welcome: object = None) -> None:
             raise RecordConflict("Client profile changed; nothing was recorded")
 
     api = TestClient(create_owner_app(repository, lambda token: OwnerPrincipal("owner-1", "pilot")

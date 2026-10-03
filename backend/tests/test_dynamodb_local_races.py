@@ -36,7 +36,7 @@ from scheduling.domain.outbox import (
     DispatchService,
     OutboxRecord,
 )
-from scheduling.domain.sms_ingress import record_in_person_consent
+from scheduling.domain.sms_ingress import ConsentEvidence, record_in_person_consent
 
 DEV_TABLE = "scheduling-dev"
 DEV_REGION = "us-west-1"
@@ -491,10 +491,15 @@ def _consent_items(env: RaceEnv) -> list[str]:
             if item["SK"]["S"].startswith(("SMS_CONSENT#", "SMS_CONSENT_CURRENT#"))]
 
 
+def _welcome_items(env: RaceEnv) -> list[str]:
+    return [item["SK"]["S"] for item in _business_items(env)
+            if item["SK"]["S"].startswith("OUTBOX#welcome#")]
+
+
 def _consent(env: RaceEnv, repo: DynamoDBCalendarRepository,
-             store: DynamoSmsIngressStore) -> None:
+             store: DynamoSmsIngressStore, agreed_at: datetime = START) -> None:
     record_in_person_consent(store, repo, env.business, "consent-client", "+14155550101",
-                             "Synthetic Client", "1", START)
+                             "Synthetic Client", "1", agreed_at)
 
 
 def test_in_person_consent_verifies_phone_in_one_transaction(race_env: RaceEnv) -> None:
@@ -547,6 +552,43 @@ def test_two_concurrent_consents_commit_exactly_one(race_env: RaceEnv) -> None:
     profile = repo.read_verified_phone(env.business, "+14155550101")
     assert profile is not None and profile.version == 2
     assert len(_consent_items(env)) == 2
+    # Exactly one welcome text was queued, and the outbox store can read and dispatch it.
+    assert _welcome_items(env) == ["OUTBOX#welcome#consent-client"]
+    outbox = DynamoOutboxStore(env.client, env.table)
+    record = outbox.get(env.business, "welcome#consent-client")
+    assert record is not None and record.template == "welcome" and record.recipient == "client"
+    assert record.state == DeliveryState.PENDING and record.created_at == START
+    assert (env.business, "welcome#consent-client") in list(outbox.due(START, 10))
+
+
+def test_repeat_consent_and_pre_welcome_client_queue_no_second_welcome(
+        race_env: RaceEnv) -> None:
+    env = race_env
+    repo, store, clients = _consent_world(env)
+    _consent(env, repo, store)
+    # A later repeat consent, as after STOP/START re-subscription.
+    _consent(env, repo, store, START + timedelta(days=1))
+    assert _welcome_items(env) == ["OUTBOX#welcome#consent-client"]
+    # A client enrolled before welcome texts existed: consent records, no outbox record.
+    clients.save_profile(env.business, "old-client", "Synthetic Old", "+14155550103",
+                         "123 Test Street", HomeSize.SMALL, 60, True, 0, 180, START)
+    old = ConsentEvidence(env.business, "old-client", "Synthetic Old", "+14155550103", START, "1")
+    profile = repo.read_profile(env.business, "old-client")
+    assert profile is not None
+    store.put_consent_verifying_phone(old, replace(
+        profile, version=2, updated_at=START, phone_verified_at=START))
+    clients.save_profile(env.business, "old-client", "Synthetic Old", "+14155550104",
+                         "123 Test Street", HomeSize.SMALL, 60, True, 2, 180, START)
+    # A new client then consents on the old client's former (shared) number, which
+    # overwrites that number's current-consent record but not the old client's history.
+    clients.save_profile(env.business, "shared-client", "Synthetic Shared", "+14155550103",
+                         "123 Test Street", HomeSize.SMALL, 60, True, 0, 180, START)
+    record_in_person_consent(store, repo, env.business, "shared-client", "+14155550103",
+                             "Synthetic Shared", "1", START + timedelta(days=3))
+    record_in_person_consent(store, repo, env.business, "old-client", "+14155550104",
+                             "Synthetic Old", "1", START + timedelta(days=5))
+    assert sorted(_welcome_items(env)) == ["OUTBOX#welcome#consent-client",
+                                           "OUTBOX#welcome#shared-client"]
 
 
 def test_retire_pending_outbox_before_cutoff_leaves_the_due_index(race_env: RaceEnv) -> None:
