@@ -8,6 +8,8 @@ export interface PlacementInput {
   /** Natural card size; the width is shrunk to fit narrow viewports. */
   card: { width: number; height: number };
   gap?: number;
+  /** For placeBelow: which anchor edge the card lines up with. Default "start" (left edges). */
+  align?: "start" | "end";
 }
 
 export interface Placement {
@@ -43,10 +45,11 @@ export function placeCard({ viewport, topLimit, anchor, card, gap = 8 }: Placeme
   return { left, top, width, maxHeight, side };
 }
 
-/** Place a card directly under its anchor, left edges aligned, kept inside the viewport. */
-export function placeBelow({ viewport, anchor, card, gap = 8 }: PlacementInput): Omit<Placement, "side"> {
+/** Place a card directly under its anchor, left (or, with align "end", right) edges aligned, kept inside the viewport. */
+export function placeBelow({ viewport, anchor, card, gap = 8, align = "start" }: PlacementInput): Omit<Placement, "side"> {
   const width = Math.min(card.width, viewport.width - 2 * gap);
-  const left = Math.min(Math.max(anchor.left, gap), viewport.width - width - gap);
+  const wanted = align === "end" ? anchor.right - width : anchor.left;
+  const left = Math.min(Math.max(wanted, gap), viewport.width - width - gap);
   // The anchor sits in the sticky header, so below it is already clear of the header and notice.
   const top = anchor.bottom + gap;
   const maxHeight = Math.max(viewport.height - top - gap, MIN_MAX_HEIGHT);

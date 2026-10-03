@@ -108,7 +108,7 @@ The core calendar, appointment state, approval policy, and availability calculat
 - Build with static export and host via Amplify Hosting (platform `WEB`). No Next.js SSR or server actions in the initial design; all data operations use the API.
 - Implemented in `frontend/` with the Pages Router, whose static export emits no inline scripts, so a build-time CSP `<meta>` tag can allow only self-hosted scripts and connections to the exact API and Cognito origins. Amplify adds `frame-ancestors`, HSTS, and related headers from the repository-root `customHttp.yml`.
 - The owner API is cross-origin from the app. API Gateway CORS allows only the configured app origin, without credentials; owner routes use explicit methods so preflight never reaches the JWT authorizer.
-- Cognito signs in the owner. API Gateway validates the owner access token for admin routes.
+- Cognito signs in the owner. API Gateway validates the owner access token for admin routes. The app keeps the `openid` scope and reads the `email` claim from the ID token returned by the token exchange only to show who is signed in (display only, signature not checked, only the string kept in memory, never sent to the API). The claim is expected because the app client can read `email`; this is not yet verified against the live pool, and the app shows "Signed in" when it is absent.
 - Screens: day/week schedule, pending approvals, client list/profile, unavailable blocks, and a small settings screen.
 - Client-facing booking portal is not part of the MVP; the client workflow is SMS.
 

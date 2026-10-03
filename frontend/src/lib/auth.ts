@@ -4,6 +4,8 @@
  * Only the one-time PKCE verifier and OAuth state, and the fixed "session ended" notice text
  * left by a 401 (which ends the hosted UI session like Sign out), are kept in sessionStorage,
  * and only across a redirect. The access token is returned to the caller and must stay in memory.
+ * The ID token is read once for the signed-in email (display only) and then dropped; it is never
+ * stored, logged, put in a URL, or sent to the API.
  */
 import type { OwnerConfig } from "./config";
 
@@ -55,6 +57,9 @@ export async function authorizeUrl(config: OwnerConfig, origin: string,
   return url.toString();
 }
 
+/** What a finished sign-in hands back: the access token (memory only) and the email to display, if any. */
+export interface SignInResult { accessToken: string; email: string | null }
+
 export function clearPendingSignIn(storage: Storage = sessionStorage): void {
   storage.removeItem(VERIFIER_KEY);
   storage.removeItem(STATE_KEY);
@@ -65,7 +70,7 @@ export function clearPendingSignIn(storage: Storage = sessionStorage): void {
  * The caller must remove the query string from the address bar before rendering.
  */
 export async function completeSignIn(config: OwnerConfig, location: URL,
-  storage: Storage = sessionStorage, fetcher: typeof fetch = fetch): Promise<string | null> {
+  storage: Storage = sessionStorage, fetcher: typeof fetch = fetch): Promise<SignInResult | null> {
   const code = location.searchParams.get("code");
   const returnedState = location.searchParams.get("state");
   const oauthError = location.searchParams.get("error");
@@ -87,12 +92,39 @@ export async function completeSignIn(config: OwnerConfig, location: URL,
     }),
   });
   const tokens: unknown = await response.json().catch(() => null);
-  const accessToken = typeof tokens === "object" && tokens !== null
-    ? (tokens as { access_token?: unknown }).access_token : undefined;
+  const fields = typeof tokens === "object" && tokens !== null
+    ? (tokens as { access_token?: unknown; id_token?: unknown }) : {};
+  const accessToken = fields.access_token;
   if (!response.ok || typeof accessToken !== "string" || !accessToken) {
     throw new SignInError("Could not complete sign-in");
   }
-  return accessToken;
+  return { accessToken, email: typeof fields.id_token === "string" ? emailFromIdToken(fields.id_token) : null };
+}
+
+/** Decode a base64url JSON segment (padding optional), or null if it is not valid. */
+function decodeSegment(segment: string): unknown {
+  try {
+    const base64 = segment.replaceAll("-", "+").replaceAll("_", "/");
+    const binary = atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, "="));
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The `email` claim of a Cognito ID token, or null when absent or unreadable.
+ * Display only: the signature is NOT checked here, so the result must never gate access or be sent
+ * to the API. The API verifies the access token on every call. The ID token itself is not kept.
+ */
+export function emailFromIdToken(idToken: string): string | null {
+  const payload = idToken.split(".")[1];
+  if (!payload) return null;
+  const claims = decodeSegment(payload);
+  if (typeof claims !== "object" || claims === null) return null;
+  const email = (claims as { email?: unknown }).email;
+  return typeof email === "string" && email.trim() ? email.trim() : null;
 }
 
 /**

@@ -7,6 +7,7 @@ import { ClientsTab } from "./clients/ClientsTab";
 import { RequestsTab } from "./requests/RequestsTab";
 import { ScheduleTab } from "./schedule/ScheduleTab";
 import { SettingsTab } from "./settings/SettingsTab";
+import { AccountMenu } from "./shell/AccountMenu";
 import { AppHeader } from "./shell/AppHeader";
 import { CalendarControls } from "./shell/CalendarControls";
 
@@ -17,7 +18,12 @@ const SECTIONS: { id: Tab; label: string }[] = [
   { id: "settings", label: "Settings" },
 ];
 
-export function Workspace({ onSignOut, notice }: { onSignOut: () => void; notice?: ReactNode }) {
+export function Workspace({ onSignOut, account, notice }: {
+  onSignOut: () => void;
+  /** Who is signed in. `email` is null in local mode or when the ID token carried no email claim. */
+  account: { email: string | null; local: boolean };
+  notice?: ReactNode;
+}) {
   const { tab, setTab, notify, data, loaded, date, view, setView, goToday, goToDate, stepRange } = useOwner();
   const pending = data.requests.length;
   // A section opened from deep in another (e.g. "Open client" below the calendar) starts at its top.
@@ -34,10 +40,7 @@ export function Workspace({ onSignOut, notice }: { onSignOut: () => void; notice
       <AppHeader appName="Scheduling" current={tab} badgeTotal={pending}
         items={SECTIONS.map((item) => ({ ...item, badge: item.id === "requests" ? pending : undefined }))}
         onSelect={(id) => setTab(id as Tab)}
-        menuFooter={<>
-          <span className="meta">Owner signed in</span>
-          <button type="button" onClick={onSignOut}>Sign out</button>
-        </>}>
+        trailing={<AccountMenu email={account.email} local={account.local} onSignOut={onSignOut} />}>
         {tab === "schedule" ? (
           <CalendarControls title={loaded ? rangeTitle(date, view) : "Loading…"}
             shortTitle={loaded ? rangeTitleShort(date, view) : undefined} view={view} disabled={!loaded} onToday={goToday}
