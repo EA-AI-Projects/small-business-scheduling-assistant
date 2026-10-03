@@ -194,7 +194,7 @@ The translator produces **61 resources** in this configuration. "Deletion" is th
 | `AlarmTopicPolicy` | `AWS::SNS::TopicPolicy` | Lets CloudWatch alarms in this account publish to the topic | Delete |
 | `OwnerUserPool` | `AWS::Cognito::UserPool` | `scheduling-owner-dev`, email username, admin-create-only, MFA off, 14-character passwords | Delete |
 | `OwnerUserPoolDomain` | `AWS::Cognito::UserPoolDomain` | Hosted-UI domain prefix from `CognitoDomainPrefix` | Delete |
-| `OwnerUserPoolClient` | `AWS::Cognito::UserPoolClient` | Public client, authorization-code flow, `openid` and `email` scopes, callback and logout `${OwnerAppOrigin}/` | Delete |
+| `OwnerUserPoolClient` | `AWS::Cognito::UserPoolClient` | Public client, authorization-code flow, `openid` scope, callback and logout `${OwnerAppOrigin}/` | Delete |
 | `OwnerHttpApi` | `AWS::ApiGatewayV2::Api` | Owner HTTP API. Routes, Lambda integrations, the Cognito JWT authorizer, and CORS are inline in the API body. Only `GET`, `POST`, `PUT`, `PATCH`, `DELETE` on `/v1/owner/{proxy+}` | Delete |
 | `OwnerHttpApiApiGatewayDefaultStage` | `AWS::ApiGatewayV2::Stage` | The `$default` stage, auto-deploy, no access logging | Delete |
 | `OwnerApiFunction` | `AWS::Lambda::Function` | `scheduling.owner_lambda.handler`, 30 s | Delete |

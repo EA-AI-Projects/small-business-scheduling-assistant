@@ -101,7 +101,7 @@ Owns all business rules and state transitions:
 
 ### 3.5 Owner web admin
 
-- Authenticated, mobile-friendly minimal interface for calendar/list review, pending requests, clients, unavailable blocks, and configuration. Use Cognito authorization-code PKCE in the browser, keep the access token in page memory (the ID token is read once for the display-only email and dropped), and serve the page on the same origin as the owner API. The API resolves owner-entered local date-times and rejects daylight-saving gaps or ambiguous times before calendar writes.
+- Authenticated, mobile-friendly minimal interface for calendar/list review, pending requests, clients, unavailable blocks, and configuration. Use Cognito authorization-code PKCE in the browser, keep the access token in page memory (the ID token is read once for the display-only `email` claim, not signature-checked, and dropped; the scope stays `openid`), and serve the page on the same origin as the owner API. The API resolves owner-entered local date-times and rejects daylight-saving gaps or ambiguous times before calendar writes.
 - Role/access controls even if the first deployment has one owner account.
 - Every write action uses the same scheduling domain service as SMS.
 - Basic audit history for changes, including actor/source and timestamps.

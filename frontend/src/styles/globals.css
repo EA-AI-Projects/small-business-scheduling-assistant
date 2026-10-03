@@ -241,6 +241,16 @@ code { font-size: .9em; }
 .account-actions { list-style: none; margin: .25rem 0 0; padding: 0; display: grid; }
 .account-row { display: flex; align-items: center; gap: .75rem; width: 100%; padding: .55rem .5rem; border: 0; border-radius: 8px; background: transparent; color: var(--color-text); font-weight: 500; text-align: left; }
 .account-row:hover { background: var(--color-surface-subtle); }
+/* Narrowest phones (320px): tighter controls so the short Day title still shows in full. Buttons stay at 2rem or more. */
+@media (max-width: 360px) {
+  .app-header { gap: 0; padding: .25rem .15rem; }
+  .calendar-controls { gap: 0; }
+  .app-header .icon-button, .calendar-controls > .pill { width: 2rem; height: 2rem; }
+  .app-header .avatar-button { width: 2rem; height: 2rem; }
+  .app-header .avatar { width: 1.7rem; height: 1.7rem; font-size: .85rem; }
+  .view-select select.pill { padding: .3rem .1rem; height: 2rem; }
+  .range-title-button { min-height: 2rem; }
+}
 .mini-cal-head { display: flex; align-items: center; gap: .1rem; }
 .mini-cal-title { flex: 1; padding-left: .25rem; font-weight: 500; }
 .mini-cal-grid { display: grid; gap: 2px; }

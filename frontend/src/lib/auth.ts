@@ -52,7 +52,7 @@ export async function authorizeUrl(config: OwnerConfig, origin: string,
   const url = new URL("/oauth2/authorize", domain);
   url.search = new URLSearchParams({
     response_type: "code", client_id: clientId, redirect_uri: redirectUri(origin),
-    scope: "openid email", state, code_challenge_method: "S256", code_challenge: await challengeFor(verifier),
+    scope: "openid", state, code_challenge_method: "S256", code_challenge: await challengeFor(verifier),
   }).toString();
   return url.toString();
 }

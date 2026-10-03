@@ -31,8 +31,8 @@ describe("emailFromIdToken", () => {
     expect(emailFromIdToken("a.bm90IGpzb24.c")).toBeNull();
   });
 
-  it("decodes base64url without padding and with url-safe characters", () => {
-    // Payload lengths that need different padding, and non-ASCII text.
+  it("decodes the base64url - and _ characters and UTF-8 text", () => {
+    // Guards the -/_ to +// mapping and strict UTF-8 decoding. (atob accepts unpadded input, so padding is not what this tests.)
     for (const email of ["a@x.test", "ab@x.test", "abc@x.test", "ü?>~@x.test"]) {
       const payload = segment({ email });
       expect(payload).not.toContain("=");
