@@ -307,6 +307,7 @@ Cognito is preferred for password and token management. Do not use SMS OTP as th
 6. 15-minute start increments, a current 3-hour maximum, and a 30-minute between-visit buffer with no first/last boundary buffer are confirmed.
 7. One crew/resource is confirmed for the pilot.
 8. The owner approved deleting SMS message bodies 90 days after the last scheduling exchange and ordinary client/appointment notes 12 months after the last visit; keep minimal consent/opt-out evidence four years after the last program text, with documented legal holds as an exception. Entry/access codes are excluded from the MVP.
+9. The owner decided on 2026-10-03 that explicit client deletion overrides those retention periods and legal holds: cancel future appointments and pending requests, release reserved time, remove all client-associated records including consent and opt-out evidence, and require new onboarding and consent if the client returns. Implementation is pending.
 
 ## 13. References
 
