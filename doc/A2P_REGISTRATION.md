@@ -6,7 +6,7 @@ Status (issue #91): the Twilio account is upgraded, a US number is bought, and t
 
 ## Sender and consent
 
-The registered Twilio A2P brand is a Sole proprietor brand in the owner's individual name, while these public pages identify only the proof-of-concept program. Twilio may reject a campaign if the sender identified in the policies, consent request, HELP reply, and sample messages cannot be connected clearly to the registered brand. Do not assert that a fictional cleaning business is a real sender. Before production use by a real business, register the appropriate business sender and align all consumer-facing disclosures with it. The exact sender wording for STOP/HELP and confirmation replies is still to be confirmed against the approved campaign's sample messages (#91).
+The registered Twilio A2P brand is a Sole proprietor brand in the owner's individual name, while these public pages identify only the proof-of-concept program. Twilio may reject a campaign if the sender identified in the policies, consent request, HELP reply, and sample messages cannot be connected clearly to the registered brand. Do not assert that a fictional cleaning business is a real sender. Before production use by a real business, register the appropriate business sender and align all consumer-facing disclosures with it. The exact sender wording for STOP/HELP replies is still to be confirmed against the approved campaign's sample messages (#192). The owner reports (2026-10-03, #182) that the only approved campaign message he sees in the Twilio console is the opt-in message, which has no sender name (see "Suggested confirmation text").
 
 The planned opt-in is in person before a participant is enrolled in the app. The operator should show the [public consent process](https://ea-ai-projects.github.io/small-business-scheduling-assistant/sms-consent/), read the exact script below, ask for a clear yes/no response, and retain a private record of consent (participant name and number, date/time, in-person method, yes response, and script version). A refusal must not prevent someone from obtaining the underlying service. Do not send an initial automated enrollment text to obtain consent from someone who has not opted in.
 
@@ -31,6 +31,8 @@ Campaign **Opt-in Keywords** and **Opt-in Message** should be blank if there is 
 Suggested confirmation text after in-person consent and campaign approval:
 
 > Smart Scheduling Assistant: You're enrolled for appointment scheduling texts. Message frequency varies. Message and data rates may apply. Reply HELP for help or STOP to opt out.
+
+This is the welcome text implemented by #182. It is separate from the campaign's Opt-in Message, and the owner keeps this wording as written (owner decision, 2026-10-03, #192). The campaign's Opt-in Message is the auto-reply to its opt-in keywords, which the Opt-in Keywords paragraph above recommends blanking; as reported by the owner (2026-10-03, #182), it has no sender name and reads: "You are now Opted-in, please reply with Help to show help options, ask to opt-out and say: STOP to opt-out". Whether to blank those keywords and that message, and the sender name for STOP/HELP replies, are open owner questions in #192.
 
 If custom replies are enabled in the Messaging Service, examples to review against the registered sender are:
 
