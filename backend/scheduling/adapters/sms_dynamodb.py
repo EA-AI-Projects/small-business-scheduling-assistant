@@ -422,7 +422,12 @@ class DynamoSmsIngressStore(SmsIngressStore):
         ]
 
     def _client_has_consent(self, business_id: str, client_id: str) -> bool:
-        """Any consent record for this client, under any phone they ever had."""
+        """Any permanent consent history record for this client, under any phone.
+
+        Uses the append-only SMS_CONSENT# history rather than SMS_CONSENT_CURRENT#,
+        which is keyed by phone and is overwritten when another client consents
+        on the same number.
+        """
         start: dict[str, Any] | None = None
         while True:
             arguments: dict[str, Any] = {
@@ -431,7 +436,7 @@ class DynamoSmsIngressStore(SmsIngressStore):
                 "FilterExpression": "client_id = :client",
                 "ExpressionAttributeValues": {
                     ":pk": {"S": f"BUSINESS#{business_id}"},
-                    ":prefix": {"S": "SMS_CONSENT_CURRENT#"},
+                    ":prefix": {"S": "SMS_CONSENT#"},
                     ":client": {"S": client_id},
                 },
                 "ConsistentRead": True,

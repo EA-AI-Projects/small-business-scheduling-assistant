@@ -497,9 +497,9 @@ def _welcome_items(env: RaceEnv) -> list[str]:
 
 
 def _consent(env: RaceEnv, repo: DynamoDBCalendarRepository,
-             store: DynamoSmsIngressStore) -> None:
+             store: DynamoSmsIngressStore, agreed_at: datetime = START) -> None:
     record_in_person_consent(store, repo, env.business, "consent-client", "+14155550101",
-                             "Synthetic Client", "1", START)
+                             "Synthetic Client", "1", agreed_at)
 
 
 def test_in_person_consent_verifies_phone_in_one_transaction(race_env: RaceEnv) -> None:
@@ -566,7 +566,8 @@ def test_repeat_consent_and_pre_welcome_client_queue_no_second_welcome(
     env = race_env
     repo, store, clients = _consent_world(env)
     _consent(env, repo, store)
-    _consent(env, repo, store)  # repeat or STOP/START re-subscription
+    # A later repeat consent, as after STOP/START re-subscription.
+    _consent(env, repo, store, START + timedelta(days=1))
     assert _welcome_items(env) == ["OUTBOX#welcome#consent-client"]
     # A client enrolled before welcome texts existed: consent records, no outbox record.
     clients.save_profile(env.business, "old-client", "Synthetic Old", "+14155550103",
@@ -578,9 +579,16 @@ def test_repeat_consent_and_pre_welcome_client_queue_no_second_welcome(
         profile, version=2, updated_at=START, phone_verified_at=START))
     clients.save_profile(env.business, "old-client", "Synthetic Old", "+14155550104",
                          "123 Test Street", HomeSize.SMALL, 60, True, 2, 180, START)
+    # A new client then consents on the old client's former (shared) number, which
+    # overwrites that number's current-consent record but not the old client's history.
+    clients.save_profile(env.business, "shared-client", "Synthetic Shared", "+14155550103",
+                         "123 Test Street", HomeSize.SMALL, 60, True, 0, 180, START)
+    record_in_person_consent(store, repo, env.business, "shared-client", "+14155550103",
+                             "Synthetic Shared", "1", START + timedelta(days=3))
     record_in_person_consent(store, repo, env.business, "old-client", "+14155550104",
                              "Synthetic Old", "1", START + timedelta(days=5))
-    assert _welcome_items(env) == ["OUTBOX#welcome#consent-client"]
+    assert sorted(_welcome_items(env)) == ["OUTBOX#welcome#consent-client",
+                                           "OUTBOX#welcome#shared-client"]
 
 
 def test_retire_pending_outbox_before_cutoff_leaves_the_due_index(race_env: RaceEnv) -> None:

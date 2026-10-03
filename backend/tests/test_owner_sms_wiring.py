@@ -29,7 +29,7 @@ class FakeDynamo:
         return {"Item": PROFILE_ITEM} if kwargs["Key"]["SK"]["S"] == "CLIENT#client-1" else {}
 
     def query(self, **kwargs: Any) -> dict[str, Any]:
-        if kwargs["ExpressionAttributeValues"][":prefix"] == {"S": "SMS_CONSENT_CURRENT#"}:
+        if kwargs["ExpressionAttributeValues"][":prefix"] == {"S": "SMS_CONSENT#"}:
             return {}  # no earlier consent for this client
         assert kwargs["ExpressionAttributeValues"][":prefix"] == {"S": "SMS_STATUS#"}
         return {"Items": [{
