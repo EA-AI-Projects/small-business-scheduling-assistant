@@ -45,7 +45,7 @@ export function ConsentForm({ client, onboarding = false, phoneUnsaved = false, 
 
   return (
     <div className="stack">
-      <h4>{onboarding ? "Onboarding: record in-person text consent" : "Record in-person text consent"}</h4>
+      <h5>{onboarding ? "Onboarding: record in-person text consent" : "Record in-person text consent"}</h5>
       {onboarding && (
         <p className="hint" role="status">
           Last step for this new client. Recording consent also marks their phone verified, which

@@ -54,7 +54,7 @@ export function ClientDetails({ client, blankKey, initialSection, onCreated }: {
   /** Called with the new client's id once its first save succeeds. */
   onCreated: (clientId: string) => void;
 }) {
-  const { stamp, selectionVersion } = useOwner();
+  const { stamp } = useOwner();
   const [open, setOpen] = useState<Record<SectionName, boolean>>({
     profile: initialSection === "profile", consent: initialSection === "consent",
     notes: initialSection === "notes",
@@ -94,7 +94,7 @@ export function ClientDetails({ client, blankKey, initialSection, onCreated }: {
         <div className="stack">
           <p className="hint">Do not enter access codes.</p>
           <NoteList clientId={clientId} />
-          <NoteForm key={`${clientId ?? ""}:${selectionVersion}`} clientId={clientId} />
+          <NoteForm key={`${clientId ?? ""}:${blankKey}`} clientId={clientId} />
         </div>
       </Accordion>
     </div>

@@ -12,7 +12,7 @@ import { DeliveryFailures } from "./DeliveryFailures";
 type Open = { token: number; clientId: string | null; section: "profile" | "notes" };
 
 export function ClientsTab() {
-  const { data, selectClient, notesRequest, clearNotesRequest } = useOwner();
+  const { data, stamp, selectClient, notesRequest, clearNotesRequest } = useOwner();
   const [open, setOpen] = useState<Open | null>(null);
   const tokens = useRef(0);
   const newButton = useRef<HTMLButtonElement>(null);
@@ -41,7 +41,9 @@ export function ClientsTab() {
   const getAnchor = useCallback(() => null, []);
 
   // The record went away while open: nothing left to show.
+  // Clear the open state too, so the pop-up cannot reappear later from another tab.
   const gone = openId != null && client === undefined;
+  if (gone) setOpen(null);
 
   return (
     <>
@@ -56,7 +58,8 @@ export function ClientsTab() {
       </div>
       {open && !gone && (
         <PopoverCard variant="modal" title={client?.name ?? "New client"} getAnchor={getAnchor}
-          onClose={() => setOpen(null)} returnFocus={returnFocus}>
+          onClose={() => setOpen(null)} returnFocus={returnFocus}
+          refocusKey={`${open.clientId ?? "new"}:${stamp.version}`}>
           <p className="eyebrow">CLIENT DETAILS</p>
           <ClientDetails key={open.token} client={client} blankKey={open.token}
             initialSection={open.section}
