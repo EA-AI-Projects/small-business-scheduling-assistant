@@ -14,7 +14,8 @@ export const CONSENT_SCRIPT_DATE = "September 27, 2026";
 const CONSENT_PAGE = "https://ea-ai-projects.github.io/small-business-scheduling-assistant/sms-consent/";
 
 /**
- * Record that a client clearly said yes in person to receiving texts. No text is sent.
+ * Record that a client clearly said yes in person to receiving texts. Recording consent for a
+ * client's first enrollment also sends one welcome text; later records send none.
  * Remounted by key when the selection or the client's data changes.
  */
 export function ConsentForm({ client, onboarding = false, phoneUnsaved = false, onSkip }: {
@@ -55,8 +56,9 @@ export function ConsentForm({ client, onboarding = false, phoneUnsaved = false, 
       )}
       <p className="hint">
         Read the exact script on the <a href={CONSENT_PAGE} target="_blank" rel="noreferrer">
-        public consent page</a> aloud first. Recording consent sends no text. The full private
-        consent record is kept by the owner outside this app.
+        public consent page</a> aloud first. After the first successful consent for a new client, one
+        welcome text is sent to the saved phone. Recording consent again for an existing client
+        sends no text. The full private consent record is kept by the owner outside this app.
       </p>
       <form className="form-stack" aria-label="Record in-person text consent" onSubmit={submit}>
         <label>Participant name <input name="participant_name" readOnly

@@ -9,6 +9,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
 
 from scheduling.domain.client_records import ACCESS_CODE_PATTERN, ClientProfile
+from scheduling.domain.outbox import DeliveryState, OutboxRecord
 
 if TYPE_CHECKING:
     from scheduling.domain.sms_status import SmsDeliveryStatus
@@ -69,6 +70,19 @@ class ConsentEvidence:
     method: str = "in_person"
 
 
+WELCOME_TEMPLATE = "welcome"
+# Must match docs/sms-consent/index.html and doc/A2P_REGISTRATION.md.
+WELCOME_TEXT = (
+    "Smart Scheduling Assistant: You're enrolled for appointment scheduling texts. "
+    "Message frequency varies. Message and data rates may apply. "
+    "Reply HELP for help or STOP to opt out."
+)
+
+
+def welcome_outbox_id(client_id: str) -> str:
+    return f"welcome#{client_id}"
+
+
 class SmsIngressStore(Protocol):
     def put_received(self, receipt: InboundReceipt) -> bool: ...
     def read_received(self, business_id: str, provider_id: str) -> InboundReceipt | None: ...
@@ -84,11 +98,14 @@ class SmsIngressStore(Protocol):
     def read_consent(self, business_id: str, phone_e164: str) -> ConsentEvidence | None: ...
     def put_consent(self, evidence: ConsentEvidence) -> None: ...
     def put_consent_verifying_phone(self, evidence: ConsentEvidence,
-                                    verified: ClientProfile) -> None:
+                                    verified: ClientProfile,
+                                    welcome: OutboxRecord | None = None) -> None:
         """Write consent and the verified profile together, or raise RecordConflict.
 
         ``verified`` is the profile at version N+1; the write requires version N
-        and the same phone to still be stored.
+        and the same phone to still be stored. ``welcome``, when given, is stored
+        as a pending outbox record in the same atomic write, unless a record with
+        that outbox ID already exists, in which case it is silently dropped.
         """
         ...
     def list_delivery_failures(self, business_id: str) -> tuple[SmsDeliveryStatus, ...]: ...
@@ -107,7 +124,12 @@ def record_in_person_consent(store: SmsIngressStore, clients: VerifiedClientLook
                              business_id: str, client_id: str, phone_e164: str,
                              participant_name: str, script_version: str,
                              agreed_at: datetime) -> ConsentEvidence:
-    """Trusted owner action; no automated enrollment text is sent.
+    """Trusted owner action; a first enrollment queues one welcome text.
+
+    The welcome text is queued in the same atomic write only when the profile
+    phone was never verified, and at most once per client (deterministic outbox
+    ID). Re-recording consent, including after STOP/START, queues nothing. The
+    sender still enforces consent, opt-out and verified phone at delivery.
 
     The owner and client meet in person and the owner reads the number back, so
     this also marks the profile phone verified in the same atomic write as the
@@ -124,7 +146,12 @@ def record_in_person_consent(store: SmsIngressStore, clients: VerifiedClientLook
                                phone, agreed_at.astimezone(UTC), script_version.strip())
     verified = replace(profile, version=profile.version + 1,
                        updated_at=evidence.agreed_at, phone_verified_at=evidence.agreed_at)
-    store.put_consent_verifying_phone(evidence, verified)
+    welcome = None
+    if profile.phone_verified_at is None:
+        welcome = OutboxRecord(business_id, welcome_outbox_id(client_id), client_id, "client",
+                               WELCOME_TEMPLATE, verified.version, DeliveryState.PENDING,
+                               evidence.agreed_at, evidence.agreed_at, evidence.agreed_at)
+    store.put_consent_verifying_phone(evidence, verified, welcome)
     return evidence
 
 

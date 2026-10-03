@@ -6,7 +6,7 @@ from typing import Any, Protocol
 from scheduling.adapters.dynamodb import _command_sort_key, _record_transaction_conflict
 from scheduling.adapters.outbox_aws import due_keys
 from scheduling.domain.client_records import ClientProfile, RecordConflict
-from scheduling.domain.outbox import DeliveryState
+from scheduling.domain.outbox import DeliveryState, OutboxRecord
 from scheduling.domain.sms_ingress import (
     ConsentEvidence,
     InboundReceipt,
@@ -425,8 +425,13 @@ class DynamoSmsIngressStore(SmsIngressStore):
         self._client.transact_write_items(TransactItems=self._consent_writes(evidence))
 
     def put_consent_verifying_phone(self, evidence: ConsentEvidence,
-                                    verified: ClientProfile) -> None:
-        """One transaction: both consent records plus the profile's verification."""
+                                    verified: ClientProfile,
+                                    welcome: OutboxRecord | None = None) -> None:
+        """One transaction: consent records, the profile's verification, optional welcome.
+
+        A welcome whose outbox ID already exists is dropped, so a client is welcomed
+        once. The conditional Put and the profile version check close the race.
+        """
         if (verified.phone_verified_at is None or verified.version < 2
                 or verified.business_id != evidence.business_id
                 or verified.client_id != evidence.client_id
@@ -448,9 +453,34 @@ class DynamoSmsIngressStore(SmsIngressStore):
                 ":active": {"BOOL": True},
             },
         }}
+        writes = [*self._consent_writes(evidence), profile_update]
+        if welcome is not None and (
+                welcome.business_id != evidence.business_id
+                or welcome.entity_id != evidence.client_id):
+            raise ValueError("Welcome must belong to the consenting client")
+        if welcome is not None and self._get(
+                welcome.business_id, f"OUTBOX#{welcome.outbox_id}") is None:
+            instant = _instant(welcome.created_at)
+            writes.append({"Put": {
+                "TableName": self._table,
+                "Item": {
+                    **self._key(welcome.business_id, f"OUTBOX#{welcome.outbox_id}"),
+                    **due_keys(DeliveryState.PENDING, welcome.created_at, welcome.outbox_id),
+                    "outbox_id": {"S": welcome.outbox_id},
+                    "entity_id": {"S": welcome.entity_id},
+                    "recipient": {"S": welcome.recipient},
+                    "template": {"S": welcome.template},
+                    "delivery_state": {"S": "PENDING"},
+                    "created_at": {"S": instant},
+                    "next_attempt_at": {"S": instant},
+                    "dispatch_after": {"S": instant},
+                    "attempts": {"N": "0"},
+                    "event_version": {"N": str(welcome.event_version)},
+                },
+                "ConditionExpression": "attribute_not_exists(PK)",
+            }})
         try:
-            self._client.transact_write_items(
-                TransactItems=[*self._consent_writes(evidence), profile_update])
+            self._client.transact_write_items(TransactItems=writes)
         except Exception as exc:
             if not _record_transaction_conflict(exc):
                 raise

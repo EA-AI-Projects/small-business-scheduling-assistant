@@ -47,7 +47,8 @@ class Store:
         self.consent[evidence.phone_e164] = evidence
 
     def put_consent_verifying_phone(self, evidence: ConsentEvidence,
-                                    verified: ClientProfile) -> None:
+                                    verified: ClientProfile,
+                                    welcome: OutboxRecord | None = None) -> None:
         # The profile write is conditional on the version; if it raises, no consent is kept.
         self.repository.save_profile(verified, verified.version - 1, verified.phone_e164)
         self.put_consent(evidence)
