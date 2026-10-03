@@ -10,12 +10,14 @@ export function ClientList({ clients, onSelect }: {
       <div className="card-list">
         {clients.length === 0 && <p className="empty">No clients yet</p>}
         {clients.map((client) => (
-          <div key={client.client_id} className="client-row">
-            <button type="button" onClick={() => onSelect(client.client_id)}>{client.name}</button>
-            <div className="meta">
+          <button key={client.client_id} type="button" className="client-row client-button"
+            data-client-id={client.client_id} aria-haspopup="dialog"
+            onClick={() => onSelect(client.client_id)}>
+            <span className="client-name">{client.name}</span>
+            <span className="meta">
               {`${client.phone_e164} · ${client.home_size} · ${client.active ? "active" : "inactive"}`}
-            </div>
-          </div>
+            </span>
+          </button>
         ))}
       </div>
     </div>

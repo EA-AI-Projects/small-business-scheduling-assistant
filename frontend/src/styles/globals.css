@@ -195,3 +195,23 @@ code { font-size: .9em; }
 @media (max-width: 520px) {
   .popover-card.sheet, .popover-card { left: 0; right: 0; bottom: 0; top: auto; width: auto; max-height: calc(100vh - var(--header-height, 0px) - var(--notice-height, 0px) - 1rem); max-height: calc(100dvh - var(--header-height, 0px) - var(--notice-height, 0px) - 1rem); border-width: 1px 0 0; border-radius: 16px 16px 0 0; padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px)); visibility: visible !important; }
 }
+
+/* ---- Client details pop-up (#162): modal variant of the pop-up card and accordion sections. ---- */
+.popover-scrim { position: fixed; inset: 0; z-index: 4; background: var(--color-shadow-strong); }
+.popover-card.modal { max-width: calc(100vw - 1rem); }
+.client-button { display: grid; gap: .15rem; width: 100%; text-align: left; font-weight: 400; color: var(--color-text); }
+.client-button:hover { background: var(--color-primary-faint); }
+.client-button .client-name { font-weight: 700; color: var(--color-primary-hover); }
+.accordion-stack { display: grid; gap: .5rem; }
+.accordion { border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-surface); }
+.accordion-title { margin: 0; font-size: 1rem; }
+.accordion-header { display: flex; align-items: center; justify-content: space-between; width: 100%; border: 0; border-radius: 10px; background: transparent; color: var(--color-text); padding: .75rem .9rem; text-align: left; }
+.accordion-header[aria-expanded="true"] { color: var(--color-primary-hover); }
+.accordion-header:disabled { cursor: not-allowed; color: var(--color-text-subtle); }
+.accordion-header:disabled:hover { background: transparent; }
+.accordion-reason { margin: 0; padding: 0 .9rem .75rem; }
+.accordion-panel { padding: 0 .9rem .9rem; }
+.accordion-panel[hidden] { display: none; }
+.popover-card .accordion .stack, .popover-card .accordion .card-list { gap: .6rem; }
+.popover-card h4 { margin: 0; }
+@media (max-width: 520px) { .popover-card.modal { max-width: none; } }

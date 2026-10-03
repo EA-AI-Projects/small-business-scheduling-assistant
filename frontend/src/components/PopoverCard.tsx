@@ -6,6 +6,7 @@ import { placeCard, type Box } from "@/lib/popoverPlacement";
 
 const GAP = 8;
 const CARD_WIDTH = 22 * 16;
+const MODAL_WIDTH = 36 * 16;
 const PHONE_QUERY = "(max-width: 520px)";
 const FOCUSABLE = "a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), "
   + "textarea:not([disabled]), [tabindex]:not([tabindex='-1'])";
@@ -70,11 +71,16 @@ export function elementAt(x: number, y: number): Element | null {
  * element (`data-popover-anchor`) goes to `onAnchorPress` so the opener can switch items, and one
  * on a slot column (`data-slot-column`) goes to `onSlotPress`; anything else closes. On close, focus goes to `returnFocus`
  * unless the user already moved it to a control. `getAnchor` gives the rectangle to point at; on
- * phones the card is a bottom sheet instead. `refocusKey` changes when the content was rebuilt or
+ * phones the card is a bottom sheet instead. `variant="modal"` centres the card horizontally near
+ * the top of the viewport with a dimmed backdrop (no anchor needed), for a form that grows and
+ * shrinks; it is the same card, so the single inert owner, focus handling and sheet apply unchanged.
+ * `refocusKey` changes when the content was rebuilt or
  * the card moved to another item; if that left focus outside the card, it returns to the card.
  */
-export function PopoverCard({ title, getAnchor, onClose, onAnchorPress, onSlotPress, returnFocus, refocusKey, children }: {
+export function PopoverCard({ title, variant = "anchored", getAnchor, onClose, onAnchorPress, onSlotPress, returnFocus, refocusKey, children }: {
   title: string;
+  variant?: "anchored" | "modal";
+  /** Not used by the modal variant. */
   getAnchor: () => CardAnchor | null;
   onClose: () => void;
   onAnchorPress?: (element: HTMLElement) => void;
@@ -97,8 +103,22 @@ export function PopoverCard({ title, getAnchor, onClose, onAnchorPress, onSlotPr
     if (!element) return;
     const onPhone = isPhone();
     setPhone(onPhone);
-    const anchor = onPhone ? null : getAnchor();
-    if (!onPhone && !anchor) return;
+    const modal = variant === "modal";
+    const anchor = onPhone || modal ? null : getAnchor();
+    if (!onPhone && !modal && !anchor) return;
+    if (modal && !onPhone) {
+      const gap = GAP;
+      const viewport = { width: document.documentElement.clientWidth, height: window.innerHeight };
+      const minTop = topLimit() + gap;
+      const width = Math.min(MODAL_WIDTH, viewport.width - 2 * gap);
+      const maxHeight = Math.max(viewport.height - minTop - gap, 120);
+      const height = Math.min(element.offsetHeight, maxHeight);
+      // A fixed fraction from the top, so opening a section grows the card downward instead of re-centring.
+      const top = Math.min(Math.max(viewport.height * 0.08, minTop), Math.max(viewport.height - height - gap, minTop));
+      const css: CSSProperties = { left: (viewport.width - width) / 2, top, width, maxHeight };
+      setStyle((current) => JSON.stringify(current) === JSON.stringify(css) ? current : css);
+      return;
+    }
     const next = anchor ? placeCard({
       viewport: { width: document.documentElement.clientWidth, height: window.innerHeight },
       topLimit: topLimit(), anchor: anchor.getBoundingClientRect(),
@@ -108,7 +128,7 @@ export function PopoverCard({ title, getAnchor, onClose, onAnchorPress, onSlotPr
       ? { left: next.left, top: next.top, width: next.width, maxHeight: next.maxHeight } : {};
     // Keep the old object when nothing moved, so repositioning on every render cannot loop.
     setStyle((current) => JSON.stringify(current) === JSON.stringify(css) ? current : css);
-  }, [getAnchor]);
+  }, [getAnchor, variant]);
 
   useLayoutEffect(() => { reposition(); });
   useEffect(() => {
@@ -181,11 +201,15 @@ export function PopoverCard({ title, getAnchor, onClose, onAnchorPress, onSlotPr
   }, []);
 
   return createPortal(
+    <>
+    {variant === "modal" && <div className="popover-scrim" aria-hidden="true" />}
     <div ref={card} role="dialog" aria-modal="true" aria-labelledby={headingId} tabIndex={-1}
-      className={`popover-card${phone ? " sheet" : ""}`} style={style}
+      className={`popover-card${variant === "modal" ? " modal" : ""}${phone ? " sheet" : ""}`} style={style}
       onKeyDown={(event) => {
         if (event.key !== "Tab") return;
-        const items = [...(card.current?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? [])];
+        // Collapsed accordion bodies are hidden but still in the DOM; skip what cannot take focus.
+        const items = [...(card.current?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? [])]
+          .filter((item) => item.getClientRects().length > 0);
         const first = items[0];
         const last = items[items.length - 1];
         if (!first || !last) { event.preventDefault(); return; }
@@ -200,7 +224,8 @@ export function PopoverCard({ title, getAnchor, onClose, onAnchorPress, onSlotPr
         </button>
       </div>
       {children}
-    </div>,
+    </div>
+    </>,
     document.body,
   );
 }
