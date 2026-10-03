@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 export interface MenuItem {
   id: string;
@@ -43,9 +43,28 @@ export function AppHeader({ appName, items, current, onSelect, menuFooter, badge
     };
   }, [open]);
 
+  // The header is sticky; publish its height so the pinned notice, the menu panel and the
+  // document's scroll padding all sit below it.
+  const header = useRef<HTMLElement>(null);
+  useLayoutEffect(() => {
+    const element = header.current;
+    const root = document.documentElement;
+    if (!element) return;
+    const apply = () => root.style.setProperty("--header-height", `${element.offsetHeight}px`);
+    apply();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(apply);
+    observer?.observe(element);
+    window.addEventListener("resize", apply);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", apply);
+      root.style.removeProperty("--header-height");
+    };
+  }, []);
+
   const pending = badgeTotal ?? 0;
   return (
-    <header className="app-header">
+    <header className="app-header" ref={header}>
       <div className="app-header-menu" ref={root} onBlur={(event) => {
           // Close when focus moves out of the menu (button and panel).
           const next = event.relatedTarget;

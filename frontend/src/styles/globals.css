@@ -44,6 +44,8 @@
   --color-shadow-strong: #00000026;
   font: 15px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--color-text); background: var(--color-bg);
 }
+/* The sticky header and the pinned error notice (heights published by AppHeader and NoticeBar) cover the top of the viewport. */
+html { scroll-padding-top: calc(var(--header-height, 0px) + var(--notice-height, 0px) + 1.5rem); }
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; }
 button, input, select, textarea { font: inherit; }
@@ -94,7 +96,7 @@ textarea { min-height: 85px; resize: vertical; }
 .notice.idle { margin: 0; padding: 0; border: 0; height: 0; overflow: hidden; }
 .notice-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 /* Rejections stay pinned below the menu layer so a failed save is seen beside the control that caused it. */
-.notice.pinned { position: sticky; top: .5rem; z-index: 5; box-shadow: 0 4px 14px var(--color-shadow-strong); }
+.notice.pinned { position: sticky; top: calc(var(--header-height, 0px) + 2px); z-index: 5; box-shadow: 0 4px 14px var(--color-shadow-strong); }
 .notice-dismiss { flex: none; padding: .25rem .6rem; font-size: .85rem; background: var(--color-surface); color: inherit; border-color: currentColor; }
 .field-error { color: var(--color-danger); font-weight: 400; }
 .notice.error { border-color: var(--color-danger-border); background: var(--color-danger-bg); color: var(--color-danger); }
@@ -106,7 +108,7 @@ footer { max-width: 1300px; margin: auto; padding: 0 clamp(1rem, 3vw, 3rem) 2rem
 code { font-size: .9em; }
 /* Shared shell: reusable by an owner or client-facing app. */
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-.app-header { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem .9rem; padding: .5rem .75rem; margin-bottom: 1.2rem; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 16px; position: relative; }
+.app-header { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem .9rem; padding: .5rem .75rem; margin-bottom: 1.2rem; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 16px; position: sticky; top: 0; z-index: 12; }
 .app-name { margin: 0; font-size: 1.25rem; font-weight: 500; color: var(--color-text); }
 .app-header-menu { position: relative; z-index: 11; }
 .icon-button { display: inline-grid; place-items: center; position: relative; width: 2.5rem; height: 2.5rem; padding: 0; border: 0; border-radius: 50%; background: transparent; font-size: 1.5rem; line-height: 1; font-weight: 400; }
@@ -116,18 +118,37 @@ code { font-size: .9em; }
 .hamburger::before { top: -6px; }
 .hamburger::after { top: 6px; }
 .dot { position: absolute; top: .35rem; right: .35rem; width: .55rem; height: .55rem; border-radius: 50%; background: var(--color-warning); }
-.menu-panel { position: absolute; z-index: 10; top: calc(100% + .4rem); left: 0; min-width: 14rem; display: grid; gap: .15rem; padding: .5rem; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 12px; box-shadow: 0 8px 24px var(--color-shadow-strong); }
+.menu-panel { position: absolute; z-index: 10; top: calc(100% + .4rem); left: 0; min-width: 14rem; max-height: calc(100vh - var(--header-height, 4rem) - 1rem); overflow-y: auto; display: grid; gap: .15rem; padding: .5rem; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 12px; box-shadow: 0 8px 24px var(--color-shadow-strong); }
 .menu-item { display: flex; justify-content: space-between; align-items: center; gap: 1rem; border: 0; border-radius: 8px; text-align: left; font-weight: 500; }
 .menu-item[aria-current="page"] { background: var(--color-primary-soft); color: var(--color-primary-dark); font-weight: 700; }
 .menu-footer { display: flex; justify-content: space-between; align-items: center; gap: .6rem; margin-top: .3rem; padding: .6rem .3rem .1rem; border-top: 1px solid var(--color-border-soft); }
 .calendar-controls { display: flex; align-items: center; flex-wrap: wrap; gap: .4rem .6rem; flex: 1; min-width: 0; }
 .step-buttons { display: inline-flex; }
+.today-icon { display: none; }
 .pill { border: 1px solid var(--color-border-strong); border-radius: 999px; padding: .45rem 1rem; background: var(--color-surface); font-weight: 500; }
 .range-title { margin: 0; flex: 1; min-width: 9rem; font-size: 1.25rem; font-weight: 400; }
 .view-select { display: block; }
 .view-select select.pill { width: auto; padding-right: .6rem; }
 .calendar-zone { margin: 0 0 1rem; color: var(--color-text-subtle); font-size: .9rem; }
-@media (max-width: 520px) { .app-header { border-radius: 12px; } .calendar-controls { flex-basis: 100%; } .range-title { font-size: 1.05rem; } }
+/* Phone: one sticky row, edge to edge. The app name stays for assistive tech only; Today becomes an icon. */
+@media (max-width: 520px) {
+  main { padding-top: 0; }
+  .app-header { flex-wrap: nowrap; gap: .15rem; padding: .25rem .35rem; margin: 0 calc(-1 * clamp(1rem, 3vw, 3rem)) .75rem; border-width: 0 0 1px; border-radius: 0; }
+  .app-name { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .app-header .icon-button { width: 2.25rem; height: 2.25rem; flex: none; }
+  .calendar-controls { flex-wrap: nowrap; gap: .15rem; flex: 1; min-width: 0; }
+  .calendar-controls > .pill { flex: none; display: inline-grid; place-items: center; width: 2.25rem; height: 2.25rem; padding: 0; }
+  .today-label { display: none; }
+  .today-icon { display: block; }
+  .step-buttons { flex: none; }
+  .range-title, .app-header > .range-title { flex: 1; min-width: 0; font-size: .95rem; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-inline: .25rem; }
+  .view-select { flex: none; }
+  .view-select select.pill { padding: .3rem .25rem; font-size: .85rem; height: 2.25rem; }
+  /* The row is flush with the screen edge, so draw focus rings inside the controls instead of clipping them. */
+  .app-header :focus-visible { outline-offset: -3px; }
+  .menu-panel { max-width: calc(100vw - .7rem); }
+  .menu-footer button { white-space: nowrap; }
+}
 /* Day and Week time grids. */
 .calendar-pane { min-width: 0; }
 .cal-scroll { max-height: min(72vh, 760px); overflow: auto; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 12px; }
