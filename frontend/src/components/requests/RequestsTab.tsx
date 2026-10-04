@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 import type { Appointment } from "@/api/types";
 import { path } from "@/lib/api";
 import { localStamp, localTime } from "@/lib/time";
@@ -23,6 +25,11 @@ export function RequestsTab() {
 function RequestCard({ request }: { request: Appointment }) {
   const { data, change } = useOwner();
   const client = data.clients.find((item) => item.client_id === request.client_id);
+  // Fixed when the card mounts; a refresh that adds a card gives it a fresh time.
+  const [now] = useState(() => Date.now());
+  const pendingOriginal = data.requests.find((item) =>
+    item.appointment_id === request.replaces_appointment_id
+    && item.hold_expires_at !== null && Date.parse(item.hold_expires_at) > now) ?? null;
   const decide = (action: "approve" | "decline") => change(
     path`/requests/${request.appointment_id}/` + action, "POST",
     { expected_version: request.version }, `Request ${action === "approve" ? "approved" : "declined"}`);
@@ -34,8 +41,9 @@ function RequestCard({ request }: { request: Appointment }) {
         {" · "}{request.duration_minutes} minutes
         {request.hold_expires_at && ` · expires ${localStamp(request.hold_expires_at, data.zone)}`}
       </p>
-      <ReplacementNote request={request} zone={data.zone} original={
-        data.requests.find((item) => item.appointment_id === request.replaces_appointment_id) ?? null} />
+      <ReplacementNote request={request} zone={data.zone} original={pendingOriginal}
+        originalConfirmed={data.calendar?.events.some((event) =>
+          event.event_id === request.replaces_appointment_id && event.status === "CONFIRMED") ?? false} />
       <div className="row-actions">
         <ConfirmButton label="Approve" confirmation="Confirm approval" className="primary"
           onConfirm={() => decide("approve")} />

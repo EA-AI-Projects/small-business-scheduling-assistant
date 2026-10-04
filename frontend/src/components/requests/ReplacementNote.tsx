@@ -2,10 +2,12 @@ import type { Appointment } from "@/api/types";
 import { localStamp, localTime } from "@/lib/time";
 
 /** Explains how a replacement request relates to the visit it replaces. */
-export function ReplacementNote({ request, original, zone }: {
+export function ReplacementNote({ request, original, originalConfirmed, zone }: {
   request: Appointment;
   /** The original when it is itself a pending request; otherwise null. */
   original: Appointment | null;
+  /** True only when the original is a confirmed visit on the calendar. */
+  originalConfirmed: boolean;
   zone: string;
 }) {
   if (!request.replaces_appointment_id) return null;
@@ -17,5 +19,12 @@ export function ReplacementNote({ request, original, zone }: {
       </p>
     );
   }
-  return <p className="hint">Replacement request; original visit stays until approval.</p>;
+  if (originalConfirmed) {
+    return <p className="hint">Replacement request; original visit stays until approval.</p>;
+  }
+  return (
+    <p className="hint">
+      Replacement request. The original request is no longer pending; approving confirms only this replacement.
+    </p>
+  );
 }

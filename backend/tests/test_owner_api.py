@@ -141,6 +141,24 @@ def test_approving_an_original_with_a_waiting_replacement_explains_why() -> None
     assert "approve or decline that one instead" in error["message"]
 
 
+def test_cancelling_a_confirmed_original_with_a_waiting_replacement_is_refused() -> None:
+    api, _ = client()
+    api.post(f"{BASE}/policy/seed", headers=headers("seed"))
+    original = api.post(f"{BASE}/requests", headers=headers("original"), json={
+        "client_id": "client-1", "start_at": START, "duration_minutes": 60}).json()["hold_id"]
+    assert api.post(f"{BASE}/requests/{original}/approve", json={"expected_version": 1},
+                    headers=headers("approve")).status_code == 200
+    replacement = api.post(f"{BASE}/requests", headers=headers("replacement"), json={
+        "client_id": "client-1", "start_at": "2026-07-06T18:00:00Z", "duration_minutes": 60,
+        "replaces_appointment_id": original})
+    assert replacement.status_code == 200, replacement.text
+    blocked = api.post(f"{BASE}/appointments/{original}/cancel", json={"expected_version": 2},
+                       headers=headers("cancel"))
+    assert blocked.status_code == 409
+    assert blocked.json()["error"]["code"] == "REPLACEMENT_PENDING"
+    assert "Withdraw the active replacement" in blocked.json()["error"]["message"]
+
+
 def test_owner_block_and_manual_appointment_use_same_revision_guard() -> None:
     api, repository = client()
     api.post(f"{BASE}/policy/seed", headers=headers("seed"))
