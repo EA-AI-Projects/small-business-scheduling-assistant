@@ -3,8 +3,9 @@
 The owner asks to offer a pending request's client a different time. This module
 resolves the request, shows the owner the exact client-facing text, and queues
 that text only on an immediately following plain confirmation. Nothing here
-writes the calendar and no model is involved: parsing is deterministic and the
-text is built from trusted records. A client's acceptance of the offer (#176)
+writes the calendar. Offer instructions are parsed deterministically and the
+text is built from trusted records; the owner's other replies are routed by the
+model classification (#177) and validated by the backend. A client's acceptance of the offer (#176)
 is handled by ``CounterofferAcceptance`` below, which reads the confirmed offer
 through ``CounterofferStore`` and creates one linked pending request.
 
