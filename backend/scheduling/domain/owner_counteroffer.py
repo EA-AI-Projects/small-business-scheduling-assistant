@@ -31,8 +31,6 @@ from scheduling.domain.availability import (
 from scheduling.domain.calendar import CalendarSnapshot, CalendarStatus
 from scheduling.domain.client_records import ClientProfile
 from scheduling.domain.conversation_state import (
-    AFFIRMATIVE,
-    FILLER,
     PROMPT_LIFETIME,
     WEEKDAYS,
     Selection,
@@ -83,11 +81,10 @@ MONTH_DAY = re.compile(
     rf"\b({'|'.join(MONTHS)})[a-z]*\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?\b")
 SLASH_DAY = re.compile(r"(?<![\w/])(\d{1,2})/(\d{1,2})(?![\w/])")
 REFERENCE = re.compile(r"(?<![0-9a-z])[0-9a-f]{8}(?![0-9a-z])")
-# Replies made only of these words read like approving or declining the request, so
-# while an offer is open they are never allowed to fall through to approval.
-APPROVAL_LIKE_WORDS = AFFIRMATIVE | FILLER | frozenset({
-    "approve", "approved", "send", "go", "ahead", "decline", "declined", "reject", "deny",
-    "now", "offer", "text", "message", "out", "them", "her", "him", "they"})
+# An instruction that names an offer verb is unmistakable; "instead" alone is not (it is also
+# how an owner narrows a calendar view), so right after a calendar answer it is clarified.
+EXPLICIT_OFFER = re.compile(r"\b(?:offer\w*|propos\w*|suggest\w*|counter\w*)\b")
+STRICT_YES = re.compile(r"(?:yes|y|yep|yeah|yup)[.!]?")
 NO_TEXT = re.compile(
     r"(?:no|nope|nah|cancel|cancel (?:it|that|the offer)|never ?mind|don'?t send(?: it)?|"
     r"decline|declined|stop|discard)(?: please| thanks)?")
@@ -304,6 +301,12 @@ def offer_text(original_start: datetime, proposed_start: datetime, zone: ZoneInf
 
 
 @dataclass(frozen=True)
+class OfferView:
+    offer: "Counteroffer"
+    live: bool  # Proposed and unexpired: the owner's next YES or NO is about it.
+
+
+@dataclass(frozen=True)
 class _Ask:
     """The owner's message could not be turned into one offer; ``question`` says why."""
 
@@ -382,7 +385,13 @@ class CounterofferService:
         self._owner = owner_number
 
     def handle(self, receipt: InboundReceipt, now: datetime,
-               pending: tuple[Appointment, ...]) -> "ConversationOutcome | None":
+               pending: tuple[Appointment, ...],
+               calendar_last: bool = False) -> "ConversationOutcome | None":
+        """The deterministic part of owner offer handling; None leaves the message to routing.
+
+        ``calendar_last``: the assistant's latest message to the owner was a calendar answer,
+        so a bare YES or an "instead" without an offer verb is not clearly about the offer.
+        """
         from scheduling.domain.conversation import ConversationOutcome
 
         body = receipt.body or ""
@@ -399,8 +408,11 @@ class CounterofferService:
                 return ConversationOutcome(self._prompt(active, receipt.business_id))
             return ConversationOutcome(_HANDLED)
         parsed = self._parse(text, now, receipt.business_id, pending)
+        if (isinstance(parsed, _Request) and calendar_last
+                and not EXPLICIT_OFFER.search(text)):
+            return ConversationOutcome(self._ambiguous_instead(parsed, receipt.business_id))
         if active is not None:
-            answered = self._answer(active, receipt, text, now, pending, parsed)
+            answered = self._answer(active, receipt, text, now, pending, parsed, calendar_last)
             if answered is not None:
                 return answered
         if parsed is None:
@@ -409,33 +421,100 @@ class CounterofferService:
             return ConversationOutcome(parsed.question)
         return self._prepare(receipt, now, parsed)
 
-    @staticmethod
-    def _approval_like(text: str) -> bool:
-        from scheduling.domain.conversation import OWNER_APPROVAL, OWNER_DECLINE
+    def _ambiguous_instead(self, parsed: "_Request", business_id: str) -> str:
+        zone = ZoneInfo(self._repository.read_policy(business_id).timezone)
+        request = parsed.request
+        profile = self._repository.read_profile(business_id, request.client_id)
+        name = profile.name if profile is not None else "the client"
+        clock = parsed.clock.strftime("%I:%M %p").lstrip("0")
+        ref = request.appointment_id[:8]
+        return (f"I wasn't sure what you meant. Do you want me to offer {clock} to {name} "
+                f"instead of {when_text(request.start_at, zone)} (ref {ref}), or are you "
+                "asking about the calendar? Nothing was sent or changed. To prepare an offer, "
+                f"say: Offer {clock} instead for ref {ref}. To see the calendar, ask for a "
+                "day or week.")
 
-        if OWNER_APPROVAL.fullmatch(text) or OWNER_DECLINE.fullmatch(text):
-            return True
-        words = re.findall(r"[a-z']+|\d+", text)
-        return bool(words) and all(word in APPROVAL_LIKE_WORDS for word in words)
+    # --- What routing needs to know about the owner's offer -------------------------------
 
-    # An active offer consumes exactly the next owner message. A plain YES confirms a
-    # still-proposed offer; NO discards it; a new instruction replaces it. Replies that
-    # read like approving, declining, or sending (including "yes send the offer") change
-    # nothing and explain what to reply, so they can never approve what the owner just
-    # countered. Only an exact "APPROVE <ref>" or "DECLINE <ref>" passes through. Any
-    # other reply cancels the offer and says so.
+    def open_offer(self, business_id: str, owner: str, now: datetime,
+                   pending: tuple[Appointment, ...]) -> "OfferView | None":
+        """The owner's offer while its request is still pending: live (awaiting YES or NO)
+        or closed (cancelled, sent, failed, accepted, or lapsed, within the notice window)."""
+        active = self._store.read_active(business_id, owner)
+        if active is None or now >= active.expires_at + EXPIRED_NOTICE_WINDOW:
+            return None
+        if not any(item.appointment_id == active.request_id
+                   and item.version == active.request_version for item in pending):
+            return None
+        return OfferView(active, active.state == OfferState.PROPOSED and not active.expired(now))
+
+    def settle(self, view: "OfferView | None") -> None:
+        """The owner moved on from a finished offer; stop absorbing replies for it."""
+        if view is not None and not view.live:
+            self._store.clear_active(view.offer.business_id, view.offer.owner,
+                                     view.offer.offer_id)
+
+    def reminder(self, offer: Counteroffer) -> str:
+        zone = ZoneInfo(self._repository.read_policy(offer.business_id).timezone)
+        return (f"Your offer to {self._client_name(offer)} for "
+                f"{when_text(offer.proposed_start, zone)} is still waiting: reply YES to send it "
+                f"or NO to cancel it. To approve the original request, reply APPROVE "
+                f"{offer.request_id[:8]}.")
+
+    def closed_note(self, offer: Counteroffer) -> str:
+        return ("Nothing was approved or sent by that reply. The request is still pending. "
+                f"To approve the original request, reply APPROVE {offer.request_id[:8]}.")
+
+    def offer_line(self, offer: Counteroffer) -> tuple[str, str]:
+        """Client first name and the offered time, for the bounded model context."""
+        zone = ZoneInfo(self._repository.read_policy(offer.business_id).timezone)
+        name = self._client_name(offer).split()
+        return (name[0] if name else "client", when_text(offer.proposed_start, zone))
+
+    def confirm_offer(self, offer: Counteroffer, receipt: InboundReceipt,
+                      now: datetime) -> "ConversationOutcome":
+        """Send the reviewed offer; rechecked exactly like a plain YES."""
+        from scheduling.domain.conversation import ConversationOutcome
+
+        if offer.expired(now):
+            self._store.discard(offer)
+            return ConversationOutcome(
+                "That offer expired after 30 minutes, so nothing was sent and the request was "
+                "not approved. Tell me the time to offer and I'll prepare it again. "
+                f"To approve the original request, reply APPROVE {offer.request_id[:8]}.")
+        return self._confirm(offer, receipt, now)
+
+    def cancel_offer(self, offer: Counteroffer) -> "ConversationOutcome":
+        from scheduling.domain.conversation import ConversationOutcome
+
+        self._store.discard(offer)
+        return ConversationOutcome(
+            f"OK, I cancelled the offer to {self._client_name(offer)}; nothing was sent. "
+            "The request is still pending. To approve the original request, reply APPROVE "
+            f"{offer.request_id[:8]}.")
+
+    # An open offer is only ever answered here by: a plain YES (confirm it), NO (cancel it), a
+    # new offer instruction (replace it), or an exact APPROVE/DECLINE command (which drops it).
+    # Every other message leaves it untouched for routing: a calendar question keeps the offer
+    # (the reply says it is still waiting), and anything unclear is asked about. Nothing here
+    # reaches approval, so a YES that confirms an offer can never approve the request.
     # The pointer outlives the offer (confirmed, failed, cancelled, or expired) for
-    # EXPIRED_NOTICE_WINDOW: while the same request is still pending, a bare yes/ok/
-    # approval-like reply is absorbed ("nothing was approved") and writes nothing. Any
-    # other message clears the pointer.
+    # EXPIRED_NOTICE_WINDOW: while the same request is still pending, a bare yes/no is absorbed
+    # ("nothing was approved") and writes nothing.
     def _answer(self, active: Counteroffer, receipt: InboundReceipt, text: str,
                 now: datetime, pending: tuple[Appointment, ...],
-                parsed: "_Request | _Ask | None") -> "ConversationOutcome | None":
+                parsed: "_Request | _Ask | None",
+                calendar_last: bool) -> "ConversationOutcome | None":
         from scheduling.domain.conversation import EXACT_COMMAND, ConversationOutcome
 
-        yes = is_affirmative(text)
+        if EXACT_COMMAND.fullmatch((receipt.body or "").strip()):
+            if active.state == OfferState.PROPOSED:
+                self._store.discard(active)
+            self._store.clear_active(active.business_id, active.owner, active.offer_id)
+            return None  # An exact approve or decline command always works.
+        # After a calendar answer only an unmistakable YES reads as answering the offer.
+        yes = bool(STRICT_YES.fullmatch(text)) if calendar_last else is_affirmative(text)
         no = is_negative(text) or bool(NO_TEXT.fullmatch(text))
-        like = not yes and not no and self._approval_like(text)
         ref = active.request_id[:8]
         how = f"To approve the original request, reply APPROVE {ref}."
         still_pending = any(item.appointment_id == active.request_id
@@ -444,26 +523,25 @@ class CounterofferService:
             if not still_pending:
                 self._store.clear_active(active.business_id, active.owner, active.offer_id)
                 return None
-            if yes or like or no:
-                if active.failure is not None:
-                    reason = PROBLEM_TEXT[OfferProblem(active.failure)]
-                    return ConversationOutcome(
-                        f"That offer could not be sent ({reason.rstrip('.')}), so nothing was "
-                        f"sent and nothing was approved. Tell me another time to offer. {how}")
-                if active.state == OfferState.ACCEPTED:
-                    return ConversationOutcome(
-                        "The client already accepted that offer, so a new request is waiting "
-                        "for your approval (ref "
-                        f"{(active.accepted_request_id or '')[:8]}). Nothing was approved by "
-                        "this reply. Reply APPROVE or DECLINE with that reference.")
-                if active.state == OfferState.CONFIRMED:
-                    return ConversationOutcome(
-                        "That offer was already queued, so nothing more was sent. The request "
-                        f"is still pending and was not approved. {how}")
+            if not (yes or no):
+                return None
+            if active.failure is not None:
+                reason = PROBLEM_TEXT[OfferProblem(active.failure)]
                 return ConversationOutcome(
-                    f"Nothing was approved or sent. The request is still pending. {how}")
-            self._store.clear_active(active.business_id, active.owner, active.offer_id)
-            return None
+                    f"That offer could not be sent ({reason.rstrip('.')}), so nothing was "
+                    f"sent and nothing was approved. Tell me another time to offer. {how}")
+            if active.state == OfferState.ACCEPTED:
+                return ConversationOutcome(
+                    "The client already accepted that offer, so a new request is waiting "
+                    "for your approval (ref "
+                    f"{(active.accepted_request_id or '')[:8]}). Nothing was approved by "
+                    "this reply. Reply APPROVE or DECLINE with that reference.")
+            if active.state == OfferState.CONFIRMED:
+                return ConversationOutcome(
+                    "That offer was already queued, so nothing more was sent. The request "
+                    f"is still pending and was not approved. {how}")
+            return ConversationOutcome(
+                f"Nothing was approved or sent. The request is still pending. {how}")
         if yes:
             if active.expired(now):
                 self._store.discard(active)
@@ -471,24 +549,15 @@ class CounterofferService:
                     "That offer expired after 30 minutes, so nothing was sent and the request "
                     f"was not approved. Tell me the time to offer and I'll prepare it again. {how}")
             return self._confirm(active, receipt, now)
-        if like:
-            if active.expired(now):
-                self._store.discard(active)
-                return ConversationOutcome(
-                    f"That offer expired, so nothing was sent and the request was not approved. {how}")
-            return ConversationOutcome(
-                f"Reply YES to send exactly that offer, or NO to cancel it. {how}")
-        self._store.discard(active)
         if no:
+            self._store.discard(active)
             return ConversationOutcome(
                 f"OK, I cancelled the offer to {self._client_name(active)}; nothing was sent. "
                 f"The request is still pending. {how}")
-        if parsed is not None or EXACT_COMMAND.fullmatch((receipt.body or "").strip()):
+        if isinstance(parsed, _Request):
+            self._store.discard(active)  # A revised instruction replaces the offer.
             self._store.clear_active(active.business_id, active.owner, active.offer_id)
-            return None  # A revised instruction, or an exact approve/decline command.
-        return ConversationOutcome(
-            f"I cancelled the offer to {self._client_name(active)}; nothing was sent. "
-            "The request is still pending.")
+        return None
 
     def _confirm(self, active: Counteroffer, receipt: InboundReceipt,
                  now: datetime) -> "ConversationOutcome":

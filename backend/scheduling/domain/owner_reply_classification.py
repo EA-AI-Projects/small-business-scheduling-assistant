@@ -1,10 +1,11 @@
-"""Model-proposed meaning of an owner reply while a calendar conversation is open.
+"""Model-proposed meaning of an owner reply (#173, #177).
 
-After a calendar answer, "yes please" or "confirmed" can mean "approve that request" or
-"keep showing me the calendar". The model reads a small bounded context and proposes
-one of four intents. It never approves anything: the backend acts on an approval only
-when the proposed reference is the request the assistant last named, that request is
-still the single pending one at the same version, and the model was confident.
+"yes please" or "confirmed" can mean "approve that request", "keep showing me the
+calendar", or "send the offer". The model reads a small bounded context (the last thing
+the assistant said, recent pending requests by first name, any open offer) and proposes
+one intent. It never approves, declines, or sends anything: the backend acts only after
+its own checks (see ``ConversationService._owner_answer``), and every failure, timeout,
+or low-confidence answer becomes a clarifying question that changes nothing.
 """
 
 import re
@@ -16,16 +17,32 @@ from typing import Protocol, runtime_checkable
 from scheduling.domain.calendar import CalendarStatus
 
 MAX_FOLLOW_UP_DAYS = 31
-# A reply that contains one of these words may be an approval, so it goes to the model.
+# Defence in depth, not routing: the backend refuses a model approval or decline whose
+# text has none of the matching words, and never answers a reply that has one of these
+# words as a plain calendar follow-up without the model reading it first.
 APPROVAL_TRIGGERS = frozenset({
     "yes", "y", "yep", "yeah", "ya", "yup", "ok", "okay", "sure", "approve", "approved",
     "confirm", "confirmed", "decline", "declined", "reject", "deny", "accept"})
+DECLINE_WORDS = frozenset({
+    "decline", "declined", "reject", "rejected", "deny", "denied", "no", "nope", "nah",
+    "don't", "dont", "cancel"})
+NEGATION_WORDS = frozenset({
+    "no", "not", "nope", "nah", "don't", "dont", "never", "cant", "can't", "won't", "wont",
+    "cancel", "decline", "declined", "reject", "deny", "stop"})
+OFFER_SEND_WORDS = APPROVAL_TRIGGERS | frozenset({"go", "ahead", "send"})
+OFFER_CANCEL_WORDS = frozenset({
+    "no", "nope", "nah", "cancel", "never", "mind", "nevermind", "don't", "dont", "stop",
+    "discard", "decline", "scrap", "forget"})
 
 
 class OwnerReplyIntent(StrEnum):
     APPROVE_NAMED_REQUEST = "approve_named_request"
     DECLINE_NAMED_REQUEST = "decline_named_request"
     CALENDAR_FOLLOWUP = "calendar_followup"
+    CONFIRM_OFFER = "confirm_offer"  # Send the counteroffer text the owner just reviewed.
+    CANCEL_OFFER = "cancel_offer"  # Drop that counteroffer.
+    CALENDAR_QUESTION = "calendar_question"  # A calendar question that lacks a day or week.
+    HOW_TO = "how_to"  # Asks how to approve, or what the assistant can do.
     UNCLEAR = "unclear"
 
 
@@ -46,13 +63,16 @@ class PendingRef:
 class OwnerReplyContext:
     today: date
     timezone: str
-    last_kind: str  # "calendar_answer" or "approval_question"
-    view: str
+    # "calendar_answer", "approval_question", "offer_prompt", "offer_with_calendar_answer",
+    # "offer_closed" (an offer that was cancelled, sent, or lapsed), or "none".
+    last_kind: str
+    view: str  # "none" when no calendar conversation is open.
     range_first: date | None
     range_last: date | None
     statuses: tuple[str, ...]
     named: PendingRef | None
     pending: tuple[PendingRef, ...]
+    offer: PendingRef | None = None  # The offer's request ref and client, with the new time.
 
 
 @dataclass(frozen=True)
@@ -70,7 +90,29 @@ class OwnerReplyClassifier(Protocol):
     def classify_owner_reply(self, body: str, context: OwnerReplyContext) -> OwnerReplyProposal: ...
 
 
+def _words(body: str) -> set[str]:
+    return set(re.findall(r"[a-z']+", body.lower()))
+
+
 def may_be_approval(body: str) -> bool:
     """True when the reply contains a word that could approve or decline a request."""
-    words = re.findall(r"[a-z']+", body.lower())
-    return any(word in APPROVAL_TRIGGERS for word in words)
+    return bool(_words(body) & (APPROVAL_TRIGGERS | DECLINE_WORDS))
+
+
+def supports_approval(body: str) -> bool:
+    """An approving word and no negation; the backend checks this on top of the model."""
+    words = _words(body)
+    return bool(words & APPROVAL_TRIGGERS) and not words & NEGATION_WORDS
+
+
+def supports_decline(body: str) -> bool:
+    return bool(_words(body) & DECLINE_WORDS)
+
+
+def supports_offer_send(body: str) -> bool:
+    words = _words(body)
+    return bool(words & OFFER_SEND_WORDS) and not words & NEGATION_WORDS
+
+
+def supports_offer_cancel(body: str) -> bool:
+    return bool(_words(body) & OFFER_CANCEL_WORDS)

@@ -40,6 +40,12 @@ NOUNS = {CONFIRMED: ("confirmed visit", "confirmed visits"),
          BLOCK: ("unavailable block", "unavailable blocks")}
 
 
+def last_answered_at(context: "QuestionContext") -> datetime:
+    """When the assistant last spoke in this calendar conversation (its lifetime is renewed
+    on every answer), so it can be compared with a later message such as an offer prompt."""
+    return context.expires_at - (QUESTION_LIFETIME if context.ask is None else ASK_LIFETIME)
+
+
 class View(StrEnum):
     SUMMARY = "summary"
     CLIENTS = "clients"
