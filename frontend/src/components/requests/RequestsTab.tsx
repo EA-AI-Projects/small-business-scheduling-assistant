@@ -5,6 +5,7 @@ import { useOwner } from "@/owner/OwnerContext";
 
 import { ConfirmButton } from "../ConfirmButton";
 import { SectionHeading } from "../Workspace";
+import { ReplacementNote } from "./ReplacementNote";
 
 export function RequestsTab() {
   const { data } = useOwner();
@@ -33,9 +34,8 @@ function RequestCard({ request }: { request: Appointment }) {
         {" · "}{request.duration_minutes} minutes
         {request.hold_expires_at && ` · expires ${localStamp(request.hold_expires_at, data.zone)}`}
       </p>
-      {request.replaces_appointment_id && (
-        <p className="hint">Replacement request; original visit stays until approval.</p>
-      )}
+      <ReplacementNote request={request} zone={data.zone} original={
+        data.requests.find((item) => item.appointment_id === request.replaces_appointment_id) ?? null} />
       <div className="row-actions">
         <ConfirmButton label="Approve" confirmation="Confirm approval" className="primary"
           onConfirm={() => decide("approve")} />

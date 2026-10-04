@@ -9,6 +9,7 @@ from scheduling.adapters.dynamodb import encode_policy
 from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.domain.availability import pilot_policy
 from scheduling.domain.client_records import ClientRecordService, HomeSize
+from scheduling.domain.holds import CreateHold, HoldService
 from scheduling.domain.sms_ingress import ConsentEvidence
 from scheduling.owner_api import OwnerPrincipal, create_owner_app
 
@@ -118,6 +119,26 @@ def test_owner_request_approval_replay_and_stale_conflict() -> None:
     assert stale.status_code == 409
     assert stale.json()["current"]["status"] == "CONFIRMED"
     assert repository.read_revision("pilot") == 3
+
+
+def test_approving_an_original_with_a_waiting_replacement_explains_why() -> None:
+    api, repository = client()
+    api.post(f"{BASE}/policy/seed", headers=headers("seed"))
+    original = api.post(f"{BASE}/requests", headers=headers("original"), json={
+        "client_id": "client-1", "start_at": START, "duration_minutes": 60})
+    assert original.status_code == 200, original.text
+    original_id = original.json()["hold_id"]
+    # An accepted counteroffer replaces a pending original; no owner route creates one.
+    HoldService(repository).create(CreateHold(
+        "pilot", "client-1", "client-1", "replacement",
+        datetime(2026, 7, 6, 18, tzinfo=UTC), 60, original_id, 1), NOW)
+    blocked = api.post(f"{BASE}/requests/{original_id}/approve",
+                       json={"expected_version": 1}, headers=headers("approve"))
+    assert blocked.status_code == 409
+    error = blocked.json()["error"]
+    assert error["code"] == "REPLACEMENT_PENDING"
+    assert "replacement request from this client is waiting" in error["message"]
+    assert "approve or decline that one instead" in error["message"]
 
 
 def test_owner_block_and_manual_appointment_use_same_revision_guard() -> None:
