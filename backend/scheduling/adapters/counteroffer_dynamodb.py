@@ -15,7 +15,7 @@ from typing import Any, Protocol
 from scheduling.adapters.dynamodb import _record_transaction_conflict
 from scheduling.adapters.outbox_aws import due_keys
 from scheduling.domain.outbox import DeliveryState, OutboxRecord
-from scheduling.domain.owner_counteroffer import Counteroffer, OfferState
+from scheduling.domain.owner_counteroffer import Counteroffer, OfferState, confirmed_offer
 
 RETAIN_AFTER_EXPIRY = timedelta(days=1)
 
@@ -63,7 +63,7 @@ class DynamoCounterofferStore:
             datetime.fromisoformat(item["created_at"]["S"]),
             datetime.fromisoformat(item["expires_at"]["S"]),
             datetime.fromisoformat(item["confirmed_at"]["S"]) if "confirmed_at" in item else None,
-            item.get("confirmed_by", {}).get("S"))
+            item.get("confirmed_by", {}).get("S"), item.get("failure", {}).get("S"))
 
     def _item(self, offer: Counteroffer) -> dict[str, Any]:
         item: dict[str, Any] = {
@@ -85,6 +85,8 @@ class DynamoCounterofferStore:
             item["confirmed_at"] = {"S": _instant(offer.confirmed_at)}
         if offer.confirmed_by is not None:
             item["confirmed_by"] = {"S": offer.confirmed_by}
+        if offer.failure is not None:
+            item["failure"] = {"S": offer.failure}
         return item
 
     def _pointer(self, offer: Counteroffer, sort_key: str) -> dict[str, Any]:
@@ -108,19 +110,25 @@ class DynamoCounterofferStore:
         pointer = self._get(business_id, f"COUNTEROFFER_CLIENT#{client_id}")
         return self.read(business_id, pointer["offer_id"]["S"]) if pointer is not None else None
 
-    def put_draft(self, offer: Counteroffer) -> None:
+    def put_draft(self, offer: Counteroffer) -> bool:
         if offer.state != OfferState.PROPOSED:
             raise ValueError("Only a proposed offer can be stored as a draft")
-        self._client.transact_write_items(TransactItems=[
-            {"Put": {"TableName": self._table, "Item": self._item(offer),
-                     # A redelivered owner message rewrites the same proposal.
-                     "ConditionExpression": "attribute_not_exists(PK) OR #s = :proposed",
-                     "ExpressionAttributeNames": {"#s": "state"},
-                     "ExpressionAttributeValues": {":proposed": {"S": "PROPOSED"}}}},
-            {"Put": {"TableName": self._table,
-                     "Item": self._pointer(offer, f"COUNTEROFFER_ACTIVE#{offer.owner}")}},
-            *self._erasure_checks(offer),
-        ])
+        try:
+            self._client.transact_write_items(TransactItems=[
+                {"Put": {"TableName": self._table, "Item": self._item(offer),
+                         # A redelivered owner message rewrites the same proposal.
+                         "ConditionExpression": "attribute_not_exists(PK) OR #s = :proposed",
+                         "ExpressionAttributeNames": {"#s": "state"},
+                         "ExpressionAttributeValues": {":proposed": {"S": "PROPOSED"}}}},
+                {"Put": {"TableName": self._table,
+                         "Item": self._pointer(offer, f"COUNTEROFFER_ACTIVE#{offer.owner}")}},
+                *self._erasure_checks(offer),
+            ])
+        except Exception as exc:
+            if not _record_transaction_conflict(exc):
+                raise
+            return False  # The offer already finished, or the client was erased.
+        return True
 
     def discard(self, offer: Counteroffer) -> None:
         try:
@@ -160,11 +168,7 @@ class DynamoCounterofferStore:
         if (outbox.entity_id != offer.offer_id or outbox.business_id != offer.business_id
                 or outbox.recipient != "client"):
             raise ValueError("Outbox intent must belong to the confirmed offer")
-        confirmed = Counteroffer(
-            offer.business_id, offer.offer_id, offer.owner, offer.request_id,
-            offer.request_version, offer.client_id, offer.client_phone, offer.proposed_start,
-            offer.duration_minutes, offer.text, OfferState.CONFIRMED, offer.version + 1,
-            offer.created_at, offer.expires_at, now, confirmed_by)
+        confirmed = confirmed_offer(offer, confirmed_by, now)
         instant = _instant(outbox.created_at)
         try:
             self._client.transact_write_items(TransactItems=[
@@ -193,3 +197,32 @@ class DynamoCounterofferStore:
                 raise
             return None
         return confirmed
+
+    def record_failure(self, offer: Counteroffer, problem: str, now: datetime,
+                       outbox: OutboxRecord) -> None:
+        if (outbox.entity_id != offer.offer_id or outbox.business_id != offer.business_id
+                or outbox.recipient != "owner"):
+            raise ValueError("Outbox intent must belong to the failed offer")
+        instant = _instant(outbox.created_at)
+        try:
+            self._client.transact_write_items(TransactItems=[
+                {"Update": {
+                    "TableName": self._table,
+                    "Key": self._key(offer.business_id, f"COUNTEROFFER#{offer.offer_id}"),
+                    "UpdateExpression": "SET failure = :problem",
+                    "ConditionExpression": "attribute_exists(PK) AND attribute_not_exists(failure)",
+                    "ExpressionAttributeValues": {":problem": {"S": problem}}}},
+                {"Put": {"TableName": self._table, "Item": {
+                    **self._key(outbox.business_id, f"OUTBOX#{outbox.outbox_id}"),
+                    **due_keys(DeliveryState.PENDING, outbox.created_at, outbox.outbox_id),
+                    "outbox_id": {"S": outbox.outbox_id}, "entity_id": {"S": outbox.entity_id},
+                    "client_id": {"S": offer.client_id},
+                    "recipient": {"S": outbox.recipient}, "template": {"S": outbox.template},
+                    "delivery_state": {"S": "PENDING"}, "created_at": {"S": instant},
+                    "next_attempt_at": {"S": instant}, "dispatch_after": {"S": instant},
+                    "attempts": {"N": "0"}, "event_version": {"N": str(outbox.event_version)},
+                }, "ConditionExpression": "attribute_not_exists(PK)"}},
+            ])
+        except Exception as exc:
+            if not _record_transaction_conflict(exc):
+                raise  # Already recorded by an earlier attempt: nothing more to queue.

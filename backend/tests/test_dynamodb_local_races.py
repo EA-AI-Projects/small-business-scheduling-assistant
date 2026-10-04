@@ -267,6 +267,27 @@ def test_client_erasure_releases_reservations_and_removes_linked_records(
         "request_hash": {"S": "synthetic-hash"},
     })
 
+    from scheduling.adapters.counteroffer_dynamodb import DynamoCounterofferStore
+    from scheduling.domain.owner_counteroffer import (
+        Counteroffer,
+        OfferState,
+        counteroffer_failure_outbox,
+        counteroffer_outbox,
+    )
+
+    offers = DynamoCounterofferStore(env.client, env.table)
+    offer = Counteroffer(
+        env.business, "co-erase", "+15005550009", pending.appointment_id, 1,
+        "synthetic-client", "+14155550101", START, 60, "Synthetic offer text.",
+        OfferState.PROPOSED, 1, START, START + timedelta(minutes=30))
+    assert offers.put_draft(offer)
+    confirmed_offer = offers.confirm(offer, "SM-erase", START, counteroffer_outbox(
+        replace(offer, version=2), START))
+    assert confirmed_offer is not None
+    offers.record_failure(confirmed_offer, "SLOT_UNAVAILABLE", START,
+                          counteroffer_failure_outbox(confirmed_offer, START))
+    assert offers.read(env.business, "co-erase") is not None
+
     lease = repo.acquire_client_send(env.business, "synthetic-client")
     with pytest.raises(RecordConflict):
         repo.erase_client(env.business, "synthetic-client")
@@ -281,6 +302,11 @@ def test_client_erasure_releases_reservations_and_removes_linked_records(
     remaining = repo._scan_items()
     assert not any(item["SK"]["S"].startswith(("NOTE#", "SMS#", "OUTBOX#"))
                    for item in remaining if item["PK"]["S"] == f"BUSINESS#{env.business}")
+    assert not any(item["SK"]["S"].startswith("COUNTEROFFER")
+                   for item in remaining if item["PK"]["S"] == f"BUSINESS#{env.business}")
+    assert offers.read(env.business, "co-erase") is None
+    assert offers.read_confirmed_for_client(env.business, "synthetic-client") is None
+    assert not offers.put_draft(offer)  # The erased client can no longer receive offers.
     assert not any(item["PK"]["S"].startswith(f"VISITS#{env.business}#")
                    for item in remaining)
     assert not any(item["SK"]["S"] == command_key for item in remaining)
@@ -755,3 +781,4 @@ def test_two_concurrent_counteroffer_confirmations_queue_exactly_one_client_text
     record = outbox.get(env.business, "counteroffer#co-race")
     assert record is not None and record.template == "owner-counteroffer"
     assert record.recipient == "client" and record.event_version == 2
+    assert not store.put_draft(offer)  # A finished offer cannot be reopened.

@@ -20,6 +20,7 @@ from scheduling.domain.holds import CreateHold, HoldService
 from scheduling.domain.lifecycle import Action, ActorRole, AppointmentCommand, LifecycleService
 from scheduling.domain.outbox import PermanentDeliveryFailure
 from scheduling.domain.owner_counteroffer import (
+    COUNTEROFFER_FAILED_TEMPLATE,
     COUNTEROFFER_TEMPLATE,
     CounterofferService,
     InMemoryCounterofferStore,
@@ -106,8 +107,8 @@ class World:
         assert appointment is not None
         return appointment.status, appointment.version
 
-    def deliver(self) -> str:
-        (record,) = self.store.outbox.values()
+    def deliver(self, template: str = COUNTEROFFER_TEMPLATE) -> str:
+        (record,) = (r for r in self.store.outbox.values() if r.template == template)
         return self.sender.deliver(record)
 
 
@@ -142,7 +143,7 @@ def test_owner_reviews_exact_offer_then_yes_sends_only_that_text(world: World) -
     assert not world.store.outbox and not world.messages.calls
 
     sent = world.say("Yes")
-    assert "Sent to Avery Sample" in sent.text and "not approved" in sent.text
+    assert "Queued the offer to Avery Sample" in sent.text and "not approved" in sent.text
     assert world.status(request) == (CalendarStatus.PENDING_APPROVAL, 1)
     (record,) = world.store.outbox.values()
     assert record.template == COUNTEROFFER_TEMPLATE and record.recipient == "client"
@@ -159,7 +160,7 @@ def test_yes_that_confirms_an_offer_never_approves_the_request(world: World) -> 
     world.say(ASK)
     world.say("YES")
     again = world.say("YES")  # A second plain YES is absorbed, not read as approval.
-    assert "already sent" in again.text
+    assert "already queued" in again.text
     assert world.status(request) == (CalendarStatus.PENDING_APPROVAL, 1)
     assert len(world.store.outbox) == 1
     # Without an offer in play, YES keeps its normal meaning.
@@ -255,7 +256,7 @@ def test_duplicate_delivery_and_second_confirmation_send_once(world: World) -> N
     assert world.say(ASK, "SM-ask").text.startswith("Offer for")  # Redelivered ask.
     first = world.say("YES", "SM-yes").text
     assert world.say("YES", "SM-yes").text == first  # Redelivered confirmation.
-    assert world.say("YES", "SM-yes-2").text.startswith("That offer was already sent")
+    assert world.say("YES", "SM-yes-2").text.startswith("That offer was already queued")
     assert len(world.store.outbox) == 1
     world.deliver()
     assert len(world.messages.calls) == 1
@@ -301,6 +302,109 @@ def test_dispatch_rechecks_state_consent_and_slot(world: World) -> None:
     assert slot.value.code == "OFFER_SLOT_UNAVAILABLE"
     assert not world.messages.calls
     assert world.status(request) == (CalendarStatus.PENDING_APPROVAL, 1)
+
+
+def test_send_time_failure_queues_one_owner_text_asking_for_another_time(world: World) -> None:
+    world.pending()
+    world.say(ASK)
+    world.say("YES")
+    world.pending(THURSDAY_2PM, "client-2", "taken")
+    for _ in range(2):  # A retried delivery must not queue a second owner text.
+        with pytest.raises(PermanentDeliveryFailure):
+            world.deliver()
+    failed = [r for r in world.store.outbox.values()
+              if r.template == COUNTEROFFER_FAILED_TEMPLATE]
+    assert len(failed) == 1 and failed[0].recipient == "owner"
+    assert failed[0].outbox_id.startswith("counteroffer-failed#")
+    world.deliver(COUNTEROFFER_FAILED_TEMPLATE)
+    (call,) = world.messages.calls
+    assert call["to"] == OWNER
+    assert "couldn't send the offer to Avery Sample" in call["body"]
+    assert "not open" in call["body"] and "another time" in call["body"]
+
+
+@pytest.mark.parametrize("phrase", [
+    "Yes, approve it", "Approved", "Approve", "Go ahead", "Send it", "OK approve", "decline it",
+    "Yes please approve",
+])
+def test_approval_like_replies_never_fall_through_to_approving(
+        world: World, phrase: str) -> None:
+    request = world.pending()
+    world.say(ASK)
+    reply = world.say(phrase).text
+    assert "Reply YES to send exactly that offer, or NO to cancel it" in reply
+    assert f"APPROVE {request[:8]}" in reply
+    assert world.status(request) == (CalendarStatus.PENDING_APPROVAL, 1)
+    assert not world.store.outbox
+    # Nothing changed: the offer is still waiting, and YES now sends it, not approves.
+    assert "Queued the offer" in world.say("YES").text
+    assert world.status(request) == (CalendarStatus.PENDING_APPROVAL, 1)
+
+
+@pytest.mark.parametrize("phrase", ["Yes, approve it", "Approved", "Go ahead", "Send it"])
+def test_approval_like_reply_after_expiry_does_not_approve(
+        world: World, phrase: str) -> None:
+    request = world.pending()
+    world.say(ASK)
+    world.clock[0] = NOW + timedelta(minutes=31)
+    reply = world.say(phrase).text
+    assert "expired" in reply and f"APPROVE {request[:8]}" in reply
+    assert world.status(request) == (CalendarStatus.PENDING_APPROVAL, 1)
+    assert not world.store.outbox
+
+
+def test_exact_approve_command_still_works_and_cancelling_is_announced(world: World) -> None:
+    request = world.pending()
+    world.say(ASK)
+    assert world.say(f"APPROVE {request[:8]}").committed
+    assert world.status(request)[0] == CalendarStatus.CONFIRMED
+    assert not world.store.outbox
+
+    other = world.pending(THURSDAY_9AM + timedelta(days=1), "client-2", "again")
+    world.say(f"Offer 2pm instead for {other[:8]}")
+    cancelled = world.say("What is the weather like?").text
+    assert "I cancelled the offer to Blake Example; nothing was sent." in cancelled
+
+
+def test_repeat_yes_is_absorbed_only_while_the_request_is_still_pending(world: World) -> None:
+    request = world.pending()
+    world.say(ASK)
+    world.say("YES")
+    LifecycleService(world.repository, lambda: NOW).apply(AppointmentCommand(
+        "pilot", request, OWNER, ActorRole.OWNER, Action.DECLINE, "dashboard-2", 1))
+    world.pending(THURSDAY_9AM + timedelta(days=1), "client-2", "next")
+    reply = world.say("YES")
+    assert "already queued" not in reply.text and reply.committed  # Normal approval.
+
+
+def test_redelivered_ask_after_the_offer_finished_shows_no_prompt(world: World) -> None:
+    world.pending()
+    world.say(ASK, "SM-ask")
+    world.say("YES", "SM-yes")
+    reply = world.say(ASK, "SM-ask").text
+    assert "Text I would send" not in reply and "already handled" in reply
+    offer = world.store.read_active("pilot", OWNER)
+    assert offer is not None and not world.store.put_draft(replace(
+        offer, state=OfferState.PROPOSED, confirmed_by=None, confirmed_at=None))
+
+
+def test_confirmed_offer_expiry_is_the_provisional_client_validity(world: World) -> None:
+    from scheduling.domain.owner_counteroffer import CLIENT_OFFER_VALIDITY_PROVISIONAL
+    world.pending()
+    world.clock[0] = NOW + timedelta(minutes=10)
+    world.say(ASK)
+    world.clock[0] = NOW + timedelta(minutes=20)
+    world.say("YES")
+    offer = world.store.read_confirmed_for_client("pilot", "client-1")
+    assert offer is not None
+    assert offer.expires_at == NOW + timedelta(minutes=20) + CLIENT_OFFER_VALIDITY_PROVISIONAL
+
+
+def test_offer_may_overlap_the_requests_own_slot(world: World) -> None:
+    request = world.pending()  # 9 AM to 11 AM; 10 AM overlaps only itself.
+    reply = world.say(f"Offer 10:00 AM instead for {request[:8]}").text
+    assert "Thu Oct 1 at 10:00 AM" in reply and "Text I would send" in reply
+    assert world.say("YES").text.startswith("Queued")
 
 
 def test_dispatch_refuses_an_offer_that_was_never_confirmed(world: World) -> None:
