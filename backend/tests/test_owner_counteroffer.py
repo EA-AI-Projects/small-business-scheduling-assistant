@@ -112,6 +112,11 @@ class World:
         return self.sender.deliver(record)
 
 
+def state_of(world: World) -> OfferState | None:
+    offer = world.store.read_active("pilot", OWNER)
+    return offer.state if offer is not None else None
+
+
 def profile(client_id: str, name: str, phone: str) -> ClientProfile:
     return ClientProfile("pilot", client_id, name, phone, "123 Test Street", HomeSize.MEDIUM,
                          120, True, 1, NOW, NOW, NOW)
@@ -194,23 +199,67 @@ def test_decline_or_revision_or_other_message_sends_nothing(world: World) -> Non
     request = world.pending()
     world.say(ASK)
     assert "nothing was sent" in world.say("No").text.lower()
-    assert world.store.read_active("pilot", OWNER) is None
+    assert state_of(world) == OfferState.DISCARDED
     world.say(ASK)
     revised = world.say("Actually offer 3:00 PM instead").text
     assert "3:00 PM" in revised and "2:00 PM" not in revised.split("Text I would send")[0]
     world.say("DECLINE")  # Bare decline cancels the offer; it does not decline the request.
     assert world.status(request) == (CalendarStatus.PENDING_APPROVAL, 1)
-    assert world.say("YES").committed  # Normal approval again, offer is gone.
+    assert not world.say("YES").committed  # Absorbed: the owner just turned the offer down.
+    assert world.status(request) == (CalendarStatus.PENDING_APPROVAL, 1)
+    assert world.say(f"APPROVE {request[:8]}").committed  # The exact command still works.
     assert not world.store.outbox and not world.messages.calls
 
 
 def test_unrelated_message_clears_the_offer_so_a_later_yes_cannot_send_it(world: World) -> None:
     world.pending()
     world.say(ASK)
-    assert world.say("What is the weather like?").text  # Falls through to the normal path.
-    assert world.store.read_active("pilot", OWNER) is None
+    assert "I cancelled the offer to Avery Sample" in world.say("What is the weather?").text
+    assert state_of(world) == OfferState.DISCARDED
     world.say("YES")
     assert not world.store.outbox
+
+
+def test_cancelled_or_expired_offer_is_not_followed_by_approval_on_a_bare_ok(
+        world: World) -> None:
+    request = world.pending()
+    held = (CalendarStatus.PENDING_APPROVAL, 1)
+    # "No" then "ok" / "ok thanks" / "yes".
+    world.say(ASK)
+    world.say("No")
+    for reply in ("ok", "ok thanks", "yes"):
+        assert "Nothing was approved" in world.say(reply).text
+        assert world.status(request) == held
+    # A reply that is neither a send intent nor a command cancels it, then "yes".
+    world.say(ASK)
+    for phrase in ("yes send the offer", "send it now", "approve it now"):
+        world.say(ASK)
+        assert "Reply YES to send exactly that offer" in world.say(phrase).text
+        assert state_of(world) == OfferState.PROPOSED
+    world.say("What is the weather?")  # Cancels the offer.
+    assert "Nothing was approved" in world.say("yes").text
+    assert world.status(request) == held
+    # Expired, "yes", then "ok".
+    world.say(ASK)
+    world.clock[0] = NOW + timedelta(minutes=31)
+    assert "expired" in world.say("yes").text
+    assert "Nothing was approved" in world.say("ok").text
+    assert world.status(request) == held
+    assert not world.store.outbox
+    # Any other message clears it, and the exact command still approves.
+    assert world.say(f"APPROVE {request[:8]}").committed
+    assert world.status(request)[0] == CalendarStatus.CONFIRMED
+
+
+def test_repeat_yes_after_a_send_time_failure_says_it_could_not_be_sent(world: World) -> None:
+    world.pending()
+    world.say(ASK)
+    world.say("YES")
+    world.pending(THURSDAY_2PM, "client-2", "taken")
+    with pytest.raises(PermanentDeliveryFailure):
+        world.deliver()
+    reply = world.say("YES").text
+    assert "could not be sent" in reply and "already queued" not in reply
 
 
 def test_changed_request_blocks_the_send(world: World) -> None:
@@ -237,7 +286,7 @@ def test_slot_taken_after_preparing_is_refused_when_confirming(world: World) -> 
     world.pending(THURSDAY_9AM + timedelta(hours=4), "client-2", "late")  # 1 PM, overlaps.
     blocked = world.say("YES").text
     assert "I did not send it" in blocked and "not open" in blocked
-    assert not world.store.outbox and world.store.read_active("pilot", OWNER) is None
+    assert not world.store.outbox and state_of(world) == OfferState.DISCARDED
 
 
 def test_expired_confirmation_sends_nothing_and_is_not_approval(world: World) -> None:

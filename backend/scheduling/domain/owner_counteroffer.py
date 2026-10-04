@@ -74,7 +74,8 @@ REFERENCE = re.compile(r"(?<![0-9a-z])[0-9a-f]{8}(?![0-9a-z])")
 # Replies made only of these words read like approving or declining the request, so
 # while an offer is open they are never allowed to fall through to approval.
 APPROVAL_LIKE_WORDS = AFFIRMATIVE | FILLER | frozenset({
-    "approve", "approved", "send", "go", "ahead", "decline", "declined", "reject", "deny"})
+    "approve", "approved", "send", "go", "ahead", "decline", "declined", "reject", "deny",
+    "now", "offer", "text", "message", "out", "them", "her", "him", "they"})
 NO_TEXT = re.compile(
     r"(?:no|nope|nah|cancel|cancel (?:it|that|the offer)|never ?mind|don'?t send(?: it)?|"
     r"decline|declined|stop|discard)(?: please| thanks)?")
@@ -185,7 +186,11 @@ class CounterofferStore(Protocol):
         """
         ...
     def discard(self, offer: Counteroffer) -> None:
-        """PROPOSED to DISCARDED if still at ``offer.version``; otherwise a no-op."""
+        """PROPOSED to DISCARDED if still at ``offer.version``; otherwise a no-op.
+
+        The owner's active pointer stays, so the next reply is still recognised as
+        following a cancelled offer (see ``CounterofferService._answer``).
+        """
         ...
     def clear_active(self, business_id: str, owner: str, offer_id: str) -> None: ...
     def confirm(self, offer: Counteroffer, confirmed_by: str, now: datetime,
@@ -386,11 +391,14 @@ class CounterofferService:
 
     # An active offer consumes exactly the next owner message. A plain YES confirms a
     # still-proposed offer; NO discards it; a new instruction replaces it. Replies that
-    # read like approving or declining the request change nothing and explain how to
-    # approve it, so they can never approve what the owner just turned down. Only an
-    # exact "APPROVE <ref>" or "DECLINE <ref>" passes through. Any other reply cancels
-    # the offer and says so. A confirmed offer absorbs a repeated YES while its
-    # request is still pending.
+    # read like approving, declining, or sending (including "yes send the offer") change
+    # nothing and explain what to reply, so they can never approve what the owner just
+    # countered. Only an exact "APPROVE <ref>" or "DECLINE <ref>" passes through. Any
+    # other reply cancels the offer and says so.
+    # The pointer outlives the offer (confirmed, failed, cancelled, or expired) for
+    # EXPIRED_NOTICE_WINDOW: while the same request is still pending, a bare yes/ok/
+    # approval-like reply is absorbed ("nothing was approved") and writes nothing. Any
+    # other message clears the pointer.
     def _answer(self, active: Counteroffer, receipt: InboundReceipt, text: str,
                 now: datetime, pending: tuple[Appointment, ...],
                 parsed: "_Request | _Ask | None") -> "ConversationOutcome | None":
@@ -403,17 +411,23 @@ class CounterofferService:
         how = f"To approve the original request, reply APPROVE {ref}."
         still_pending = any(item.appointment_id == active.request_id
                             and item.version == active.request_version for item in pending)
-        if active.state == OfferState.CONFIRMED:
-            if active.expired(now) or not still_pending:
+        if active.state in (OfferState.CONFIRMED, OfferState.DISCARDED):
+            if not still_pending or (active.state == OfferState.CONFIRMED
+                                     and active.failure is None and active.expired(now)):
                 self._store.clear_active(active.business_id, active.owner, active.offer_id)
                 return None
-            if yes or like:
+            if yes or like or no:
+                if active.failure is not None:
+                    reason = PROBLEM_TEXT[OfferProblem(active.failure)]
+                    return ConversationOutcome(
+                        f"That offer could not be sent ({reason.rstrip('.')}), so nothing was "
+                        f"sent and nothing was approved. Tell me another time to offer. {how}")
+                if active.state == OfferState.CONFIRMED:
+                    return ConversationOutcome(
+                        "That offer was already queued, so nothing more was sent. The request "
+                        f"is still pending and was not approved. {how}")
                 return ConversationOutcome(
-                    "That offer was already queued, so nothing more was sent. The request is "
-                    f"still pending and was not approved. {how}")
-            self._store.clear_active(active.business_id, active.owner, active.offer_id)
-            return None
-        if active.state != OfferState.PROPOSED:
+                    f"Nothing was approved or sent. The request is still pending. {how}")
             self._store.clear_active(active.business_id, active.owner, active.offer_id)
             return None
         if yes:
@@ -436,6 +450,7 @@ class CounterofferService:
                 f"OK, I cancelled the offer to {self._client_name(active)}; nothing was sent. "
                 f"The request is still pending. {how}")
         if parsed is not None or EXACT_COMMAND.fullmatch((receipt.body or "").strip()):
+            self._store.clear_active(active.business_id, active.owner, active.offer_id)
             return None  # A revised instruction, or an exact approve/decline command.
         return ConversationOutcome(
             f"I cancelled the offer to {self._client_name(active)}; nothing was sent. "
@@ -616,8 +631,6 @@ class InMemoryCounterofferStore:
                     and current.version == offer.version):
                 self._offers[key] = replace(current, state=OfferState.DISCARDED,
                                             version=current.version + 1)
-            if self._active.get((offer.business_id, offer.owner)) == offer.offer_id:
-                del self._active[(offer.business_id, offer.owner)]
 
     def clear_active(self, business_id: str, owner: str, offer_id: str) -> None:
         with self._lock:

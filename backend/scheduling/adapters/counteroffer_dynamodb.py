@@ -148,7 +148,6 @@ class DynamoCounterofferStore:
         except Exception as exc:
             if not _record_transaction_conflict(exc):
                 raise
-        self.clear_active(offer.business_id, offer.owner, offer.offer_id)
 
     def clear_active(self, business_id: str, owner: str, offer_id: str) -> None:
         try:
