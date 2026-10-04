@@ -313,7 +313,7 @@ def test_dynamo_context_round_trips_without_message_text() -> None:
     context = QuestionContext(
         "pilot", OWNER, View.COUNT, date(2026, 10, 2), date(2026, 10, 2),
         frozenset({CalendarStatus.CONFIRMED}), 3, Ask.STATUS, NOW, NOW + timedelta(minutes=10),
-        2, "SM-1", "abc", "SM-2", 4)
+        2, "SM-1", "abc", "SM-2", 4, "SM-9")
     store.put_context(context)
     assert store.read_context("pilot", OWNER) == context
     assert store.read_context("pilot", "+14155550123") is None
@@ -579,3 +579,26 @@ def test_the_25_hour_fall_back_sunday_counts_one_overnight_block_once() -> None:
     week = chat.ask("What is this week looking like?").text
     assert "1 unavailable block." in week.splitlines()[0]
     assert "Mon Nov 2" not in week.splitlines()[0]
+
+
+def test_a_redelivered_asking_message_asks_again_instead_of_approving() -> None:
+    chat, request = week_with_one_pending()
+    chat.model.script["yes please"] = decision(OwnerReplyIntent.APPROVE_NAMED_REQUEST, request)
+    first = chat.ask("yes please", "SM-owner-1")
+    assert not first.committed and first.text.startswith("I wasn't sure what you meant.")
+    # The reply may never have been saved; SQS redelivers the same message.
+    again = chat.ask("yes please", "SM-owner-1")
+    assert not again.committed and again.text == first.text
+    assert status_of(chat, request) == CalendarStatus.PENDING_APPROVAL
+    approved = chat.ask("yes please", "SM-owner-2")  # A new message answers the question.
+    assert approved.committed and status_of(chat, request) == CalendarStatus.CONFIRMED
+
+
+def test_a_half_stated_model_range_asks_instead_of_reusing_the_old_range() -> None:
+    chat, request = week_with_one_pending()
+    for start, end in ((date(2026, 10, 12), None), (None, date(2026, 10, 18))):
+        chat.model.script["ok, and later"] = OwnerReplyProposal(
+            OwnerReplyIntent.CALENDAR_FOLLOWUP, None, Confidence.HIGH, None, start, end)
+        reply = chat.ask("ok, and later")
+        assert "wasn't sure" in reply.text and not reply.committed
+    assert status_of(chat, request) == CalendarStatus.PENDING_APPROVAL

@@ -68,6 +68,7 @@ class QuestionContext:
     fingerprint: str = ""  # Hash of the full entry list the offsets refer to.
     clarified_request: str = ""  # Request the assistant last asked the owner about.
     clarified_version: int = 0  # Its version when asked; approval needs the same version.
+    clarified_by: str = ""  # Inbound message that asked; its redelivery must ask again.
 
     def expired(self, now: datetime) -> bool:
         return now >= self.expires_at
@@ -301,20 +302,22 @@ class OwnerCalendarQuestions:
         return parsed is not None and parsed.fresh
 
     def mark_clarified(self, business_id: str, sender: str, now: datetime,
-                       request_id: str, version: int) -> None:
+                       request_id: str, version: int, receipt_id: str) -> None:
         """Remember the request the owner was just asked about."""
         context = self.open_context(business_id, sender, now)
         if context is not None:
             self._contexts.put_context(replace(
-                context, clarified_request=request_id, clarified_version=version))
+                context, clarified_request=request_id, clarified_version=version,
+                clarified_by=receipt_id))
 
     def apply_followup(self, business_id: str, sender: str, now: datetime, receipt_id: str,
                        statuses: frozenset[CalendarStatus] | None,
                        first: date | None, last: date | None) -> str | None:
         """Re-answer the open question with validated, model-proposed changes."""
         context = self.open_context(business_id, sender, now)
-        if context is None or (statuses is None and first is None):
-            return None
+        if context is None or (first is None) != (last is None) or (
+                first is None and statuses is None):
+            return None  # A half-stated range is a question, not a reason to reuse the old one.
         if first is not None and last is not None:
             if last < first or (last - first).days >= MAX_FOLLOW_UP_DAYS:
                 return None
@@ -392,7 +395,8 @@ class OwnerCalendarQuestions:
         self._contexts.put_context(replace(
             context, skip=following if following < len(entries) else 0, ask=None,
             expires_at=now + QUESTION_LIFETIME, page_start=skip, receipt_id=receipt_id,
-            fingerprint=fingerprint, clarified_request="", clarified_version=0))
+            fingerprint=fingerprint, clarified_request="", clarified_version=0,
+            clarified_by=""))
         return text
 
     def _items(self, business_id: str, days: list[date], zone: ZoneInfo,

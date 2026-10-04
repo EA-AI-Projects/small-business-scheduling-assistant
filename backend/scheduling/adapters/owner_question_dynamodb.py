@@ -43,7 +43,8 @@ class DynamoQuestionContexts:
             int(item["page_start"]["N"]), item.get("receipt_id", {}).get("S", ""),
             item.get("fingerprint", {}).get("S", ""),
             item.get("clarified_request", {}).get("S", ""),
-            int(item.get("clarified_version", {"N": "0"})["N"]))
+            int(item.get("clarified_version", {"N": "0"})["N"]),
+            item.get("clarified_by", {}).get("S", ""))
 
     def put_context(self, context: QuestionContext) -> None:
         item: dict[str, Any] = {
@@ -60,7 +61,7 @@ class DynamoQuestionContexts:
             item["last"] = {"S": context.last.isoformat()}
         if context.statuses:
             item["statuses"] = {"SS": sorted(status.value for status in context.statuses)}
-        for name in ("receipt_id", "fingerprint", "clarified_request"):
+        for name in ("receipt_id", "fingerprint", "clarified_request", "clarified_by"):
             if getattr(context, name):
                 item[name] = {"S": getattr(context, name)}
         if context.ask is not None:

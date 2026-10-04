@@ -630,8 +630,11 @@ class ConversationService:
         zone = ZoneInfo(policy.timezone)
         if questions.is_fresh_question(body, now.astimezone(zone).date()):
             return None  # A complete calendar question; it cannot approve anything.
+        # A redelivery of the message that asked the question must ask again: the reply
+        # to it may never have been saved, so the owner has not seen the question.
+        was_named = bool(context.clarified_request) and context.clarified_by != receipt.provider_id
         named = next((target for target in targets
-                      if target.appointment_id == context.clarified_request), None)
+                      if was_named and target.appointment_id == context.clarified_request), None)
         if self._owner_classifier is None:
             return self._ask_owner(receipt, targets, now, "I wasn't sure what you meant.")
         try:
@@ -663,7 +666,9 @@ class ConversationService:
                 action = (Action.APPROVE if proposal.intent == OwnerReplyIntent.APPROVE_NAMED_REQUEST
                           else Action.DECLINE)
                 return self._decide(receipt, named, action)
-            return self._ask_owner(receipt, targets, now, "That request may have changed.")
+            return self._ask_owner(
+                receipt, targets, now,
+                "That request may have changed." if was_named else "I wasn't sure what you meant.")
         return self._ask_owner(receipt, targets, now, "I wasn't sure what you meant.")
 
     def _pending_ref(self, business_id: str, target: Appointment, zone: ZoneInfo) -> PendingRef:
@@ -677,7 +682,8 @@ class ConversationService:
         if len(targets) == 1:
             target = targets[0]
             self._owner_questions.mark_clarified(
-                receipt.business_id, receipt.sender, now, target.appointment_id, target.version)
+                receipt.business_id, receipt.sender, now, target.appointment_id, target.version,
+                receipt.provider_id)
             return ConversationOutcome(
                 f"{lead} Do you mean approve {self._request_line(receipt.business_id, target)}, "
                 "or something about the calendar? Reply APPROVE or DECLINE to decide it, "
