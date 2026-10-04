@@ -49,7 +49,7 @@ def handler(event: dict[str, Any], _context: object) -> dict[str, list[dict[str,
             calendar, interpreter, HoldService(calendar),
             LifecycleService(calendar, clock), store, clock,
             os.environ["OWNER_NUMBER"], states,
-            OwnerCalendarQuestions(calendar, DynamoQuestionContexts(dynamo, table)),
+            owner_questions=OwnerCalendarQuestions(calendar, DynamoQuestionContexts(dynamo, table)),
         )
 
     processor = ReceiptProcessor(store, None, business_id, clock,

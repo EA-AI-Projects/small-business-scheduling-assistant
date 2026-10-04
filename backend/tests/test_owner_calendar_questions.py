@@ -68,10 +68,10 @@ class Chat:
             LifecycleService(self.store, lambda: self.now), Consent(), lambda: self.now,
             OWNER, InMemoryConversationStates())
 
-    def ask(self, body: str) -> ConversationOutcome:
+    def ask(self, body: str, provider_id: str | None = None) -> ConversationOutcome:
         self.count += 1
         return self.service.handle(InboundReceipt(
-            "pilot", f"SM-{self.count}", OWNER, "+14155550000", body, self.now,
+            "pilot", provider_id or f"SM-{self.count}", OWNER, "+14155550000", body, self.now,
             SenderRole.OWNER, None, Keyword.OTHER, True))
 
     def hold(self, client: str, start: datetime, key: str, confirm: bool = False) -> str:
@@ -139,7 +139,10 @@ def test_count_states_the_statuses_counted_and_not_counted() -> None:
     chat.hold("c2", local(10, 2, 10, 30), "d")
     chat.block(local(10, 2, 16), local(10, 2, 17), "blk")
 
-    reply = chat.ask("How many bookings do we have for Friday?")
+    # A bare "bookings" count does not say which statuses; it asks instead of choosing.
+    asked = chat.ask("How many bookings do we have for Friday?")
+    assert asked.text.startswith("For Fri Oct 2, 2026, should I count confirmed visits only")
+    reply = chat.ask("confirmed")
 
     assert reply.text == ("Fri Oct 2, 2026 (America/Los_Angeles): 2 confirmed visits counted. "
                           "Not counted: 1 pending request, 1 unavailable block.")
@@ -153,8 +156,9 @@ def test_empty_period_says_so_without_inventing_items() -> None:
     chat = Chat()
     assert chat.ask("What clients do I have tomorrow?").text == (
         "Wed Sep 30, 2026 (America/Los_Angeles): no confirmed visits or pending requests.")
-    assert chat.ask("How many bookings do we have for Friday?").text == (
-        "Fri Oct 2, 2026 (America/Los_Angeles): 0 confirmed visits counted.")
+    chat.ask("How many bookings do we have for Friday?")
+    assert chat.ask("both").text == (
+        "Fri Oct 2, 2026 (America/Los_Angeles): 0 confirmed visits, 0 pending requests counted.")
     week = chat.ask("What is next week looking like?").text
     assert week.splitlines()[0].endswith("no confirmed visits or pending requests or "
                                          "unavailable blocks.")
@@ -168,8 +172,8 @@ def test_unclear_range_or_status_gets_one_focused_question_then_the_answer() -> 
 
     assert chat.ask("How many bookings do we have?").text.startswith(
         "Which day or week do you mean?")
-    assert "Fri Oct 2, 2026 (America/Los_Angeles): 1 confirmed visit counted." in \
-        chat.ask("Friday").text
+    assert chat.ask("Friday").text.startswith("For Fri Oct 2, 2026, should I count")
+    assert "1 confirmed visit counted." in chat.ask("confirmed").text
 
     status = chat.ask("How many do we have Friday?").text
     assert status.startswith("For Fri Oct 2, 2026, should I count confirmed visits only")
@@ -261,9 +265,13 @@ def test_approval_and_decline_still_work_and_questions_change_nothing() -> None:
     request = chat.hold("c1", local(10, 1, 9), "a")
     before = chat.snapshot()
     chat.ask("What is next week looking like?")
-    chat.ask("How many bookings do we have for Thursday?")
+    chat.ask("How many pending requests do we have for Thursday?")
     assert chat.snapshot() == before
-    approved = chat.ask("Yes")
+    # Right after an answer, "Yes" could also mean something about the list: ask once.
+    asked = chat.ask("Yes")
+    assert not asked.committed and asked.text.startswith("Do you mean approve Avery Example")
+    assert chat.snapshot() == before
+    approved = chat.ask("APPROVE")
     assert approved.committed and approved.text.startswith("Approved: Avery Example")
     assert chat.store.read_appointment(request).status == CalendarStatus.CONFIRMED  # type: ignore[union-attr]
     other = chat.hold("c2", local(10, 5, 9), "b")
@@ -304,7 +312,8 @@ def test_dynamo_context_round_trips_without_message_text() -> None:
     store = DynamoQuestionContexts(Client(), "t")
     context = QuestionContext(
         "pilot", OWNER, View.COUNT, date(2026, 10, 2), date(2026, 10, 2),
-        frozenset({CalendarStatus.CONFIRMED}), 3, Ask.STATUS, NOW, NOW + timedelta(minutes=10))
+        frozenset({CalendarStatus.CONFIRMED}), 3, Ask.STATUS, NOW, NOW + timedelta(minutes=10),
+        2, "SM-1", "abc", "SM-2")
     store.put_context(context)
     assert store.read_context("pilot", OWNER) == context
     assert store.read_context("pilot", "+14155550123") is None
@@ -312,3 +321,127 @@ def test_dynamo_context_round_trips_without_message_text() -> None:
                               NOW, NOW + timedelta(minutes=10))
     store.put_context(partial)
     assert store.read_context("pilot", OWNER) == partial
+
+
+def test_bare_confirmed_after_an_answer_asks_once_and_never_approves() -> None:
+    chat = Chat()
+    chat.hold("c1", local(10, 6, 9), "a", confirm=True)
+    request = chat.hold("c2", local(10, 7, 9), "b")
+    chat.ask("What is next week looking like?")
+    pending = CalendarStatus.PENDING_APPROVAL
+
+    for word in ("confirmed", "approved", "ok"):
+        chat.ask("What is next week looking like?")
+        asked = chat.ask(word)
+        assert not asked.committed, word
+        assert asked.text.startswith("Do you mean approve Blake Sample, Wed Oct 7 at 9:00 AM"), word
+        assert "Reply APPROVE or CONFIRMED ONLY." in asked.text
+        assert chat.store.read_appointment(request).status == pending  # type: ignore[union-attr]
+    chat.ask("What is next week looking like?")
+    chat.ask("confirmed")
+    only = chat.ask("confirmed only")
+    assert "Avery Example" in only.text and "Blake Sample" not in only.text
+    assert chat.store.read_appointment(request).status == pending  # type: ignore[union-attr]
+    # A redelivery of the same bare word asks again; it never approves.
+    chat.ask("What is next week looking like?")
+    chat.ask("yes", "SM-same")
+    assert chat.ask("yes", "SM-same").text.startswith("Do you mean approve")
+    assert chat.store.read_appointment(request).status == pending  # type: ignore[union-attr]
+    # Once asked, the owner's later plain yes is their answer and approves.
+    assert chat.ask("yes").committed
+    assert chat.store.read_appointment(request).status == CalendarStatus.CONFIRMED  # type: ignore[union-attr]
+
+
+def paged_week(chat: Chat, blocks: int = 14) -> list[str]:
+    for index in range(blocks):
+        chat.block(local(10, 6, 8, 0) + timedelta(minutes=index * 30),
+                   local(10, 6, 8, 15) + timedelta(minutes=index * 30), f"b{index}")
+    return [chat.ask("What is next week looking like?").text]
+
+
+def entries_of(*pages: str) -> list[str]:
+    return [line for page in pages for line in page.splitlines()
+            if ": unavailable block" in line or "(confirmed)" in line]
+
+
+def test_more_restarts_when_the_calendar_changed_between_pages() -> None:
+    chat = Chat()
+    first = paged_week(chat)[0]
+    shown = entries_of(first)
+    # An insert changes the list the offsets refer to; MORE must restart, not skip or repeat.
+    chat.block(local(10, 6, 16), local(10, 6, 17), "inserted")
+    second = chat.ask("more").text
+    assert second.startswith("The calendar changed, so this is the updated list from the start.")
+    assert "Showing 1-" in second
+    assert len(second) <= 480 + 80
+    assert entries_of(second)[0] == shown[0]  # Starts again from the first entry.
+    assert any("4:00 PM-5:00 PM" in line for line in second.splitlines()) or "Reply MORE" in second
+
+
+def test_more_pages_through_every_entry_exactly_once_when_nothing_changed() -> None:
+    chat = Chat()
+    pages = paged_week(chat)
+    while "Reply MORE" in pages[-1]:
+        pages.append(chat.ask("more").text)
+    entries = entries_of(*pages)
+    assert len(entries) == 14 and len(set(entries)) == 14
+
+
+def test_a_cancelled_item_between_pages_restarts_instead_of_skipping() -> None:
+    chat = Chat()
+    for index in range(8):
+        chat.hold("c1" if index % 2 else "c2", local(10, 6 + index // 2, 8 + index % 2 * 4),
+                  f"h{index}", confirm=True)
+    first = chat.ask("What is next week looking like?").text
+    assert "Reply MORE" in first
+    shown = entries_of(first)
+    cancelled = shown[0]
+    ref = next(event.event_id for event in chat.store.read_calendar("pilot").events
+               if event.start_at == local(10, 6, 8))
+    LifecycleService(chat.store, lambda: chat.now).apply(AppointmentCommand(
+        "pilot", ref, "owner", ActorRole.OWNER, Action.CANCEL, "cancel-1", 2))
+    second = chat.ask("more").text
+    assert second.startswith("The calendar changed")
+    assert cancelled not in second  # Never lists the cancelled visit.
+    remaining = entries_of(second)
+    while "Reply MORE" in second:
+        second = chat.ask("more").text
+        remaining += entries_of(second)
+    assert len(remaining) == 7  # All seven current visits, none skipped.
+
+
+def test_a_redelivered_more_repeats_its_page_instead_of_skipping_one() -> None:
+    chat = Chat()
+    first = paged_week(chat)[0]
+    page_two = chat.ask("more", "SM-more")
+    again = chat.ask("more", "SM-more")  # SQS redelivery of the same message.
+    assert again.text == page_two.text
+    assert entries_of(again.text)[0] not in entries_of(first)
+    third = chat.ask("more")
+    assert entries_of(third.text)[0] not in entries_of(first, page_two.text)
+
+
+def test_week_of_the_fall_back_change_keeps_repeated_hour_entries_distinct() -> None:
+    chat = Chat()
+    chat.now = datetime(2026, 10, 27, 17, tzinfo=UTC)
+    # Sun Nov 1, 2026: clocks go back at 2:00 AM, so 1:15 AM happens twice.
+    chat.block(datetime(2026, 11, 1, 8, 15, tzinfo=UTC), datetime(2026, 11, 1, 8, 30, tzinfo=UTC), "pdt")
+    chat.block(datetime(2026, 11, 1, 9, 15, tzinfo=UTC), datetime(2026, 11, 1, 9, 30, tzinfo=UTC), "pst")
+    text = chat.ask("What is this week looking like?").text
+    assert text.splitlines()[0].startswith("Mon Oct 26 to Sun Nov 1, 2026")
+    assert "2 unavailable blocks" in text.splitlines()[0]
+    assert "Sun Nov 1, 1:15 AM PDT-1:30 AM PDT: unavailable block" in text
+    assert "Sun Nov 1, 1:15 AM PST-1:30 AM PST: unavailable block" in text
+    assert "Sat Oct 31: nothing scheduled" in text
+
+
+def test_the_25_hour_fall_back_sunday_counts_one_overnight_block_once() -> None:
+    chat = Chat()
+    chat.now = datetime(2026, 10, 27, 17, tzinfo=UTC)
+    # Midnight PDT Sunday to midnight PST Monday is 25 hours.
+    chat.block(datetime(2026, 11, 1, 7, tzinfo=UTC), datetime(2026, 11, 2, 8, tzinfo=UTC), "long")
+    sunday = chat.ask("What do I have on 2026-11-01?").text
+    assert "Sun Nov 1, from 12:00 AM PDT to Mon Nov 2 12:00 AM: unavailable block" in sunday
+    week = chat.ask("What is this week looking like?").text
+    assert "1 unavailable block." in week.splitlines()[0]
+    assert "Mon Nov 2" not in week.splitlines()[0]

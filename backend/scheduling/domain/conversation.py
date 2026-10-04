@@ -576,13 +576,20 @@ class ConversationService:
         """Read-only calendar questions; an open clarifying question gets the first look."""
         questions, body = self._owner_questions, receipt.body or ""
         if questions.awaiting_answer(receipt.business_id, receipt.sender, now):
-            text = questions.answer(receipt.business_id, receipt.sender, body, now)
+            text = questions.answer(receipt.business_id, receipt.sender, body, now,
+                                    receipt.provider_id)
             if text is not None:
                 return ConversationOutcome(text)
+        if len(targets) == 1 and questions.needs_approval_check(
+                receipt.business_id, receipt.sender, body, now, receipt.provider_id):
+            return ConversationOutcome(
+                f"Do you mean approve {self._request_line(receipt.business_id, targets[0])}, "
+                "or show only confirmed visits? Reply APPROVE or CONFIRMED ONLY.")
         reply = self._owner_reply(receipt, targets)
         if reply is not None:
             return reply
-        text = questions.answer(receipt.business_id, receipt.sender, body, now)
+        text = questions.answer(receipt.business_id, receipt.sender, body, now,
+                                receipt.provider_id)
         return ConversationOutcome(text) if text is not None else None
 
     def _owner_reply(self, receipt: InboundReceipt,

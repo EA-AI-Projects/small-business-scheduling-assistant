@@ -39,12 +39,16 @@ class DynamoQuestionContexts:
             if "statuses" in item else None,
             int(item["skip"]["N"]), Ask(item["ask"]["S"]) if "ask" in item else None,
             datetime.fromisoformat(item["created_at"]["S"]),
-            datetime.fromisoformat(item["expires_at"]["S"]))
+            datetime.fromisoformat(item["expires_at"]["S"]),
+            int(item["page_start"]["N"]), item.get("receipt_id", {}).get("S", ""),
+            item.get("fingerprint", {}).get("S", ""),
+            item.get("clarified_receipt", {}).get("S", ""))
 
     def put_context(self, context: QuestionContext) -> None:
         item: dict[str, Any] = {
             **self._key(context.business_id, context.sender),
             "view": {"S": context.view.value}, "skip": {"N": str(context.skip)},
+            "page_start": {"N": str(context.page_start)},
             "created_at": {"S": context.created_at.isoformat()},
             "expires_at": {"S": context.expires_at.isoformat()},
             "expires_at_epoch": {"N": str(int(context.expires_at.timestamp()))},
@@ -54,6 +58,9 @@ class DynamoQuestionContexts:
             item["last"] = {"S": context.last.isoformat()}
         if context.statuses:
             item["statuses"] = {"SS": sorted(status.value for status in context.statuses)}
+        for name in ("receipt_id", "fingerprint", "clarified_receipt"):
+            if getattr(context, name):
+                item[name] = {"S": getattr(context, name)}
         if context.ask is not None:
             item["ask"] = {"S": context.ask.value}
         self._client.put_item(TableName=self._table, Item=item)

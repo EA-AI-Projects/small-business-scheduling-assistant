@@ -12,6 +12,7 @@ import threading
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
+from hashlib import sha256
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
@@ -23,7 +24,7 @@ from scheduling.domain.conversation_state import clock_text, day_text, normalize
 
 QUESTION_LIFETIME = timedelta(minutes=30)
 ASK_LIFETIME = timedelta(minutes=10)  # An unanswered clarifying question goes stale sooner.
-MAX_REPLY_LENGTH = 480  # About three SMS segments; longer answers are paged, never cut.
+MAX_REPLY_LENGTH = 480  # Three GSM-7 segments (160 each); longer answers are paged, never cut.
 FOOTER_ROOM = 60
 MAX_NAME_LENGTH = 60
 MAX_FOLLOW_UP_WORDS = 8
@@ -61,6 +62,10 @@ class QuestionContext:
     ask: Ask | None
     created_at: datetime
     expires_at: datetime
+    page_start: int = 0  # Offset of the page last sent, so a redelivered MORE repeats it.
+    receipt_id: str = ""  # The inbound message that produced that page.
+    fingerprint: str = ""  # Hash of the full entry list the offsets refer to.
+    clarified_receipt: str = ""  # Message that was asked "approve or show confirmed only?".
 
     def expired(self, now: datetime) -> bool:
         return now >= self.expires_at
@@ -114,7 +119,7 @@ SUBJECT = re.compile(
     r"calendar|agenda|looking like|look like|booked|blocks?|blocked|unavailable|pending|"
     r"have|on the books|on my plate|coming|scheduled)\b")
 STATUS_PENDING = re.compile(r"\b(?:pending|requests?|awaiting|unconfirmed|holds?)\b")
-STATUS_CONFIRMED = re.compile(r"\b(?:confirmed|approved)\b")
+STATUS_CONFIRMED = re.compile(r"\bconfirmed\b")
 STATUS_BLOCK = re.compile(r"\b(?:blocks?|blocked|unavailable|time off)\b")
 STATUS_ALL = re.compile(r"\b(?:all|everything)\b")
 STATUS_BOTH = re.compile(r"\bboth\b")
@@ -124,6 +129,7 @@ GENERIC_BOOKING = re.compile(
 CLIENT_QUESTION = re.compile(r"\b(?:who|clients?|customers?|names?)\b")
 BREAKDOWN = re.compile(r"\bby day\b|\bbreak ?down\b|\bdaily\b|\beach day\b")
 MORE = re.compile(r"(?:more|show more|next|continue|the rest|rest)")
+AMBIGUOUS_REPLY = re.compile(r"(?:confirmed|confirm|approved|yes|y|yep|yeah|ok|okay|sure)")
 FOLLOW_UP_FILLER = frozenset({
     "what", "whats", "what's", "about", "and", "how", "the", "only", "just", "include",
     "including", "also", "with", "without", "for", "on", "in", "please", "then", "ok",
@@ -215,9 +221,7 @@ def _statuses(text: str, view: View | None) -> frozenset[CalendarStatus] | None:
         return ALL_STATUSES
     if view == View.CLIENTS:
         return frozenset({CONFIRMED, PENDING})
-    if GENERIC_BOOKING.search(text):
-        return frozenset({CONFIRMED})  # "bookings", "visits": see the open question on counts.
-    return None
+    return None  # A count of "bookings" does not say which statuses; the caller asks.
 
 
 def _view_of(text: str) -> View:
@@ -255,8 +259,7 @@ def parse(body: str, today: date, has_context: bool) -> ParsedQuestion | None:
         return None
     wants_count = "how many" in text
     wants_clients = bool(re.search(r"\b(?:who|names?|clients?)\b", text))
-    named = _named_statuses(text) or (
-        frozenset({CONFIRMED}) if GENERIC_BOOKING.search(text) else None)
+    named = _named_statuses(text)
     if not (ranges or named or wants_count or wants_clients or BREAKDOWN.search(text)):
         return None
     follow_view: View | None = (
@@ -286,7 +289,26 @@ class OwnerCalendarQuestions:
         context = self._contexts.read_context(business_id, sender)
         return context is not None and context.ask is not None and not context.expired(now)
 
-    def answer(self, business_id: str, sender: str, body: str, now: datetime) -> str | None:
+    def needs_approval_check(self, business_id: str, sender: str, body: str,
+                             now: datetime, receipt_id: str) -> bool:
+        """True once per question when a bare approval-like word could mean either thing.
+
+        "confirmed" can mean "show only confirmed visits" and "yes" can mean "approve",
+        so after a calendar answer the owner is asked which, once.
+        """
+        context = self._contexts.read_context(business_id, sender)
+        if (context is None or context.expired(now)
+                or AMBIGUOUS_REPLY.fullmatch(normalized(body)) is None):
+            return False
+        if context.clarified_receipt:
+            # Asked once already; a redelivery of that same message asks again, but a
+            # later reply is the owner's answer to the question.
+            return context.clarified_receipt == receipt_id
+        self._contexts.put_context(replace(context, clarified_receipt=receipt_id))
+        return True
+
+    def answer(self, business_id: str, sender: str, body: str, now: datetime,
+               receipt_id: str = "") -> str | None:
         """Reply text for a calendar question, or None if the text is not one."""
         policy = self._repository.read_policy(business_id)
         zone = ZoneInfo(policy.timezone)
@@ -303,10 +325,14 @@ class OwnerCalendarQuestions:
             assert context is not None
             if context.ask is not None or context.first is None or context.last is None:
                 return None
-            if context.skip == 0:
+            # A redelivered MORE repeats its page instead of advancing past it.
+            retry = bool(receipt_id) and context.receipt_id == receipt_id
+            if context.skip == 0 and not retry:
                 return (f"That was everything for {_span_text(context.first, context.last)}; "
                         "nothing more to show.")
-            return self._reply(context, now, policy, zone, context.skip)
+            return self._reply(context, now, policy, zone,
+                               context.page_start if retry else context.skip, receipt_id,
+                               resume=True)
         base = context if not parsed.fresh else None
         view = parsed.view or (base.view if base is not None else View.SUMMARY)
         first, last = parsed.first, parsed.last
@@ -328,19 +354,25 @@ class OwnerCalendarQuestions:
                 draft, ask=Ask.STATUS, expires_at=now + ASK_LIFETIME))
             return (f"For {_span_text(first, last)}, should I count confirmed visits only, "
                     "pending requests only, or both? Reply confirmed, pending, or both.")
-        return self._reply(draft, now, policy, zone, 0)
+        return self._reply(draft, now, policy, zone, 0, receipt_id)
 
     def _reply(self, context: QuestionContext, now: datetime, policy: AvailabilityPolicy,
-               zone: ZoneInfo, skip: int) -> str:
+               zone: ZoneInfo, skip: int, receipt_id: str, resume: bool = False) -> str:
         assert context.first is not None and context.last is not None
         days = _days(context.first, context.last)
         items = self._items(context.business_id, days, zone, now)
         header, entries = _render(context, days, items, zone, policy.timezone)
+        fingerprint = sha256("\n".join(entries).encode()).hexdigest()
+        if resume and fingerprint != context.fingerprint:
+            # Offsets into the old list could skip or repeat entries, so start over.
+            skip = 0
+            header = f"The calendar changed, so this is the updated list from the start. {header}"
         text, shown = _page(header, entries, skip)
         following = skip + shown
         self._contexts.put_context(replace(
             context, skip=following if following < len(entries) else 0, ask=None,
-            expires_at=now + QUESTION_LIFETIME))
+            expires_at=now + QUESTION_LIFETIME, page_start=skip, receipt_id=receipt_id,
+            fingerprint=fingerprint, clarified_receipt=""))
         return text
 
     def _items(self, business_id: str, days: list[date], zone: ZoneInfo,
@@ -390,22 +422,31 @@ def _label(item: _Item) -> str:
         return "unavailable block"
     name = item.name if item.name is not None else "client record not found"
     if len(name) > MAX_NAME_LENGTH:
-        name = name[:MAX_NAME_LENGTH - 1] + "…"
+        name = name[:MAX_NAME_LENGTH - 3] + "..."
     if event.status == PENDING:
         return f"{name} (pending, ref {event.event_id[:8]})"
     return f"{name} (confirmed)"
 
 
+def _clock(instant: datetime, zone: ZoneInfo, tag: bool) -> str:
+    """Clock time; on a daylight-saving change day also the zone, since a time can repeat."""
+    text = clock_text(instant, zone)
+    return f"{text} {instant.astimezone(zone).strftime('%Z')}" if tag else text
+
+
 def _item_line(day: date, item: _Item, zone: ZoneInfo) -> str:
     event = item.event
     start, end = event.start_at.astimezone(zone), event.end_at.astimezone(zone)
+    midnight = datetime.combine(day, time.min, tzinfo=zone)
+    following = datetime.combine(day + timedelta(days=1), time.min, tzinfo=zone)
+    tag = midnight.utcoffset() != following.utcoffset()
     if start.date() != day:
-        span = f"until {clock_text(event.end_at, zone)}"
+        span = f"until {_clock(event.end_at, zone, tag)}"
     elif end.date() != day:
-        span = (f"from {clock_text(event.start_at, zone)} to {day_text(end.date())} "
+        span = (f"from {_clock(event.start_at, zone, tag)} to {day_text(end.date())} "
                 f"{clock_text(event.end_at, zone)}")
     else:
-        span = f"{clock_text(event.start_at, zone)}-{clock_text(event.end_at, zone)}"
+        span = f"{_clock(event.start_at, zone, tag)}-{_clock(event.end_at, zone, tag)}"
     return f"{day_text(day)}, {span}: {_label(item)}"
 
 
