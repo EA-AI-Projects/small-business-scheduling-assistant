@@ -196,7 +196,8 @@ def test_asking_how_to_approve_is_explained_by_the_model_verdict() -> None:
     chat, request = one_pending()
     chat.model.script["how do I approve these?"] = proposal(OwnerReplyIntent.HOW_TO)
     reply = chat.ask("how do I approve these?")
-    assert "APPROVE or DECLINE with the request reference" in reply.text
+    assert "reply APPROVE or DECLINE with its reference" in reply.text
+    assert "YES / NO" not in reply.text
     assert "I can answer calendar questions" in reply.text
     assert chat.status(request) == CalendarStatus.PENDING_APPROVAL
 
@@ -343,7 +344,13 @@ def test_an_awaited_clarifying_answer_is_taken_before_the_model_or_the_offer_hoo
 def test_a_request_arriving_while_an_offer_waits_changes_nothing_about_the_offer() -> None:
     chat, request = one_pending()
     chat.ask(ASK)
+    chat.now += timedelta(minutes=1)
     other = chat.hold("c2", local(10, 2, 9), "arrives-later")
+    # The new request's notification is now the latest message, so YES is not trusted to mean
+    # the old offer: the draft is shown again and nothing is sent.
+    again = chat.ask("YES")
+    assert "new request arrived" in again.text and "Text I would send" in again.text
+    assert not chat.offers.outbox and chat.offer_state() == OfferState.PROPOSED
     sent = chat.ask("YES")
     assert sent.text.startswith("Queued the offer") and not sent.committed
     assert chat.status(request) == CalendarStatus.PENDING_APPROVAL
@@ -537,3 +544,126 @@ def test_a_model_context_is_bounded_and_has_no_phone_numbers_or_full_names() -> 
     assert [(item.client, item.when) for item in context.pending] == [
         ("Avery", "Thu Oct 1 at 9:00 AM")]
     assert "Example" not in repr(context) and "+1415" not in repr(context)
+
+
+# --- Review round 1 (#177) ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("phrase", [
+    "Don't decline it yet", "no, do not decline", "No problem", "No", "cancel", "nope",
+    "Yes, decline it", "wait, don't reject that"])
+def test_a_model_decline_needs_an_explicit_decline_word_and_no_negator(phrase: str) -> None:
+    chat, request = one_pending()
+    chat.model.script[phrase] = proposal(DECLINE, request)
+    reply = chat.ask(phrase)
+    assert not reply.committed and chat.status(request) == CalendarStatus.PENDING_APPROVAL
+
+
+@pytest.mark.parametrize("phrase", ["decline it", "Please decline", "reject that one"])
+def test_a_clear_model_decline_still_declines_the_single_request(phrase: str) -> None:
+    chat, request = one_pending()
+    chat.model.script[phrase] = proposal(DECLINE, request)
+    assert chat.ask(phrase).committed
+    assert chat.status(request) == CalendarStatus.DECLINED
+
+
+def test_a_bare_no_cancels_an_open_offer_but_never_declines_a_request() -> None:
+    chat, request = one_pending()
+    chat.model.hostile = True
+    chat.ask(ASK)
+    assert "I cancelled the offer" in chat.ask("No").text
+    assert chat.status(request) == CalendarStatus.PENDING_APPROVAL
+
+
+def test_help_text_never_advertises_no_as_a_decline() -> None:
+    chat, _request = one_pending()
+    reply = chat.ask("hello there").text
+    assert "NO" not in reply and "YES / NO" not in reply
+
+
+def test_a_clarifying_question_that_outlives_its_conversation_still_gates_approval() -> None:
+    chat, request = one_pending()
+    chat.model.hostile = True
+    chat.ask(WEEK)
+    chat.now += timedelta(minutes=29, seconds=20)
+    first = chat.ask("yes please", state="PENDING")  # Asks; its reply is not sent.
+    assert not first.committed
+    chat.now += timedelta(seconds=40)  # The calendar conversation has now expired.
+    assert chat.service._owner_questions.open_context("pilot", OWNER, chat.now) is None
+    again = chat.ask("yes please")
+    assert not again.committed and chat.status(request) == CalendarStatus.PENDING_APPROVAL
+    assert chat.ask("yes please").committed  # The re-ask was sent, so this one answers it.
+
+
+def test_a_failed_question_followed_by_a_resend_after_half_an_hour_does_not_approve() -> None:
+    chat, request = one_pending()
+    chat.model.hostile = True
+    chat.ask(WEEK)
+    chat.ask("ok", state="FAILED")
+    chat.now += timedelta(minutes=31)
+    assert not chat.ask("yes please").committed
+    assert chat.status(request) == CalendarStatus.PENDING_APPROVAL
+    assert chat.ask("yes please").committed
+
+
+def test_question_names_x_then_x_is_declined_and_y_arrives_then_yes_does_not_approve_y() -> None:
+    chat, request_x = one_pending()
+    chat.model.hostile = True
+    chat.model.script["ok"] = UNCLEAR
+    chat.ask("ok")  # No calendar conversation: the question still names X.
+    LifecycleService(chat.store, lambda: chat.now).apply(AppointmentCommand(
+        "pilot", request_x, "owner", ActorRole.OWNER, Action.DECLINE, "gone", 1))
+    request_y = chat.hold("c2", local(10, 8, 9), "y")
+    reply = chat.ask("yes")
+    assert not reply.committed and "Blake Sample" in reply.text
+    assert chat.status(request_y) == CalendarStatus.PENDING_APPROVAL
+    assert chat.ask("yes").committed  # Now the question named Y and was sent.
+    assert chat.status(request_y) == CalendarStatus.CONFIRMED
+
+
+def test_a_sent_question_that_lapsed_no_longer_gates_a_plain_yes() -> None:
+    chat, request = one_pending()
+    chat.model.hostile = True
+    chat.model.script["ok"] = UNCLEAR
+    chat.ask("ok")
+    chat.now += timedelta(minutes=31)
+    assert chat.ask("yes").committed and chat.status(request) == CalendarStatus.CONFIRMED
+
+
+def test_which_day_or_week_can_be_answered_with_a_bare_range() -> None:
+    chat = Chat()
+    chat.hold("c1", local(10, 6, 9), "a")
+    chat.model.script["how busy am I?"] = proposal(OwnerReplyIntent.CALENDAR_QUESTION)
+    assert chat.ask("how busy am I?").text.startswith("Which day or week")
+    answer = chat.ask("next week")
+    assert "Mon Oct 5 to Sun Oct 11" in answer.text or "confirmed visits only" in answer.text
+    assert "approve" not in answer.text.lower()
+
+
+def test_how_to_with_a_live_offer_does_not_give_competing_yes_instructions() -> None:
+    chat, _request = one_pending()
+    chat.ask(ASK)
+    chat.model.script["help"] = proposal(OwnerReplyIntent.HOW_TO)
+    text = chat.ask("help").text
+    assert text.count("reply YES") == 1 and "YES / NO" not in text
+
+
+def test_a_paged_calendar_answer_with_a_live_offer_uses_the_short_reminder() -> None:
+    chat = Chat()
+    request = chat.hold("c1", local(10, 1, 9), "a")
+    chat.ask(ASK)
+    from scheduling.domain.owner_calendar import (
+        OwnerAction,
+        OwnerCalendarCommand,
+        OwnerCalendarService,
+    )
+    for day in range(5, 10):
+        for hour in (8, 11, 14):
+            OwnerCalendarService(chat.store, lambda: chat.now).apply(OwnerCalendarCommand(
+                "pilot", "owner", f"b{day}{hour}", OwnerAction.CREATE_BLOCK,
+                chat.store.read_revision("pilot"), start_at=local(10, day, hour),
+                end_at=local(10, day, hour + 1)))
+    reply = chat.ask(WEEK).text
+    assert "Reply MORE for the rest." in reply and "still waits for YES or NO" in reply
+    assert "reply YES to send it or NO" not in reply
+    assert chat.status(request) == CalendarStatus.PENDING_APPROVAL

@@ -473,8 +473,33 @@ class CounterofferService:
         name = self._client_name(offer).split()
         return (name[0] if name else "client", when_text(offer.proposed_start, zone))
 
+    def short_reminder(self, offer: Counteroffer) -> str:
+        zone = ZoneInfo(self._repository.read_policy(offer.business_id).timezone)
+        return (f"(Your offer to {self._client_name(offer)} for "
+                f"{when_text(offer.proposed_start, zone)} still waits for YES or NO.)")
+
+    def _newer_request(self, offer: Counteroffer, pending: tuple[Appointment, ...]) -> bool:
+        """A request arrived after the offer was drafted: the owner may mean that one."""
+        minutes = timedelta(minutes=self._repository.read_policy(offer.business_id).hold_minutes)
+        return any(item.appointment_id != offer.request_id and item.hold_expires_at is not None
+                   and item.hold_expires_at - minutes > offer.created_at for item in pending)
+
+    def _reprompt(self, offer: Counteroffer, receipt: InboundReceipt,
+                  now: datetime) -> "ConversationOutcome":
+        """Show the draft again as the latest message instead of sending it on a stale YES."""
+        from scheduling.domain.conversation import ConversationOutcome
+
+        fresh = replace(offer, offer_id=offer_id_for(receipt.business_id, receipt.provider_id),
+                        version=1, created_at=now, expires_at=now + CONFIRMATION_LIFETIME)
+        self._store.discard(offer)
+        if not self._store.put_draft(fresh):
+            return ConversationOutcome(_HANDLED)
+        return ConversationOutcome(
+            "A new request arrived after I drafted this offer, so I did not send it yet. "
+            + self._prompt(fresh, receipt.business_id))
+
     def confirm_offer(self, offer: Counteroffer, receipt: InboundReceipt,
-                      now: datetime) -> "ConversationOutcome":
+                      now: datetime, pending: tuple[Appointment, ...]) -> "ConversationOutcome":
         """Send the reviewed offer; rechecked exactly like a plain YES."""
         from scheduling.domain.conversation import ConversationOutcome
 
@@ -484,6 +509,8 @@ class CounterofferService:
                 "That offer expired after 30 minutes, so nothing was sent and the request was "
                 "not approved. Tell me the time to offer and I'll prepare it again. "
                 f"To approve the original request, reply APPROVE {offer.request_id[:8]}.")
+        if self._newer_request(offer, pending):
+            return self._reprompt(offer, receipt, now)
         return self._confirm(offer, receipt, now)
 
     def cancel_offer(self, offer: Counteroffer) -> "ConversationOutcome":
@@ -550,6 +577,8 @@ class CounterofferService:
                 return ConversationOutcome(
                     "That offer expired after 30 minutes, so nothing was sent and the request "
                     f"was not approved. Tell me the time to offer and I'll prepare it again. {how}")
+            if self._newer_request(active, pending):
+                return self._reprompt(active, receipt, now)
             return self._confirm(active, receipt, now)
         if no:
             self._store.discard(active)

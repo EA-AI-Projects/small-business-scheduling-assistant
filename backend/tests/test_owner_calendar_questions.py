@@ -412,9 +412,9 @@ def test_an_approval_needs_the_request_to_have_been_named_first() -> None:
 def test_a_correct_decline_after_the_request_was_named_declines_it() -> None:
     chat, request = week_with_one_pending()
     chat.ask("ok")  # Unclear: asks, naming the request.
-    chat.model.script["no thanks, decline it"] = decision(
+    chat.model.script["decline it please"] = decision(
         OwnerReplyIntent.DECLINE_NAMED_REQUEST, request)
-    declined = chat.ask("no thanks, decline it")
+    declined = chat.ask("decline it please")
     assert declined.committed and declined.text.startswith("Declined: Blake Sample")
     assert status_of(chat, request) == CalendarStatus.DECLINED
 

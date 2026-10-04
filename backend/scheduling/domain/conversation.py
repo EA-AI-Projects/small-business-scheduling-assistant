@@ -57,6 +57,7 @@ from scheduling.domain.lifecycle import (
     StaleVersion,
 )
 from scheduling.domain.owner_calendar_questions import (
+    CLARIFICATION_LIFETIME,
     OwnerCalendarQuestions,
     ReplyLookup,
     last_answered_at,
@@ -676,7 +677,10 @@ class ConversationService:
         if self._counteroffers is None or view is None:
             return ConversationOutcome(text)
         if view.live:
-            return ConversationOutcome(f"{text} {self._counteroffers.reminder(view.offer)}")
+            # Do not stack a long reminder under "Reply MORE": two competing instructions.
+            note = (self._counteroffers.short_reminder(view.offer) if "Reply MORE" in text
+                    else self._counteroffers.reminder(view.offer))
+            return ConversationOutcome(f"{text} {note}")
         self._counteroffers.settle(view)
         return ConversationOutcome(text)
 
@@ -697,17 +701,28 @@ class ConversationService:
         live = view is not None and view.live
         calendar_last = context is not None and (
             view is None or not view.live or last_answered_at(context) > view.offer.created_at)
-        # A request counts as named only once the question's reply was SENT, and only for a
-        # message our webhook received after that send. A redelivery of the asking message,
-        # an earlier message, a pending or failed question, or a lookup error all ask again.
-        was_named = (
-            context is not None and bool(context.clarified_request)
-            and context.clarified_by != receipt.provider_id
-            and context.clarified_at is not None and receipt.received_at > context.clarified_at
-            and self._question_was_sent_before(receipt, context.clarified_by))
-        named = next((target for target in targets
-                      if was_named and context is not None
-                      and target.appointment_id == context.clarified_request), None)
+        # The assistant's last clarifying question about a request, even one asked in a calendar
+        # conversation that has since expired. A request counts as named only once that
+        # question's reply was SENT, for a message our webhook received after the send, within
+        # CLARIFICATION_LIFETIME of it, and not superseded by a later calendar answer. An unsent,
+        # failed, unsaved, redelivered, or earlier-received question, or a lookup error, keeps
+        # approvals blocked (the question is asked again); only a sent one that lapsed is ignored.
+        asked = questions.read_clarification(receipt.business_id, receipt.sender, now)
+        was_named = False
+        asking = False
+        named = None
+        if asked is not None and asked.clarified_at is not None:
+            sent_at = self._question_sent_at(receipt, asked.clarified_by)
+            if (sent_at is None or asked.clarified_by == receipt.provider_id
+                    or receipt.received_at <= sent_at or receipt.received_at <= asked.clarified_at
+                    or (context is not None and asked.clarified_at < last_answered_at(context))):
+                asking = True
+            elif now < sent_at + CLARIFICATION_LIFETIME:
+                asking = was_named = True
+                named = next((target for target in targets
+                              if target.appointment_id == asked.clarified_request
+                              and target.version == asked.clarified_version), None)
+        gated = context is not None or asking
         if view is not None and view.live:
             kind = "offer_with_calendar_answer" if calendar_last else "offer_prompt"
         elif view is not None:
@@ -751,12 +766,10 @@ class ConversationService:
                 # only an exact APPROVE <ref> does.
                 return unsure("That reply doesn't approve or decline the request.")
             approving = intent == OwnerReplyIntent.APPROVE_NAMED_REQUEST
-            candidate = named if context is not None else (
-                targets[0] if len(targets) == 1 else None)
+            candidate = named if gated else (targets[0] if len(targets) == 1 else None)
             reference = (proposal.request_reference or "").lower()
             if (candidate is not None and len(targets) == 1 and len(reference) >= 8
                     and candidate.appointment_id.startswith(reference)
-                    and (context is None or candidate.version == context.clarified_version)
                     and (supports_approval(body) if approving else supports_decline(body))):
                 return self._decide(receipt, candidate,
                                     Action.APPROVE if approving else Action.DECLINE)
@@ -765,7 +778,7 @@ class ConversationService:
         if intent == OwnerReplyIntent.CONFIRM_OFFER:
             if (offers is not None and view is not None and live and kind == "offer_prompt"
                     and supports_offer_send(body)):
-                return offers.confirm_offer(view.offer, receipt, now)
+                return offers.confirm_offer(view.offer, receipt, now, targets)
             return unsure("I wasn't sure what you meant.")
         if intent == OwnerReplyIntent.CANCEL_OFFER:
             if offers is not None and view is not None and live and supports_offer_cancel(body):
@@ -779,7 +792,7 @@ class ConversationService:
                 return self._calendar_reply(text, view)
             return unsure("I wasn't sure what you meant.")
         if intent in (OwnerReplyIntent.HOW_TO, OwnerReplyIntent.CALENDAR_QUESTION):
-            return self._explain(receipt.business_id, targets, view,
+            return self._explain(receipt.business_id, receipt.sender, now, targets, view,
                                  intent == OwnerReplyIntent.CALENDAR_QUESTION)
         return unsure("I wasn't sure what you meant.")
 
@@ -788,31 +801,32 @@ class ConversationService:
         client, when = self._counteroffers.offer_line(view.offer)
         return PendingRef(view.offer.request_id[:8], client, when)
 
-    def _explain(self, business_id: str, targets: tuple[Appointment, ...],
-                 view: "OfferView | None", calendar_question: bool) -> ConversationOutcome:
+    def _explain(self, business_id: str, sender: str, now: datetime,
+                 targets: tuple[Appointment, ...], view: "OfferView | None",
+                 calendar_question: bool) -> ConversationOutcome:
         """Capability help, only when the owner asked for it. Writes nothing."""
         if calendar_question:
-            text = ("Which day or week do you mean? For example: tomorrow, Friday, this week, "
-                    "next week, or a date like 2026-10-09.")
+            text = self._owner_questions.ask_range(business_id, sender, now)
         else:
-            decide = ("To approve or decline, reply APPROVE or DECLINE with the request "
-                      "reference" + (", or YES / NO when only one request is pending"
-                                     if len(targets) == 1 else "") + ".")
-            text = (f"{self._pending_summary(business_id, targets, False)} {decide} "
-                    f"{CAPABILITIES}")
+            decide = ("To approve or decline a request, reply APPROVE or DECLINE with its "
+                      "reference.")
+            summary = ("" if view is not None and view.live
+                       else f"{self._pending_summary(business_id, targets, False)} ")
+            text = f"{summary}{decide} {CAPABILITIES}"
         if view is not None and view.live and self._counteroffers is not None:
             text = f"{text} {self._counteroffers.reminder(view.offer)}"
         return ConversationOutcome(text)
 
-    def _question_was_sent_before(self, receipt: InboundReceipt, asked_by: str) -> bool:
+    def _question_sent_at(self, receipt: InboundReceipt, asked_by: str) -> datetime | None:
+        """When the saved reply to ``asked_by`` was sent; None unless it surely was."""
         if self._reply_lookup is None:
-            return False
+            return None
         try:
             saved = self._reply_lookup.read_reply_text(receipt.business_id, asked_by)
             sent_at = self._reply_lookup.read_reply_sent_at(receipt.business_id, asked_by)
         except Exception:  # noqa: BLE001 - any lookup failure must fail closed
-            return False
-        return saved is not None and sent_at is not None and receipt.received_at > sent_at
+            return None
+        return sent_at if saved is not None else None
 
     def _pending_ref(self, business_id: str, target: Appointment, zone: ZoneInfo) -> PendingRef:
         profile = self._repository.read_profile(business_id, target.client_id)

@@ -23,6 +23,10 @@ from scheduling.domain.client_records import ClientProfile
 from scheduling.domain.conversation_state import clock_text, day_text, normalized
 
 QUESTION_LIFETIME = timedelta(minutes=30)
+# A clarifying question about a named request: a reply to it counts for this long after it was
+# sent. An unsent one blocks approvals for the longer retention, so a resend cannot skip it.
+CLARIFICATION_LIFETIME = timedelta(minutes=30)
+CLARIFICATION_RETENTION = timedelta(hours=24)
 ASK_LIFETIME = timedelta(minutes=10)  # An unanswered clarifying question goes stale sooner.
 MAX_REPLY_LENGTH = 480  # Three GSM-7 segments (160 each); longer answers are paged, never cut.
 FOOTER_ROOM = 60
@@ -41,9 +45,12 @@ NOUNS = {CONFIRMED: ("confirmed visit", "confirmed visits"),
 
 
 def last_answered_at(context: "QuestionContext") -> datetime:
-    """When the assistant last spoke in this calendar conversation (its lifetime is renewed
-    on every answer), so it can be compared with a later message such as an offer prompt."""
-    return context.expires_at - (QUESTION_LIFETIME if context.ask is None else ASK_LIFETIME)
+    """When the assistant last spoke in this calendar conversation."""
+    return context.answered_at if context.answered_at is not None else context.created_at
+
+
+RANGE_QUESTION = ("Which day or week do you mean? For example: tomorrow, Friday, "
+                  "this week, next week, or a date like 2026-10-09.")
 
 
 class View(StrEnum):
@@ -76,6 +83,7 @@ class QuestionContext:
     clarified_version: int = 0  # Its version when asked; approval needs the same version.
     clarified_by: str = ""  # Inbound message that asked; its redelivery must ask again.
     clarified_at: datetime | None = None  # When it asked (our clock); answers must be later.
+    answered_at: datetime | None = None  # When the assistant last answered or asked a range.
 
     def expired(self, now: datetime) -> bool:
         return now >= self.expires_at
@@ -319,14 +327,39 @@ class OwnerCalendarQuestions:
         parsed = parse(body, today, False)
         return parsed is not None and parsed.fresh
 
+    def read_clarification(self, business_id: str, sender: str,
+                           now: datetime) -> QuestionContext | None:
+        """The stored record of the last clarifying question about a request, if it has not
+        lapsed on its own. It outlives the calendar conversation it was asked in."""
+        context = self._contexts.read_context(business_id, sender)
+        if (context is None or not context.clarified_request or context.clarified_at is None
+                or now >= context.clarified_at + CLARIFICATION_RETENTION):
+            return None
+        return context
+
     def mark_clarified(self, business_id: str, sender: str, now: datetime,
                        request_id: str, version: int, receipt_id: str) -> None:
-        """Remember the request the owner was just asked about."""
-        context = self.open_context(business_id, sender, now)
-        if context is not None:
-            self._contexts.put_context(replace(
-                context, clarified_request=request_id, clarified_version=version,
-                clarified_by=receipt_id, clarified_at=now))
+        """Remember the request the owner was just asked about, with or without an open
+        calendar conversation (an expired or missing one is kept closed)."""
+        context = self._contexts.read_context(business_id, sender)
+        if context is None:
+            context = QuestionContext(business_id, sender, View.SUMMARY, None, None, None, 0,
+                                      None, now, now, answered_at=now)
+        self._contexts.put_context(replace(
+            context, clarified_request=request_id, clarified_version=version,
+            clarified_by=receipt_id, clarified_at=now))
+
+    def ask_range(self, business_id: str, sender: str, now: datetime) -> str:
+        """Ask which day or week, so a bare "next week" answers it."""
+        stored = self._contexts.read_context(business_id, sender)
+        draft = QuestionContext(business_id, sender, View.SUMMARY, None, None, None, 0,
+                                Ask.RANGE, now, now + ASK_LIFETIME, answered_at=now)
+        if stored is not None:  # Keep any open clarifying question about a request.
+            draft = replace(draft, clarified_request=stored.clarified_request,
+                            clarified_version=stored.clarified_version,
+                            clarified_by=stored.clarified_by, clarified_at=stored.clarified_at)
+        self._contexts.put_context(draft)
+        return RANGE_QUESTION
 
     def apply_followup(self, business_id: str, sender: str, now: datetime, receipt_id: str,
                        statuses: frozenset[CalendarStatus] | None,
@@ -385,14 +418,17 @@ class OwnerCalendarQuestions:
             statuses = base.statuses
         draft = QuestionContext(business_id, sender, view, first, last, statuses, 0, None,
                                 now, now + QUESTION_LIFETIME)
+        if stored is not None:  # A clarifying question about a request outlives the answer.
+            draft = replace(draft, clarified_request=stored.clarified_request,
+                            clarified_version=stored.clarified_version,
+                            clarified_by=stored.clarified_by, clarified_at=stored.clarified_at)
         if first is None or last is None:
             self._contexts.put_context(replace(
-                draft, ask=Ask.RANGE, expires_at=now + ASK_LIFETIME))
-            return ("Which day or week do you mean? For example: tomorrow, Friday, "
-                    "this week, next week, or a date like 2026-10-09.")
+                draft, ask=Ask.RANGE, expires_at=now + ASK_LIFETIME, answered_at=now))
+            return RANGE_QUESTION
         if statuses is None:
             self._contexts.put_context(replace(
-                draft, ask=Ask.STATUS, expires_at=now + ASK_LIFETIME))
+                draft, ask=Ask.STATUS, expires_at=now + ASK_LIFETIME, answered_at=now))
             return (f"For {_span_text(first, last)}, should I count confirmed visits only, "
                     "pending requests only, or both? Reply confirmed, pending, or both.")
         return self._reply(draft, now, policy, zone, 0, receipt_id)
@@ -413,8 +449,7 @@ class OwnerCalendarQuestions:
         self._contexts.put_context(replace(
             context, skip=following if following < len(entries) else 0, ask=None,
             expires_at=now + QUESTION_LIFETIME, page_start=skip, receipt_id=receipt_id,
-            fingerprint=fingerprint, clarified_request="", clarified_version=0,
-            clarified_by="", clarified_at=None))
+            fingerprint=fingerprint, answered_at=now))
         return text
 
     def _items(self, business_id: str, days: list[date], zone: ZoneInfo,

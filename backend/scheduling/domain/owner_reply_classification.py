@@ -23,12 +23,15 @@ MAX_FOLLOW_UP_DAYS = 31
 APPROVAL_TRIGGERS = frozenset({
     "yes", "y", "yep", "yeah", "ya", "yup", "ok", "okay", "sure", "approve", "approved",
     "confirm", "confirmed", "decline", "declined", "reject", "deny", "accept"})
-DECLINE_WORDS = frozenset({
-    "decline", "declined", "reject", "rejected", "deny", "denied", "no", "nope", "nah",
-    "don't", "dont", "cancel"})
+# A request is declined by the model only on one of these explicit words. A bare "no",
+# "nope", "nah", or "cancel" never declines a request (PRD 6.3 names only "decline").
+DECLINE_WORDS = frozenset({"decline", "declined", "reject", "rejected", "deny", "denied"})
 NEGATION_WORDS = frozenset({
     "no", "not", "nope", "nah", "don't", "dont", "never", "cant", "can't", "won't", "wont",
-    "cancel", "decline", "declined", "reject", "deny", "stop"})
+    "wait", "hold", "stop", "cancel", "decline", "declined", "reject", "rejected", "deny",
+    "denied"})
+# Negators that can turn a decline word around ("don't decline it", "no, do not decline").
+NEGATORS = NEGATION_WORDS - DECLINE_WORDS
 OFFER_SEND_WORDS = APPROVAL_TRIGGERS | frozenset({"go", "ahead", "send"})
 OFFER_CANCEL_WORDS = frozenset({
     "no", "nope", "nah", "cancel", "never", "mind", "nevermind", "don't", "dont", "stop",
@@ -91,12 +94,12 @@ class OwnerReplyClassifier(Protocol):
 
 
 def _words(body: str) -> set[str]:
-    return set(re.findall(r"[a-z']+", body.lower()))
+    return set(re.findall(r"[a-z']+", body.lower().replace("\u2019", "'")))
 
 
 def may_be_approval(body: str) -> bool:
     """True when the reply contains a word that could approve or decline a request."""
-    return bool(_words(body) & (APPROVAL_TRIGGERS | DECLINE_WORDS))
+    return bool(_words(body) & (APPROVAL_TRIGGERS | {"no", "nope", "nah", "cancel"}))
 
 
 def supports_approval(body: str) -> bool:
@@ -106,7 +109,10 @@ def supports_approval(body: str) -> bool:
 
 
 def supports_decline(body: str) -> bool:
-    return bool(_words(body) & DECLINE_WORDS)
+    """An explicit decline, reject, or deny word, with no negator and no approving word."""
+    words = _words(body)
+    return (bool(words & DECLINE_WORDS) and not words & NEGATORS
+            and not words & (APPROVAL_TRIGGERS - DECLINE_WORDS))
 
 
 def supports_offer_send(body: str) -> bool:
