@@ -667,3 +667,129 @@ def test_a_paged_calendar_answer_with_a_live_offer_uses_the_short_reminder() -> 
     assert "Reply MORE for the rest." in reply and "still waits for YES or NO" in reply
     assert "reply YES to send it or NO" not in reply
     assert chat.status(request) == CalendarStatus.PENDING_APPROVAL
+
+
+# --- Review round 2 (#177) ---------------------------------------------------------------
+
+
+def test_a_lapsed_question_about_avery_never_lets_a_plain_yes_approve_blake() -> None:
+    chat, avery = one_pending()
+    chat.model.hostile = True
+    chat.model.script["ok"] = UNCLEAR
+    chat.ask("ok")  # Names Avery; the reply is sent.
+    chat.now += timedelta(minutes=31)  # Past the 30-minute window; the record still exists.
+    LifecycleService(chat.store, lambda: chat.now).apply(AppointmentCommand(
+        "pilot", avery, "owner", ActorRole.OWNER, Action.DECLINE, "gone", 1))
+    blake = chat.hold("c2", local(10, 8, 9), "blake")
+    reply = chat.ask("yes")
+    assert not reply.committed and "Blake Sample" in reply.text
+    assert chat.status(blake) == CalendarStatus.PENDING_APPROVAL
+    assert chat.ask("yes").committed  # The new question names Blake and was sent.
+
+
+@pytest.mark.parametrize("phrase", [
+    "Decline, I can't that day", "Decline it, not available", "Please deny, won't work"])
+def test_a_negator_after_the_decline_word_does_not_block_a_clear_decline(phrase: str) -> None:
+    chat, request = one_pending()
+    chat.model.script[phrase] = proposal(DECLINE, request)
+    assert chat.ask(phrase).committed and chat.status(request) == CalendarStatus.DECLINED
+
+
+@pytest.mark.parametrize("phrase", [
+    "Don't decline it yet", "no, do not decline", "No problem", "wait, don't reject that"])
+def test_a_negator_before_the_decline_word_still_refuses(phrase: str) -> None:
+    chat, request = one_pending()
+    chat.model.script[phrase] = proposal(DECLINE, request)
+    assert not chat.ask(phrase).committed
+    assert chat.status(request) == CalendarStatus.PENDING_APPROVAL
+
+
+@pytest.mark.parametrize("phrase", ["yes, hold it for her", "yes send it, I'll wait"])
+def test_a_negator_word_after_an_approval_does_not_block_it(phrase: str) -> None:
+    from scheduling.domain.owner_reply_classification import (
+        supports_approval,
+        supports_offer_send,
+    )
+    assert supports_approval(phrase) and supports_offer_send(phrase)
+
+
+@pytest.mark.parametrize("phrase", [
+    "wait, yes", "no, yes", "yes but not yet", "yes, not yet", "don't approve it",
+    "yes, don't send it"])
+def test_a_negator_near_an_approval_blocks_it(phrase: str) -> None:
+    from scheduling.domain.owner_reply_classification import supports_approval
+    assert not supports_approval(phrase)
+
+
+def _set_hold_minutes(chat: Chat, minutes: int) -> None:
+    from dataclasses import replace
+
+    chat.store._policies["pilot"] = replace(chat.store.read_policy("pilot"), hold_minutes=minutes)
+
+
+def test_a_raised_hold_length_does_not_make_a_new_request_look_old() -> None:
+    chat, _request = one_pending()
+    chat.ask(ASK)
+    chat.now += timedelta(minutes=1)
+    chat.hold("c2", local(10, 2, 9), "arrives-later")
+    _set_hold_minutes(chat, 7 * 24 * 60)  # The owner edits the hold length afterwards.
+    reply = chat.ask("YES")
+    assert "new request arrived" in reply.text and not chat.offers.outbox
+
+
+def test_a_lowered_hold_length_does_not_block_an_offer_for_hours() -> None:
+    chat = Chat()
+    request = chat.hold("c1", local(10, 1, 9), "a")
+    older = chat.hold("c2", local(10, 2, 9), "older")  # Both existed before the offer.
+    chat.now += timedelta(minutes=5)
+    chat.ask(f"Offer 2pm instead for {request[:8]}")
+    _set_hold_minutes(chat, 60)
+    sent = chat.ask("YES")
+    assert sent.text.startswith("Queued the offer") and len(chat.offers.outbox) == 1
+    assert chat.status(older) == CalendarStatus.PENDING_APPROVAL
+
+
+def test_a_request_with_no_recorded_creation_time_is_re_prompted_never_sent() -> None:
+    from dataclasses import replace
+
+    chat = Chat()
+    request = chat.hold("c1", local(10, 1, 9), "a")
+    old = chat.hold("c2", local(10, 2, 9), "old")
+    legacy = chat.store.read_appointment(old)
+    assert legacy is not None and legacy.created_at is not None
+    chat.store._appointments[old] = replace(legacy, created_at=None)
+    chat.ask(f"Offer 2pm instead for {request[:8]}")
+    reply = chat.ask("YES")
+    assert "new request arrived" in reply.text and not chat.offers.outbox
+
+
+def test_holds_record_when_they_were_made_including_replacement_holds() -> None:
+    chat = Chat()
+    before = chat.now
+    confirmed = chat.hold("c1", local(10, 1, 9), "visit", confirm=True)
+    chat.now += timedelta(hours=1)
+    replacement = HoldService(chat.store).create(CreateHold(
+        "pilot", "c1", "c1", "move", local(10, 2, 9), 120, confirmed), chat.now).hold_id
+    first, second = (chat.store.read_appointment(item) for item in (confirmed, replacement))
+    assert first is not None and second is not None
+    assert first.created_at == before and second.created_at == chat.now
+    assert first.created_at == chat.store.read_appointment(confirmed).created_at  # type: ignore[union-attr]
+
+
+def test_dynamo_payloads_persist_and_read_the_creation_time() -> None:
+    from scheduling.adapters.dynamodb import (
+        DynamoDBCalendarRepository,
+        _appointment_from_payload,
+        _appointment_payload,
+    )
+
+    chat = Chat()
+    request = chat.hold("c1", local(10, 1, 9), "a")
+    appointment = chat.store.read_appointment(request)
+    assert appointment is not None and appointment.created_at is not None
+    assert _appointment_from_payload(_appointment_payload(appointment)) == appointment
+    item = DynamoDBCalendarRepository._appointment_item(appointment)
+    assert item["created_at"]["S"].startswith("2026-09-29T17:")
+    legacy = dict(_appointment_payload(appointment))
+    del legacy["created_at"]
+    assert _appointment_from_payload(legacy).created_at is None

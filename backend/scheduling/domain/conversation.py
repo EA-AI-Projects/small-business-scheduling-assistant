@@ -722,6 +722,13 @@ class ConversationService:
                 named = next((target for target in targets
                               if target.appointment_id == asked.clarified_request
                               and target.version == asked.clarified_version), None)
+            else:
+                # Lapsed after 30 minutes, but the record lives on: a plain yes still means
+                # the asked-about request only while it is the single pending one at the
+                # same version. Otherwise ask again, naming the current request.
+                asking = not (len(targets) == 1
+                              and targets[0].appointment_id == asked.clarified_request
+                              and targets[0].version == asked.clarified_version)
         gated = context is not None or asking
         if view is not None and view.live:
             kind = "offer_with_calendar_answer" if calendar_last else "offer_prompt"

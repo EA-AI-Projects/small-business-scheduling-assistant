@@ -19,6 +19,7 @@ class Appointment:
     buffer_minutes: int
     version: int
     replaces_appointment_id: str | None = None
+    created_at: datetime | None = None  # When the request was made; None on old records.
 
     def __post_init__(self) -> None:
         if not all((self.appointment_id, self.business_id, self.client_id)):

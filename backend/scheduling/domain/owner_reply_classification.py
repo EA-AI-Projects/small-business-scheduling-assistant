@@ -93,8 +93,34 @@ class OwnerReplyClassifier(Protocol):
     def classify_owner_reply(self, body: str, context: OwnerReplyContext) -> OwnerReplyProposal: ...
 
 
+def _tokens(body: str) -> list[str]:
+    return re.findall(r"[a-z']+", body.lower().replace("\u2019", "'"))
+
+
 def _words(body: str) -> set[str]:
-    return set(re.findall(r"[a-z']+", body.lower().replace("\u2019", "'")))
+    return set(_tokens(body))
+
+
+# A negator counts only when it sits right before the word it would turn around (within
+# NEGATOR_REACH words), so "Don't decline it yet" refuses but "Decline, I can't that day" does
+# not. A strong negator right after an approving word also refuses ("yes, not yet"), and a
+# contrast word anywhere does ("yes but ...").
+NEGATOR_REACH = 3
+STRONG_NEGATORS = frozenset({
+    "no", "not", "nope", "nah", "don't", "dont", "never", "cant", "can't", "won't", "wont"})
+CONTRAST_WORDS = frozenset({"but", "except", "however", "unless"})
+
+
+def _negated(tokens: list[str], targets: frozenset[str] | set[str]) -> bool:
+    """Some target word has a negator in front of it (or a strong one right behind it)."""
+    for index, token in enumerate(tokens):
+        if token not in targets:
+            continue
+        if NEGATORS & set(tokens[max(0, index - NEGATOR_REACH):index]):
+            return True
+        if STRONG_NEGATORS & set(tokens[index + 1:index + 3]):
+            return True
+    return False
 
 
 def may_be_approval(body: str) -> bool:
@@ -103,21 +129,34 @@ def may_be_approval(body: str) -> bool:
 
 
 def supports_approval(body: str) -> bool:
-    """An approving word and no negation; the backend checks this on top of the model."""
-    words = _words(body)
-    return bool(words & APPROVAL_TRIGGERS) and not words & NEGATION_WORDS
+    """An approving word, no decline word, and no negator near it; checked on top of the model."""
+    tokens = _tokens(body)
+    words = set(tokens)
+    approving = words & (APPROVAL_TRIGGERS - DECLINE_WORDS)
+    return (bool(approving) and not words & DECLINE_WORDS and not words & CONTRAST_WORDS
+            and not _negated(tokens, approving))
 
 
 def supports_decline(body: str) -> bool:
-    """An explicit decline, reject, or deny word, with no negator and no approving word."""
-    words = _words(body)
-    return (bool(words & DECLINE_WORDS) and not words & NEGATORS
-            and not words & (APPROVAL_TRIGGERS - DECLINE_WORDS))
+    """An explicit decline, reject, or deny word that no negator precedes, and no approving
+    word anywhere."""
+    tokens = _tokens(body)
+    words = set(tokens)
+    declining = words & DECLINE_WORDS
+    if not declining or words & (APPROVAL_TRIGGERS - DECLINE_WORDS):
+        return False
+    for index, token in enumerate(tokens):
+        if token in declining and NEGATORS & set(tokens[max(0, index - NEGATOR_REACH):index]):
+            return False
+    return True
 
 
 def supports_offer_send(body: str) -> bool:
-    words = _words(body)
-    return bool(words & OFFER_SEND_WORDS) and not words & NEGATION_WORDS
+    tokens = _tokens(body)
+    words = set(tokens)
+    sending = words & OFFER_SEND_WORDS
+    return (bool(sending) and not words & CONTRAST_WORDS and not _negated(tokens, sending)
+            and not words & DECLINE_WORDS)
 
 
 def supports_offer_cancel(body: str) -> bool:

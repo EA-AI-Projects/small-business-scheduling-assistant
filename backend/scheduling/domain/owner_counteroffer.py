@@ -480,9 +480,12 @@ class CounterofferService:
 
     def _newer_request(self, offer: Counteroffer, pending: tuple[Appointment, ...]) -> bool:
         """A request arrived after the offer was drafted: the owner may mean that one."""
-        minutes = timedelta(minutes=self._repository.read_policy(offer.business_id).hold_minutes)
-        return any(item.appointment_id != offer.request_id and item.hold_expires_at is not None
-                   and item.hold_expires_at - minutes > offer.created_at for item in pending)
+        # The request's own recorded creation time, never derived from the hold length, which
+        # the owner can edit. A record from before it was stored (no created_at) cannot be
+        # ordered, so it counts as possibly newer: a re-prompt is chosen over a send.
+        return any(item.appointment_id != offer.request_id
+                   and (item.created_at is None or item.created_at > offer.created_at)
+                   for item in pending)
 
     def _reprompt(self, offer: Counteroffer, receipt: InboundReceipt,
                   now: datetime) -> "ConversationOutcome":

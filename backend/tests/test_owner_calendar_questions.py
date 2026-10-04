@@ -1,5 +1,6 @@
 """The verified owner can ask read-only calendar questions over SMS (#174)."""
 
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -342,6 +343,17 @@ def test_dynamo_context_round_trips_without_message_text() -> None:
         2, "SM-1", "abc", "SM-2", 4, "SM-9", NOW)
     store.put_context(context)
     assert store.read_context("pilot", OWNER) == context
+    answered = replace(context, answered_at=NOW + timedelta(minutes=1))
+    store.put_context(answered)
+    assert store.read_context("pilot", OWNER) == answered
+    # The TTL keeps a clarifying question for 24 hours after it was asked, past the conversation.
+    stored = items[("BUSINESS#pilot", f"OWNER_QUESTION#{OWNER}")]
+    assert stored["answered_at"] == {"S": (NOW + timedelta(minutes=1)).isoformat()}
+    assert stored["expires_at_epoch"] == {"N": str(int((NOW + timedelta(hours=24)).timestamp()))}
+    plain = replace(context, clarified_at=None, clarified_request="", clarified_by="")
+    store.put_context(plain)
+    assert items[("BUSINESS#pilot", f"OWNER_QUESTION#{OWNER}")]["expires_at_epoch"] == {
+        "N": str(int(plain.expires_at.timestamp()))}
     assert store.read_context("pilot", "+14155550123") is None
     partial = QuestionContext("pilot", OWNER, View.SUMMARY, None, None, None, 0, Ask.RANGE,
                               NOW, NOW + timedelta(minutes=10))
