@@ -75,7 +75,7 @@ from scheduling.domain.sms_ingress import (
 )
 
 if TYPE_CHECKING:
-    from scheduling.domain.owner_counteroffer import CounterofferService
+    from scheduling.domain.owner_counteroffer import CounterofferAcceptance, CounterofferService
 
 MAX_CONTEXT_APPOINTMENTS = 8
 MAX_MESSAGE_LENGTH = 1000
@@ -163,7 +163,8 @@ class ConversationService:
                  owner_questions: OwnerCalendarQuestions | None = None,
                  owner_reply_classifier: OwnerReplyClassifier | None = None,
                  reply_lookup: ReplyLookup | None = None,
-                 counteroffers: "CounterofferService | None" = None) -> None:
+                 counteroffers: "CounterofferService | None" = None,
+                 counteroffer_acceptance: "CounterofferAcceptance | None" = None) -> None:
         self._repository = repository
         self._interpreter = interpreter
         self._holds = holds
@@ -182,6 +183,7 @@ class ConversationService:
         self._reply_lookup = (reply_lookup if reply_lookup is not None
                               else consent if isinstance(consent, ReplyLookup) else None)
         self._counteroffers = counteroffers
+        self._acceptance = counteroffer_acceptance
 
     def handle(self, receipt: InboundReceipt) -> ConversationOutcome:
         if (not receipt.authorized_for_commands or receipt.body is None
@@ -226,6 +228,15 @@ class ConversationService:
             countered = self._counteroffers.handle(receipt, now, targets)
             if countered is not None:
                 return countered
+        if receipt.role == SenderRole.CLIENT and self._acceptance is not None:
+            # A reply to the owner's counteroffer (#176) is matched only to this client's
+            # own current offer; every other message falls through unchanged.
+            accepted = self._acceptance.handle(
+                receipt, now, prompt is not None and not prompt.expired(now))
+            if accepted is not None:
+                if accepted.committed:
+                    self._forget(prompt)
+                return accepted
         exact = proposal is not None
         if proposal is None:
             answered = self._answer(receipt, prompt, targets, policy, now)
@@ -244,6 +255,10 @@ class ConversationService:
         if proposal.needs_clarification or proposal.intent in ("clarify", "unsupported"):
             return ConversationOutcome(self._clarify(
                 receipt.role, proposal.intent, receipt.body or "", targets))
+        if (receipt.role == SenderRole.CLIENT and self._acceptance is not None
+                and proposal.intent in ("request_booking", "availability", "reschedule",
+                                        "cancel")):
+            self._acceptance.supersede_for_new_request(receipt)  # A new request replaces it.
         if proposal.intent == "owner_decision":
             return self._owner_decision(receipt, proposal, targets)
         if exact and proposal.intent == "cancel":
@@ -362,12 +377,18 @@ class ConversationService:
             result = self._lifecycle.apply(AppointmentCommand(
                 receipt.business_id, target.appointment_id, receipt.sender,
                 ActorRole.OWNER, action, receipt.provider_id, target.version))
+        except ReplacementPending:
+            return ConversationOutcome(
+                "The client accepted a counteroffer for that request, so a replacement request "
+                "is waiting. Nothing was approved. Approve or decline the replacement instead.")
         except (HoldExpired, InvalidTransition, StaleVersion, SlotConflict,
                 TooManyConflicts, IdempotencyKeyReused):
             return ConversationOutcome("That request changed. Please review the current calendar.")
         state = "confirmed" if action == Action.APPROVE else "declined"
-        return ConversationOutcome(f"Request {target.appointment_id[:8]} {state}.", True,
-                                   result.appointment.appointment_id)
+        return ConversationOutcome(
+            f"Request {target.appointment_id[:8]} {state}."
+            f"{self._resolved_note(receipt.business_id, target, result.replaced_appointment)}", True,
+            result.appointment.appointment_id)
 
     def _cancel(self, receipt: InboundReceipt, proposal: MessageProposal,
                 targets: tuple[Appointment, ...]) -> ConversationOutcome:
@@ -728,13 +749,27 @@ class ConversationService:
             result = self._lifecycle.apply(AppointmentCommand(
                 receipt.business_id, target.appointment_id, receipt.sender,
                 ActorRole.OWNER, action, receipt.provider_id, target.version))
+        except ReplacementPending:
+            return ConversationOutcome(
+                "The client accepted a counteroffer for that request, so a replacement request "
+                "is waiting. Nothing was approved. Approve or decline the replacement instead.")
         except (HoldExpired, InvalidTransition, StaleVersion, SlotConflict,
                 TooManyConflicts, IdempotencyKeyReused):
             return ConversationOutcome("That request changed. Please review the current calendar.")
         state = "Approved" if action == Action.APPROVE else "Declined"
         return ConversationOutcome(
-            f"{state}: {self._request_line(receipt.business_id, target)}.", True,
+            f"{state}: {self._request_line(receipt.business_id, target)}."
+            f"{self._resolved_note(receipt.business_id, target, result.replaced_appointment)}", True,
             result.appointment.appointment_id)
+
+    def _resolved_note(self, business_id: str, approved: Appointment,
+                       replaced: Appointment | None) -> str:
+        """Approval of an accepted counteroffer also resolves the request it replaced."""
+        if replaced is None or replaced.status != CalendarStatus.DECLINED:
+            return ""
+        return (" Both requests are resolved: the accepted counteroffer "
+                f"{self._request_line(business_id, approved)} is approved, and the original "
+                f"request {self._request_line(business_id, replaced)} is closed.")
 
     def _request_line(self, business_id: str, target: Appointment) -> str:
         zone = ZoneInfo(self._repository.read_policy(business_id).timezone)

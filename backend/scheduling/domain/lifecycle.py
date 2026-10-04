@@ -22,6 +22,13 @@ from scheduling.domain.holds import (
     TooManyConflicts,
 )
 
+# Notifications for a request that replaces the client's still-pending original after
+# an accepted owner counteroffer (the original is resolved with it, never confirmed).
+COUNTEROFFER_APPROVED_TEMPLATE = "counteroffer-approved"
+COUNTEROFFER_DECLINED_TEMPLATE = "counteroffer-declined"
+# The normal expiry text for an original whose accepted counteroffer request is still pending.
+EXPIRED_REPLACEMENT_WAITING_TEMPLATE = "expire-replacement-waiting"
+
 
 class Action(StrEnum):
     APPROVE = "approve"
@@ -170,6 +177,12 @@ class LifecycleService:
             after: Appointment
             if command.operation == Action.APPROVE:
                 self._require_pending(before, now)
+                guard = self._repository.read_replacement_guard(
+                    before.business_id, before.appointment_id)
+                if guard is not None and guard.expires_at > now:
+                    # An accepted counteroffer is waiting to replace this request;
+                    # approving both would book the client twice.
+                    raise ReplacementPending("Resolve the accepted counteroffer request first")
                 original = self._replacement_original(before, now)
                 try:
                     self._require_free(before, revision, now, original)
@@ -219,8 +232,15 @@ class LifecycleService:
             else:
                 raise ValueError("Unsupported operation")
 
+            # A confirmed original is cancelled by its replacement; a pending original
+            # (an owner-countered request) is resolved as declined.
             replaced = (
-                replace(original, status=CalendarStatus.CANCELLED, version=original.version + 1)
+                replace(
+                    original,
+                    status=(CalendarStatus.DECLINED
+                            if original.status == CalendarStatus.PENDING_APPROVAL
+                            else CalendarStatus.CANCELLED),
+                    version=original.version + 1)
                 if original is not None else None
             )
             result = TransitionResult(after, revision + 1, replaced)
@@ -233,6 +253,11 @@ class LifecycleService:
                 before.hold_expires_at is None or before.hold_expires_at > decision_at
             ):
                 raise InvalidTransition("Hold is not due for expiry")
+            replacement_waiting = False
+            if command.operation == Action.EXPIRE and before.replaces_appointment_id is None:
+                waiting = self._repository.read_replacement_guard(
+                    before.business_id, before.appointment_id)
+                replacement_waiting = waiting is not None and waiting.expires_at > decision_at
             clear_guard = False
             if before.replaces_appointment_id is not None:
                 guard = self._repository.read_replacement_guard(
@@ -245,7 +270,9 @@ class LifecycleService:
                 before=before,
                 result=result,
                 audit_id=audit_id,
-                outbox=self._outbox(command, before, result, audit_id),
+                outbox=self._outbox(command, before, result, audit_id,
+                                    self._counteroffer_original(before, original),
+                                    replacement_waiting),
                 decision_at=decision_at,
                 clear_replacement_guard=clear_guard,
             )
@@ -294,13 +321,36 @@ class LifecycleService:
             original is None
             or original.business_id != before.business_id
             or original.client_id != before.client_id
-            or original.status != CalendarStatus.CONFIRMED
             or guard is None
             or guard.replacement_id != before.appointment_id
             or guard.expires_at <= now
         ):
-            raise InvalidTransition("Original confirmed appointment is no longer eligible")
-        return original
+            raise InvalidTransition("Original appointment is no longer eligible")
+        if original.status == CalendarStatus.CONFIRMED:
+            return original
+        if (
+            original.status == CalendarStatus.PENDING_APPROVAL
+            and original.hold_expires_at is not None
+            and original.hold_expires_at > now
+        ):
+            return original  # Resolved together with the approved replacement.
+        if original.status in (CalendarStatus.PENDING_APPROVAL, CalendarStatus.EXPIRED,
+                               CalendarStatus.DECLINED, CalendarStatus.CANCELLED):
+            # A countered request that already ended on its own (its hold expired, or it
+            # was declined or withdrawn) has nothing left to resolve; the replacement is
+            # still a valid request in its own right.
+            return None
+        raise InvalidTransition("Original appointment is no longer eligible")
+
+    def _counteroffer_original(self, before: Appointment,
+                               original: Appointment | None) -> Appointment | None:
+        """The original a counteroffer replacement answers, or None for a normal request."""
+        if before.replaces_appointment_id is None:
+            return None
+        found = original or self._repository.read_appointment(before.replaces_appointment_id)
+        if found is None or found.status == CalendarStatus.CONFIRMED:
+            return None
+        return found
 
     def _require_free(
         self,
@@ -343,15 +393,24 @@ class LifecycleService:
         before: Appointment,
         result: TransitionResult,
         audit_id: str,
+        countered: Appointment | None = None,
+        replacement_waiting: bool = False,
     ) -> tuple[OutboxIntent, ...]:
         template = command.operation.value
         if command.operation == Action.EXPIRE:
+            if replacement_waiting:
+                template = EXPIRED_REPLACEMENT_WAITING_TEMPLATE
             return (OutboxIntent(f"{audit_id}#client", before.appointment_id, "client", template),)
         if command.operation == Action.CANCEL and command.actor_role == ActorRole.OWNER:
             return (OutboxIntent(f"{audit_id}#client", before.appointment_id, "client", template),)
         if result.replaced_appointment is not None:
-            template = "replacement-approved"
-        if before.replaces_appointment_id and command.operation in (Action.DECLINE, Action.CANCEL):
+            template = ("replacement-approved" if countered is None
+                        else COUNTEROFFER_APPROVED_TEMPLATE)
+        if countered is not None:
+            if command.operation == Action.DECLINE:
+                template = COUNTEROFFER_DECLINED_TEMPLATE
+        elif before.replaces_appointment_id and command.operation in (
+                Action.DECLINE, Action.CANCEL):
             template = "replacement-original-retained"
         return (
             OutboxIntent(f"{audit_id}#client", before.appointment_id, "client", template),

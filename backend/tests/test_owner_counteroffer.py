@@ -437,8 +437,8 @@ def test_redelivered_ask_after_the_offer_finished_shows_no_prompt(world: World) 
         offer, state=OfferState.PROPOSED, confirmed_by=None, confirmed_at=None))
 
 
-def test_confirmed_offer_expiry_is_the_provisional_client_validity(world: World) -> None:
-    from scheduling.domain.owner_counteroffer import CLIENT_OFFER_VALIDITY_PROVISIONAL
+def test_confirmed_offer_expiry_is_the_shared_client_validity(world: World) -> None:
+    from scheduling.domain.owner_counteroffer import CLIENT_OFFER_VALIDITY
     world.pending()
     world.clock[0] = NOW + timedelta(minutes=10)
     world.say(ASK)
@@ -446,7 +446,7 @@ def test_confirmed_offer_expiry_is_the_provisional_client_validity(world: World)
     world.say("YES")
     offer = world.store.read_confirmed_for_client("pilot", "client-1")
     assert offer is not None
-    assert offer.expires_at == NOW + timedelta(minutes=20) + CLIENT_OFFER_VALIDITY_PROVISIONAL
+    assert offer.expires_at == NOW + timedelta(minutes=20) + CLIENT_OFFER_VALIDITY
 
 
 def test_offer_may_overlap_the_requests_own_slot(world: World) -> None:

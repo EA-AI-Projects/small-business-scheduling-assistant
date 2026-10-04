@@ -257,7 +257,7 @@ class InMemoryCalendarRepository:
                 guard = self._replacement_guards.get(guard_key)
                 if (
                     original is None
-                    or original.status.value != "CONFIRMED"
+                    or original.status.value not in ("CONFIRMED", "PENDING_APPROVAL")
                     or original.version + 1 != replaced.version
                     or guard is None
                     or guard.replacement_id != current.appointment_id

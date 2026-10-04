@@ -4,9 +4,9 @@ The owner asks to offer a pending request's client a different time. This module
 resolves the request, shows the owner the exact client-facing text, and queues
 that text only on an immediately following plain confirmation. Nothing here
 writes the calendar and no model is involved: parsing is deterministic and the
-text is built from trusted records. A client's acceptance of the offer, and the
-linked pending replacement, belong to the next stage (#176), which reads the
-confirmed offer through ``CounterofferStore``.
+text is built from trusted records. A client's acceptance of the offer (#176)
+is handled by ``CounterofferAcceptance`` below, which reads the confirmed offer
+through ``CounterofferStore`` and creates one linked pending request.
 
 Preparation and the client send both call ``check_offer`` so eligibility,
 consent, request state, and slot availability are verified twice.
@@ -33,12 +33,24 @@ from scheduling.domain.client_records import ClientProfile
 from scheduling.domain.conversation_state import (
     AFFIRMATIVE,
     FILLER,
+    PROMPT_LIFETIME,
     WEEKDAYS,
+    Selection,
     day_text,
     is_affirmative,
     is_negative,
+    match_selection,
     normalized,
     when_text,
+)
+from scheduling.domain.holds import (
+    CreateHold,
+    IdempotencyKeyReused,
+    InvalidReplacement,
+    PendingHold,
+    ReplacementPending,
+    SlotConflict,
+    TooManyConflicts,
 )
 from scheduling.domain.outbox import DeliveryState, OutboxRecord
 from scheduling.domain.sms_ingress import ConsentEvidence, InboundReceipt
@@ -51,10 +63,10 @@ COUNTEROFFER_FAILED_TEMPLATE = "owner-counteroffer-failed"
 # Technical default: how long the owner's confirmation prompt stays usable. It is
 # the same 30 minutes the client-facing offers use; not a business-validity rule.
 CONFIRMATION_LIFETIME = timedelta(minutes=30)
-# PROVISIONAL, pending the owner's answer on #176: how long a sent offer stays open
-# for the client. Set on the record at confirmation. It reuses the 30 minutes that
-# existing client slot offers state; storage TTL (a retention window) never defines it.
-CLIENT_OFFER_VALIDITY_PROVISIONAL = timedelta(minutes=30)
+# Decided by the owner (#176, PRD section 6.4): a counteroffer follows the same rules as
+# any client offer, so it is open for the shared client-offer lifetime from the moment
+# the owner confirms it. Storage TTL (a retention window) never defines it.
+CLIENT_OFFER_VALIDITY = PROMPT_LIFETIME
 # A YES that arrives after the prompt lapsed is answered (and never approves the
 # request) for this long; after that the message is treated as unrelated.
 EXPIRED_NOTICE_WINDOW = timedelta(hours=1)
@@ -85,6 +97,11 @@ class OfferState(StrEnum):
     PROPOSED = "PROPOSED"    # Shown to the owner; nothing has been queued.
     CONFIRMED = "CONFIRMED"  # Owner confirmed; one client text is queued.
     DISCARDED = "DISCARDED"  # Declined, revised, expired, or failed a check.
+    ACCEPTED = "ACCEPTED"    # The client accepted; one linked pending request was created.
+    SUPERSEDED = "SUPERSEDED"  # The client declined it, or made a new request instead.
+
+
+SENT_STATES = frozenset({OfferState.CONFIRMED, OfferState.ACCEPTED, OfferState.SUPERSEDED})
 
 
 @dataclass(frozen=True)
@@ -113,6 +130,7 @@ class Counteroffer:
     confirmed_at: datetime | None = None
     confirmed_by: str | None = None  # Provider ID of the owner's confirming message.
     failure: str | None = None  # OfferProblem recorded when the send-time recheck failed.
+    accepted_request_id: str | None = None  # The pending request an acceptance created.
 
     def __post_init__(self) -> None:
         if not all((self.business_id, self.offer_id, self.owner, self.request_id,
@@ -125,8 +143,13 @@ class Counteroffer:
                 raise ValueError("Counteroffer instants must be timezone-aware")
         if self.expires_at <= self.created_at:
             raise ValueError("Counteroffer lifetime is invalid")
-        if (self.state == OfferState.CONFIRMED) != (self.confirmed_by is not None):
+        if (self.state in SENT_STATES) != (self.confirmed_by is not None):
             raise ValueError("Only a confirmed counteroffer names its confirming message")
+        if self.state == OfferState.ACCEPTED and self.accepted_request_id is None:
+            raise ValueError("An accepted counteroffer names its created request")
+        if self.state in (OfferState.PROPOSED, OfferState.CONFIRMED, OfferState.DISCARDED) and \
+                self.accepted_request_id is not None:
+            raise ValueError("Only an accepted counteroffer names its created request")
 
     def expired(self, now: datetime) -> bool:
         return now >= self.expires_at
@@ -148,12 +171,12 @@ def failure_outbox_id_for(offer_id: str) -> str:
 def confirmed_offer(offer: Counteroffer, confirmed_by: str, now: datetime) -> Counteroffer:
     """The record a confirmation writes; both stores use it so they cannot diverge.
 
-    Its expiry is the client-offer validity (provisional, see the constant), not the
+    Its expiry is the client-offer validity (see the constant), not the
     owner prompt lifetime it had while proposed.
     """
     return replace(offer, state=OfferState.CONFIRMED, version=offer.version + 1,
                    confirmed_at=now, confirmed_by=confirmed_by,
-                   expires_at=now + CLIENT_OFFER_VALIDITY_PROVISIONAL)
+                   expires_at=now + CLIENT_OFFER_VALIDITY)
 
 
 def counteroffer_failure_outbox(offer: Counteroffer, now: datetime) -> OutboxRecord:
@@ -177,7 +200,13 @@ class CounterofferStore(Protocol):
         ...
     def read_confirmed_for_client(self, business_id: str,
                                   client_id: str) -> Counteroffer | None:
-        """For #176: the client's most recently confirmed offer."""
+        """The client's most recently confirmed offer (it may since be accepted or superseded)."""
+        ...
+    def accept(self, offer: Counteroffer, request_id: str) -> Counteroffer | None:
+        """CONFIRMED to ACCEPTED at ``offer.version``, naming the created request; None if lost."""
+        ...
+    def supersede(self, offer: Counteroffer) -> None:
+        """CONFIRMED or ACCEPTED to SUPERSEDED if still at ``offer.version``; else a no-op."""
         ...
     def put_draft(self, offer: Counteroffer) -> bool:
         """Store a PROPOSED offer as the owner's active one; idempotent per offer ID.
@@ -411,7 +440,7 @@ class CounterofferService:
         how = f"To approve the original request, reply APPROVE {ref}."
         still_pending = any(item.appointment_id == active.request_id
                             and item.version == active.request_version for item in pending)
-        if active.state in (OfferState.CONFIRMED, OfferState.DISCARDED):
+        if active.state != OfferState.PROPOSED:
             if not still_pending:
                 self._store.clear_active(active.business_id, active.owner, active.offer_id)
                 return None
@@ -421,6 +450,12 @@ class CounterofferService:
                     return ConversationOutcome(
                         f"That offer could not be sent ({reason.rstrip('.')}), so nothing was "
                         f"sent and nothing was approved. Tell me another time to offer. {how}")
+                if active.state == OfferState.ACCEPTED:
+                    return ConversationOutcome(
+                        "The client already accepted that offer, so a new request is waiting "
+                        "for your approval (ref "
+                        f"{(active.accepted_request_id or '')[:8]}). Nothing was approved by "
+                        "this reply. Reply APPROVE or DECLINE with that reference.")
                 if active.state == OfferState.CONFIRMED:
                     return ConversationOutcome(
                         "That offer was already queued, so nothing more was sent. The request "
@@ -587,6 +622,156 @@ class CounterofferService:
         return ConversationOutcome(self._prompt(draft, receipt.business_id))
 
 
+class HoldCreator(Protocol):
+    def create(self, command: CreateHold, now: datetime) -> PendingHold: ...
+    def existing(self, command: CreateHold) -> PendingHold | None:
+        """The request this exact command already created, if any (idempotent replay)."""
+        ...
+
+
+def acceptance_key(offer_id: str) -> str:
+    """One idempotency key per offer, so a repeated YES can never create a second request."""
+    return f"counteroffer-accept#{offer_id}"
+
+
+class CounterofferAcceptance:
+    """A client's reply to an owner counteroffer.
+
+    Only the client's own current, unexpired, confirmed offer can be accepted, by a
+    plain yes (or the offered time). Acceptance rechecks consent, the source request's
+    state and version, and availability, then creates exactly one pending request linked
+    to the original through the existing replacement hold. It never confirms anything:
+    the owner still approves, and the original stays pending until then.
+    """
+
+    def __init__(self, repository: OfferRepository, consent: OfferConsent,
+                 store: CounterofferStore, holds: HoldCreator) -> None:
+        self._repository = repository
+        self._consent = consent
+        self._store = store
+        self._holds = holds
+
+    def _open_offer(self, receipt: InboundReceipt) -> Counteroffer | None:
+        if receipt.client_id is None:
+            return None
+        offer = self._store.read_confirmed_for_client(receipt.business_id, receipt.client_id)
+        if (offer is None or offer.client_id != receipt.client_id
+                or offer.client_phone != receipt.sender):
+            return None
+        return offer
+
+    def supersede_for_new_request(self, receipt: InboundReceipt) -> None:
+        """A new client request replaces the open offer, as it replaces any other prompt."""
+        offer = self._open_offer(receipt)
+        if offer is not None and offer.state in (OfferState.CONFIRMED, OfferState.ACCEPTED):
+            self._store.supersede(offer)
+
+    def _command(self, offer: Counteroffer) -> CreateHold:
+        return CreateHold(
+            offer.business_id, offer.client_id, offer.client_id, acceptance_key(offer.offer_id),
+            offer.proposed_start, offer.duration_minutes, offer.request_id,
+            offer.request_version)
+
+    def handle(self, receipt: InboundReceipt, now: datetime,
+               newer_prompt: bool = False) -> "ConversationOutcome | None":
+        """``newer_prompt``: the client has an open normal prompt made after the offer."""
+        from scheduling.domain.conversation import ConversationOutcome
+
+        offer = self._open_offer(receipt)
+        if offer is None or offer.state not in (OfferState.CONFIRMED, OfferState.ACCEPTED):
+            return None
+        body = receipt.body or ""
+        zone = ZoneInfo(self._repository.read_policy(receipt.business_id).timezone)
+        selection, _ = match_selection(
+            body, (offer.proposed_start,), zone, now.astimezone(zone).date())
+        negative = is_negative(body)
+        if offer.state == OfferState.ACCEPTED:
+            # A repeat of the same YES is answered only while it can still be a repeat: the
+            # request it created is still pending, the offer's window is open, and the client
+            # has no newer prompt. Otherwise the message is handled like any other.
+            created = (self._repository.read_appointment(offer.accepted_request_id)
+                       if offer.accepted_request_id is not None else None)
+            waiting = (created is not None and created.status == CalendarStatus.PENDING_APPROVAL
+                       and created.hold_expires_at is not None and created.hold_expires_at > now)
+            if selection != Selection.MATCH or not waiting or newer_prompt or offer.expired(now):
+                return None
+            return ConversationOutcome(
+                f"You already asked for {when_text(offer.proposed_start, zone)} (ref "
+                f"{(offer.accepted_request_id or '')[:8]}). It's pending owner approval, "
+                "so nothing more was requested.")
+        if selection == Selection.NONE and not negative:
+            return None
+        try:
+            made = self._holds.existing(self._command(offer))
+        except IdempotencyKeyReused:
+            made = None
+        if made is not None:
+            # An earlier delivery created the request but its offer update was lost: repair
+            # the offer, then speak only to the request's current state.
+            self._store.accept(offer, made.hold_id)
+            created = self._repository.read_appointment(made.hold_id)
+            if (created is None or created.status != CalendarStatus.PENDING_APPROVAL
+                    or created.hold_expires_at is None or created.hold_expires_at <= now
+                    or offer.expired(now) or newer_prompt):
+                return None  # Decided, expired, or stale: handled like any other message.
+            if selection == Selection.MATCH:
+                return self._requested(offer, made, zone)
+            return ConversationOutcome(
+                f"Your request for {when_text(made.start_at, zone)} (ref {made.hold_id[:8]}) "
+                "was already made and is pending owner approval. To withdraw it, tell me to "
+                "cancel it.")
+        if offer.expired(now):
+            self._store.supersede(offer)
+            return ConversationOutcome(
+                "That offer expired after 30 minutes, so nothing changed. Tell me what day "
+                "works and I'll send the current open times.")
+        if negative:
+            self._store.supersede(offer)
+            return ConversationOutcome(
+                "OK, I won't request that time. Nothing was requested, and your original "
+                "request is unchanged.")
+        if selection == Selection.AMBIGUOUS:
+            return ConversationOutcome(
+                "I couldn't tell if you meant that time, so nothing was requested. Reply YES "
+                "to request it, or tell me another day.")
+        if selection == Selection.UNMATCHED:
+            return ConversationOutcome(
+                "That isn't the time offered, so nothing was requested. Reply YES to request "
+                f"{when_text(offer.proposed_start, zone)}, or tell me another day.")
+        return self._accept(offer, now, zone)
+
+    def _accept(self, offer: Counteroffer, now: datetime,
+                zone: ZoneInfo) -> "ConversationOutcome":
+        from scheduling.domain.conversation import ConversationOutcome
+
+        gone = ConversationOutcome(
+            "Sorry, that offer is no longer available, so nothing was requested. Tell me what "
+            "day works and I'll send the current open times.")
+        if check_offer(offer, self._repository, self._consent, now) is not None:
+            return gone
+        try:
+            hold = self._holds.create(self._command(offer), now)
+        except (SlotConflict, InvalidReplacement, ReplacementPending, TooManyConflicts,
+                IdempotencyKeyReused, InvalidDuration, InvalidPolicy, ValueError):
+            return ConversationOutcome(
+                f"Sorry, {when_text(offer.proposed_start, zone)} is no longer open, so nothing "
+                "was requested. Tell me what day works and I'll send the current open times.")
+        self._store.accept(offer, hold.hold_id)
+        return self._requested(offer, hold, zone)
+
+    def _requested(self, offer: Counteroffer, hold: PendingHold,
+                   zone: ZoneInfo) -> "ConversationOutcome":
+        from scheduling.domain.conversation import ConversationOutcome
+
+        original = self._repository.read_appointment(offer.request_id)
+        kept = (f" Your earlier request for {when_text(original.start_at, zone)} (ref "
+                f"{original.appointment_id[:8]}) stays pending until then."
+                if original is not None else "")
+        return ConversationOutcome(
+            f"Requested {when_text(hold.start_at, zone)} (ref {hold.hold_id[:8]}). It's "
+            f"pending owner approval, not confirmed yet.{kept}", True, hold.hold_id)
+
+
 class InMemoryCounterofferStore:
     """Process-local store with the all-or-nothing contract of the DynamoDB one."""
 
@@ -650,6 +835,28 @@ class InMemoryCounterofferStore:
             self.outbox.setdefault(outbox.outbox_id, outbox)
             self._by_client[(offer.business_id, offer.client_id)] = offer.offer_id
             return confirmed
+
+    def accept(self, offer: Counteroffer, request_id: str) -> Counteroffer | None:
+        with self._lock:
+            key = (offer.business_id, offer.offer_id)
+            current = self._offers.get(key)
+            if (current is None or current.state != OfferState.CONFIRMED
+                    or current.version != offer.version):
+                return None
+            accepted = replace(current, state=OfferState.ACCEPTED, version=current.version + 1,
+                               accepted_request_id=request_id)
+            self._offers[key] = accepted
+            return accepted
+
+    def supersede(self, offer: Counteroffer) -> None:
+        with self._lock:
+            key = (offer.business_id, offer.offer_id)
+            current = self._offers.get(key)
+            if (current is not None
+                    and current.state in (OfferState.CONFIRMED, OfferState.ACCEPTED)
+                    and current.version == offer.version):
+                self._offers[key] = replace(current, state=OfferState.SUPERSEDED,
+                                            version=current.version + 1)
 
     def record_failure(self, offer: Counteroffer, problem: str, now: datetime,
                        outbox: OutboxRecord) -> None:
