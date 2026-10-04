@@ -347,9 +347,56 @@ def test_bare_confirmed_after_an_answer_asks_once_and_never_approves() -> None:
     chat.ask("yes", "SM-same")
     assert chat.ask("yes", "SM-same").text.startswith("Do you mean approve")
     assert chat.store.read_appointment(request).status == pending  # type: ignore[union-attr]
-    # Once asked, the owner's later plain yes is their answer and approves.
-    assert chat.ask("yes").committed
+
+
+def asked_once() -> tuple[Chat, str]:
+    chat = Chat()
+    chat.hold("c1", local(10, 6, 9), "a", confirm=True)
+    request = chat.hold("c2", local(10, 7, 9), "b")
+    chat.ask("What is next week looking like?")
+    assert chat.ask("confirmed").text.startswith("Do you mean approve Blake Sample")
+    return chat, request
+
+
+def test_after_the_question_confirmed_shows_confirmed_visits_and_never_approves() -> None:
+    chat, request = asked_once()
+    shown = chat.ask("confirmed")
+    assert not shown.committed
+    assert "Avery Example" in shown.text and "Blake Sample" not in shown.text
+    assert chat.store.read_appointment(request).status == CalendarStatus.PENDING_APPROVAL  # type: ignore[union-attr]
+
+
+def test_after_the_question_yes_and_similar_words_ask_again_and_write_nothing() -> None:
+    chat, _request = asked_once()
+    before = chat.snapshot()
+    for word in ("yes", "ok", "sure", "approved", "y"):
+        again = chat.ask(word)
+        assert not again.committed, word
+        assert again.text.startswith("Do you mean approve Blake Sample"), word
+    assert chat.snapshot() == before
+
+
+def test_after_the_question_only_an_explicit_approve_acts() -> None:
+    chat, request = asked_once()
+    approved = chat.ask("APPROVE")
+    assert approved.committed and approved.text.startswith("Approved: Blake Sample")
     assert chat.store.read_appointment(request).status == CalendarStatus.CONFIRMED  # type: ignore[union-attr]
+
+
+def test_approve_after_the_question_is_refused_when_the_named_request_is_gone() -> None:
+    chat, request_x = asked_once()
+    LifecycleService(chat.store, lambda: chat.now).apply(AppointmentCommand(
+        "pilot", request_x, "owner", ActorRole.OWNER, Action.DECLINE, "gone", 1))
+    request_y = chat.hold("c3", local(10, 8, 9), "y")  # A different request arrives.
+    before = chat.snapshot()
+    reply = chat.ask("APPROVE")
+    assert not reply.committed
+    assert reply.text.startswith("That request changed. Do you mean approve Casey Testperson")
+    assert chat.snapshot() == before
+    assert chat.store.read_appointment(request_y).status == CalendarStatus.PENDING_APPROVAL  # type: ignore[union-attr]
+    # Having been asked about Y by name, an explicit APPROVE now approves Y.
+    assert chat.ask("APPROVE").committed
+    assert chat.store.read_appointment(request_y).status == CalendarStatus.CONFIRMED  # type: ignore[union-attr]
 
 
 def paged_week(chat: Chat, blocks: int = 14) -> list[str]:

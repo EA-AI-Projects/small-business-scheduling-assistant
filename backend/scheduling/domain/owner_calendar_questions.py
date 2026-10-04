@@ -65,7 +65,7 @@ class QuestionContext:
     page_start: int = 0  # Offset of the page last sent, so a redelivered MORE repeats it.
     receipt_id: str = ""  # The inbound message that produced that page.
     fingerprint: str = ""  # Hash of the full entry list the offsets refer to.
-    clarified_receipt: str = ""  # Message that was asked "approve or show confirmed only?".
+    clarified_request: str = ""  # Request named in an "approve or show confirmed only?" question.
 
     def expired(self, now: datetime) -> bool:
         return now >= self.expires_at
@@ -130,6 +130,20 @@ CLIENT_QUESTION = re.compile(r"\b(?:who|clients?|customers?|names?)\b")
 BREAKDOWN = re.compile(r"\bby day\b|\bbreak ?down\b|\bdaily\b|\beach day\b")
 MORE = re.compile(r"(?:more|show more|next|continue|the rest|rest)")
 AMBIGUOUS_REPLY = re.compile(r"(?:confirmed|confirm|approved|yes|y|yep|yeah|ok|okay|sure)")
+EXPLICIT_DECISION = re.compile(
+    r"(?:approve|decline|reject|deny)(?: it| (?:the )?request)?(?:,? (?:please|thanks|thank you))?")
+
+
+def is_ambiguous_reply(body: str) -> bool:
+    return AMBIGUOUS_REPLY.fullmatch(normalized(body)) is not None
+
+
+def is_explicit_decision(body: str) -> bool:
+    return EXPLICIT_DECISION.fullmatch(normalized(body)) is not None
+
+
+def is_bare_confirmed(body: str) -> bool:
+    return normalized(body) == "confirmed"
 FOLLOW_UP_FILLER = frozenset({
     "what", "whats", "what's", "about", "and", "how", "the", "only", "just", "include",
     "including", "also", "with", "without", "for", "on", "in", "please", "then", "ok",
@@ -289,23 +303,23 @@ class OwnerCalendarQuestions:
         context = self._contexts.read_context(business_id, sender)
         return context is not None and context.ask is not None and not context.expired(now)
 
-    def needs_approval_check(self, business_id: str, sender: str, body: str,
-                             now: datetime, receipt_id: str) -> bool:
-        """True once per question when a bare approval-like word could mean either thing.
+    def approval_state(self, business_id: str, sender: str,
+                       now: datetime) -> tuple[bool, str | None]:
+        """(a question context is open, the request an "approve?" question named).
 
-        "confirmed" can mean "show only confirmed visits" and "yes" can mean "approve",
-        so after a calendar answer the owner is asked which, once.
+        The second item is None until the owner has been asked "approve or show only
+        confirmed visits?" for a request.
         """
         context = self._contexts.read_context(business_id, sender)
-        if (context is None or context.expired(now)
-                or AMBIGUOUS_REPLY.fullmatch(normalized(body)) is None):
-            return False
-        if context.clarified_receipt:
-            # Asked once already; a redelivery of that same message asks again, but a
-            # later reply is the owner's answer to the question.
-            return context.clarified_receipt == receipt_id
-        self._contexts.put_context(replace(context, clarified_receipt=receipt_id))
-        return True
+        if context is None or context.expired(now):
+            return False, None
+        return True, context.clarified_request or None
+
+    def mark_clarified(self, business_id: str, sender: str, now: datetime,
+                       request_id: str) -> None:
+        context = self._contexts.read_context(business_id, sender)
+        if context is not None and not context.expired(now):
+            self._contexts.put_context(replace(context, clarified_request=request_id))
 
     def answer(self, business_id: str, sender: str, body: str, now: datetime,
                receipt_id: str = "") -> str | None:
@@ -372,7 +386,7 @@ class OwnerCalendarQuestions:
         self._contexts.put_context(replace(
             context, skip=following if following < len(entries) else 0, ask=None,
             expires_at=now + QUESTION_LIFETIME, page_start=skip, receipt_id=receipt_id,
-            fingerprint=fingerprint, clarified_receipt=""))
+            fingerprint=fingerprint, clarified_request=""))
         return text
 
     def _items(self, business_id: str, days: list[date], zone: ZoneInfo,

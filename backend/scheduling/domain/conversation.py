@@ -57,7 +57,12 @@ from scheduling.domain.lifecycle import (
     LifecycleService,
     StaleVersion,
 )
-from scheduling.domain.owner_calendar_questions import OwnerCalendarQuestions
+from scheduling.domain.owner_calendar_questions import (
+    OwnerCalendarQuestions,
+    is_ambiguous_reply,
+    is_bare_confirmed,
+    is_explicit_decision,
+)
 from scheduling.domain.sms_ingress import (
     ConsentEvidence,
     InboundReceipt,
@@ -580,17 +585,44 @@ class ConversationService:
                                     receipt.provider_id)
             if text is not None:
                 return ConversationOutcome(text)
-        if len(targets) == 1 and questions.needs_approval_check(
-                receipt.business_id, receipt.sender, body, now, receipt.provider_id):
-            return ConversationOutcome(
-                f"Do you mean approve {self._request_line(receipt.business_id, targets[0])}, "
-                "or show only confirmed visits? Reply APPROVE or CONFIRMED ONLY.")
+        blocked = self._ambiguous_owner_reply(receipt, targets, now)
+        if blocked is not None:
+            return blocked
         reply = self._owner_reply(receipt, targets)
         if reply is not None:
             return reply
         text = questions.answer(receipt.business_id, receipt.sender, body, now,
                                 receipt.provider_id)
         return ConversationOutcome(text) if text is not None else None
+
+    def _ambiguous_owner_reply(self, receipt: InboundReceipt, targets: tuple[Appointment, ...],
+                               now: datetime) -> ConversationOutcome | None:
+        """Keep a bare "yes" or "confirmed" after a calendar answer from approving.
+
+        After a calendar answer such a word may mean "show confirmed visits". The owner is
+        asked once; from then on only an explicit APPROVE or DECLINE acts, and only on the
+        request the question named while it is still the single pending one.
+        """
+        questions, body = self._owner_questions, receipt.body or ""
+        if len(targets) != 1:
+            return None
+        target = targets[0]
+        open_context, asked = questions.approval_state(receipt.business_id, receipt.sender, now)
+        if not open_context:
+            return None
+        ambiguous = is_ambiguous_reply(body)
+        if asked is not None and is_bare_confirmed(body):
+            text = questions.answer(receipt.business_id, receipt.sender, body, now,
+                                    receipt.provider_id)
+            return ConversationOutcome(text) if text is not None else None
+        stale = asked is not None and is_explicit_decision(body) and asked != target.appointment_id
+        if not (ambiguous or stale):
+            return None
+        questions.mark_clarified(receipt.business_id, receipt.sender, now, target.appointment_id)
+        prefix = "That request changed. " if stale else ""
+        return ConversationOutcome(
+            f"{prefix}Do you mean approve {self._request_line(receipt.business_id, target)}, "
+            "or show only confirmed visits? Reply APPROVE or CONFIRMED ONLY.")
 
     def _owner_reply(self, receipt: InboundReceipt,
                      targets: tuple[Appointment, ...]) -> ConversationOutcome | None:
