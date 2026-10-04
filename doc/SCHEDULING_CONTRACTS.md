@@ -31,6 +31,16 @@ The scheduling service is the sole writer of appointments, holds, calendar block
 
 `decision_at` is taken by the scheduling service immediately before its transaction and included in the conditional expiry check. The transaction's conditional status/version checks serialize approval and expiry workers. The service checks the clock again before submitting an approval transaction if preparation took time; callers must not infer approval from an earlier availability read.
 
+## Owner counteroffer confirmation (#175)
+
+A counteroffer is not a calendar operation: it writes no appointment, hold, or revision and the original request stays `PENDING_APPROVAL`. It is a versioned confirmation record (`Counteroffer`, states `PROPOSED`, `CONFIRMED`, `DISCARDED`) linked to the request ID and version, the client, the proposed start, and the exact client-facing text.
+
+- Preparation resolves one pending request from an exact reference, a unique client name, a single pending request, or a unique date; otherwise it asks which request and stores nothing. It then runs `check_offer`: request still pending at the recorded version and unexpired, client profile active and phone-verified, consent present and not opted out, proposed time not equal to the request's own time, and the time offered by availability for the request's duration snapshot (the request being countered does not block its own offer). Failure explains and asks for another time.
+- The record expires 30 minutes after preparation (a technical default for the owner prompt, not a client offer validity period). It consumes exactly the next owner message: a plain YES confirms, NO or a bare DECLINE discards (the request stays pending), a new instruction replaces it, and anything else discards it. A YES never approves the request while a counteroffer is proposed, confirmed within its window, or expired within one hour.
+- Confirmation re-runs `check_offer`, then in one transaction moves `PROPOSED` to `CONFIRMED` at the expected version, queues one client outbox intent (`owner-counteroffer`, ID `counteroffer#<offer>`, event version = confirmed record version), and records the offer as the client's latest confirmed offer. Duplicate or stale confirmations lose the version check and send nothing; a redelivered owner SMS replays its original reply.
+- The client send reads the stored text (never model or caller text) and re-runs `check_offer` at send time. A failure is a permanent delivery failure with an `OFFER_<problem>` code and no client text.
+- Client acceptance, its linked pending replacement, and the offer validity period belong to #176, which reads the confirmed offer through `read_confirmed_for_client`.
+
 ## API envelope and examples
 
 Internal scheduling commands use typed request/response schemas. An owner HTTP adapter can expose `POST /v1/requests`, `POST /v1/requests/{id}/approve`, `POST /v1/requests/{id}/decline`, `POST /v1/appointments/{id}/cancel`, `PATCH /v1/appointments/{id}`, and `POST /v1/blocks`. Provider webhooks are separate and verify signatures before calling the service. Mutating HTTP calls require an `Idempotency-Key` header and server-derived actor context.

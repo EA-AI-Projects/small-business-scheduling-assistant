@@ -7,6 +7,7 @@ from typing import Any
 import boto3  # type: ignore[import-untyped]
 from twilio.rest import Client  # type: ignore[import-untyped]
 
+from scheduling.adapters.counteroffer_dynamodb import DynamoCounterofferStore
 from scheduling.adapters.dynamodb import DynamoDBCalendarRepository
 from scheduling.adapters.outbox_aws import DynamoOutboxStore
 from scheduling.adapters.sms_dynamodb import DynamoSmsIngressStore
@@ -39,6 +40,7 @@ def handler(event: dict[str, Any], _context: object) -> dict[str, list[dict[str,
         DynamoDBCalendarRepository(dynamo, table), DynamoSmsIngressStore(dynamo, table),
         os.environ["BUSINESS_ID"], os.environ["TWILIO_BUSINESS_NUMBER"],
         os.environ["OWNER_NUMBER"], status_callback=os.environ.get("TWILIO_STATUS_URL"),
+        counteroffers=DynamoCounterofferStore(dynamo, table),
     )
     consumer = ConsumeService(DynamoOutboxStore(dynamo, table), sender,
                               lambda: datetime.now(UTC))
