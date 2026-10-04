@@ -324,7 +324,9 @@ def create_owner_app(
             raise _error("IDEMPOTENCY_KEY_REUSED", str(exc), 409) from exc
         except (RevisionConflict, StaleVersion, TooManyConflicts) as exc:
             raise _error("STALE_VERSION", str(exc), 409, current() if current else None) from exc
-        except (SlotConflict, ReplacementPending, PolicyConflict) as exc:
+        except ReplacementPending as exc:
+            raise _error("REPLACEMENT_PENDING", str(exc), 409, current() if current else None) from exc
+        except (SlotConflict, PolicyConflict) as exc:
             raise _error("SLOT_CONFLICT", str(exc), 409, current() if current else None) from exc
         except HoldExpired as exc:
             raise _error("HOLD_EXPIRED", str(exc), 409, current() if current else None) from exc

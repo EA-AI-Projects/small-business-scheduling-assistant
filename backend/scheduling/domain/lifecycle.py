@@ -182,7 +182,9 @@ class LifecycleService:
                 if guard is not None and guard.expires_at > now:
                     # An accepted counteroffer is waiting to replace this request;
                     # approving both would book the client twice.
-                    raise ReplacementPending("Resolve the accepted counteroffer request first")
+                    raise ReplacementPending(
+                        "A replacement request from this client is waiting; "
+                        "approve or decline that one instead")
                 original = self._replacement_original(before, now)
                 try:
                     self._require_free(before, revision, now, original)

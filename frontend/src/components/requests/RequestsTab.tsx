@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 import type { Appointment } from "@/api/types";
 import { path } from "@/lib/api";
 import { localStamp, localTime } from "@/lib/time";
@@ -5,6 +7,8 @@ import { useOwner } from "@/owner/OwnerContext";
 
 import { ConfirmButton } from "../ConfirmButton";
 import { SectionHeading } from "../Workspace";
+import { ReplacementNote } from "./ReplacementNote";
+import { replacementOriginal } from "./replacementOriginal";
 
 export function RequestsTab() {
   const { data } = useOwner();
@@ -22,6 +26,10 @@ export function RequestsTab() {
 function RequestCard({ request }: { request: Appointment }) {
   const { data, change } = useOwner();
   const client = data.clients.find((item) => item.client_id === request.client_id);
+  // Fixed when the card mounts; a refresh that adds a card gives it a fresh time.
+  const [now] = useState(() => Date.now());
+  const { original, originalConfirmed } = replacementOriginal(
+    request, data.requests, data.calendar?.events ?? [], now);
   const decide = (action: "approve" | "decline") => change(
     path`/requests/${request.appointment_id}/` + action, "POST",
     { expected_version: request.version }, `Request ${action === "approve" ? "approved" : "declined"}`);
@@ -33,9 +41,8 @@ function RequestCard({ request }: { request: Appointment }) {
         {" · "}{request.duration_minutes} minutes
         {request.hold_expires_at && ` · expires ${localStamp(request.hold_expires_at, data.zone)}`}
       </p>
-      {request.replaces_appointment_id && (
-        <p className="hint">Replacement request; original visit stays until approval.</p>
-      )}
+      <ReplacementNote request={request} zone={data.zone} original={original}
+        originalConfirmed={originalConfirmed} />
       <div className="row-actions">
         <ConfirmButton label="Approve" confirmation="Confirm approval" className="primary"
           onConfirm={() => decide("approve")} />
