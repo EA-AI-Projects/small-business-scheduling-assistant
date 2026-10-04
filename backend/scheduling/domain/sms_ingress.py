@@ -24,6 +24,10 @@ class SmsCommandInterrupted(Exception):
     """An SMS scheduling transaction was cancelled; the old text must not replay."""
 
 
+class SmsReceiptErased(Exception):
+    """A provider retry belongs to a receipt removed by client deletion."""
+
+
 def normalize_phone(value: str) -> str:
     """Accept an international number, without guessing a country from local digits."""
     phone = "+" + re.sub(r"[ ().-]", "", value[1:]) if value.startswith("+") else value
@@ -213,7 +217,12 @@ class SmsIngressService:
             profile.client_id if profile else None, keyword,
             safe_body is not None,
         )
-        inserted = self._store.put_received(receipt)
+        if role == SenderRole.UNKNOWN:
+            return receipt, True
+        try:
+            inserted = self._store.put_received(receipt)
+        except SmsReceiptErased:
+            return replace(receipt, body=None, authorized_for_commands=False), True
         return receipt, not inserted
 
     def record_in_person_consent(self, client_id: str, phone_e164: str,

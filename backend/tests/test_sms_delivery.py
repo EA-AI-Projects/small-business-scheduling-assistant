@@ -120,7 +120,7 @@ def test_client_destination_is_from_verified_profile_with_consent() -> None:
         sender.deliver(record())
 
 
-def test_client_send_claim_blocks_deletion_race_and_is_released_on_failure() -> None:
+def test_client_send_claim_blocks_deletion_race_and_survives_uncertain_failure() -> None:
     sender, messages, _, records = setup()
     def erasing(_business_id: str, _client_id: str) -> str:
         raise RecordConflict("Erasing")
@@ -140,7 +140,17 @@ def test_client_send_claim_blocks_deletion_race_and_is_released_on_failure() -> 
     messages.fail = True
     with pytest.raises(DeliveryFailure, match="PROVIDER_SEND_ERROR"):
         sender.deliver(record())
-    assert records.send_claimed is False
+    assert records.send_claimed is True
+
+    sender, messages, consent, records = setup()
+    def evidence_failed(_business_id: str, _phone_e164: str,
+                        _provider_id: str, _sent_at: datetime) -> None:
+        raise RuntimeError("evidence unavailable")
+    consent.record_outbound = evidence_failed  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="evidence unavailable"):
+        sender.deliver(record())
+    assert len(messages.calls) == 1
+    assert records.send_claimed is True
 
 
 def test_callback_identifies_committed_outbox_intent() -> None:

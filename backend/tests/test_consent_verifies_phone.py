@@ -96,7 +96,7 @@ def test_consent_marks_phone_verified_and_client_can_text() -> None:
     assert before is not None and before.phone_verified_at is None
     assert api.post("/webhooks/sms/inbound", data=values,
                     headers=signed(values)).status_code == 204
-    assert store.receipts["SM-1"].role == SenderRole.UNKNOWN
+    assert "SM-1" not in store.receipts
 
     consent(repository, store)
     profile = repository.read_profile("pilot", "client-1")

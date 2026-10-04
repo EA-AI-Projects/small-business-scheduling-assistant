@@ -225,7 +225,8 @@ class DynamoDBCalendarRepository:
         try:
             self._client.transact_write_items(TransactItems=[
                 {"Put": {"TableName": self._table,
-                         "Item": {**lease_key, "token": {"S": token}},
+                         "Item": {**lease_key, "token": {"S": token},
+                                  "acquired_at": {"S": _instant(datetime.now(UTC))}},
                          "ConditionExpression": "attribute_not_exists(PK)"}},
                 self._erasure_check(business_id, client_id),
             ])
@@ -489,6 +490,18 @@ class DynamoDBCalendarRepository:
             ))
             for offset in range(0, len(linked), 24):
                 batch = linked[offset:offset + 24]
+                receipt_markers = [
+                    {"Put": {
+                        "TableName": self._table,
+                        "Item": self._business_key(
+                            business_id,
+                            f"SMS_ERASED#{sha256(item['SK']['S'].removeprefix('SMS#').encode()).hexdigest()}"),
+                        "ConditionExpression": "attribute_not_exists(PK)",
+                    }}
+                    for item in batch
+                    if (item["PK"]["S"] == f"BUSINESS#{business_id}"
+                        and item["SK"]["S"].startswith("SMS#"))
+                ]
                 def guarded_delete(item: dict[str, Any]) -> dict[str, Any]:
                     stable = ("version", "client_id", "phone_e164", "created_at",
                               "provider_id", "appointment_id", "hold_id", "entity_id",
@@ -516,6 +529,7 @@ class DynamoDBCalendarRepository:
                         "ExpressionAttributeNames": {"#state": "state"},
                         "ExpressionAttributeValues": {":erasing": {"S": "ERASING"}},
                     }},
+                    *receipt_markers,
                     *(guarded_delete(item) for item in batch),
                 ])
         self._client.transact_write_items(TransactItems=[

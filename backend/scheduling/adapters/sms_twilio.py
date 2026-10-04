@@ -158,6 +158,7 @@ class TwilioSmsSender:
                 raise PermanentDeliveryFailure("CLIENT_UNAVAILABLE") from exc
             except RecordConflict as exc:
                 raise DeliveryFailure("CLIENT_SEND_BUSY") from exc
+        evidence_written = False
         try:
             try:
                 result = self._messages.create(**kwargs)
@@ -168,9 +169,12 @@ class TwilioSmsSender:
             if not isinstance(provider_id, str) or not provider_id:
                 raise DeliveryFailure("PROVIDER_ID_MISSING")
             self._consent.record_outbound(record.business_id, to, provider_id, self._clock())
+            evidence_written = True
             return provider_id
         finally:
-            if token is not None and client_id is not None:
+            # A timeout or evidence-write failure may follow provider acceptance.
+            # Keep the claim until an operator reconciles that uncertain send.
+            if evidence_written and token is not None and client_id is not None:
                 self._records.release_client_send(record.business_id, client_id, token)
 
     def _render(self, record: OutboxRecord, appointment: Appointment | None,

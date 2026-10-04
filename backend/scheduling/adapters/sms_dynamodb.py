@@ -15,6 +15,7 @@ from scheduling.domain.sms_ingress import (
     SenderRole,
     SmsCommandInterrupted,
     SmsIngressStore,
+    SmsReceiptErased,
     normalize_phone,
 )
 from scheduling.domain.sms_status import STATUS_RANK, SmsDeliveryStatus
@@ -217,6 +218,10 @@ class DynamoSmsIngressStore(SmsIngressStore):
         return True
 
     def put_received(self, receipt: InboundReceipt) -> bool:
+        # Unknown senders have no verified profile. Twilio handles reserved
+        # STOP/HELP replies; persisting them could recreate erased client data.
+        if receipt.role == SenderRole.UNKNOWN:
+            return False
         item: dict[str, Any] = {
             **self._key(receipt.business_id, f"SMS#{receipt.provider_id}"),
             "provider_id": {"S": receipt.provider_id},
@@ -238,6 +243,13 @@ class DynamoSmsIngressStore(SmsIngressStore):
         if receipt.client_id is not None:
             writes.append(self._erasure_check(receipt.business_id, receipt.client_id))
         writes.append(self._phone_erasure_check(receipt.business_id, receipt.sender))
+        writes.append({"ConditionCheck": {
+            "TableName": self._table,
+            "Key": self._key(
+                receipt.business_id,
+                f"SMS_ERASED#{sha256(receipt.provider_id.encode()).hexdigest()}"),
+            "ConditionExpression": "attribute_not_exists(PK)",
+        }})
         if receipt.keyword == Keyword.STOP:
             writes.append({"Put": {
                 "TableName": self._table,
@@ -325,6 +337,9 @@ class DynamoSmsIngressStore(SmsIngressStore):
                 # A duplicate provider retry is harmless. A racing newer message
                 # can change the thread; reread it before retrying. Other errors
                 # propagate so Twilio retries rather than dropping a STOP.
+                if self._get(receipt.business_id,
+                             f"SMS_ERASED#{sha256(receipt.provider_id.encode()).hexdigest()}") is not None:
+                    raise SmsReceiptErased from exc
                 if self._get(receipt.business_id, f"SMS#{receipt.provider_id}") is not None:
                     return False
                 response = getattr(exc, "response", {})
