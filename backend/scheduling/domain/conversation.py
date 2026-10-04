@@ -57,6 +57,15 @@ from scheduling.domain.lifecycle import (
     LifecycleService,
     StaleVersion,
 )
+from scheduling.domain.owner_calendar_questions import OwnerCalendarQuestions, ReplyLookup
+from scheduling.domain.owner_reply_classification import (
+    Confidence,
+    OwnerReplyClassifier,
+    OwnerReplyContext,
+    OwnerReplyIntent,
+    PendingRef,
+    may_be_approval,
+)
 from scheduling.domain.sms_ingress import (
     ConsentEvidence,
     InboundReceipt,
@@ -151,6 +160,9 @@ class ConversationService:
                  holds: HoldService, lifecycle: LifecycleService,
                  consent: ConsentLookup, clock: Callable[[], datetime],
                  owner_number: str, states: ConversationStateStore | None = None,
+                 owner_questions: OwnerCalendarQuestions | None = None,
+                 owner_reply_classifier: OwnerReplyClassifier | None = None,
+                 reply_lookup: ReplyLookup | None = None,
                  counteroffers: "CounterofferService | None" = None) -> None:
         self._repository = repository
         self._interpreter = interpreter
@@ -161,6 +173,14 @@ class ConversationService:
         self._owner_number = normalize_phone(owner_number)
         self._availability = AvailabilityService(repository)
         self._states = states if states is not None else InMemoryConversationStates()
+        self._owner_questions = (owner_questions if owner_questions is not None
+                                 else OwnerCalendarQuestions(repository))
+        self._owner_classifier = (
+            owner_reply_classifier if owner_reply_classifier is not None
+            else interpreter if isinstance(interpreter, OwnerReplyClassifier) else None)
+        # The SMS store that holds saved replies; without it no request ever counts as named.
+        self._reply_lookup = (reply_lookup if reply_lookup is not None
+                              else consent if isinstance(consent, ReplyLookup) else None)
         self._counteroffers = counteroffers
 
     def handle(self, receipt: InboundReceipt) -> ConversationOutcome:
@@ -460,7 +480,7 @@ class ConversationService:
         """Handle a reply to the business's own offer or question, or return None."""
         body = receipt.body or ""
         if receipt.role == SenderRole.OWNER:
-            return self._owner_reply(receipt, targets)
+            return self._owner_answer(receipt, targets, now)
         if prompt is None or prompt.kind == PromptKind.RESCHEDULE_DAY:
             return None
         zone = ZoneInfo(policy.timezone)
@@ -578,6 +598,117 @@ class ConversationService:
             f"Cancelled your {when_text(target.start_at, zone)} {what} "
             f"(ref {target.appointment_id[:8]}).", True, result.appointment.appointment_id)
 
+    def _owner_answer(self, receipt: InboundReceipt, targets: tuple[Appointment, ...],
+                      now: datetime) -> ConversationOutcome | None:
+        """Read-only calendar questions; an open clarifying question gets the first look."""
+        questions, body = self._owner_questions, receipt.body or ""
+        if questions.awaiting_answer(receipt.business_id, receipt.sender, now):
+            text = questions.answer(receipt.business_id, receipt.sender, body, now,
+                                    receipt.provider_id)
+            if text is not None:
+                return ConversationOutcome(text)
+        classified = self._classified_owner_reply(receipt, targets, now)
+        if classified is not None:
+            return classified
+        reply = self._owner_reply(receipt, targets)
+        if reply is not None:
+            return reply
+        text = questions.answer(receipt.business_id, receipt.sender, body, now,
+                                receipt.provider_id)
+        return ConversationOutcome(text) if text is not None else None
+
+    def _classified_owner_reply(self, receipt: InboundReceipt,
+                                targets: tuple[Appointment, ...],
+                                now: datetime) -> ConversationOutcome | None:
+        """Let the model say what an approval-like reply means inside a calendar conversation.
+
+        The model proposes; this method acts only on a confident approve or decline that
+        names the request the assistant last asked about, while that request is still the
+        single pending one at the same version. Anything else asks and writes nothing.
+        """
+        questions, body = self._owner_questions, receipt.body or ""
+        context = questions.open_context(receipt.business_id, receipt.sender, now)
+        if context is None or not targets or not may_be_approval(body):
+            return None
+        policy = self._repository.read_policy(receipt.business_id)
+        zone = ZoneInfo(policy.timezone)
+        if questions.is_fresh_question(body, now.astimezone(zone).date()):
+            return None  # A complete calendar question; it cannot approve anything.
+        # A request counts as named only once the question's reply was SENT, and only for a
+        # message our webhook received after that send. A redelivery of the asking message,
+        # an earlier message, a pending or failed question, or a lookup error all ask again.
+        was_named = (
+            bool(context.clarified_request) and context.clarified_by != receipt.provider_id
+            and context.clarified_at is not None and receipt.received_at > context.clarified_at
+            and self._question_was_sent_before(receipt, context.clarified_by))
+        named = next((target for target in targets
+                      if was_named and target.appointment_id == context.clarified_request), None)
+        if self._owner_classifier is None:
+            return self._ask_owner(receipt, targets, now, "I wasn't sure what you meant.")
+        try:
+            proposal = self._owner_classifier.classify_owner_reply(body, OwnerReplyContext(
+                now.astimezone(zone).date(), policy.timezone,
+                "approval_question" if named is not None else "calendar_answer",
+                context.view.value, context.first, context.last,
+                tuple(sorted(status.value for status in context.statuses or ())),
+                self._pending_ref(receipt.business_id, named, zone) if named else None,
+                tuple(self._pending_ref(receipt.business_id, target, zone)
+                      for target in targets[:MAX_CONTEXT_APPOINTMENTS])))
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+            return self._ask_owner(receipt, targets, now, "I couldn't tell what you meant.")
+        if proposal.confidence != Confidence.HIGH:
+            return self._ask_owner(receipt, targets, now, "I wasn't sure what you meant.")
+        if proposal.intent == OwnerReplyIntent.CALENDAR_FOLLOWUP:
+            text = questions.apply_followup(
+                receipt.business_id, receipt.sender, now, receipt.provider_id,
+                proposal.statuses, proposal.range_first, proposal.range_last)
+            if text is not None:
+                return ConversationOutcome(text)
+            return self._ask_owner(receipt, targets, now, "I wasn't sure what you meant.")
+        if proposal.intent in (OwnerReplyIntent.APPROVE_NAMED_REQUEST,
+                               OwnerReplyIntent.DECLINE_NAMED_REQUEST):
+            reference = (proposal.request_reference or "").lower()
+            if (named is not None and len(targets) == 1 and named.version == context.clarified_version
+                    and reference and named.appointment_id.startswith(reference)
+                    and len(reference) >= 8):
+                action = (Action.APPROVE if proposal.intent == OwnerReplyIntent.APPROVE_NAMED_REQUEST
+                          else Action.DECLINE)
+                return self._decide(receipt, named, action)
+            return self._ask_owner(
+                receipt, targets, now,
+                "That request may have changed." if was_named else "I wasn't sure what you meant.")
+        return self._ask_owner(receipt, targets, now, "I wasn't sure what you meant.")
+
+    def _question_was_sent_before(self, receipt: InboundReceipt, asked_by: str) -> bool:
+        if self._reply_lookup is None:
+            return False
+        try:
+            saved = self._reply_lookup.read_reply_text(receipt.business_id, asked_by)
+            sent_at = self._reply_lookup.read_reply_sent_at(receipt.business_id, asked_by)
+        except Exception:  # noqa: BLE001 - any lookup failure must fail closed
+            return False
+        return saved is not None and sent_at is not None and receipt.received_at > sent_at
+
+    def _pending_ref(self, business_id: str, target: Appointment, zone: ZoneInfo) -> PendingRef:
+        profile = self._repository.read_profile(business_id, target.client_id)
+        name = profile.name.split()[0] if profile is not None and profile.name.split() else "client"
+        return PendingRef(target.appointment_id[:8], name, when_text(target.start_at, zone))
+
+    def _ask_owner(self, receipt: InboundReceipt, targets: tuple[Appointment, ...],
+                   now: datetime, lead: str) -> ConversationOutcome:
+        """One focused question; remembers the named request for the answer. Writes nothing."""
+        if len(targets) == 1:
+            target = targets[0]
+            self._owner_questions.mark_clarified(
+                receipt.business_id, receipt.sender, now, target.appointment_id, target.version,
+                receipt.provider_id)
+            return ConversationOutcome(
+                f"{lead} Do you mean approve {self._request_line(receipt.business_id, target)}, "
+                "or something about the calendar? Reply APPROVE or DECLINE to decide it, "
+                "or ask me about the calendar.")
+        return ConversationOutcome(
+            f"{lead} {self._pending_summary(receipt.business_id, targets)}")
+
     def _owner_reply(self, receipt: InboundReceipt,
                      targets: tuple[Appointment, ...]) -> ConversationOutcome | None:
         text = normalized(receipt.body or "")
@@ -589,7 +720,10 @@ class ConversationService:
             return None
         if len(targets) != 1:
             return ConversationOutcome(self._pending_summary(receipt.business_id, targets))
-        target = targets[0]
+        return self._decide(receipt, targets[0], action)
+
+    def _decide(self, receipt: InboundReceipt, target: Appointment,
+                action: Action) -> ConversationOutcome:
         try:
             result = self._lifecycle.apply(AppointmentCommand(
                 receipt.business_id, target.appointment_id, receipt.sender,
