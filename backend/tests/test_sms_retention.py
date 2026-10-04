@@ -461,3 +461,36 @@ def test_owner_rule_applies_only_when_the_owner_number_is_given() -> None:
     store.put_received(_owner_receipt("SM-owner-old", NOW - timedelta(days=100)))
     store.put_received(_owner_receipt("SM-owner-new", NOW - timedelta(days=1)))
     assert store.purge_expired_bodies("pilot", NOW) == 0
+
+
+def test_retention_handler_normalizes_owner_number_and_fails_closed(
+        monkeypatch: Any) -> None:
+    from scheduling.workers import sms_retention
+
+    seen: list[str | None] = []
+
+    class Store:
+        def __init__(self, *_args: Any) -> None: ...
+
+        def purge_expired_bodies(self, _b: str, _n: datetime, owner: str | None) -> int:
+            seen.append(owner)
+            return 0
+
+        def purge_expired_evidence(self, _b: str, _n: datetime) -> int:
+            return 0
+
+    monkeypatch.setattr(sms_retention.boto3, "client", lambda *_a: object())
+    monkeypatch.setattr(sms_retention, "DynamoSmsIngressStore", Store)
+    monkeypatch.setenv("SCHEDULING_TABLE_NAME", "synthetic")
+    monkeypatch.setenv("BUSINESS_ID", "pilot")
+    monkeypatch.setenv("OWNER_NUMBER", " +1 (415) 555-0100 ")
+    sms_retention.handler({}, None)
+    assert seen == ["+14155550100"]
+    for bad in ("", "   ", "4155550100"):
+        monkeypatch.setenv("OWNER_NUMBER", bad)
+        try:
+            sms_retention.handler({}, None)
+        except ValueError:
+            continue
+        raise AssertionError("malformed owner number must fail closed")
+    assert seen == ["+14155550100"]
