@@ -664,6 +664,36 @@ class DynamoSmsIngressStore(SmsIngressStore):
             if start is None:
                 return tuple(failures)
 
+    def _purge_owner_message(self, business_id: str, item: dict[str, Any],
+                             cutoff: str) -> bool:
+        processed = item.get("processed_at")
+        exchanged = max(item["received_at"]["S"], processed["S"] if processed else "")
+        if exchanged > cutoff:
+            return False
+        values: dict[str, Any] = {":received": item["received_at"]}
+        condition = ("(attribute_exists(body) OR attribute_exists(reply_text)) AND "
+                     "received_at = :received AND attribute_not_exists(legal_hold_reason)")
+        if processed is None:
+            condition += " AND attribute_not_exists(processed_at)"
+        else:
+            condition += " AND processed_at = :processed"
+            values[":processed"] = processed
+        try:
+            self._client.transact_write_items(TransactItems=[{"Update": {
+                "TableName": self._table,
+                "Key": self._key(business_id, item["SK"]["S"]),
+                "UpdateExpression": "REMOVE body, reply_text",
+                "ConditionExpression": condition,
+                "ExpressionAttributeValues": values,
+            }}])
+        except Exception as exc:
+            response = getattr(exc, "response", {})
+            if (isinstance(response, dict) and response.get("Error", {}).get("Code")
+                    == "TransactionCanceledException"):
+                return False  # A reply, hold, or another purge won; recheck next run.
+            raise
+        return True
+
     def purge_expired_evidence(self, business_id: str, now: datetime) -> int:
         """Delete four-year-old consent/STOP evidence; keep active suppression state."""
         cutoff = _four_year_cutoff(now)
@@ -748,8 +778,16 @@ class DynamoSmsIngressStore(SmsIngressStore):
                     break
         return removed
 
-    def purge_expired_bodies(self, business_id: str, now: datetime) -> int:
-        """Remove only bodies, 90 days after the sender's last scheduling exchange."""
+    def purge_expired_bodies(self, business_id: str, now: datetime,
+                             owner_number: str | None = None) -> int:
+        """Remove only message text, 90 days after the relevant exchange.
+
+        Client messages follow the sender's last scheduling exchange. Messages
+        from ``owner_number`` follow their own exchange time (receipt, or the
+        assistant's reply if later), so owner activity never keeps older texts.
+        The one partition Query over ``SMS#`` already visits every owner item;
+        owner items are told apart by sender, so no Scan or extra index is used.
+        """
         if now.tzinfo is None:
             raise ValueError("Retention clock must be timezone-aware")
         cutoff = _instant(now - timedelta(days=90))
@@ -772,6 +810,10 @@ class DynamoSmsIngressStore(SmsIngressStore):
                 if ("body" not in item and "reply_text" not in item) or "legal_hold_reason" in item:
                     continue
                 sender = item["sender"]["S"]
+                if owner_number is not None and sender == owner_number:
+                    if self._purge_owner_message(business_id, item, cutoff):
+                        removed += 1
+                    continue
                 thread_key = f"SMS_THREAD#{sender}"
                 thread = self._get(business_id, thread_key)
                 if thread is None or thread["last_exchange_at"]["S"] > cutoff:

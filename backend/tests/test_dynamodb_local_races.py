@@ -223,7 +223,9 @@ def _seed(env: RaceEnv, appointments: tuple[Appointment, ...],
         client.put_item(
             TableName=table,
             Item={**repo._business_key(env.business, f"REPLACEMENT#{guard_original}"),
-                  "replacement_id": {"S": "replacement"},
+                  "replacement_id": {"S": next(
+                      (a.appointment_id for a in appointments
+                       if a.replaces_appointment_id == guard_original), "replacement")},
                   "expires_at": {"S": EXPIRY.isoformat(timespec="microseconds")}},
         )
 
@@ -845,3 +847,116 @@ def test_accepted_counteroffer_approval_races_a_decision_on_the_original_atomica
     assert events == [replacement.appointment_id]
     guard = _get(env, f"BUSINESS#{env.business}", f"REPLACEMENT#{original.appointment_id}")
     assert (guard is None) == (replacement_item["status"]["S"] == "CONFIRMED")
+
+
+def test_accepted_counteroffer_approval_after_the_original_changed_writes_nothing(
+    race_env: RaceEnv,
+) -> None:
+    env = race_env
+    original, replacement = _countered_pair(env)
+    repo = DynamoDBCalendarRepository(env.client, env.table)
+    declined_original = replace(original, status=CalendarStatus.DECLINED, version=2)
+    repo.commit_transition(7, _commit(env, original, declined_original, Action.DECLINE,
+                                      EXPIRY - timedelta(seconds=1)))
+    stale_approval = _commit(
+        env, replacement, replace(replacement, status=CalendarStatus.CONFIRMED, version=2),
+        Action.APPROVE, EXPIRY - timedelta(seconds=1),
+        replaced=replace(declined_original, version=3), clear_guard=True)
+    with pytest.raises(RevisionConflict):
+        repo.commit_transition(8, stale_approval)
+    replacement_item = _get(env, f"APPOINTMENT#{replacement.appointment_id}", "META")
+    assert replacement_item is not None and replacement_item["status"]["S"] == "PENDING_APPROVAL"
+    assert len([item for item in _business_items(env)
+                if item["SK"]["S"].startswith("AUDIT#")]) == 1
+
+
+def test_owner_thread_text_is_purged_per_message_while_client_thread_keeps_old_rule(
+        race_env: RaceEnv) -> None:
+    from scheduling.domain.sms_ingress import InboundReceipt, Keyword, SenderRole
+
+    env = race_env
+    store = DynamoSmsIngressStore(env.client, env.table)
+    owner, client_phone = "+15005550010", "+15005550011"
+    now = datetime.now(UTC)
+
+    def receive(sid: str, sender: str, role: SenderRole, age_days: int) -> None:
+        assert store.put_received(InboundReceipt(
+            env.business, f"{env.run}-{sid}", sender, "+15005550000", f"Synthetic {sid}",
+            now - timedelta(days=age_days), role,
+            "synthetic-client" if role == SenderRole.CLIENT else None, Keyword.OTHER, True))
+
+    receive("owner-old", owner, SenderRole.OWNER, 100)
+    receive("owner-new", owner, SenderRole.OWNER, 1)  # Recent owner activity.
+    receive("client-old", client_phone, SenderRole.CLIENT, 100)
+    receive("client-new", client_phone, SenderRole.CLIENT, 1)
+
+    assert store.purge_expired_bodies(env.business, now, owner) == 1
+    old = _get(env, f"BUSINESS#{env.business}", f"SMS#{env.run}-owner-old")
+    assert old is not None and "body" not in old and "provider_id" in old
+    new = _get(env, f"BUSINESS#{env.business}", f"SMS#{env.run}-owner-new")
+    assert new is not None and new["body"]["S"] == "Synthetic owner-new"
+    for name in ("client-old", "client-new"):
+        kept = _get(env, f"BUSINESS#{env.business}", f"SMS#{env.run}-{name}")
+        assert kept is not None and "body" in kept
+    _owner_edge_cases(env, store, owner, now)
+    assert store.put_received(InboundReceipt(
+        env.business, f"{env.run}-owner-old", owner, "+15005550000", "Synthetic redelivery",
+        now - timedelta(days=100), SenderRole.OWNER, None, Keyword.OTHER, True)) is False
+
+
+class _ReplyBeforePurge:
+    """Client proxy that lets a reply land after the purge read but before its write."""
+
+    def __init__(self, client: Any, on_first_write: Callable[[], None]) -> None:
+        self._client, self._hook = client, on_first_write
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
+
+    def transact_write_items(self, **kwargs: Any) -> Any:
+        hook, self._hook = self._hook, lambda: None
+        hook()
+        return self._client.transact_write_items(**kwargs)
+
+
+def _owner_edge_cases(env: RaceEnv, store: DynamoSmsIngressStore, owner: str,
+                      now: datetime) -> None:
+    from scheduling.domain.sms_ingress import InboundReceipt, Keyword, SenderRole
+
+    def receive(sid: str, age_days: int) -> InboundReceipt:
+        receipt = InboundReceipt(
+            env.business, f"{env.run}-{sid}", owner, "+15005550000", f"Synthetic {sid}",
+            now - timedelta(days=age_days), SenderRole.OWNER, None, Keyword.OTHER, True)
+        assert store.put_received(receipt)
+        return receipt
+
+    def answer(receipt: InboundReceipt, when: datetime) -> None:
+        assert store.claim_processing(receipt, "token", when, when + timedelta(minutes=2))
+        assert store.put_reply(receipt, "Synthetic reply", "token", when)
+
+    def read(sid: str) -> dict[str, Any]:
+        item = _get(env, f"BUSINESS#{env.business}", f"SMS#{env.run}-{sid}")
+        assert item is not None
+        return item
+
+    # Received 100 days ago, answered 89 days ago: the reply keeps the exchange alive.
+    answered = receive("owner-answered", 100)
+    answer(answered, now - timedelta(days=89))
+    # Under legal hold: kept even though it is old.
+    receive("owner-held", 100)
+    env.client.update_item(
+        TableName=env.table,
+        Key={"PK": {"S": f"BUSINESS#{env.business}"}, "SK": {"S": f"SMS#{env.run}-owner-held"}},
+        UpdateExpression="SET legal_hold_reason = :r",
+        ExpressionAttributeValues={":r": {"S": "synthetic hold"}})
+    # Old and unanswered when read; a reply lands before the purge writes.
+    racing = receive("owner-racing", 100)
+    racer = DynamoSmsIngressStore(_ReplyBeforePurge(
+        env.client, lambda: answer(racing, now)), env.table)
+
+    assert racer.purge_expired_bodies(env.business, now, owner) == 0  # The earlier purge already took owner-old; the race cancels the rest.
+    assert read("owner-answered")["body"]["S"] == "Synthetic owner-answered"
+    assert read("owner-answered")["reply_text"]["S"] == "Synthetic reply"
+    assert read("owner-held")["body"]["S"] == "Synthetic owner-held"
+    assert read("owner-racing")["reply_text"]["S"] == "Synthetic reply"
+    assert "body" in read("owner-racing")
