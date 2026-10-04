@@ -136,7 +136,7 @@ Owns all business rules and state transitions:
 ### Conversation and Message
 - `Conversation`: client/phone association, current conversation state, timestamps.
 - `Message`: provider message ID, direction, delivery status, minimized/redacted content where possible, timestamps.
-- Delete SMS message bodies 90 days after the last scheduling exchange. Keep minimal consent and opt-out evidence separately for four years after the last program text, except during a documented legal hold. Do not copy full message bodies into that evidence record.
+- Delete SMS message bodies 90 days after the last scheduling exchange (in the owner's own thread, 90 days after each message, #201). Keep minimal consent and opt-out evidence separately for four years after the last program text, except during a documented legal hold. Do not copy full message bodies into that evidence record.
 
 ### AuditEvent
 - Actor (owner/client/system), source, action, entity reference, timestamp, and minimal before/after fields needed for accountability. Avoid copying sensitive message content into audit records.

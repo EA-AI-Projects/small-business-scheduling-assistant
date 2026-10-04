@@ -196,8 +196,10 @@ def purge_risks(items: dict[Key, Item], real_now: datetime,
                 risks.append(f"note {sk}")
         elif sk.startswith("SMS#") and ("body" in item or "reply_text" in item):
             thread = items.get((f"BUSINESS#{BUSINESS}", f"SMS_THREAD#{item['sender']['S']}"))
-            if ("legal_hold_reason" not in item and thread is not None
-                    and thread["last_exchange_at"]["S"] <= body_cutoff):
+            owner_expired = (item.get("role", {}).get("S") == "owner"
+                             and item["received_at"]["S"] <= body_cutoff)
+            if ("legal_hold_reason" not in item and (owner_expired or (
+                    thread is not None and thread["last_exchange_at"]["S"] <= body_cutoff))):
                 risks.append(f"sms body {sk}")
         elif sk.startswith(EVIDENCE_PREFIXES) and "legal_hold_reason" not in item:
             field_name = "opted_out_at" if sk.startswith("SMS_OPTOUT") else "agreed_at"
@@ -244,6 +246,7 @@ def _retention_run(function_var: str, handler_path: str, in_process: Invoke,
         monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "synthetic")
         monkeypatch.setenv("SCHEDULING_TABLE_NAME", env.table)
         monkeypatch.setenv("BUSINESS_ID", BUSINESS)
+        monkeypatch.setenv("OWNER_NUMBER", "+12065550198")
         _seed_bystanders(env, datetime.now(UTC))
         yield from _prepared(env, in_process)
 
