@@ -101,26 +101,30 @@ def _words(body: str) -> set[str]:
     return set(_tokens(body))
 
 
-# A negator counts only when it sits right before the word it would turn around (within
-# NEGATOR_REACH words), so "Don't decline it yet" refuses but "Decline, I can't that day" does
-# not. A strong negator right after an approving word also refuses ("yes, not yet"), and a
-# contrast word anywhere does ("yes but ...").
+# Fail closed: a model verdict is trusted only when the text does not retract itself.
+# - Before the word it would reverse, a negator within NEGATOR_REACH words refuses.
+# - After it, any retraction marker anywhere later refuses ("ok actually hold off", "decline,
+#   wait", "yes, I mean no", "decline it. actually don't"). Contrast words refuse too.
+# - Approving or sending also refuses a marker anywhere before it, so "yes, hold it for her"
+#   and "yes send it, I'll wait" ask instead (a known limit, see CONVERSATION.md).
+# - The only reasons allowed after a decline word are masked below by exact phrase.
 NEGATOR_REACH = 3
-STRONG_NEGATORS = frozenset({
-    "no", "not", "nope", "nah", "don't", "dont", "never", "cant", "can't", "won't", "wont"})
+RETRACTION_MARKERS = frozenset({
+    "no", "nope", "nah", "not", "wait", "hold", "stop", "cancel", "never", "mind",
+    "nevermind", "actually", "scratch", "yet", "don't", "dont", "won't", "wont", "can't",
+    "cant", "cancelled", "canceled"})
 CONTRAST_WORDS = frozenset({"but", "except", "however", "unless"})
+DECLINE_REASONS = re.compile(
+    r"\b(?:i )?can't\b|\bwon't work\b|\bnot available\b|\bunavailable\b")
 
 
-def _negated(tokens: list[str], targets: frozenset[str] | set[str]) -> bool:
-    """Some target word has a negator in front of it (or a strong one right behind it)."""
-    for index, token in enumerate(tokens):
-        if token not in targets:
-            continue
-        if NEGATORS & set(tokens[max(0, index - NEGATOR_REACH):index]):
-            return True
-        if STRONG_NEGATORS & set(tokens[index + 1:index + 3]):
-            return True
-    return False
+def _text(body: str) -> str:
+    return body.lower().replace("\u2019", "'")
+
+
+def _retracts(tokens: list[str]) -> bool:
+    words = set(tokens)
+    return bool(words & (RETRACTION_MARKERS | CONTRAST_WORDS))
 
 
 def may_be_approval(body: str) -> bool:
@@ -129,34 +133,35 @@ def may_be_approval(body: str) -> bool:
 
 
 def supports_approval(body: str) -> bool:
-    """An approving word, no decline word, and no negator near it; checked on top of the model."""
+    """An approving word, no decline word, and no retraction anywhere in the text."""
     tokens = _tokens(body)
     words = set(tokens)
-    approving = words & (APPROVAL_TRIGGERS - DECLINE_WORDS)
-    return (bool(approving) and not words & DECLINE_WORDS and not words & CONTRAST_WORDS
-            and not _negated(tokens, approving))
+    return (bool(words & (APPROVAL_TRIGGERS - DECLINE_WORDS)) and not words & DECLINE_WORDS
+            and not _retracts(tokens))
 
 
 def supports_decline(body: str) -> bool:
-    """An explicit decline, reject, or deny word that no negator precedes, and no approving
-    word anywhere."""
+    """An explicit decline, reject, or deny word, no approving word, no negator just before it,
+    and no retraction after it (except the exact reasons in ``DECLINE_REASONS``)."""
+    text = _text(body)
     tokens = _tokens(body)
     words = set(tokens)
-    declining = words & DECLINE_WORDS
-    if not declining or words & (APPROVAL_TRIGGERS - DECLINE_WORDS):
+    if not words & DECLINE_WORDS or words & (APPROVAL_TRIGGERS - DECLINE_WORDS):
         return False
-    for index, token in enumerate(tokens):
-        if token in declining and NEGATORS & set(tokens[max(0, index - NEGATOR_REACH):index]):
-            return False
-    return True
+    first = next(index for index, token in enumerate(tokens) if token in DECLINE_WORDS)
+    if RETRACTION_MARKERS & set(tokens[max(0, first - NEGATOR_REACH):first]):
+        return False
+    position = min((match.start() for match in re.finditer(r"[a-z']+", text)
+                    if match.group() in DECLINE_WORDS), default=0)
+    after = DECLINE_REASONS.sub(" ", text[position:])
+    return not _retracts(re.findall(r"[a-z']+", after)[1:])
 
 
 def supports_offer_send(body: str) -> bool:
     tokens = _tokens(body)
     words = set(tokens)
-    sending = words & OFFER_SEND_WORDS
-    return (bool(sending) and not words & CONTRAST_WORDS and not _negated(tokens, sending)
-            and not words & DECLINE_WORDS)
+    return (bool(words & OFFER_SEND_WORDS) and not words & DECLINE_WORDS
+            and not _retracts(tokens))
 
 
 def supports_offer_cancel(body: str) -> bool:

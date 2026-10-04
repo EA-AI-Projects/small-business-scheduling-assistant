@@ -704,18 +704,44 @@ def test_a_negator_before_the_decline_word_still_refuses(phrase: str) -> None:
     assert chat.status(request) == CalendarStatus.PENDING_APPROVAL
 
 
-@pytest.mark.parametrize("phrase", ["yes, hold it for her", "yes send it, I'll wait"])
-def test_a_negator_word_after_an_approval_does_not_block_it(phrase: str) -> None:
+SELF_RETRACTING_APPROVALS = [
+    "ok actually hold off", "Sure, actually let's not", "yes, I mean no",
+    "ok on second thought no", "ok, please stop", "yes, scratch that",
+    "yes, hold it for her", "yes send it, I'll wait", "yes but not yet", "yes, not yet",
+    "yes nevermind"]
+SELF_RETRACTING_DECLINES = [
+    "decline... wait", "decline, hold on", "Reject? No, never mind",
+    "I said decline but not yet", "decline. no wait", "decline it. actually don't",
+    "decline, not yet", "decline it, however wait", "deny it unless she calls"]
+
+
+@pytest.mark.parametrize("phrase", SELF_RETRACTING_APPROVALS)
+def test_a_self_retracting_reply_never_approves_or_sends(phrase: str) -> None:
     from scheduling.domain.owner_reply_classification import (
         supports_approval,
         supports_offer_send,
     )
-    assert supports_approval(phrase) and supports_offer_send(phrase)
+    assert not supports_approval(phrase) and not supports_offer_send(phrase)
+    chat, request = one_pending()
+    chat.model.script[phrase] = proposal(APPROVE, request)
+    assert not chat.ask(phrase).committed
+    assert chat.status(request) == CalendarStatus.PENDING_APPROVAL
+    chat.ask(ASK)
+    chat.model.script[phrase] = proposal(OwnerReplyIntent.CONFIRM_OFFER)
+    chat.ask(phrase)
+    assert not chat.offers.outbox
+
+
+@pytest.mark.parametrize("phrase", SELF_RETRACTING_DECLINES)
+def test_a_self_retracting_reply_never_declines(phrase: str) -> None:
+    chat, request = one_pending()
+    chat.model.script[phrase] = proposal(DECLINE, request)
+    assert not chat.ask(phrase).committed
+    assert chat.status(request) == CalendarStatus.PENDING_APPROVAL
 
 
 @pytest.mark.parametrize("phrase", [
-    "wait, yes", "no, yes", "yes but not yet", "yes, not yet", "don't approve it",
-    "yes, don't send it"])
+    "wait, yes", "no, yes", "don't approve it", "yes, don't send it"])
 def test_a_negator_near_an_approval_blocks_it(phrase: str) -> None:
     from scheduling.domain.owner_reply_classification import supports_approval
     assert not supports_approval(phrase)
