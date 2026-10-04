@@ -116,3 +116,25 @@ def test_invalid_owner_reply_classification_is_rejected(
                                 "summary", None, None, (), None, ())
     with pytest.raises(ValueError):
         OpenAIMessageInterpreter("synthetic-key").classify_owner_reply("yes", context)
+
+
+def test_owner_reply_classification_describes_an_open_offer_and_accepts_offer_intents(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list[dict[str, Any]] = []
+
+    def fake_urlopen(request: Request, timeout: int) -> BytesIO:
+        sent.append(json.loads(request.data or b"{}"))
+        return owner_reply_response(intent="confirm_offer", statuses=None)
+
+    monkeypatch.setattr("scheduling.adapters.openai_messages.urlopen", fake_urlopen)
+    pending = PendingRef("abc12345", "Blake", "Wed Oct 7 at 9:00 AM")
+    context = OwnerReplyContext(
+        date(2026, 10, 4), "America/Los_Angeles", "offer_prompt", "none", None, None, (), None,
+        (pending,), PendingRef("abc12345", "Blake", "Wed Oct 7 at 2:00 PM"))
+    result = OpenAIMessageInterpreter("synthetic-key").classify_owner_reply("go ahead", context)
+    assert result.intent == OwnerReplyIntent.CONFIRM_OFFER
+    text = sent[0]["input"]
+    assert "Last assistant message: offer_prompt" in text
+    assert "Open offer: ref abc12345, Blake, new time Wed Oct 7 at 2:00 PM" in text
+    enum = sent[0]["tools"][0]["parameters"]["properties"]["intent"]["enum"]
+    assert {"confirm_offer", "cancel_offer", "how_to", "calendar_question"} <= set(enum)
