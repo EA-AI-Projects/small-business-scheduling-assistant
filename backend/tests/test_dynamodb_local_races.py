@@ -782,3 +782,36 @@ def test_two_concurrent_counteroffer_confirmations_queue_exactly_one_client_text
     assert record is not None and record.template == "owner-counteroffer"
     assert record.recipient == "client" and record.event_version == 2
     assert not store.put_draft(offer)  # A finished offer cannot be reopened.
+
+
+def test_owner_thread_text_is_purged_per_message_while_client_thread_keeps_old_rule(
+        race_env: RaceEnv) -> None:
+    from scheduling.domain.sms_ingress import InboundReceipt, Keyword, SenderRole
+
+    env = race_env
+    store = DynamoSmsIngressStore(env.client, env.table)
+    owner, client_phone = "+15005550010", "+15005550011"
+    now = datetime.now(UTC)
+
+    def receive(sid: str, sender: str, role: SenderRole, age_days: int) -> None:
+        assert store.put_received(InboundReceipt(
+            env.business, f"{env.run}-{sid}", sender, "+15005550000", f"Synthetic {sid}",
+            now - timedelta(days=age_days), role,
+            "synthetic-client" if role == SenderRole.CLIENT else None, Keyword.OTHER, True))
+
+    receive("owner-old", owner, SenderRole.OWNER, 100)
+    receive("owner-new", owner, SenderRole.OWNER, 1)  # Recent owner activity.
+    receive("client-old", client_phone, SenderRole.CLIENT, 100)
+    receive("client-new", client_phone, SenderRole.CLIENT, 1)
+
+    assert store.purge_expired_bodies(env.business, now, owner) == 1
+    old = _get(env, f"BUSINESS#{env.business}", f"SMS#{env.run}-owner-old")
+    assert old is not None and "body" not in old and "provider_id" in old
+    new = _get(env, f"BUSINESS#{env.business}", f"SMS#{env.run}-owner-new")
+    assert new is not None and new["body"]["S"] == "Synthetic owner-new"
+    for name in ("client-old", "client-new"):
+        kept = _get(env, f"BUSINESS#{env.business}", f"SMS#{env.run}-{name}")
+        assert kept is not None and "body" in kept
+    assert store.put_received(InboundReceipt(
+        env.business, f"{env.run}-owner-old", owner, "+15005550000", "Synthetic redelivery",
+        now - timedelta(days=100), SenderRole.OWNER, None, Keyword.OTHER, True)) is False

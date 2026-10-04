@@ -426,3 +426,38 @@ def test_old_stop_evidence_purges_but_suppression_remains() -> None:
                            "client-1", Keyword.START, False)
     store.put_received(start)
     assert not store.is_opted_out("pilot", "+14155550101")
+
+
+OWNER = "+14155550100"
+
+
+def _owner_receipt(sid: str, when: datetime) -> InboundReceipt:
+    return InboundReceipt("pilot", sid, OWNER, "+14155550000", "Move the Thursday visit",
+                          when, SenderRole.OWNER, None, Keyword.OTHER, True)
+
+
+def test_owner_text_expires_90_days_after_its_own_time_not_thread_activity() -> None:
+    dynamo = MemoryDynamo()
+    store = DynamoSmsIngressStore(dynamo, "synthetic")
+    old = _owner_receipt("SM-owner-old", NOW - timedelta(days=100))
+    recent = _owner_receipt("SM-owner-new", NOW - timedelta(days=1))
+    store.put_received(old)
+    store.put_received(recent)
+    store.put_received(_receipt("SM-client-old", NOW - timedelta(days=100)))
+    store.put_received(_receipt("SM-client-new", NOW - timedelta(days=1)))
+    assert store.purge_expired_bodies("pilot", NOW, OWNER) == 1
+    assert "body" not in dynamo.items["SMS#SM-owner-old"]
+    assert dynamo.items["SMS#SM-owner-new"]["body"]["S"] == "Move the Thursday visit"
+    # The client thread's latest exchange still keeps its older text.
+    assert dynamo.items["SMS#SM-client-old"]["body"]["S"] == "Next Tuesday"
+    # Redelivery stays idempotent, and a read after the purge shows no body.
+    assert store.put_received(old) is False
+    assert store.read_received("pilot", "SM-owner-old").body is None  # type: ignore[union-attr]
+
+
+def test_owner_rule_applies_only_when_the_owner_number_is_given() -> None:
+    dynamo = MemoryDynamo()
+    store = DynamoSmsIngressStore(dynamo, "synthetic")
+    store.put_received(_owner_receipt("SM-owner-old", NOW - timedelta(days=100)))
+    store.put_received(_owner_receipt("SM-owner-new", NOW - timedelta(days=1)))
+    assert store.purge_expired_bodies("pilot", NOW) == 0

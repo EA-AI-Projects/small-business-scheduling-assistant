@@ -564,6 +564,9 @@ Resources:
     Properties:
       Handler: scheduling.workers.sms_retention.handler
       Timeout: 60
+      Environment:
+        Variables:
+          OWNER_NUMBER: !Ref OwnerNumber
       Policies:
         - Statement:
             - Effect: Allow
