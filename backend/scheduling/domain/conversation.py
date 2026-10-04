@@ -634,15 +634,13 @@ class ConversationService:
         zone = ZoneInfo(policy.timezone)
         if questions.is_fresh_question(body, now.astimezone(zone).date()):
             return None  # A complete calendar question; it cannot approve anything.
-        # A request counts as named only if the question's reply was durably saved, and only
-        # for a message received after the question was asked. A redelivery of the asking
-        # message, or any earlier message, must ask again.
+        # A request counts as named only once the question's reply was SENT, and only for a
+        # message our webhook received after that send. A redelivery of the asking message,
+        # an earlier message, a pending or failed question, or a lookup error all ask again.
         was_named = (
             bool(context.clarified_request) and context.clarified_by != receipt.provider_id
             and context.clarified_at is not None and receipt.received_at > context.clarified_at
-            and self._reply_lookup is not None
-            and self._reply_lookup.read_reply_text(
-                receipt.business_id, context.clarified_by) is not None)
+            and self._question_was_sent_before(receipt, context.clarified_by))
         named = next((target for target in targets
                       if was_named and target.appointment_id == context.clarified_request), None)
         if self._owner_classifier is None:
@@ -680,6 +678,16 @@ class ConversationService:
                 receipt, targets, now,
                 "That request may have changed." if was_named else "I wasn't sure what you meant.")
         return self._ask_owner(receipt, targets, now, "I wasn't sure what you meant.")
+
+    def _question_was_sent_before(self, receipt: InboundReceipt, asked_by: str) -> bool:
+        if self._reply_lookup is None:
+            return False
+        try:
+            saved = self._reply_lookup.read_reply_text(receipt.business_id, asked_by)
+            sent_at = self._reply_lookup.read_reply_sent_at(receipt.business_id, asked_by)
+        except Exception:  # noqa: BLE001 - any lookup failure must fail closed
+            return False
+        return saved is not None and sent_at is not None and receipt.received_at > sent_at
 
     def _pending_ref(self, business_id: str, target: Appointment, zone: ZoneInfo) -> PendingRef:
         profile = self._repository.read_profile(business_id, target.client_id)

@@ -86,6 +86,21 @@ class DynamoSmsIngressStore(SmsIngressStore):
         item = self._get(business_id, f"SMS#{provider_id}")
         return item.get("reply_text", {}).get("S") if item is not None else None
 
+    def read_reply_sent_at(self, business_id: str, provider_id: str) -> datetime | None:
+        """When our sender sent the reply to this inbound message.
+
+        Returns the ``sent_at`` that ``record_outbound`` stored, and only if the reply's
+        outbox item is SENT. A pending, retryable, failed, or missing item returns None.
+        """
+        outbox = self._get(business_id, f"OUTBOX#sms-reply#{provider_id}")
+        if outbox is None or outbox.get("delivery_state", {}).get("S") != "SENT":
+            return None
+        sent_sid = outbox.get("provider_id", {}).get("S")
+        evidence = self._get(business_id, f"SMS_OUT#{sent_sid}") if sent_sid else None
+        if evidence is None or "sent_at" not in evidence:
+            return None
+        return datetime.fromisoformat(evidence["sent_at"]["S"])
+
     def has_committed_command(self, receipt: InboundReceipt) -> bool:
         return any(self._get(receipt.business_id, key) is not None
                    for key in self._command_keys(receipt))

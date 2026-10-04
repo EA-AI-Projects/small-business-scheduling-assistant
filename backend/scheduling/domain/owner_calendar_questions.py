@@ -69,7 +69,7 @@ class QuestionContext:
     clarified_request: str = ""  # Request the assistant last asked the owner about.
     clarified_version: int = 0  # Its version when asked; approval needs the same version.
     clarified_by: str = ""  # Inbound message that asked; its redelivery must ask again.
-    clarified_at: datetime | None = None  # When it asked; only later messages may answer.
+    clarified_at: datetime | None = None  # When it asked (our clock); answers must be later.
 
     def expired(self, now: datetime) -> bool:
         return now >= self.expires_at
@@ -98,9 +98,13 @@ class InMemoryQuestionContexts:
 
 @runtime_checkable
 class ReplyLookup(Protocol):
-    """Whether the reply to an inbound message was durably saved."""
+    """Whether the reply to an inbound message was saved, and when our sender sent it."""
 
     def read_reply_text(self, business_id: str, provider_id: str) -> str | None: ...
+
+    def read_reply_sent_at(self, business_id: str, provider_id: str) -> datetime | None:
+        """When the reply was sent, or None unless its outbox item is SENT."""
+        ...
 
 
 class QuestionRepository(Protocol):

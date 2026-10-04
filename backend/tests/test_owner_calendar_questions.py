@@ -62,13 +62,21 @@ class Model:
 
 class Consent:
     def __init__(self) -> None:
-        self.replies: dict[str, str] = {}  # What the SMS processor has durably saved.
+        self.replies: dict[str, str] = {}  # What the SMS processor has saved.
+        self.outbox: dict[str, tuple[str, datetime | None]] = {}  # State and sent_at.
+        self.lookup_error: Exception | None = None
 
     def is_opted_out(self, business_id: str, phone_e164: str) -> bool:
         return False
 
     def read_reply_text(self, business_id: str, provider_id: str) -> str | None:
+        if self.lookup_error is not None:
+            raise self.lookup_error
         return self.replies.get(provider_id)
+
+    def read_reply_sent_at(self, business_id: str, provider_id: str) -> datetime | None:
+        state, sent_at = self.outbox.get(provider_id, ("MISSING", None))
+        return sent_at if state == "SENT" else None
 
     def read_consent(self, business_id: str, phone_e164: str) -> ConsentEvidence | None:
         return None
@@ -95,8 +103,9 @@ class Chat:
             OWNER, InMemoryConversationStates())
 
     def ask(self, body: str, provider_id: str | None = None, save: bool = True,
-            received_at: datetime | None = None) -> ConversationOutcome:
-        """Send an owner text. Like ReceiptProcessor, save the reply unless ``save`` is False."""
+            received_at: datetime | None = None, state: str = "SENT") -> ConversationOutcome:
+        """Send an owner text. Like ReceiptProcessor, save the reply unless ``save`` is False,
+        and let the sender mark its outbox item ``state`` (SENT, PENDING, or FAILED)."""
         self.count += 1
         self.now += timedelta(seconds=10)
         provider = provider_id or f"SM-{self.count}"
@@ -106,6 +115,7 @@ class Chat:
             SenderRole.OWNER, None, Keyword.OTHER, True))
         if save and not outcome.committed:
             self.consent.replies[provider] = outcome.text
+            self.consent.outbox[provider] = (state, self.now if state == "SENT" else None)
         return outcome
 
     def hold(self, client: str, start: datetime, key: str, confirm: bool = False) -> str:
@@ -664,3 +674,62 @@ def test_without_a_way_to_check_saved_replies_nothing_is_ever_named() -> None:
     chat.ask("yes please")
     assert not chat.ask("yes please").committed
     assert status_of(chat, request) == CalendarStatus.PENDING_APPROVAL
+
+
+def test_a_question_that_is_pending_or_failed_is_not_named_yet() -> None:
+    for state in ("PENDING", "FAILED"):
+        chat, request = week_with_one_pending()
+        chat.model.script["yes please"] = decision(OwnerReplyIntent.APPROVE_NAMED_REQUEST, request)
+        chat.ask("yes please", "SM-A", state=state)
+        resent = chat.ask("yes please", "SM-B")
+        assert not resent.committed, state
+        assert status_of(chat, request) == CalendarStatus.PENDING_APPROVAL, state
+        # SM-B's question was sent, so a message received after that send approves.
+        assert chat.ask("yes please", "SM-C").committed, state
+
+
+def test_a_message_received_before_the_send_but_processed_after_it_asks_again() -> None:
+    chat, request = week_with_one_pending()
+    chat.model.script["yes please"] = decision(OwnerReplyIntent.APPROVE_NAMED_REQUEST, request)
+    chat.ask("ok", "SM-A", state="PENDING")
+    sent_at = chat.now + timedelta(seconds=60)
+    chat.consent.outbox["SM-A"] = ("SENT", sent_at)  # The sender sends it a minute later.
+    early = chat.ask("yes please", "SM-B", received_at=sent_at - timedelta(seconds=20))
+    assert not early.committed and status_of(chat, request) == CalendarStatus.PENDING_APPROVAL
+    chat.now = sent_at + timedelta(minutes=1)
+    assert chat.ask("yes please", "SM-C").committed
+
+
+def test_a_failed_sent_lookup_asks_again() -> None:
+    chat, request = week_with_one_pending()
+    chat.model.script["yes please"] = decision(OwnerReplyIntent.APPROVE_NAMED_REQUEST, request)
+    chat.ask("ok", "SM-A")
+    chat.consent.lookup_error = RuntimeError("table unavailable")
+    assert not chat.ask("yes please", "SM-B").committed
+    chat.consent.lookup_error = None
+    assert status_of(chat, request) == CalendarStatus.PENDING_APPROVAL
+
+
+def test_sms_store_reports_a_sent_time_only_for_a_sent_outbox_item() -> None:
+    from scheduling.adapters.sms_dynamodb import DynamoSmsIngressStore
+
+    stamp = NOW.isoformat()
+    items = {
+        "OUTBOX#sms-reply#SM-sent": {"delivery_state": {"S": "SENT"}, "provider_id": {"S": "SMX"}},
+        "SMS_OUT#SMX": {"sent_at": {"S": stamp}},
+        "OUTBOX#sms-reply#SM-pending": {"delivery_state": {"S": "PENDING"}},
+        "OUTBOX#sms-reply#SM-failed": {"delivery_state": {"S": "FAILED"}},
+        "OUTBOX#sms-reply#SM-nosend": {"delivery_state": {"S": "SENT"},
+                                       "provider_id": {"S": "SMY"}},
+    }
+
+    class Client:
+        def get_item(self, **kwargs: object) -> dict[str, object]:
+            key: dict[str, dict[str, str]] = kwargs["Key"]  # type: ignore[assignment]
+            item = items.get(key["SK"]["S"])
+            return {"Item": item} if item is not None else {}
+
+    store = DynamoSmsIngressStore(Client(), "t")  # type: ignore[arg-type]
+    assert store.read_reply_sent_at("pilot", "SM-sent") == NOW
+    for missing in ("SM-pending", "SM-failed", "SM-nosend", "SM-unknown"):
+        assert store.read_reply_sent_at("pilot", missing) is None, missing
