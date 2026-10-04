@@ -57,11 +57,14 @@ from scheduling.domain.lifecycle import (
     LifecycleService,
     StaleVersion,
 )
-from scheduling.domain.owner_calendar_questions import (
-    OwnerCalendarQuestions,
-    is_ambiguous_reply,
-    is_bare_confirmed,
-    is_explicit_decision,
+from scheduling.domain.owner_calendar_questions import OwnerCalendarQuestions
+from scheduling.domain.owner_reply_classification import (
+    Confidence,
+    OwnerReplyClassifier,
+    OwnerReplyContext,
+    OwnerReplyIntent,
+    PendingRef,
+    may_be_approval,
 )
 from scheduling.domain.sms_ingress import (
     ConsentEvidence,
@@ -154,7 +157,8 @@ class ConversationService:
                  holds: HoldService, lifecycle: LifecycleService,
                  consent: ConsentLookup, clock: Callable[[], datetime],
                  owner_number: str, states: ConversationStateStore | None = None,
-                 owner_questions: OwnerCalendarQuestions | None = None) -> None:
+                 owner_questions: OwnerCalendarQuestions | None = None,
+                 owner_reply_classifier: OwnerReplyClassifier | None = None) -> None:
         self._repository = repository
         self._interpreter = interpreter
         self._holds = holds
@@ -166,6 +170,9 @@ class ConversationService:
         self._states = states if states is not None else InMemoryConversationStates()
         self._owner_questions = (owner_questions if owner_questions is not None
                                  else OwnerCalendarQuestions(repository))
+        self._owner_classifier = (
+            owner_reply_classifier if owner_reply_classifier is not None
+            else interpreter if isinstance(interpreter, OwnerReplyClassifier) else None)
 
     def handle(self, receipt: InboundReceipt) -> ConversationOutcome:
         if (not receipt.authorized_for_commands or receipt.body is None
@@ -585,9 +592,9 @@ class ConversationService:
                                     receipt.provider_id)
             if text is not None:
                 return ConversationOutcome(text)
-        blocked = self._ambiguous_owner_reply(receipt, targets, now)
-        if blocked is not None:
-            return blocked
+        classified = self._classified_owner_reply(receipt, targets, now)
+        if classified is not None:
+            return classified
         reply = self._owner_reply(receipt, targets)
         if reply is not None:
             return reply
@@ -595,34 +602,77 @@ class ConversationService:
                                 receipt.provider_id)
         return ConversationOutcome(text) if text is not None else None
 
-    def _ambiguous_owner_reply(self, receipt: InboundReceipt, targets: tuple[Appointment, ...],
-                               now: datetime) -> ConversationOutcome | None:
-        """Keep a bare "yes" or "confirmed" after a calendar answer from approving.
+    def _classified_owner_reply(self, receipt: InboundReceipt,
+                                targets: tuple[Appointment, ...],
+                                now: datetime) -> ConversationOutcome | None:
+        """Let the model say what an approval-like reply means inside a calendar conversation.
 
-        After a calendar answer such a word may mean "show confirmed visits". The owner is
-        asked once; from then on only an explicit APPROVE or DECLINE acts, and only on the
-        request the question named while it is still the single pending one.
+        The model proposes; this method acts only on a confident approve or decline that
+        names the request the assistant last asked about, while that request is still the
+        single pending one at the same version. Anything else asks and writes nothing.
         """
         questions, body = self._owner_questions, receipt.body or ""
-        if len(targets) != 1:
+        context = questions.open_context(receipt.business_id, receipt.sender, now)
+        if context is None or not targets or not may_be_approval(body):
             return None
-        target = targets[0]
-        open_context, asked = questions.approval_state(receipt.business_id, receipt.sender, now)
-        if not open_context:
-            return None
-        ambiguous = is_ambiguous_reply(body)
-        if asked is not None and is_bare_confirmed(body):
-            text = questions.answer(receipt.business_id, receipt.sender, body, now,
-                                    receipt.provider_id)
-            return ConversationOutcome(text) if text is not None else None
-        stale = asked is not None and is_explicit_decision(body) and asked != target.appointment_id
-        if not (ambiguous or stale):
-            return None
-        questions.mark_clarified(receipt.business_id, receipt.sender, now, target.appointment_id)
-        prefix = "That request changed. " if stale else ""
+        policy = self._repository.read_policy(receipt.business_id)
+        zone = ZoneInfo(policy.timezone)
+        if questions.is_fresh_question(body, now.astimezone(zone).date()):
+            return None  # A complete calendar question; it cannot approve anything.
+        named = next((target for target in targets
+                      if target.appointment_id == context.clarified_request), None)
+        if self._owner_classifier is None:
+            return self._ask_owner(receipt, targets, now, "I wasn't sure what you meant.")
+        try:
+            proposal = self._owner_classifier.classify_owner_reply(body, OwnerReplyContext(
+                now.astimezone(zone).date(), policy.timezone,
+                "approval_question" if named is not None else "calendar_answer",
+                context.view.value, context.first, context.last,
+                tuple(sorted(status.value for status in context.statuses or ())),
+                self._pending_ref(receipt.business_id, named, zone) if named else None,
+                tuple(self._pending_ref(receipt.business_id, target, zone)
+                      for target in targets[:MAX_CONTEXT_APPOINTMENTS])))
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+            return self._ask_owner(receipt, targets, now, "I couldn't tell what you meant.")
+        if proposal.confidence != Confidence.HIGH:
+            return self._ask_owner(receipt, targets, now, "I wasn't sure what you meant.")
+        if proposal.intent == OwnerReplyIntent.CALENDAR_FOLLOWUP:
+            text = questions.apply_followup(
+                receipt.business_id, receipt.sender, now, receipt.provider_id,
+                proposal.statuses, proposal.range_first, proposal.range_last)
+            if text is not None:
+                return ConversationOutcome(text)
+            return self._ask_owner(receipt, targets, now, "I wasn't sure what you meant.")
+        if proposal.intent in (OwnerReplyIntent.APPROVE_NAMED_REQUEST,
+                               OwnerReplyIntent.DECLINE_NAMED_REQUEST):
+            reference = (proposal.request_reference or "").lower()
+            if (named is not None and len(targets) == 1 and named.version == context.clarified_version
+                    and reference and named.appointment_id.startswith(reference)
+                    and len(reference) >= 8):
+                action = (Action.APPROVE if proposal.intent == OwnerReplyIntent.APPROVE_NAMED_REQUEST
+                          else Action.DECLINE)
+                return self._decide(receipt, named, action)
+            return self._ask_owner(receipt, targets, now, "That request may have changed.")
+        return self._ask_owner(receipt, targets, now, "I wasn't sure what you meant.")
+
+    def _pending_ref(self, business_id: str, target: Appointment, zone: ZoneInfo) -> PendingRef:
+        profile = self._repository.read_profile(business_id, target.client_id)
+        name = profile.name.split()[0] if profile is not None and profile.name.split() else "client"
+        return PendingRef(target.appointment_id[:8], name, when_text(target.start_at, zone))
+
+    def _ask_owner(self, receipt: InboundReceipt, targets: tuple[Appointment, ...],
+                   now: datetime, lead: str) -> ConversationOutcome:
+        """One focused question; remembers the named request for the answer. Writes nothing."""
+        if len(targets) == 1:
+            target = targets[0]
+            self._owner_questions.mark_clarified(
+                receipt.business_id, receipt.sender, now, target.appointment_id, target.version)
+            return ConversationOutcome(
+                f"{lead} Do you mean approve {self._request_line(receipt.business_id, target)}, "
+                "or something about the calendar? Reply APPROVE or DECLINE to decide it, "
+                "or ask me about the calendar.")
         return ConversationOutcome(
-            f"{prefix}Do you mean approve {self._request_line(receipt.business_id, target)}, "
-            "or show only confirmed visits? Reply APPROVE or CONFIRMED ONLY.")
+            f"{lead} {self._pending_summary(receipt.business_id, targets)}")
 
     def _owner_reply(self, receipt: InboundReceipt,
                      targets: tuple[Appointment, ...]) -> ConversationOutcome | None:
@@ -635,7 +685,10 @@ class ConversationService:
             return None
         if len(targets) != 1:
             return ConversationOutcome(self._pending_summary(receipt.business_id, targets))
-        target = targets[0]
+        return self._decide(receipt, targets[0], action)
+
+    def _decide(self, receipt: InboundReceipt, target: Appointment,
+                action: Action) -> ConversationOutcome:
         try:
             result = self._lifecycle.apply(AppointmentCommand(
                 receipt.business_id, target.appointment_id, receipt.sender,

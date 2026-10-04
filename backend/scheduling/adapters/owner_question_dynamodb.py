@@ -42,13 +42,15 @@ class DynamoQuestionContexts:
             datetime.fromisoformat(item["expires_at"]["S"]),
             int(item["page_start"]["N"]), item.get("receipt_id", {}).get("S", ""),
             item.get("fingerprint", {}).get("S", ""),
-            item.get("clarified_request", {}).get("S", ""))
+            item.get("clarified_request", {}).get("S", ""),
+            int(item.get("clarified_version", {"N": "0"})["N"]))
 
     def put_context(self, context: QuestionContext) -> None:
         item: dict[str, Any] = {
             **self._key(context.business_id, context.sender),
             "view": {"S": context.view.value}, "skip": {"N": str(context.skip)},
             "page_start": {"N": str(context.page_start)},
+            "clarified_version": {"N": str(context.clarified_version)},
             "created_at": {"S": context.created_at.isoformat()},
             "expires_at": {"S": context.expires_at.isoformat()},
             "expires_at_epoch": {"N": str(int(context.expires_at.timestamp()))},

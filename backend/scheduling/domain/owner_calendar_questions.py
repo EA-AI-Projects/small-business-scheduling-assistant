@@ -28,6 +28,7 @@ MAX_REPLY_LENGTH = 480  # Three GSM-7 segments (160 each); longer answers are pa
 FOOTER_ROOM = 60
 MAX_NAME_LENGTH = 60
 MAX_FOLLOW_UP_WORDS = 8
+MAX_FOLLOW_UP_DAYS = 31
 
 CONFIRMED = CalendarStatus.CONFIRMED
 PENDING = CalendarStatus.PENDING_APPROVAL
@@ -65,7 +66,8 @@ class QuestionContext:
     page_start: int = 0  # Offset of the page last sent, so a redelivered MORE repeats it.
     receipt_id: str = ""  # The inbound message that produced that page.
     fingerprint: str = ""  # Hash of the full entry list the offsets refer to.
-    clarified_request: str = ""  # Request named in an "approve or show confirmed only?" question.
+    clarified_request: str = ""  # Request the assistant last asked the owner about.
+    clarified_version: int = 0  # Its version when asked; approval needs the same version.
 
     def expired(self, now: datetime) -> bool:
         return now >= self.expires_at
@@ -129,21 +131,6 @@ GENERIC_BOOKING = re.compile(
 CLIENT_QUESTION = re.compile(r"\b(?:who|clients?|customers?|names?)\b")
 BREAKDOWN = re.compile(r"\bby day\b|\bbreak ?down\b|\bdaily\b|\beach day\b")
 MORE = re.compile(r"(?:more|show more|next|continue|the rest|rest)")
-AMBIGUOUS_REPLY = re.compile(r"(?:confirmed|confirm|approved|yes|y|yep|yeah|ok|okay|sure)")
-EXPLICIT_DECISION = re.compile(
-    r"(?:approve|decline|reject|deny)(?: it| (?:the )?request)?(?:,? (?:please|thanks|thank you))?")
-
-
-def is_ambiguous_reply(body: str) -> bool:
-    return AMBIGUOUS_REPLY.fullmatch(normalized(body)) is not None
-
-
-def is_explicit_decision(body: str) -> bool:
-    return EXPLICIT_DECISION.fullmatch(normalized(body)) is not None
-
-
-def is_bare_confirmed(body: str) -> bool:
-    return normalized(body) == "confirmed"
 FOLLOW_UP_FILLER = frozenset({
     "what", "whats", "what's", "about", "and", "how", "the", "only", "just", "include",
     "including", "also", "with", "without", "for", "on", "in", "please", "then", "ok",
@@ -303,23 +290,42 @@ class OwnerCalendarQuestions:
         context = self._contexts.read_context(business_id, sender)
         return context is not None and context.ask is not None and not context.expired(now)
 
-    def approval_state(self, business_id: str, sender: str,
-                       now: datetime) -> tuple[bool, str | None]:
-        """(a question context is open, the request an "approve?" question named).
-
-        The second item is None until the owner has been asked "approve or show only
-        confirmed visits?" for a request.
-        """
+    def open_context(self, business_id: str, sender: str,
+                     now: datetime) -> QuestionContext | None:
+        """The owner's unexpired calendar conversation, if any."""
         context = self._contexts.read_context(business_id, sender)
-        if context is None or context.expired(now):
-            return False, None
-        return True, context.clarified_request or None
+        return context if context is not None and not context.expired(now) else None
+
+    def is_fresh_question(self, body: str, today: date) -> bool:
+        parsed = parse(body, today, False)
+        return parsed is not None and parsed.fresh
 
     def mark_clarified(self, business_id: str, sender: str, now: datetime,
-                       request_id: str) -> None:
-        context = self._contexts.read_context(business_id, sender)
-        if context is not None and not context.expired(now):
-            self._contexts.put_context(replace(context, clarified_request=request_id))
+                       request_id: str, version: int) -> None:
+        """Remember the request the owner was just asked about."""
+        context = self.open_context(business_id, sender, now)
+        if context is not None:
+            self._contexts.put_context(replace(
+                context, clarified_request=request_id, clarified_version=version))
+
+    def apply_followup(self, business_id: str, sender: str, now: datetime, receipt_id: str,
+                       statuses: frozenset[CalendarStatus] | None,
+                       first: date | None, last: date | None) -> str | None:
+        """Re-answer the open question with validated, model-proposed changes."""
+        context = self.open_context(business_id, sender, now)
+        if context is None or (statuses is None and first is None):
+            return None
+        if first is not None and last is not None:
+            if last < first or (last - first).days >= MAX_FOLLOW_UP_DAYS:
+                return None
+        else:
+            first, last = context.first, context.last
+        statuses = statuses if statuses is not None else context.statuses
+        if first is None or last is None or statuses is None:
+            return None
+        policy = self._repository.read_policy(business_id)
+        draft = replace(context, first=first, last=last, statuses=statuses, ask=None)
+        return self._reply(draft, now, policy, ZoneInfo(policy.timezone), 0, receipt_id)
 
     def answer(self, business_id: str, sender: str, body: str, now: datetime,
                receipt_id: str = "") -> str | None:
@@ -386,7 +392,7 @@ class OwnerCalendarQuestions:
         self._contexts.put_context(replace(
             context, skip=following if following < len(entries) else 0, ask=None,
             expires_at=now + QUESTION_LIFETIME, page_start=skip, receipt_id=receipt_id,
-            fingerprint=fingerprint, clarified_request=""))
+            fingerprint=fingerprint, clarified_request="", clarified_version=0))
         return text
 
     def _items(self, business_id: str, days: list[date], zone: ZoneInfo,

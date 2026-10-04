@@ -10,6 +10,12 @@ import pytest
 
 from scheduling.adapters.openai_messages import OpenAIMessageInterpreter
 from scheduling.domain.conversation import MessageContext
+from scheduling.domain.owner_reply_classification import (
+    Confidence,
+    OwnerReplyContext,
+    OwnerReplyIntent,
+    PendingRef,
+)
 from scheduling.domain.sms_ingress import SenderRole
 
 
@@ -63,3 +69,50 @@ def test_ambiguous_proposal_with_action_is_rejected(monkeypatch: pytest.MonkeyPa
                              "America/Los_Angeles", ("abc12345",))
     with pytest.raises(ValueError, match="Ambiguous proposal"):
         OpenAIMessageInterpreter("synthetic-key").propose("Yes", context)
+
+
+def owner_reply_response(**changes: Any) -> BytesIO:
+    arguments: dict[str, Any] = {
+        "intent": "calendar_followup", "request_reference": None, "confidence": "high",
+        "statuses": ["confirmed"], "date_from": None, "date_to": None}
+    arguments.update(changes)
+    return BytesIO(json.dumps({"output": [{
+        "type": "function_call", "name": "classify_owner_reply",
+        "arguments": json.dumps(arguments),
+    }]}).encode())
+
+
+def test_owner_reply_classification_sends_only_bounded_context(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list[dict[str, Any]] = []
+
+    def fake_urlopen(request: Request, timeout: int) -> BytesIO:
+        sent.append(json.loads(request.data or b"{}"))
+        return owner_reply_response()
+
+    monkeypatch.setattr("scheduling.adapters.openai_messages.urlopen", fake_urlopen)
+    pending = PendingRef("abc12345", "Blake", "Wed Oct 7 at 9:00 AM")
+    context = OwnerReplyContext(date(2026, 10, 4), "America/Los_Angeles", "approval_question",
+                                "summary", date(2026, 10, 5), date(2026, 10, 11),
+                                ("confirmed", "pending"), pending, (pending,))
+    result = OpenAIMessageInterpreter("synthetic-key").classify_owner_reply(
+        "yes please", context)
+    assert result.intent == OwnerReplyIntent.CALENDAR_FOLLOWUP
+    assert result.confidence == Confidence.HIGH and result.statuses is not None
+    payload = sent[0]
+    assert payload["store"] is False and payload["tool_choice"]["name"] == "classify_owner_reply"
+    assert "ref abc12345, Blake, Wed Oct 7 at 9:00 AM" in payload["input"]
+    assert "yes please" in payload["input"] and "synthetic-key" not in json.dumps(payload)
+
+
+@pytest.mark.parametrize("changes", [
+    {"intent": "approve_everything"}, {"confidence": "certain"}, {"statuses": ["bogus"]},
+    {"date_from": "next friday"}, {"request_reference": "x" * 65}])
+def test_invalid_owner_reply_classification_is_rejected(
+        monkeypatch: pytest.MonkeyPatch, changes: dict[str, Any]) -> None:
+    monkeypatch.setattr("scheduling.adapters.openai_messages.urlopen",
+                        lambda *_args, **_kwargs: owner_reply_response(**changes))
+    context = OwnerReplyContext(date(2026, 10, 4), "America/Los_Angeles", "calendar_answer",
+                                "summary", None, None, (), None, ())
+    with pytest.raises(ValueError):
+        OpenAIMessageInterpreter("synthetic-key").classify_owner_reply("yes", context)
