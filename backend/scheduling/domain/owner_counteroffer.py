@@ -412,8 +412,7 @@ class CounterofferService:
         still_pending = any(item.appointment_id == active.request_id
                             and item.version == active.request_version for item in pending)
         if active.state in (OfferState.CONFIRMED, OfferState.DISCARDED):
-            if not still_pending or (active.state == OfferState.CONFIRMED
-                                     and active.failure is None and active.expired(now)):
+            if not still_pending:
                 self._store.clear_active(active.business_id, active.owner, active.offer_id)
                 return None
             if yes or like or no:

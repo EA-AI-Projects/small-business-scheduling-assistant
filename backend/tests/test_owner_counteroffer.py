@@ -481,3 +481,15 @@ def test_time_without_am_pm_or_with_two_times_asks(world: World) -> None:
     assert "AM or PM" in world.say("Offer 2 instead").text
     assert "more than one time" in world.say("Offer 2pm or 3pm instead").text
     assert world.store.read_active("pilot", OWNER) is None
+
+
+def test_yes_after_a_successful_offer_expires_still_approves_nothing(world: World) -> None:
+    request = world.pending()
+    world.say(ASK)
+    world.say("YES")
+    world.clock[0] = NOW + timedelta(minutes=31)  # Past the client-offer validity.
+    for reply in ("yes", "ok"):
+        assert "was not approved" in world.say(reply).text
+        assert world.status(request) == (CalendarStatus.PENDING_APPROVAL, 1)
+    world.clock[0] = NOW + timedelta(hours=2)  # Past the one-hour notice window.
+    assert world.say("yes").committed
