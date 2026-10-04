@@ -34,6 +34,19 @@ The last offer, list of visits, or confirmation question is stored per sender ph
 - **Local harnesses** keep it in process memory; it resets on restart.
 - **The cloud worker** stores it as one `SMS_STATE#<phone>` item per sender in the business table. Reads use strong consistency and enforce expiry themselves. DynamoDB TTL on `expires_at_epoch` removes stale items later; TTL deletion can lag, so it is cleanup, not the expiry check. Clearing a prompt is conditional on its ID, so an older reply cannot erase a newer offer.
 
+## Owner calendar questions
+
+The verified owner can ask read-only calendar questions by text, such as "What is next week looking like?", "What clients do I have tomorrow?", or "How many bookings do we have for Friday?" (PRD 6.6). These are fixed question types in `owner_calendar_questions.py`, matched deterministically; they do not use the model and cannot write. Approve and decline replies are checked first, so they keep working.
+
+- **Grounded.** Every answer is read from the calendar and client records at that moment, so a follow-up after a calendar change reflects the change. Nothing is listed that is not in the records.
+- **Dates and times.** Answers name the dates and show times in the business timezone. A day runs midnight to midnight in that timezone; a block that crosses midnight appears on both days and counts once in a total.
+- **Statuses.** Confirmed visits, pending requests (unexpired holds only), and unavailable blocks are labeled separately. Declined, cancelled, and expired items are not shown.
+- **Counts say what they counted.** "Bookings", "visits", and "appointments" count confirmed visits; "requests" counts pending. Anything else present in the range is reported as not counted. "Including pending" counts both.
+- **Clarifying questions.** A missing day or week, or a count with no status noun, gets one focused question. While it is open, a bare reply such as "confirmed" answers it instead of approving a request.
+- **Follow-ups.** Within 30 minutes, short messages narrow or expand the last question ("just the pending ones", "what about Friday?", "how many?", "by day"). "MORE" continues a long answer.
+- **Length.** A reply stays within about 480 characters. Whole entries are never cut: the reply says "Showing 1-5 of 20" and offers MORE.
+- **Memory.** The last question type, date range, and status names are kept per sender for follow-ups, with no message text: in process memory locally, and as one `OWNER_QUESTION#<phone>` item in the business table in the cloud (strongly consistent reads, expiry enforced on read, TTL cleanup).
+
 ## Try it locally
 
 For texts together with the owner web app on one shared calendar, use the text simulator described in the [README](../README.md#try-the-app-locally). The terminal exercise below has its own separate calendar.

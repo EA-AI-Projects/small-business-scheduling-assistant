@@ -57,6 +57,7 @@ from scheduling.domain.lifecycle import (
     LifecycleService,
     StaleVersion,
 )
+from scheduling.domain.owner_calendar_questions import OwnerCalendarQuestions
 from scheduling.domain.sms_ingress import (
     ConsentEvidence,
     InboundReceipt,
@@ -147,7 +148,8 @@ class ConversationService:
     def __init__(self, repository: ConversationRepository, interpreter: MessageInterpreter,
                  holds: HoldService, lifecycle: LifecycleService,
                  consent: ConsentLookup, clock: Callable[[], datetime],
-                 owner_number: str, states: ConversationStateStore | None = None) -> None:
+                 owner_number: str, states: ConversationStateStore | None = None,
+                 owner_questions: OwnerCalendarQuestions | None = None) -> None:
         self._repository = repository
         self._interpreter = interpreter
         self._holds = holds
@@ -157,6 +159,8 @@ class ConversationService:
         self._owner_number = normalize_phone(owner_number)
         self._availability = AvailabilityService(repository)
         self._states = states if states is not None else InMemoryConversationStates()
+        self._owner_questions = (owner_questions if owner_questions is not None
+                                 else OwnerCalendarQuestions(repository))
 
     def handle(self, receipt: InboundReceipt) -> ConversationOutcome:
         if (not receipt.authorized_for_commands or receipt.body is None
@@ -449,7 +453,7 @@ class ConversationService:
         """Handle a reply to the business's own offer or question, or return None."""
         body = receipt.body or ""
         if receipt.role == SenderRole.OWNER:
-            return self._owner_reply(receipt, targets)
+            return self._owner_answer(receipt, targets, now)
         if prompt is None or prompt.kind == PromptKind.RESCHEDULE_DAY:
             return None
         zone = ZoneInfo(policy.timezone)
@@ -566,6 +570,20 @@ class ConversationService:
         return ConversationOutcome(
             f"Cancelled your {when_text(target.start_at, zone)} {what} "
             f"(ref {target.appointment_id[:8]}).", True, result.appointment.appointment_id)
+
+    def _owner_answer(self, receipt: InboundReceipt, targets: tuple[Appointment, ...],
+                      now: datetime) -> ConversationOutcome | None:
+        """Read-only calendar questions; an open clarifying question gets the first look."""
+        questions, body = self._owner_questions, receipt.body or ""
+        if questions.awaiting_answer(receipt.business_id, receipt.sender, now):
+            text = questions.answer(receipt.business_id, receipt.sender, body, now)
+            if text is not None:
+                return ConversationOutcome(text)
+        reply = self._owner_reply(receipt, targets)
+        if reply is not None:
+            return reply
+        text = questions.answer(receipt.business_id, receipt.sender, body, now)
+        return ConversationOutcome(text) if text is not None else None
 
     def _owner_reply(self, receipt: InboundReceipt,
                      targets: tuple[Appointment, ...]) -> ConversationOutcome | None:
