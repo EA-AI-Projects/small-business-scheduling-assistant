@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -22,6 +23,10 @@ START_WORDS = frozenset({"START", "UNSTOP"})
 
 class SmsCommandInterrupted(Exception):
     """An SMS scheduling transaction was cancelled; the old text must not replay."""
+
+
+class SmsReceiptErased(Exception):
+    """A provider retry belongs to a receipt removed by client deletion."""
 
 
 def normalize_phone(value: str) -> str:
@@ -157,7 +162,8 @@ def record_in_person_consent(store: SmsIngressStore, clients: VerifiedClientLook
 
 class SmsIngressService:
     def __init__(self, store: SmsIngressStore, clients: VerifiedClientLookup,
-                 business_id: str, business_number: str, owner_number: str) -> None:
+                 business_id: str, business_number: str, owner_number: str,
+                 message_created_at: Callable[[str], datetime]) -> None:
         if not business_id:
             raise ValueError("Business ID is required")
         self._store = store
@@ -165,6 +171,7 @@ class SmsIngressService:
         self._business_id = business_id
         self._business_number = normalize_phone(business_number)
         self._owner_number = normalize_phone(owner_number)
+        self._message_created_at = message_created_at
 
     def receive(self, values: dict[str, str], now: datetime) -> tuple[InboundReceipt, bool]:
         """Deduplicate a verified provider message before a future conversation worker sees it."""
@@ -213,7 +220,20 @@ class SmsIngressService:
             profile.client_id if profile else None, keyword,
             safe_body is not None,
         )
-        inserted = self._store.put_received(receipt)
+        if role == SenderRole.UNKNOWN:
+            return receipt, True
+        if role == SenderRole.CLIENT and consent is not None and profile is not None:
+            # Webhook arrival time can be much later than message creation.
+            # A retry of a pre-consent message must never enter a new profile.
+            created_at = self._message_created_at(provider_id)
+            if created_at.tzinfo is None:
+                raise RuntimeError("Provider message timestamp is unavailable")
+            if created_at.astimezone(UTC) <= max(consent.agreed_at, profile.created_at):
+                return replace(receipt, body=None, authorized_for_commands=False), True
+        try:
+            inserted = self._store.put_received(receipt)
+        except SmsReceiptErased:
+            return replace(receipt, body=None, authorized_for_commands=False), True
         return receipt, not inserted
 
     def record_in_person_consent(self, client_id: str, phone_e164: str,

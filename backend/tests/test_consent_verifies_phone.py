@@ -88,7 +88,7 @@ def signed(values: dict[str, str]) -> dict[str, str]:
 def test_consent_marks_phone_verified_and_client_can_text() -> None:
     repository, _, store = world()
     service = SmsIngressService(store, repository, "pilot", "+14155550000",  # type: ignore[arg-type]
-                                "+15005550009")
+                                "+15005550009", lambda _provider_id: NOW + timedelta(seconds=1))
     api = TestClient(create_twilio_ingress_app(service, TOKEN, URL, lambda: NOW))
     values = {"MessageSid": "SM-1", "From": PHONE, "To": "+14155550000", "Body": "Tuesday at 9"}
 
@@ -96,7 +96,7 @@ def test_consent_marks_phone_verified_and_client_can_text() -> None:
     assert before is not None and before.phone_verified_at is None
     assert api.post("/webhooks/sms/inbound", data=values,
                     headers=signed(values)).status_code == 204
-    assert store.receipts["SM-1"].role == SenderRole.UNKNOWN
+    assert "SM-1" not in store.receipts
 
     consent(repository, store)
     profile = repository.read_profile("pilot", "client-1")
@@ -130,6 +130,12 @@ class Records:
 
     def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None:
         return self.repository.read_profile(business_id, client_id)
+
+    def acquire_client_send(self, business_id: str, client_id: str) -> str:
+        return "synthetic-token"
+
+    def release_client_send(self, business_id: str, client_id: str, token: str) -> None:
+        assert token == "synthetic-token"
 
 
 def test_sender_refuses_until_consent_then_sends() -> None:
@@ -214,7 +220,10 @@ def test_dynamodb_writes_consent_and_verification_in_one_transaction() -> None:
         evidence, profile)
     assert len(dynamo.transactions) == 1
     items = dynamo.transactions[0]
-    assert [next(iter(item)) for item in items] == ["Put", "Update", "Update"]
+    assert [next(iter(item)) for item in items] == [
+        "Put", "Update", "Update", "ConditionCheck", "ConditionCheck"]
+    assert items[3]["ConditionCheck"]["Key"]["SK"]["S"].startswith("ERASURE#")
+    assert items[4]["ConditionCheck"]["Key"]["SK"]["S"].startswith("ERASURE_PHONE#")
     update = items[2]["Update"]
     assert update["Key"]["SK"]["S"] == "CLIENT#client-1"
     assert "version = :old_version" in update["ConditionExpression"]

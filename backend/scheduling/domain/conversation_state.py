@@ -41,6 +41,7 @@ class ConversationState:
     options: tuple[datetime, ...] = ()
     appointment_id: str | None = None
     appointment_version: int | None = None
+    client_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.created_at.tzinfo is None or self.expires_at.tzinfo is None:

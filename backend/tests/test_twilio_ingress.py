@@ -1,7 +1,9 @@
 """Signed synthetic Twilio callbacks cannot bypass sender and consent gates."""
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from fastapi.testclient import TestClient
 from starlette.datastructures import FormData
 from twilio.request_validator import RequestValidator
@@ -12,6 +14,7 @@ from scheduling.domain.sms_ingress import (
     InboundReceipt,
     Keyword,
     SmsIngressService,
+    SmsReceiptErased,
     normalize_phone,
 )
 from scheduling.domain.sms_status import SmsDeliveryStatus
@@ -29,8 +32,11 @@ class MemoryStore:
         self.consent: dict[str, ConsentEvidence] = {}
         self.opted_out: dict[str, datetime] = {}
         self.statuses: dict[str, SmsDeliveryStatus] = {}
+        self.erased_ids: set[str] = set()
 
     def put_received(self, receipt: InboundReceipt) -> bool:
+        if receipt.provider_id in self.erased_ids:
+            raise SmsReceiptErased
         if receipt.provider_id in self.receipts:
             return False
         self.receipts[receipt.provider_id] = receipt
@@ -76,9 +82,12 @@ class Clients:
                              NOW, NOW, NOW)
 
 
-def setup() -> tuple[TestClient, SmsIngressService, MemoryStore]:
+def setup(message_created_at: Callable[[str], datetime] | None = None
+          ) -> tuple[TestClient, SmsIngressService, MemoryStore]:
     store = MemoryStore()
-    service = SmsIngressService(store, Clients(), "pilot", "+14155550000", "+14155559999")
+    service = SmsIngressService(store, Clients(), "pilot", "+14155550000", "+14155559999",
+                                message_created_at or
+                                (lambda _provider_id: NOW + timedelta(seconds=2)))
     return (TestClient(create_twilio_ingress_app(service, TOKEN, URL, lambda: NOW,
                                                 status_url=STATUS_URL, status_store=store,
                                                 business_id="pilot")),
@@ -113,12 +122,40 @@ def test_signature_then_dedup_and_verified_consent_gate() -> None:
     assert send(client, inbound("SM-2")) == 204
     assert store.receipts["SM-2"].authorized_for_commands is True
     assert send(client, inbound("SM-3", "+14155550102")) == 204
-    assert store.receipts["SM-3"].authorized_for_commands is False
-    assert store.receipts["SM-3"].body is None
+    assert "SM-3" not in store.receipts  # Unknown numbers are never persisted.
     assert send(client, inbound("SM-4", "+14155559999")) == 204
     assert store.receipts["SM-4"].role.value == "owner"
     assert send(client, inbound("SM-code", body="door code 1234")) == 204
     assert store.receipts["SM-code"].body is None
+
+
+def test_erased_provider_retry_is_acknowledged_without_recreating_a_receipt() -> None:
+    client, service, store = setup()
+    service.record_in_person_consent("client-1", "+14155550101", "Synthetic Client",
+                                     "pilot-v1", NOW)
+    store.erased_ids.add("SM-erased")
+    assert send(client, inbound("SM-erased")) == 204
+    assert "SM-erased" not in store.receipts
+    receipt, duplicate = service.receive(inbound("SM-erased"), NOW)
+    assert duplicate is True
+    assert receipt.authorized_for_commands is False
+
+
+def test_message_created_before_fresh_consent_cannot_enter_new_profile() -> None:
+    client, service, store = setup(lambda _provider_id: NOW)
+    service.record_in_person_consent("client-1", "+14155550101", "Synthetic Client",
+                                     "pilot-v1", NOW + timedelta(seconds=1))
+    assert send(client, inbound("SM-before-consent")) == 204
+    assert "SM-before-consent" not in store.receipts
+
+    def unavailable(_provider_id: str) -> datetime:
+        raise RuntimeError("provider unavailable")
+    client, service, store = setup(unavailable)
+    service.record_in_person_consent("client-1", "+14155550101", "Synthetic Client",
+                                     "pilot-v1", NOW)
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        send(client, inbound("SM-unverified-time"))
+    assert store.receipts == {}
 
 
 def test_stop_help_and_start_never_run_scheduling_command() -> None:
@@ -248,4 +285,4 @@ def test_authorized_receipt_handoff_retries_duplicates_without_queueing_unknowns
         assert send(handoff_client, inbound("SM-unknown", "+14155550102")) == 204
         assert send(handoff_client, inbound("SM-stop", body="STOP")) == 204
         assert queue.calls == [("pilot", "SM-queued"), ("pilot", "SM-queued")]
-        assert len(store.receipts) == 3
+        assert len(store.receipts) == 2

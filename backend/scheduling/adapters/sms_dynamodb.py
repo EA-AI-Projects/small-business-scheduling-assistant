@@ -1,6 +1,7 @@
 """Conditional SMS ingress and consent records in the business table."""
 
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from typing import Any, Protocol
 
 from scheduling.adapters.dynamodb import _command_sort_key, _record_transaction_conflict
@@ -14,6 +15,7 @@ from scheduling.domain.sms_ingress import (
     SenderRole,
     SmsCommandInterrupted,
     SmsIngressStore,
+    SmsReceiptErased,
     normalize_phone,
 )
 from scheduling.domain.sms_status import STATUS_RANK, SmsDeliveryStatus
@@ -53,6 +55,20 @@ class DynamoSmsIngressStore(SmsIngressStore):
         return self._client.get_item(TableName=self._table,
                                      Key=self._key(business_id, sort_key),
                                      ConsistentRead=True).get("Item")
+
+    def _erasure_check(self, business_id: str, client_id: str) -> dict[str, Any]:
+        return {"ConditionCheck": {
+            "TableName": self._table,
+            "Key": self._key(business_id, f"ERASURE#{sha256(client_id.encode()).hexdigest()}"),
+            "ConditionExpression": "attribute_not_exists(PK)",
+        }}
+
+    def _phone_erasure_check(self, business_id: str, phone: str) -> dict[str, Any]:
+        return {"ConditionCheck": {
+            "TableName": self._table,
+            "Key": self._key(business_id, f"ERASURE_PHONE#{phone}"),
+            "ConditionExpression": "attribute_not_exists(PK)",
+        }}
 
     def read_received(self, business_id: str, provider_id: str) -> InboundReceipt | None:
         item = self._get(business_id, f"SMS#{provider_id}")
@@ -185,6 +201,9 @@ class DynamoSmsIngressStore(SmsIngressStore):
                     "Key": self._key(receipt.business_id, key),
                     "ConditionExpression": "attribute_not_exists(PK)",
                 }} for key in self._command_keys(receipt)),
+                *([self._erasure_check(receipt.business_id, receipt.client_id)]
+                  if receipt.client_id is not None else []),
+                self._phone_erasure_check(receipt.business_id, receipt.sender),
             ])
         except Exception as exc:
             if self.read_reply_text(receipt.business_id, receipt.provider_id) is not None:
@@ -199,6 +218,10 @@ class DynamoSmsIngressStore(SmsIngressStore):
         return True
 
     def put_received(self, receipt: InboundReceipt) -> bool:
+        # Unknown senders have no verified profile. Twilio handles reserved
+        # STOP/HELP replies; persisting them could recreate erased client data.
+        if receipt.role == SenderRole.UNKNOWN:
+            return False
         item: dict[str, Any] = {
             **self._key(receipt.business_id, f"SMS#{receipt.provider_id}"),
             "provider_id": {"S": receipt.provider_id},
@@ -217,6 +240,16 @@ class DynamoSmsIngressStore(SmsIngressStore):
             "TableName": self._table, "Item": item,
             "ConditionExpression": "attribute_not_exists(PK)",
         }}]
+        if receipt.client_id is not None:
+            writes.append(self._erasure_check(receipt.business_id, receipt.client_id))
+        writes.append(self._phone_erasure_check(receipt.business_id, receipt.sender))
+        writes.append({"ConditionCheck": {
+            "TableName": self._table,
+            "Key": self._key(
+                receipt.business_id,
+                f"SMS_ERASED#{sha256(receipt.provider_id.encode()).hexdigest()}"),
+            "ConditionExpression": "attribute_not_exists(PK)",
+        }})
         if receipt.keyword == Keyword.STOP:
             writes.append({"Put": {
                 "TableName": self._table,
@@ -304,6 +337,9 @@ class DynamoSmsIngressStore(SmsIngressStore):
                 # A duplicate provider retry is harmless. A racing newer message
                 # can change the thread; reread it before retrying. Other errors
                 # propagate so Twilio retries rather than dropping a STOP.
+                if self._get(receipt.business_id,
+                             f"SMS_ERASED#{sha256(receipt.provider_id.encode()).hexdigest()}") is not None:
+                    raise SmsReceiptErased from exc
                 if self._get(receipt.business_id, f"SMS#{receipt.provider_id}") is not None:
                     return False
                 response = getattr(exc, "response", {})
@@ -451,7 +487,11 @@ class DynamoSmsIngressStore(SmsIngressStore):
                 return False
 
     def put_consent(self, evidence: ConsentEvidence) -> None:
-        self._client.transact_write_items(TransactItems=self._consent_writes(evidence))
+        self._client.transact_write_items(TransactItems=[
+            *self._consent_writes(evidence),
+            self._erasure_check(evidence.business_id, evidence.client_id),
+            self._phone_erasure_check(evidence.business_id, evidence.phone_e164),
+        ])
 
     def put_consent_verifying_phone(self, evidence: ConsentEvidence,
                                     verified: ClientProfile,
@@ -511,6 +551,10 @@ class DynamoSmsIngressStore(SmsIngressStore):
                 },
                 "ConditionExpression": "attribute_not_exists(PK)",
             }})
+        writes.extend([
+            self._erasure_check(evidence.business_id, evidence.client_id),
+            self._phone_erasure_check(evidence.business_id, evidence.phone_e164),
+        ])
         try:
             self._client.transact_write_items(TransactItems=writes)
         except Exception as exc:
@@ -554,21 +598,25 @@ class DynamoSmsIngressStore(SmsIngressStore):
             expression += ", error_code = :error"
             values[":error"] = {"S": status.error_code}
         try:
-            self._client.update_item(
-                TableName=self._table,
-                Key=self._key(status.business_id, f"SMS_STATUS#{status.provider_id}"),
-                UpdateExpression=expression,
-                ConditionExpression=("attribute_not_exists(status_rank) OR "
-                                     "status_rank < :rank OR "
-                                     "(status_rank = :rank AND delivery_status = :status)"),
-                ExpressionAttributeValues=values,
-            )
+            self._client.transact_write_items(TransactItems=[
+                {"ConditionCheck": {
+                    "TableName": self._table,
+                    "Key": self._key(status.business_id, f"OUTBOX#{status.outbox_id}"),
+                    "ConditionExpression": "attribute_exists(PK)",
+                }},
+                {"Update": {
+                    "TableName": self._table,
+                    "Key": self._key(status.business_id, f"SMS_STATUS#{status.provider_id}"),
+                    "UpdateExpression": expression,
+                    "ConditionExpression": ("attribute_not_exists(status_rank) OR "
+                                         "status_rank < :rank OR "
+                                         "(status_rank = :rank AND delivery_status = :status)"),
+                    "ExpressionAttributeValues": values,
+                }},
+            ])
         except Exception as exc:
-            response = getattr(exc, "response", {})
-            if isinstance(response, dict) and response.get("Error", {}).get("Code") == (
-                "ConditionalCheckFailedException"
-            ):
-                return  # Stale or conflicting callback; first terminal result wins.
+            if _record_transaction_conflict(exc):
+                return  # Deleted outbox or stale callback; never recreate evidence.
             raise
 
     def list_delivery_failures(self, business_id: str) -> tuple[SmsDeliveryStatus, ...]:
@@ -651,6 +699,7 @@ class DynamoSmsIngressStore(SmsIngressStore):
                             "ConditionExpression": "attribute_not_exists(PK)",
                         }})
                     actions.extend([
+                        self._phone_erasure_check(business_id, phone),
                         {"ConditionCheck": {
                             "TableName": self._table,
                             "Key": self._key(business_id, thread_key),

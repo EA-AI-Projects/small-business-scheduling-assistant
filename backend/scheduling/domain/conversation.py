@@ -440,7 +440,8 @@ class ConversationService:
             receipt.business_id, receipt.sender, receipt.provider_id, kind, now,
             now + PROMPT_LIFETIME, options,
             appointment.appointment_id if appointment is not None else None,
-            appointment.version if appointment is not None else None))
+            appointment.version if appointment is not None else None,
+            receipt.client_id))
 
     def _answer(self, receipt: InboundReceipt, prompt: ConversationState | None,
                 targets: tuple[Appointment, ...], policy: AvailabilityPolicy,
@@ -646,7 +647,8 @@ class ConversationService:
         kind = PromptKind.CHOOSE_CANCEL if verb == "cancel" else PromptKind.CHOOSE_MOVE
         self._states.put_state(ConversationState(
             receipt.business_id, receipt.sender, receipt.provider_id, kind, now,
-            now + PROMPT_LIFETIME, tuple(target.start_at for target in candidates)))
+            now + PROMPT_LIFETIME, tuple(target.start_at for target in candidates),
+            client_id=receipt.client_id))
         numbered = ", ".join(f"{number}) {when_text(target.start_at, zone)}"
                              for number, target in enumerate(candidates, 1))
         return None, (f"Which visit would you like to {verb}? {numbered}. "

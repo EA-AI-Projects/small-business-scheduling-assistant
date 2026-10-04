@@ -8,7 +8,7 @@ from urllib.parse import urlencode, urlsplit
 from zoneinfo import ZoneInfo
 
 from scheduling.domain.appointments import Appointment
-from scheduling.domain.client_records import ClientProfile
+from scheduling.domain.client_records import ClientProfile, RecordConflict, RecordNotFound
 from scheduling.domain.outbox import DeliveryFailure, OutboxRecord, PermanentDeliveryFailure
 from scheduling.domain.sms_ingress import (
     WELCOME_TEMPLATE,
@@ -27,6 +27,8 @@ BLOCK_TEMPLATES = frozenset({"block_time", "edit_block", "remove_block"})
 class SchedulingRecords(Protocol):
     def read_appointment(self, appointment_id: str) -> Appointment | None: ...
     def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None: ...
+    def acquire_client_send(self, business_id: str, client_id: str) -> str: ...
+    def release_client_send(self, business_id: str, client_id: str, token: str) -> None: ...
 
 
 class TwilioMessages(Protocol):
@@ -85,7 +87,9 @@ class TwilioSmsSender:
         if self._consent.is_opted_out(record.business_id, to):
             raise PermanentDeliveryFailure("OPTED_OUT")
         body = self._render(record, appointment, profile)
-        return self._send(record, to, body)
+        return self._send(record, to, body,
+                          appointment.client_id if record.recipient == "client"
+                          and appointment is not None else None)
 
     def _deliver_welcome(self, record: OutboxRecord) -> str:
         """First enrollment text: only to the phone verified by the consent that queued it."""
@@ -133,9 +137,11 @@ class TwilioSmsSender:
             raise PermanentDeliveryFailure("RECIPIENT_UNKNOWN")
         if self._consent.is_opted_out(record.business_id, to):
             raise PermanentDeliveryFailure("OPTED_OUT")
-        return self._send(record, to, body)
+        return self._send(record, to, body,
+                          receipt.client_id if receipt.role == SenderRole.CLIENT else None)
 
-    def _send(self, record: OutboxRecord, to: str, body: str) -> str:
+    def _send(self, record: OutboxRecord, to: str, body: str,
+              client_id: str | None = None) -> str:
         # Synthetic test numbers (555-0100 to 555-0199 in any area code) never reach Twilio.
         if FICTIONAL_NUMBER.fullmatch(to):
             raise PermanentDeliveryFailure("FICTIONAL_NUMBER")
@@ -144,16 +150,32 @@ class TwilioSmsSender:
             kwargs["status_callback"] = (self._status_callback + "?" + urlencode({
                 "outbox_id": record.outbox_id,
             }))
+        token: str | None = None
+        if client_id is not None:
+            try:
+                token = self._records.acquire_client_send(record.business_id, client_id)
+            except RecordNotFound as exc:
+                raise PermanentDeliveryFailure("CLIENT_UNAVAILABLE") from exc
+            except RecordConflict as exc:
+                raise DeliveryFailure("CLIENT_SEND_BUSY") from exc
+        evidence_written = False
         try:
-            result = self._messages.create(**kwargs)
-        except Exception as exc:
-            # Never leak provider diagnostics, body, or destination to the outbox.
-            raise DeliveryFailure("PROVIDER_SEND_ERROR") from exc
-        provider_id = getattr(result, "sid", None)
-        if not isinstance(provider_id, str) or not provider_id:
-            raise DeliveryFailure("PROVIDER_ID_MISSING")
-        self._consent.record_outbound(record.business_id, to, provider_id, self._clock())
-        return provider_id
+            try:
+                result = self._messages.create(**kwargs)
+            except Exception as exc:
+                # Never leak provider diagnostics, body, or destination to the outbox.
+                raise DeliveryFailure("PROVIDER_SEND_ERROR") from exc
+            provider_id = getattr(result, "sid", None)
+            if not isinstance(provider_id, str) or not provider_id:
+                raise DeliveryFailure("PROVIDER_ID_MISSING")
+            self._consent.record_outbound(record.business_id, to, provider_id, self._clock())
+            evidence_written = True
+            return provider_id
+        finally:
+            # A timeout or evidence-write failure may follow provider acceptance.
+            # Keep the claim until an operator reconciles that uncertain send.
+            if evidence_written and token is not None and client_id is not None:
+                self._records.release_client_send(record.business_id, client_id, token)
 
     def _render(self, record: OutboxRecord, appointment: Appointment | None,
                 profile: ClientProfile | None) -> str:

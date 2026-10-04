@@ -43,6 +43,11 @@ def test_owner_routes_reject_missing_invalid_and_cross_business_credentials() ->
     assert api.post(f"{BASE}/policy/seed", headers={
         "Authorization": "Bearer verified-owner",
     }).status_code == 422
+    deletion = f"{BASE}/clients/synthetic-client"
+    assert api.delete(deletion).status_code == 401
+    assert api.delete(deletion, headers={"Authorization": "Bearer fake"}).status_code == 401
+    assert api.delete(deletion.replace("/pilot/", "/other/"),
+                      headers=headers()).status_code == 403
 
 
 def test_owner_records_in_person_yes_and_queues_one_welcome_for_a_new_client() -> None:

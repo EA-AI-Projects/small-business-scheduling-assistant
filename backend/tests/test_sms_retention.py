@@ -42,6 +42,10 @@ class MemoryDynamo:
             elif "ConditionCheck" in action:
                 check = action["ConditionCheck"]
                 key = check["Key"]["SK"]["S"]
+                if check["ConditionExpression"] == "attribute_exists(PK)":
+                    if key not in items:
+                        raise TransactionCancelled()
+                    continue
                 if check["ConditionExpression"] == "attribute_not_exists(PK)":
                     if key in items:
                         raise TransactionCancelled()
@@ -171,7 +175,8 @@ class NewHoldBeforePurge(MemoryDynamo):
     def transact_write_items(self, **kwargs: Any) -> dict[str, Any]:
         if self.inject and "ConditionCheck" in kwargs["TransactItems"][0]:
             self.inject = False
-            key = kwargs["TransactItems"][1]["Delete"]["Key"]["SK"]["S"]
+            key = next(action["Delete"]["Key"]["SK"]["S"]
+                       for action in kwargs["TransactItems"] if "Delete" in action)
             self.items[key]["legal_hold_reason"] = {"S": "documented case"}
             raise TransactionCancelled()
         return super().transact_write_items(**kwargs)
@@ -261,13 +266,23 @@ def test_stop_before_reply_transaction_prevents_reply_intent() -> None:
 
 
 def test_failed_provider_callback_is_linked_for_owner_follow_up() -> None:
-    store = DynamoSmsIngressStore(MemoryDynamo(), "synthetic")
+    dynamo = MemoryDynamo()
+    dynamo.items["OUTBOX#outbox-1"] = {"SK": {"S": "OUTBOX#outbox-1"}}
+    store = DynamoSmsIngressStore(dynamo, "synthetic")
     store.put_status(SmsDeliveryStatus("pilot", "outbox-1", "SM-failed",
                                        "undelivered", "+14155550101", NOW, "30007"))
     failures = store.list_delivery_failures("pilot")
     assert len(failures) == 1
     assert failures[0].outbox_id == "outbox-1"
     assert failures[0].error_code == "30007"
+
+
+def test_late_provider_callback_cannot_recreate_evidence_after_outbox_erasure() -> None:
+    dynamo = MemoryDynamo()
+    store = DynamoSmsIngressStore(dynamo, "synthetic")
+    store.put_status(SmsDeliveryStatus("pilot", "erased-outbox", "SM-late",
+                                       "undelivered", "+14155550101", NOW, "30007"))
+    assert "SMS_STATUS#SM-late" not in dynamo.items
 
 
 def _consent(when: datetime) -> ConsentEvidence:
