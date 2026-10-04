@@ -13,6 +13,10 @@ from scheduling.domain.availability import AvailabilityPolicy, available_starts
 from scheduling.domain.calendar import CalendarEvent, CalendarSnapshot, CalendarStatus
 
 
+# Owner notification for a request a client created by accepting an owner counteroffer.
+COUNTEROFFER_REQUEST_TEMPLATE = "counteroffer-request"
+
+
 class RevisionConflict(Exception):
     """A calendar write advanced the revision during this command."""
 
@@ -48,23 +52,33 @@ class CreateHold:
     start_at: datetime
     duration_minutes: int
     replaces_appointment_id: str | None = None
+    # Set only when the original is the client's still-pending request that an owner
+    # counteroffer replaces: it must be that pending request at exactly this version.
+    # Unset keeps the rule that a replacement targets a confirmed visit.
+    replaces_pending_version: int | None = None
 
     def __post_init__(self) -> None:
         if not all((self.business_id, self.actor_id, self.client_id, self.idempotency_key)):
             raise ValueError("Hold identity fields are required")
         if self.start_at.tzinfo is None:
             raise ValueError("Start must be timezone-aware")
+        if self.replaces_pending_version is not None and (
+                self.replaces_appointment_id is None or self.replaces_pending_version <= 0):
+            raise ValueError("A pending replacement names its original and version")
 
     def request_hash(self) -> str:
+        payload: dict[str, object] = {
+            "business_id": self.business_id,
+            "actor_id": self.actor_id,
+            "client_id": self.client_id,
+            "start_at": self.start_at.astimezone(UTC).isoformat(),
+            "duration_minutes": self.duration_minutes,
+            "replaces_appointment_id": self.replaces_appointment_id,
+        }
+        if self.replaces_pending_version is not None:
+            payload["replaces_pending_version"] = self.replaces_pending_version
         canonical = json.dumps(
-            {
-                "business_id": self.business_id,
-                "actor_id": self.actor_id,
-                "client_id": self.client_id,
-                "start_at": self.start_at.astimezone(UTC).isoformat(),
-                "duration_minutes": self.duration_minutes,
-                "replaces_appointment_id": self.replaces_appointment_id,
-            },
+            payload,
             sort_keys=True,
             separators=(",", ":"),
         )
@@ -166,7 +180,19 @@ class HoldService:
             original: Appointment | None = None
             if command.replaces_appointment_id is not None:
                 original = self._repository.read_appointment(command.replaces_appointment_id)
-                if (
+                if command.replaces_pending_version is not None:
+                    if (
+                        original is None
+                        or original.business_id != command.business_id
+                        or original.client_id != command.client_id
+                        or original.status != CalendarStatus.PENDING_APPROVAL
+                        or original.version != command.replaces_pending_version
+                        or original.replaces_appointment_id is not None
+                        or original.hold_expires_at is None
+                        or original.hold_expires_at <= now
+                    ):
+                        raise InvalidReplacement("Original pending request was not found")
+                elif (
                     original is None
                     or original.business_id != command.business_id
                     or original.client_id != command.client_id
@@ -230,7 +256,10 @@ class HoldService:
                 result=result,
                 audit_id=f"hold-created#{hold_id}",
                 outbox=(
-                    OutboxIntent(f"{hold_id}#owner", hold_id, "owner", "hold-request"),
+                    OutboxIntent(
+                        f"{hold_id}#owner", hold_id, "owner",
+                        COUNTEROFFER_REQUEST_TEMPLATE
+                        if command.replaces_pending_version is not None else "hold-request"),
                     OutboxIntent(f"{hold_id}#client", hold_id, "client", "hold-pending"),
                 ),
                 created_at=now.astimezone(UTC),
