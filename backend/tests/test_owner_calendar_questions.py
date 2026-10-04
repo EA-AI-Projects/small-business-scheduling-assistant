@@ -312,8 +312,8 @@ def test_ambiguous_ranges_and_unrelated_texts_are_not_answered_as_calendar_quest
     assert "one day or one week at a time" in chat.ask(
         "What do I have tomorrow and Friday?").text
     reply = chat.ask("Please bring up the thermostat settings")
-    assert reply.text.startswith("Reply YES to approve")  # Existing owner fallback.
-    assert not reply.committed
+    assert reply.text.startswith("I wasn't sure what you meant")  # The model could not say.
+    assert "Reply YES to approve" not in reply.text and not reply.committed
 
 
 def test_dynamo_context_round_trips_without_message_text() -> None:
@@ -479,11 +479,14 @@ def test_request_x_gone_and_y_arrived_is_not_approved_on_the_old_question() -> N
     assert chat.snapshot() != before
 
 
-def test_exact_commands_and_replies_outside_a_calendar_conversation_skip_the_model() -> None:
+def test_exact_commands_skip_the_model_and_a_plain_yes_needs_it_outside_a_conversation() -> None:
     chat = Chat()
     request = chat.hold("c1", local(10, 1, 9), "a")
-    approved = chat.ask("Yes")  # No calendar question open: unchanged owner behavior.
+    assert not chat.ask("Yes").committed  # The model has no verdict, so the owner is asked.
+    chat.model.script["Yes"] = decision(OwnerReplyIntent.APPROVE_NAMED_REQUEST, request)
+    approved = chat.ask("Yes")  # No conversation open: the model judges one pending request.
     assert approved.committed and status_of(chat, request) == CalendarStatus.CONFIRMED
+    chat.model.classified.clear()
     other = chat.hold("c2", local(10, 5, 9), "b")
     chat.ask("What is next week looking like?")
     exact = chat.ask(f"APPROVE {other[:8]}")

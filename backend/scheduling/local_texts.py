@@ -43,6 +43,12 @@ from scheduling.domain.conversation_state import InMemoryConversationStates
 from scheduling.domain.holds import HoldService, OutboxIntent
 from scheduling.domain.lifecycle import LifecycleService
 from scheduling.domain.outbox import PermanentDeliveryFailure
+from scheduling.domain.owner_reply_classification import (
+    Confidence,
+    OwnerReplyContext,
+    OwnerReplyIntent,
+    OwnerReplyProposal,
+)
 from scheduling.domain.sms_ingress import (
     HELP_WORDS,
     START_WORDS,
@@ -90,6 +96,10 @@ class OfflineInterpreter:
     def propose(self, body: str, context: MessageContext) -> MessageProposal:
         self.consulted = True
         return MessageProposal("clarify", None, None, None, True)
+
+    def classify_owner_reply(self, body: str, context: OwnerReplyContext) -> OwnerReplyProposal:
+        self.consulted = True  # Offline, an owner's plain reply is only ever clarified.
+        return OwnerReplyProposal(OwnerReplyIntent.UNCLEAR, None, Confidence.HIGH)
 
 
 @dataclass(frozen=True)

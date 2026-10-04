@@ -462,7 +462,8 @@ class CounterofferService:
                 f"{offer.request_id[:8]}.")
 
     def closed_note(self, offer: Counteroffer) -> str:
-        return ("Nothing was approved or sent by that reply. The request is still pending. "
+        lapsed = "That offer expired. " if offer.state == OfferState.PROPOSED else ""
+        return (f"{lapsed}Nothing was approved or sent by that reply. The request is still pending. "
                 f"To approve the original request, reply APPROVE {offer.request_id[:8]}.")
 
     def offer_line(self, offer: Counteroffer) -> tuple[str, str]:
