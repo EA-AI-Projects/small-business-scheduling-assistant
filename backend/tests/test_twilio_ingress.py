@@ -1,7 +1,9 @@
 """Signed synthetic Twilio callbacks cannot bypass sender and consent gates."""
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from fastapi.testclient import TestClient
 from starlette.datastructures import FormData
 from twilio.request_validator import RequestValidator
@@ -80,9 +82,12 @@ class Clients:
                              NOW, NOW, NOW)
 
 
-def setup() -> tuple[TestClient, SmsIngressService, MemoryStore]:
+def setup(message_created_at: Callable[[str], datetime] | None = None
+          ) -> tuple[TestClient, SmsIngressService, MemoryStore]:
     store = MemoryStore()
-    service = SmsIngressService(store, Clients(), "pilot", "+14155550000", "+14155559999")
+    service = SmsIngressService(store, Clients(), "pilot", "+14155550000", "+14155559999",
+                                message_created_at or
+                                (lambda _provider_id: NOW + timedelta(seconds=2)))
     return (TestClient(create_twilio_ingress_app(service, TOKEN, URL, lambda: NOW,
                                                 status_url=STATUS_URL, status_store=store,
                                                 business_id="pilot")),
@@ -134,6 +139,23 @@ def test_erased_provider_retry_is_acknowledged_without_recreating_a_receipt() ->
     receipt, duplicate = service.receive(inbound("SM-erased"), NOW)
     assert duplicate is True
     assert receipt.authorized_for_commands is False
+
+
+def test_message_created_before_fresh_consent_cannot_enter_new_profile() -> None:
+    client, service, store = setup(lambda _provider_id: NOW)
+    service.record_in_person_consent("client-1", "+14155550101", "Synthetic Client",
+                                     "pilot-v1", NOW + timedelta(seconds=1))
+    assert send(client, inbound("SM-before-consent")) == 204
+    assert "SM-before-consent" not in store.receipts
+
+    def unavailable(_provider_id: str) -> datetime:
+        raise RuntimeError("provider unavailable")
+    client, service, store = setup(unavailable)
+    service.record_in_person_consent("client-1", "+14155550101", "Synthetic Client",
+                                     "pilot-v1", NOW)
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        send(client, inbound("SM-unverified-time"))
+    assert store.receipts == {}
 
 
 def test_stop_help_and_start_never_run_scheduling_command() -> None:

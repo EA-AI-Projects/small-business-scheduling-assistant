@@ -348,6 +348,7 @@ Resources:
           SCHEDULING_TABLE_NAME: !Ref SchedulingTable
           BUSINESS_ID: !Ref BusinessId
           TWILIO_AUTH_TOKEN_PARAM: !Sub '/scheduling/${Environment}/twilio/auth-token'
+          TWILIO_ACCOUNT_SID: !Ref TwilioAccountSid
           TWILIO_BUSINESS_NUMBER: !Ref TwilioBusinessNumber
           OWNER_NUMBER: !Ref OwnerNumber
           TWILIO_INBOUND_URL: !Ref TwilioInboundUrl

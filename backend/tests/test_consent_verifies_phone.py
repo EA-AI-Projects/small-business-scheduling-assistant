@@ -88,7 +88,7 @@ def signed(values: dict[str, str]) -> dict[str, str]:
 def test_consent_marks_phone_verified_and_client_can_text() -> None:
     repository, _, store = world()
     service = SmsIngressService(store, repository, "pilot", "+14155550000",  # type: ignore[arg-type]
-                                "+15005550009")
+                                "+15005550009", lambda _provider_id: NOW + timedelta(seconds=1))
     api = TestClient(create_twilio_ingress_app(service, TOKEN, URL, lambda: NOW))
     values = {"MessageSid": "SM-1", "From": PHONE, "To": "+14155550000", "Body": "Tuesday at 9"}
 
