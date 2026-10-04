@@ -701,15 +701,25 @@ class CounterofferAcceptance:
                 "so nothing more was requested.")
         if selection == Selection.NONE and not negative:
             return None
-        if selection == Selection.MATCH:
-            try:
-                made = self._holds.existing(self._command(offer))
-            except IdempotencyKeyReused:
-                made = None
-            if made is not None:
-                # An earlier delivery created the request but its offer update was lost.
-                self._store.accept(offer, made.hold_id)
+        try:
+            made = self._holds.existing(self._command(offer))
+        except IdempotencyKeyReused:
+            made = None
+        if made is not None:
+            # An earlier delivery created the request but its offer update was lost: repair
+            # the offer, then speak only to the request's current state.
+            self._store.accept(offer, made.hold_id)
+            created = self._repository.read_appointment(made.hold_id)
+            if (created is None or created.status != CalendarStatus.PENDING_APPROVAL
+                    or created.hold_expires_at is None or created.hold_expires_at <= now
+                    or offer.expired(now) or newer_prompt):
+                return None  # Decided, expired, or stale: handled like any other message.
+            if selection == Selection.MATCH:
                 return self._requested(offer, made, zone)
+            return ConversationOutcome(
+                f"Your request for {when_text(made.start_at, zone)} (ref {made.hold_id[:8]}) "
+                "was already made and is pending owner approval. To withdraw it, tell me to "
+                "cancel it.")
         if offer.expired(now):
             self._store.supersede(offer)
             return ConversationOutcome(

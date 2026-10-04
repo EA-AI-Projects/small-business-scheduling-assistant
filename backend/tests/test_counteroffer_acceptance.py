@@ -394,6 +394,48 @@ def test_a_lost_accepted_write_is_repaired_when_the_yes_is_redelivered(world: Wo
                 if a.replaces_appointment_id == request]) == 1
 
 
+def _crashed_after_hold(world: World) -> str:
+    """The request exists but the offer is still CONFIRMED (the ACCEPTED write was lost)."""
+    request = world.offered()
+    world.clock[0] = NOW + timedelta(minutes=5)
+    real_accept = world.store.accept
+    world.store.accept = lambda offer, request_id: None  # type: ignore[method-assign]
+    assert world.client("YES", "SM-crash").committed
+    world.store.accept = real_accept  # type: ignore[method-assign]
+    return world.replacement_of(request).appointment_id
+
+
+def _says_no_false_status(text: str) -> None:
+    assert "pending owner approval" not in text and "Requested" not in text
+    assert "nothing was requested" not in text.lower()
+
+
+@pytest.mark.parametrize("decision", [Action.APPROVE, Action.DECLINE])
+def test_redelivered_yes_after_the_owner_decided_gives_no_false_status(
+        world: World, decision: Action) -> None:
+    new = _crashed_after_hold(world)
+    world.owner_command(new, decision, "dash-decide")
+    reply = world.client("YES", "SM-crash")
+    _says_no_false_status(reply.text)
+    offer = world.store.read_confirmed_for_client("pilot", "client-1")
+    assert offer is not None and offer.state == OfferState.ACCEPTED
+
+
+def test_no_while_the_lost_write_request_is_pending_says_so_truthfully(world: World) -> None:
+    new = _crashed_after_hold(world)
+    reply = world.client("No")
+    assert "pending owner approval" in reply.text and "Nothing was requested" not in reply.text
+    assert world.appointment(new).status == CalendarStatus.PENDING_APPROVAL
+    offer = world.store.read_confirmed_for_client("pilot", "client-1")
+    assert offer is not None and offer.state == OfferState.ACCEPTED
+
+
+def test_redelivery_after_the_offer_window_gives_no_success_reply(world: World) -> None:
+    _crashed_after_hold(world)
+    world.clock[0] = NOW + timedelta(minutes=40)
+    _says_no_false_status(world.client("YES", "SM-crash").text)
+
+
 def test_original_expiry_text_still_goes_out_and_mentions_the_waiting_request(
         world: World) -> None:
     request = world.offered()
