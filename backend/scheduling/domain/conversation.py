@@ -8,7 +8,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 from zoneinfo import ZoneInfo
 
 from scheduling.domain.appointments import Appointment
@@ -64,6 +64,9 @@ from scheduling.domain.sms_ingress import (
     SenderRole,
     normalize_phone,
 )
+
+if TYPE_CHECKING:
+    from scheduling.domain.owner_counteroffer import CounterofferService
 
 MAX_CONTEXT_APPOINTMENTS = 8
 MAX_MESSAGE_LENGTH = 1000
@@ -147,7 +150,8 @@ class ConversationService:
     def __init__(self, repository: ConversationRepository, interpreter: MessageInterpreter,
                  holds: HoldService, lifecycle: LifecycleService,
                  consent: ConsentLookup, clock: Callable[[], datetime],
-                 owner_number: str, states: ConversationStateStore | None = None) -> None:
+                 owner_number: str, states: ConversationStateStore | None = None,
+                 counteroffers: "CounterofferService | None" = None) -> None:
         self._repository = repository
         self._interpreter = interpreter
         self._holds = holds
@@ -157,6 +161,7 @@ class ConversationService:
         self._owner_number = normalize_phone(owner_number)
         self._availability = AvailabilityService(repository)
         self._states = states if states is not None else InMemoryConversationStates()
+        self._counteroffers = counteroffers
 
     def handle(self, receipt: InboundReceipt) -> ConversationOutcome:
         if (not receipt.authorized_for_commands or receipt.body is None
@@ -195,6 +200,12 @@ class ConversationService:
             proposal = self._exact_command(receipt.body, context, targets)
         except (OSError, ValueError, TypeError, KeyError, RuntimeError):
             return ConversationOutcome("I couldn't understand that message. Please try again later.")
+        if receipt.role == SenderRole.OWNER and self._counteroffers is not None:
+            # Owner counteroffers (#175) run first so a YES that confirms an offer
+            # is never read as approval of the pending request.
+            countered = self._counteroffers.handle(receipt, now, targets)
+            if countered is not None:
+                return countered
         exact = proposal is not None
         if proposal is None:
             answered = self._answer(receipt, prompt, targets, policy, now)

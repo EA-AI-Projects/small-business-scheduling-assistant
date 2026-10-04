@@ -8,8 +8,22 @@ from urllib.parse import urlencode, urlsplit
 from zoneinfo import ZoneInfo
 
 from scheduling.domain.appointments import Appointment
+from scheduling.domain.availability import AvailabilityPolicy
+from scheduling.domain.calendar import CalendarSnapshot
 from scheduling.domain.client_records import ClientProfile, RecordConflict, RecordNotFound
 from scheduling.domain.outbox import DeliveryFailure, OutboxRecord, PermanentDeliveryFailure
+from scheduling.domain.owner_counteroffer import (
+    COUNTEROFFER_FAILED_TEMPLATE,
+    COUNTEROFFER_TEMPLATE,
+    PROBLEM_TEXT,
+    CounterofferStore,
+    OfferProblem,
+    OfferState,
+    check_offer,
+    counteroffer_failure_outbox,
+    failure_outbox_id_for,
+    outbox_id_for,
+)
 from scheduling.domain.sms_ingress import (
     WELCOME_TEMPLATE,
     WELCOME_TEXT,
@@ -27,6 +41,8 @@ BLOCK_TEMPLATES = frozenset({"block_time", "edit_block", "remove_block"})
 class SchedulingRecords(Protocol):
     def read_appointment(self, appointment_id: str) -> Appointment | None: ...
     def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None: ...
+    def read_policy(self, business_id: str) -> AvailabilityPolicy: ...
+    def read_calendar(self, business_id: str) -> CalendarSnapshot: ...
     def acquire_client_send(self, business_id: str, client_id: str) -> str: ...
     def release_client_send(self, business_id: str, client_id: str, token: str) -> None: ...
 
@@ -42,7 +58,8 @@ class TwilioSmsSender:
                  consent: SmsIngressStore, business_id: str, from_number: str,
                  owner_number: str, *, timezone: str = "America/Los_Angeles",
                  status_callback: str | None = None,
-                 clock: Callable[[], datetime] | None = None) -> None:
+                 clock: Callable[[], datetime] | None = None,
+                 counteroffers: CounterofferStore | None = None) -> None:
         if not business_id:
             raise ValueError("Business ID is required")
         self._messages = messages
@@ -59,6 +76,7 @@ class TwilioSmsSender:
                 raise ValueError("Status callback needs an exact HTTPS URL")
         self._status_callback = status_callback
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._counteroffers = counteroffers
 
     def deliver(self, record: OutboxRecord) -> str:
         if record.business_id != self._business_id:
@@ -69,6 +87,10 @@ class TwilioSmsSender:
             return self._deliver_reply(record)
         if record.template == WELCOME_TEMPLATE:
             return self._deliver_welcome(record)
+        if record.template == COUNTEROFFER_TEMPLATE:
+            return self._deliver_counteroffer(record)
+        if record.template == COUNTEROFFER_FAILED_TEMPLATE:
+            return self._deliver_counteroffer_failed(record)
         appointment = self._records.read_appointment(record.entity_id)
         if appointment is not None and appointment.business_id != record.business_id:
             raise PermanentDeliveryFailure("ENTITY_MISMATCH")
@@ -112,6 +134,46 @@ class TwilioSmsSender:
         if self._consent.is_opted_out(record.business_id, to):
             raise PermanentDeliveryFailure("OPTED_OUT")
         return self._send(record, to, WELCOME_TEXT)
+
+    def _deliver_counteroffer(self, record: OutboxRecord) -> str:
+        """Owner-confirmed offer text, sent only if everything still holds at send time."""
+        offer = (self._counteroffers.read(record.business_id, record.entity_id)
+                 if self._counteroffers is not None else None)
+        if (offer is None or record.recipient != "client"
+                or record.outbox_id != outbox_id_for(offer.offer_id)
+                or offer.state != OfferState.CONFIRMED or record.event_version != offer.version):
+            raise PermanentDeliveryFailure("OFFER_UNAVAILABLE")
+        now = self._clock()
+        problem = check_offer(offer, self._records, self._consent, now)
+        if problem is not None:
+            # No client text. Tell the owner once (insert-if-absent), then fail permanently.
+            assert self._counteroffers is not None
+            self._counteroffers.record_failure(
+                offer, problem.value, now, counteroffer_failure_outbox(offer, now))
+            raise PermanentDeliveryFailure(f"OFFER_{problem.value}")
+        to = normalize_phone(offer.client_phone)
+        if self._consent.is_opted_out(record.business_id, to):
+            raise PermanentDeliveryFailure("OPTED_OUT")
+        return self._send(record, to, offer.text, offer.client_id)
+
+    def _deliver_counteroffer_failed(self, record: OutboxRecord) -> str:
+        """Owner text explaining why a confirmed offer could not be sent."""
+        offer = (self._counteroffers.read(record.business_id, record.entity_id)
+                 if self._counteroffers is not None else None)
+        if (offer is None or record.recipient != "owner" or offer.failure is None
+                or record.outbox_id != failure_outbox_id_for(offer.offer_id)):
+            raise PermanentDeliveryFailure("OFFER_UNAVAILABLE")
+        if self._consent.is_opted_out(record.business_id, self._owner):
+            raise PermanentDeliveryFailure("OPTED_OUT")
+        profile = self._records.read_profile(record.business_id, offer.client_id)
+        name = profile.name if profile is not None else "the client"
+        try:
+            reason = PROBLEM_TEXT[OfferProblem(offer.failure)]
+        except ValueError as exc:
+            raise PermanentDeliveryFailure("OFFER_UNAVAILABLE") from exc
+        return self._send(record, self._owner,
+                          f"I couldn't send the offer to {name}: {reason} "
+                          "Tell me another time to offer.")
 
     def _deliver_reply(self, record: OutboxRecord) -> str:
         receipt = self._consent.read_received(record.business_id, record.entity_id)
