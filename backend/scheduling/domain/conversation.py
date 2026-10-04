@@ -386,7 +386,7 @@ class ConversationService:
         state = "confirmed" if action == Action.APPROVE else "declined"
         return ConversationOutcome(
             f"Request {target.appointment_id[:8]} {state}."
-            f"{self._resolved_note(receipt.business_id, result.replaced_appointment)}", True,
+            f"{self._resolved_note(receipt.business_id, target, result.replaced_appointment)}", True,
             result.appointment.appointment_id)
 
     def _cancel(self, receipt: InboundReceipt, proposal: MessageProposal,
@@ -758,15 +758,17 @@ class ConversationService:
         state = "Approved" if action == Action.APPROVE else "Declined"
         return ConversationOutcome(
             f"{state}: {self._request_line(receipt.business_id, target)}."
-            f"{self._resolved_note(receipt.business_id, result.replaced_appointment)}", True,
+            f"{self._resolved_note(receipt.business_id, target, result.replaced_appointment)}", True,
             result.appointment.appointment_id)
 
-    def _resolved_note(self, business_id: str, replaced: Appointment | None) -> str:
+    def _resolved_note(self, business_id: str, approved: Appointment,
+                       replaced: Appointment | None) -> str:
         """Approval of an accepted counteroffer also resolves the request it replaced."""
         if replaced is None or replaced.status != CalendarStatus.DECLINED:
             return ""
-        return (" Both requests are resolved: the original request "
-                f"{self._request_line(business_id, replaced)} is closed.")
+        return (" Both requests are resolved: the accepted counteroffer "
+                f"{self._request_line(business_id, approved)} is approved, and the original "
+                f"request {self._request_line(business_id, replaced)} is closed.")
 
     def _request_line(self, business_id: str, target: Appointment) -> str:
         zone = ZoneInfo(self._repository.read_policy(business_id).timezone)

@@ -782,3 +782,66 @@ def test_two_concurrent_counteroffer_confirmations_queue_exactly_one_client_text
     assert record is not None and record.template == "owner-counteroffer"
     assert record.recipient == "client" and record.event_version == 2
     assert not store.put_draft(offer)  # A finished offer cannot be reopened.
+
+
+def _countered_pair(env: RaceEnv) -> tuple[Appointment, Appointment]:
+    """A still-pending original and the pending request an accepted counteroffer created."""
+    original = _appointment(env, "countered", CalendarStatus.PENDING_APPROVAL)
+    replacement = _appointment(env, "accepted", CalendarStatus.PENDING_APPROVAL,
+                               replacement_of=original.appointment_id)
+    _seed(env, (original, replacement), guard_original=original.appointment_id)
+    return original, replacement
+
+
+def test_approving_an_accepted_counteroffer_resolves_both_requests_in_one_transaction(
+    race_env: RaceEnv,
+) -> None:
+    env = race_env
+    original, replacement = _countered_pair(env)
+    repo = DynamoDBCalendarRepository(env.client, env.table)
+    approval = _commit(
+        env, replacement, replace(replacement, status=CalendarStatus.CONFIRMED, version=2),
+        Action.APPROVE, EXPIRY - timedelta(seconds=1),
+        replaced=replace(original, status=CalendarStatus.DECLINED, version=2), clear_guard=True)
+    repo.commit_transition(7, approval)
+
+    original_item = _get(env, f"APPOINTMENT#{original.appointment_id}", "META")
+    replacement_item = _get(env, f"APPOINTMENT#{replacement.appointment_id}", "META")
+    assert original_item is not None and original_item["status"]["S"] == "DECLINED"
+    assert replacement_item is not None and replacement_item["status"]["S"] == "CONFIRMED"
+    items = _business_items(env)
+    assert [item["event_id"]["S"] for item in items if item["SK"]["S"].startswith("EVENT#")] == [
+        replacement.appointment_id]
+    assert len([item for item in items if item["SK"]["S"].startswith("AUDIT#")]) == 1
+    assert _get(env, f"BUSINESS#{env.business}", f"REPLACEMENT#{original.appointment_id}") is None
+    revision = _get(env, f"BUSINESS#{env.business}", "CALENDAR#REVISION")
+    assert revision is not None and revision["revision"]["N"] == "8"
+
+
+def test_accepted_counteroffer_approval_races_a_decision_on_the_original_atomically(
+    race_env: RaceEnv,
+) -> None:
+    env = race_env
+    original, replacement = _countered_pair(env)
+    repo = DynamoDBCalendarRepository(env.client, env.table)
+    declined_original = replace(original, status=CalendarStatus.DECLINED, version=2)
+    approval = _commit(
+        env, replacement, replace(replacement, status=CalendarStatus.CONFIRMED, version=2),
+        Action.APPROVE, EXPIRY - timedelta(seconds=1),
+        replaced=declined_original, clear_guard=True)
+    decline = _commit(env, original, declined_original, Action.DECLINE,
+                      EXPIRY - timedelta(seconds=1))
+    if not _run_race(env, repo, approval, decline):
+        return  # both cancelled: the helper already proved nothing committed
+
+    original_item = _get(env, f"APPOINTMENT#{original.appointment_id}", "META")
+    replacement_item = _get(env, f"APPOINTMENT#{replacement.appointment_id}", "META")
+    assert original_item is not None and original_item["status"]["S"] == "DECLINED"
+    assert replacement_item is not None
+    assert replacement_item["status"]["S"] in {"CONFIRMED", "PENDING_APPROVAL"}
+    items = _business_items(env)
+    assert len([item for item in items if item["SK"]["S"].startswith("AUDIT#")]) == 1
+    events = [item["event_id"]["S"] for item in items if item["SK"]["S"].startswith("EVENT#")]
+    assert events == [replacement.appointment_id]
+    guard = _get(env, f"BUSINESS#{env.business}", f"REPLACEMENT#{original.appointment_id}")
+    assert (guard is None) == (replacement_item["status"]["S"] == "CONFIRMED")
