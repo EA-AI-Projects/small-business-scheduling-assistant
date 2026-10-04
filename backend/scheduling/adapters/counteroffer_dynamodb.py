@@ -201,10 +201,10 @@ class DynamoCounterofferStore:
             return None
         return confirmed
 
-    def _move_confirmed(self, offer: Counteroffer, state: OfferState,
+    def _move_offer(self, offer: Counteroffer, state: OfferState,
                         request_id: str | None) -> bool:
         values: dict[str, Any] = {
-            ":to": {"S": state.value}, ":confirmed": {"S": OfferState.CONFIRMED.value},
+            ":to": {"S": state.value}, ":from": {"S": offer.state.value},
             ":version": {"N": str(offer.version)}, ":next": {"N": str(offer.version + 1)}}
         update = "SET #s = :to, #v = :next"
         if request_id is not None:
@@ -216,7 +216,7 @@ class DynamoCounterofferStore:
                     "TableName": self._table,
                     "Key": self._key(offer.business_id, f"COUNTEROFFER#{offer.offer_id}"),
                     "UpdateExpression": update,
-                    "ConditionExpression": "#s = :confirmed AND #v = :version",
+                    "ConditionExpression": "#s = :from AND #v = :version",
                     "ExpressionAttributeNames": {"#s": "state", "#v": "version"},
                     "ExpressionAttributeValues": values}},
             ])
@@ -227,13 +227,13 @@ class DynamoCounterofferStore:
         return True
 
     def accept(self, offer: Counteroffer, request_id: str) -> Counteroffer | None:
-        if not self._move_confirmed(offer, OfferState.ACCEPTED, request_id):
+        if not self._move_offer(offer, OfferState.ACCEPTED, request_id):
             return None
         return replace(offer, state=OfferState.ACCEPTED, version=offer.version + 1,
                        accepted_request_id=request_id)
 
     def supersede(self, offer: Counteroffer) -> None:
-        self._move_confirmed(offer, OfferState.SUPERSEDED, None)
+        self._move_offer(offer, OfferState.SUPERSEDED, None)
 
     def record_failure(self, offer: Counteroffer, problem: str, now: datetime,
                        outbox: OutboxRecord) -> None:

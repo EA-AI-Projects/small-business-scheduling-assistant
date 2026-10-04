@@ -7,7 +7,7 @@ from typing import Any, Protocol
 from urllib.parse import urlencode, urlsplit
 from zoneinfo import ZoneInfo
 
-from scheduling.domain.appointments import Appointment
+from scheduling.domain.appointments import Appointment, ReplacementGuard
 from scheduling.domain.availability import AvailabilityPolicy
 from scheduling.domain.calendar import CalendarSnapshot, CalendarStatus
 from scheduling.domain.client_records import ClientProfile, RecordConflict, RecordNotFound
@@ -15,6 +15,7 @@ from scheduling.domain.holds import COUNTEROFFER_REQUEST_TEMPLATE
 from scheduling.domain.lifecycle import (
     COUNTEROFFER_APPROVED_TEMPLATE,
     COUNTEROFFER_DECLINED_TEMPLATE,
+    EXPIRED_REPLACEMENT_WAITING_TEMPLATE,
 )
 from scheduling.domain.outbox import DeliveryFailure, OutboxRecord, PermanentDeliveryFailure
 from scheduling.domain.owner_counteroffer import (
@@ -48,6 +49,8 @@ class SchedulingRecords(Protocol):
     def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None: ...
     def read_policy(self, business_id: str) -> AvailabilityPolicy: ...
     def read_calendar(self, business_id: str) -> CalendarSnapshot: ...
+    def read_replacement_guard(
+        self, business_id: str, original_id: str) -> ReplacementGuard | None: ...
     def acquire_client_send(self, business_id: str, client_id: str) -> str: ...
     def release_client_send(self, business_id: str, client_id: str, token: str) -> None: ...
 
@@ -252,6 +255,11 @@ class TwilioSmsSender:
         original = (self._records.read_appointment(appointment.replaces_appointment_id)
                     if appointment is not None and appointment.replaces_appointment_id
                     and record.template in COUNTEROFFER_TEMPLATES else None)
+        if appointment is not None and record.template == EXPIRED_REPLACEMENT_WAITING_TEMPLATE:
+            guard = self._records.read_replacement_guard(
+                record.business_id, appointment.appointment_id)
+            original = (self._records.read_appointment(guard.replacement_id)
+                        if guard is not None else None)
         return render_notification(record.template, record.recipient, appointment, profile,
                                    self._timezone, original, self._clock())
 
@@ -307,6 +315,16 @@ def render_notification(template: str, recipient: str, appointment: Appointment 
         if template in {"seed_policy", "edit_business_calendar"}:
             return "Scheduling policy updated. Check the current owner calendar."
         raise PermanentDeliveryFailure("TEMPLATE_UNKNOWN")
+    if template == EXPIRED_REPLACEMENT_WAITING_TEMPLATE:
+        # The normal expiry text, plus the accepted counteroffer request still waiting
+        # (``original`` carries that replacement here).
+        text = render_notification("expire", recipient, appointment, profile, timezone)
+        if (original is not None and original.status == CalendarStatus.PENDING_APPROVAL
+                and original.hold_expires_at is not None and now is not None
+                and original.hold_expires_at > now):
+            text += (f" Your request for {_when(original.start_at.astimezone(timezone))} "
+                     f"(ref {original.appointment_id[:8]}) is still pending owner approval.")
+        return text
     if template not in {
         "hold-request", "hold-pending", "approve", "decline", "expire", "cancel",
         "edit_appointment", "replacement-approved", "replacement-original-retained",

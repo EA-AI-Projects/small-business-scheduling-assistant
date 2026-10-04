@@ -168,7 +168,7 @@ Rules:
 - A confirmed appointment occupies its duration plus the applicable scheduling buffer.
 - Cancelled, declined, and expired entries no longer reserve time.
 - The owner may edit/cancel confirmed appointments; changes are audited and the client is notified when relevant.
-- Rescheduling is modeled as a replacement pending request while retaining the existing confirmed appointment until the replacement is approved. If the replacement is approved, confirm it and cancel the old appointment in one transaction; if declined/expired, leave the original appointment intact.
+- Rescheduling is modeled as a replacement pending request while retaining the existing confirmed appointment until the replacement is approved. If the replacement is approved, confirm it and cancel the old appointment in one transaction; if declined/expired, leave the original appointment intact. The same model covers an accepted owner counteroffer (#176), where the original is the client's still-pending request: it stays pending, and approving the replacement confirms it and declines the original in one transaction (an original that already ended is left alone). See [SCHEDULING_CONTRACTS.md](SCHEDULING_CONTRACTS.md#client-acceptance-176).
 
 ## 6. Availability and conflict handling
 

@@ -20,7 +20,12 @@ from test_owner_counteroffer import (
 
 from scheduling.adapters.sms_twilio import TwilioSmsSender
 from scheduling.domain.calendar import CalendarStatus
-from scheduling.domain.conversation import ConversationOutcome, ConversationService
+from scheduling.domain.conversation import (
+    ConversationOutcome,
+    ConversationService,
+    MessageContext,
+    MessageProposal,
+)
 from scheduling.domain.holds import CreateHold, HoldService, OutboxIntent
 from scheduling.domain.lifecycle import (
     Action,
@@ -259,13 +264,12 @@ def test_consent_withdrawn_before_acceptance_creates_nothing(world: World) -> No
                    world.repository._appointments.values())
 
 
-def test_negated_ambiguous_and_other_time_replies_create_nothing(world: World) -> None:
-    world.offered()
-    for body in ("No", "no thanks", "yes or no?", "not sure", "3 pm", "Yes, or maybe Friday"):
-        reply = world.client(body)
-        assert not reply.committed, body
-        if body in ("No", "no thanks"):
-            break
+@pytest.mark.parametrize("body", [
+    "No", "no thanks", "yes or no?", "not sure", "3 pm", "Yes, or maybe Friday"])
+def test_negated_ambiguous_and_other_time_replies_create_nothing(
+        world: World, body: str) -> None:
+    world.offered()  # A fresh offer for every reply variant.
+    assert not world.client(body).committed
     assert not any(a.replaces_appointment_id for a in
                    world.repository._appointments.values())
 
@@ -308,6 +312,102 @@ def test_duplicate_delivery_and_second_yes_create_exactly_one_request(world: Wor
                if a.replaces_appointment_id == request]
     assert len(created) == 1
     assert len(world.outbox("counteroffer-request")) == 1
+
+
+class ScriptedModel:
+    """Stands in for the language model: returns the proposal the test sets."""
+
+    def __init__(self) -> None:
+        self.proposal = MessageProposal("clarify", None, None, None, True)
+
+    def propose(self, body: str, context: MessageContext) -> MessageProposal:
+        return self.proposal
+
+
+def _accepted_and_approved(world: World) -> ScriptedModel:
+    model = ScriptedModel()
+    world.service._interpreter = model
+    request = world.offered()
+    world.clock[0] = NOW + timedelta(minutes=5)
+    assert world.client("YES").committed
+    new = world.replacement_of(request)
+    assert world.owner(f"APPROVE {new.appointment_id[:8]}").committed
+    world.clock[0] = NOW + timedelta(hours=3)
+    return model
+
+
+def test_a_yes_after_the_replacement_is_approved_answers_a_normal_offer(world: World) -> None:
+    model = _accepted_and_approved(world)
+    model.proposal = MessageProposal(
+        "request_booking", None, None, None, False, "2026-10-02", "2026-10-02",
+        "10:00", "10:00")
+    offer = world.client("Could I get Friday at 10?")
+    assert "Fri Oct 2 at 10:00 AM" in offer.text and not offer.committed
+    reply = world.client("yes")
+    assert reply.committed and "Requested Fri Oct 2 at 10:00 AM" in reply.text
+    assert "already asked" not in reply.text
+    friday = datetime(2026, 10, 2, 17, tzinfo=THURSDAY_2PM.tzinfo)
+    assert any(a.start_at == friday and a.status == CalendarStatus.PENDING_APPROVAL
+               for a in world.repository._appointments.values())
+
+
+def test_a_yes_after_the_replacement_is_approved_confirms_a_cancellation(world: World) -> None:
+    model = _accepted_and_approved(world)
+    model.proposal = MessageProposal("cancel", None, None, None, False, target_date="2026-10-01")
+    asked = world.client("Please cancel my Thursday visit")
+    assert "Cancel your Thu Oct 1 at 2:00 PM visit?" in asked.text
+    done = world.client("yes")
+    assert done.committed and "Cancelled" in done.text
+    assert "already asked" not in done.text
+
+
+def test_a_repeat_yes_is_answered_only_while_the_new_request_is_pending(world: World) -> None:
+    world.offered()
+    world.clock[0] = NOW + timedelta(minutes=5)
+    assert world.client("YES").committed
+    assert "nothing more was requested" in world.client("YES").text
+
+
+def test_a_new_request_ends_an_accepted_offer(world: World) -> None:
+    world.offered()
+    world.clock[0] = NOW + timedelta(minutes=5)
+    world.client("YES")
+    world.client("BOOK 2026-10-02 10:00")
+    offer = world.store.read_confirmed_for_client("pilot", "client-1")
+    assert offer is not None and offer.state == OfferState.SUPERSEDED
+
+
+def test_a_lost_accepted_write_is_repaired_when_the_yes_is_redelivered(world: World) -> None:
+    request = world.offered()
+    real_accept = world.store.accept
+    world.store.accept = lambda offer, request_id: None  # type: ignore[method-assign]
+    assert world.client("YES", "SM-crash").committed  # The process died before ACCEPTED.
+    world.store.accept = real_accept  # type: ignore[method-assign]
+    offer = world.store.read_confirmed_for_client("pilot", "client-1")
+    assert offer is not None and offer.state == OfferState.CONFIRMED
+    again = world.client("YES", "SM-crash")
+    assert again.committed and "Requested Thu Oct 1 at 2:00 PM" in again.text
+    assert "nothing was requested" not in again.text
+    offer = world.store.read_confirmed_for_client("pilot", "client-1")
+    assert offer is not None and offer.state == OfferState.ACCEPTED
+    assert len([a for a in world.repository._appointments.values()
+                if a.replaces_appointment_id == request]) == 1
+
+
+def test_original_expiry_text_still_goes_out_and_mentions_the_waiting_request(
+        world: World) -> None:
+    request = world.offered()
+    world.clock[0] = NOW + timedelta(minutes=10)
+    world.client("YES")
+    world.clock[0] = NOW + timedelta(hours=24, minutes=1)
+    world.lifecycle().apply(AppointmentCommand(
+        "pilot", request, "system", ActorRole.SYSTEM, Action.EXPIRE, "expire-orig",
+        world.appointment(request).version))
+    (intent,) = world.outbox("expire-replacement-waiting")
+    text = render(world, intent)
+    assert text.startswith("Cleaning visit expired: Thu Oct 1 at 9:00 AM.")
+    assert "request for Thu Oct 1 at 2:00 PM" in text and "still pending owner approval" in text
+    assert "confirmed" not in text
 
 
 def test_only_that_clients_offer_can_be_accepted(world: World) -> None:

@@ -231,7 +231,8 @@ class ConversationService:
         if receipt.role == SenderRole.CLIENT and self._acceptance is not None:
             # A reply to the owner's counteroffer (#176) is matched only to this client's
             # own current offer; every other message falls through unchanged.
-            accepted = self._acceptance.handle(receipt, now)
+            accepted = self._acceptance.handle(
+                receipt, now, prompt is not None and not prompt.expired(now))
             if accepted is not None:
                 if accepted.committed:
                     self._forget(prompt)

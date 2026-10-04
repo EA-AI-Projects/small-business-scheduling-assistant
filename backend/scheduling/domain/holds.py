@@ -163,6 +163,11 @@ class HoldService:
         self._repository = repository
         self._max_attempts = max_attempts
 
+    def existing(self, command: CreateHold) -> PendingHold | None:
+        """The hold this exact command already committed, for a redelivered request."""
+        record = self._repository.read_idempotency(command)
+        return None if record is None else self._replay(record, command.request_hash())
+
     def create(self, command: CreateHold, now: datetime) -> PendingHold:
         if now.tzinfo is None:
             raise ValueError("Current time must be timezone-aware")

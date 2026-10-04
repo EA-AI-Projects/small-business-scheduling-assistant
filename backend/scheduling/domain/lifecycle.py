@@ -26,6 +26,8 @@ from scheduling.domain.holds import (
 # an accepted owner counteroffer (the original is resolved with it, never confirmed).
 COUNTEROFFER_APPROVED_TEMPLATE = "counteroffer-approved"
 COUNTEROFFER_DECLINED_TEMPLATE = "counteroffer-declined"
+# The normal expiry text for an original whose accepted counteroffer request is still pending.
+EXPIRED_REPLACEMENT_WAITING_TEMPLATE = "expire-replacement-waiting"
 
 
 class Action(StrEnum):
@@ -251,6 +253,11 @@ class LifecycleService:
                 before.hold_expires_at is None or before.hold_expires_at > decision_at
             ):
                 raise InvalidTransition("Hold is not due for expiry")
+            replacement_waiting = False
+            if command.operation == Action.EXPIRE and before.replaces_appointment_id is None:
+                waiting = self._repository.read_replacement_guard(
+                    before.business_id, before.appointment_id)
+                replacement_waiting = waiting is not None and waiting.expires_at > decision_at
             clear_guard = False
             if before.replaces_appointment_id is not None:
                 guard = self._repository.read_replacement_guard(
@@ -264,7 +271,8 @@ class LifecycleService:
                 result=result,
                 audit_id=audit_id,
                 outbox=self._outbox(command, before, result, audit_id,
-                                    self._counteroffer_original(before, original)),
+                                    self._counteroffer_original(before, original),
+                                    replacement_waiting),
                 decision_at=decision_at,
                 clear_replacement_guard=clear_guard,
             )
@@ -386,9 +394,12 @@ class LifecycleService:
         result: TransitionResult,
         audit_id: str,
         countered: Appointment | None = None,
+        replacement_waiting: bool = False,
     ) -> tuple[OutboxIntent, ...]:
         template = command.operation.value
         if command.operation == Action.EXPIRE:
+            if replacement_waiting:
+                template = EXPIRED_REPLACEMENT_WAITING_TEMPLATE
             return (OutboxIntent(f"{audit_id}#client", before.appointment_id, "client", template),)
         if command.operation == Action.CANCEL and command.actor_role == ActorRole.OWNER:
             return (OutboxIntent(f"{audit_id}#client", before.appointment_id, "client", template),)
