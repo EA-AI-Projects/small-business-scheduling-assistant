@@ -1512,19 +1512,21 @@ class DynamoDBCalendarRepository:
             original_before = self.read_appointment(replaced.appointment_id)
             if (
                 original_before is None
-                or original_before.status != CalendarStatus.CONFIRMED
+                or original_before.status not in (
+                    CalendarStatus.CONFIRMED, CalendarStatus.PENDING_APPROVAL)
                 or original_before.version + 1 != replaced.version
             ):
                 raise RevisionConflict("Replacement original changed")
             writes.extend((
                 guarded_put(self._appointment_item(replaced), original_before),
                 event_delete(original_before),
-                {"Delete": {
+            ))
+            if original_before.status == CalendarStatus.CONFIRMED:
+                writes.append({"Delete": {
                     "TableName": self._table,
                     "Key": {key: value for key, value in self._visit_item(original_before).items()
                             if key in ("PK", "SK")},
-                }},
-            ))
+                }})
 
         if commit.clear_replacement_guard and before.replaces_appointment_id is not None:
             condition = "replacement_id = :replacement_id"

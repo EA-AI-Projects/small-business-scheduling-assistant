@@ -16,7 +16,7 @@ from scheduling.domain.conversation import ConversationService
 from scheduling.domain.holds import HoldService
 from scheduling.domain.lifecycle import LifecycleService
 from scheduling.domain.owner_calendar_questions import OwnerCalendarQuestions
-from scheduling.domain.owner_counteroffer import CounterofferService
+from scheduling.domain.owner_counteroffer import CounterofferAcceptance, CounterofferService
 from scheduling.domain.sms_ingress import InboundReceipt
 from scheduling.domain.sms_processing import ReceiptProcessor, process_sqs_batch
 
@@ -55,6 +55,9 @@ def handler(event: dict[str, Any], _context: object) -> dict[str, list[dict[str,
             counteroffers=CounterofferService(
                 calendar, store, DynamoCounterofferStore(dynamo, table),
                 os.environ["OWNER_NUMBER"]),
+            counteroffer_acceptance=CounterofferAcceptance(
+                calendar, store, DynamoCounterofferStore(dynamo, table),
+                HoldService(calendar)),
         )
 
     processor = ReceiptProcessor(store, None, business_id, clock,

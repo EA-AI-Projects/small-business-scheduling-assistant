@@ -22,7 +22,6 @@ from scheduling.domain.holds import (
     TooManyConflicts,
 )
 
-
 # Notifications for a request that replaces the client's still-pending original after
 # an accepted owner counteroffer (the original is resolved with it, never confirmed).
 COUNTEROFFER_APPROVED_TEMPLATE = "counteroffer-approved"

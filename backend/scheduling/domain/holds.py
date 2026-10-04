@@ -12,7 +12,6 @@ from scheduling.domain.appointments import Appointment, ReplacementGuard
 from scheduling.domain.availability import AvailabilityPolicy, available_starts
 from scheduling.domain.calendar import CalendarEvent, CalendarSnapshot, CalendarStatus
 
-
 # Owner notification for a request a client created by accepting an owner counteroffer.
 COUNTEROFFER_REQUEST_TEMPLATE = "counteroffer-request"
 

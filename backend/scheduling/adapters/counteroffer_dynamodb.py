@@ -8,6 +8,7 @@ transaction: the version-guarded state change, the single client outbox intent,
 and the client pointer commit together or not at all.
 """
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Any, Protocol
@@ -63,7 +64,8 @@ class DynamoCounterofferStore:
             datetime.fromisoformat(item["created_at"]["S"]),
             datetime.fromisoformat(item["expires_at"]["S"]),
             datetime.fromisoformat(item["confirmed_at"]["S"]) if "confirmed_at" in item else None,
-            item.get("confirmed_by", {}).get("S"), item.get("failure", {}).get("S"))
+            item.get("confirmed_by", {}).get("S"), item.get("failure", {}).get("S"),
+            item.get("accepted_request_id", {}).get("S"))
 
     def _item(self, offer: Counteroffer) -> dict[str, Any]:
         item: dict[str, Any] = {
@@ -87,6 +89,8 @@ class DynamoCounterofferStore:
             item["confirmed_by"] = {"S": offer.confirmed_by}
         if offer.failure is not None:
             item["failure"] = {"S": offer.failure}
+        if offer.accepted_request_id is not None:
+            item["accepted_request_id"] = {"S": offer.accepted_request_id}
         return item
 
     def _pointer(self, offer: Counteroffer, sort_key: str) -> dict[str, Any]:
@@ -196,6 +200,40 @@ class DynamoCounterofferStore:
                 raise
             return None
         return confirmed
+
+    def _move_confirmed(self, offer: Counteroffer, state: OfferState,
+                        request_id: str | None) -> bool:
+        values: dict[str, Any] = {
+            ":to": {"S": state.value}, ":confirmed": {"S": OfferState.CONFIRMED.value},
+            ":version": {"N": str(offer.version)}, ":next": {"N": str(offer.version + 1)}}
+        update = "SET #s = :to, #v = :next"
+        if request_id is not None:
+            update += ", accepted_request_id = :request"
+            values[":request"] = {"S": request_id}
+        try:
+            self._client.transact_write_items(TransactItems=[
+                {"Update": {
+                    "TableName": self._table,
+                    "Key": self._key(offer.business_id, f"COUNTEROFFER#{offer.offer_id}"),
+                    "UpdateExpression": update,
+                    "ConditionExpression": "#s = :confirmed AND #v = :version",
+                    "ExpressionAttributeNames": {"#s": "state", "#v": "version"},
+                    "ExpressionAttributeValues": values}},
+            ])
+        except Exception as exc:
+            if not _record_transaction_conflict(exc):
+                raise
+            return False
+        return True
+
+    def accept(self, offer: Counteroffer, request_id: str) -> Counteroffer | None:
+        if not self._move_confirmed(offer, OfferState.ACCEPTED, request_id):
+            return None
+        return replace(offer, state=OfferState.ACCEPTED, version=offer.version + 1,
+                       accepted_request_id=request_id)
+
+    def supersede(self, offer: Counteroffer) -> None:
+        self._move_confirmed(offer, OfferState.SUPERSEDED, None)
 
     def record_failure(self, offer: Counteroffer, problem: str, now: datetime,
                        outbox: OutboxRecord) -> None:

@@ -9,8 +9,13 @@ from zoneinfo import ZoneInfo
 
 from scheduling.domain.appointments import Appointment
 from scheduling.domain.availability import AvailabilityPolicy
-from scheduling.domain.calendar import CalendarSnapshot
+from scheduling.domain.calendar import CalendarSnapshot, CalendarStatus
 from scheduling.domain.client_records import ClientProfile, RecordConflict, RecordNotFound
+from scheduling.domain.holds import COUNTEROFFER_REQUEST_TEMPLATE
+from scheduling.domain.lifecycle import (
+    COUNTEROFFER_APPROVED_TEMPLATE,
+    COUNTEROFFER_DECLINED_TEMPLATE,
+)
 from scheduling.domain.outbox import DeliveryFailure, OutboxRecord, PermanentDeliveryFailure
 from scheduling.domain.owner_counteroffer import (
     COUNTEROFFER_FAILED_TEMPLATE,
@@ -244,12 +249,53 @@ class TwilioSmsSender:
         if (record.template not in BLOCK_TEMPLATES and appointment is not None
                 and record.event_version != appointment.version):
             raise PermanentDeliveryFailure("EVENT_SUPERSEDED")
+        original = (self._records.read_appointment(appointment.replaces_appointment_id)
+                    if appointment is not None and appointment.replaces_appointment_id
+                    and record.template in COUNTEROFFER_TEMPLATES else None)
         return render_notification(record.template, record.recipient, appointment, profile,
-                                   self._timezone)
+                                   self._timezone, original, self._clock())
+
+
+COUNTEROFFER_TEMPLATES = frozenset({
+    COUNTEROFFER_REQUEST_TEMPLATE, COUNTEROFFER_APPROVED_TEMPLATE,
+    COUNTEROFFER_DECLINED_TEMPLATE})
+
+
+def _counteroffer_text(template: str, recipient: str, appointment: Appointment,
+                       profile: ClientProfile | None, timezone: ZoneInfo,
+                       original: Appointment | None, now: datetime | None) -> str:
+    """Wording for a request created by accepting an owner counteroffer."""
+    when = _when(appointment.start_at.astimezone(timezone))
+    reference = appointment.appointment_id[:8]
+    name = profile.name if profile else "client"
+    earlier = (_when(original.start_at.astimezone(timezone)) if original is not None
+               else "the earlier time")
+    earlier_ref = f" (ref {original.appointment_id[:8]})" if original is not None else ""
+    if template == COUNTEROFFER_REQUEST_TEMPLATE:
+        if recipient != "owner":
+            raise PermanentDeliveryFailure("TEMPLATE_RECIPIENT_MISMATCH")
+        return (f"{name} accepted your counteroffer: new request for {when}, "
+                f"{appointment.duration_minutes} min. Ref {reference}. It replaces their "
+                f"request for {earlier}{earlier_ref}, which stays pending until you decide. "
+                "Approving this one resolves both. Review before approval.")
+    if template == COUNTEROFFER_APPROVED_TEMPLATE:
+        if recipient == "owner":
+            return (f"Accepted counteroffer approved: {name}, {when}. Ref {reference}. "
+                    f"Both requests are resolved: their request for {earlier}{earlier_ref} "
+                    "is closed.")
+        return f"Cleaning visit confirmed: {when}. Ref {reference}. Reply to the business number for help."
+    live = (original is not None and original.status == CalendarStatus.PENDING_APPROVAL
+            and original.hold_expires_at is not None and now is not None
+            and original.hold_expires_at > now)
+    tail = (f" The earlier request for {earlier}{earlier_ref} is still pending owner approval."
+            if live else "")
+    return f"Cleaning request declined: {when}. Ref {reference}.{tail}"
 
 
 def render_notification(template: str, recipient: str, appointment: Appointment | None,
-                        profile: ClientProfile | None, timezone: ZoneInfo) -> str:
+                        profile: ClientProfile | None, timezone: ZoneInfo,
+                        original: Appointment | None = None,
+                        now: datetime | None = None) -> str:
     """Render a notification body from trusted records; callers check event freshness."""
     if template in BLOCK_TEMPLATES:
         if recipient != "owner":
@@ -264,9 +310,12 @@ def render_notification(template: str, recipient: str, appointment: Appointment 
     if template not in {
         "hold-request", "hold-pending", "approve", "decline", "expire", "cancel",
         "edit_appointment", "replacement-approved", "replacement-original-retained",
-        "create_owner_appointment",
+        "create_owner_appointment", *COUNTEROFFER_TEMPLATES,
     }:
         raise PermanentDeliveryFailure("TEMPLATE_UNKNOWN")
+    if template in COUNTEROFFER_TEMPLATES:
+        return _counteroffer_text(
+            template, recipient, appointment, profile, timezone, original, now)
     if template == "hold-request" and recipient != "owner":
         raise PermanentDeliveryFailure("TEMPLATE_RECIPIENT_MISMATCH")
     if template == "hold-pending" and recipient != "client":
