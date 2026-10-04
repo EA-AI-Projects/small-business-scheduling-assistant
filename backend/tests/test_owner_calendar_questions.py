@@ -61,8 +61,14 @@ class Model:
 
 
 class Consent:
+    def __init__(self) -> None:
+        self.replies: dict[str, str] = {}  # What the SMS processor has durably saved.
+
     def is_opted_out(self, business_id: str, phone_e164: str) -> bool:
         return False
+
+    def read_reply_text(self, business_id: str, provider_id: str) -> str | None:
+        return self.replies.get(provider_id)
 
     def read_consent(self, business_id: str, phone_e164: str) -> ConsentEvidence | None:
         return None
@@ -74,6 +80,7 @@ class Chat:
         self.now = NOW
         self.model = Model()
         self.count = 0
+        self.received: dict[str, datetime] = {}
         self.names: dict[str, str] = {}
         for client_id, name in (("c1", "Avery Example"), ("c2", "Blake Sample"),
                                 ("c3", "Casey Testperson")):
@@ -81,16 +88,25 @@ class Chat:
             self.store.save_profile(ClientProfile(
                 "pilot", client_id, name, f"+1415555010{client_id[1]}", "1 Test Street",
                 HomeSize.MEDIUM, 120, True, 1, NOW, NOW, NOW), 0, None)
+        self.consent = Consent()
         self.service = ConversationService(
             self.store, self.model, HoldService(self.store),
-            LifecycleService(self.store, lambda: self.now), Consent(), lambda: self.now,
+            LifecycleService(self.store, lambda: self.now), self.consent, lambda: self.now,
             OWNER, InMemoryConversationStates())
 
-    def ask(self, body: str, provider_id: str | None = None) -> ConversationOutcome:
+    def ask(self, body: str, provider_id: str | None = None, save: bool = True,
+            received_at: datetime | None = None) -> ConversationOutcome:
+        """Send an owner text. Like ReceiptProcessor, save the reply unless ``save`` is False."""
         self.count += 1
-        return self.service.handle(InboundReceipt(
-            "pilot", provider_id or f"SM-{self.count}", OWNER, "+14155550000", body, self.now,
+        self.now += timedelta(seconds=10)
+        provider = provider_id or f"SM-{self.count}"
+        self.received.setdefault(provider, received_at or self.now)  # A redelivery keeps it.
+        outcome = self.service.handle(InboundReceipt(
+            "pilot", provider, OWNER, "+14155550000", body, received_at or self.received[provider],
             SenderRole.OWNER, None, Keyword.OTHER, True))
+        if save and not outcome.committed:
+            self.consent.replies[provider] = outcome.text
+        return outcome
 
     def hold(self, client: str, start: datetime, key: str, confirm: bool = False) -> str:
         hold_id = HoldService(self.store).create(CreateHold(
@@ -313,7 +329,7 @@ def test_dynamo_context_round_trips_without_message_text() -> None:
     context = QuestionContext(
         "pilot", OWNER, View.COUNT, date(2026, 10, 2), date(2026, 10, 2),
         frozenset({CalendarStatus.CONFIRMED}), 3, Ask.STATUS, NOW, NOW + timedelta(minutes=10),
-        2, "SM-1", "abc", "SM-2", 4, "SM-9")
+        2, "SM-1", "abc", "SM-2", 4, "SM-9", NOW)
     store.put_context(context)
     assert store.read_context("pilot", OWNER) == context
     assert store.read_context("pilot", "+14155550123") is None
@@ -601,4 +617,50 @@ def test_a_half_stated_model_range_asks_instead_of_reusing_the_old_range() -> No
             OwnerReplyIntent.CALENDAR_FOLLOWUP, None, Confidence.HIGH, None, start, end)
         reply = chat.ask("ok, and later")
         assert "wasn't sure" in reply.text and not reply.committed
+    assert status_of(chat, request) == CalendarStatus.PENDING_APPROVAL
+
+
+def asked_but_reply_lost() -> tuple[Chat, str]:
+    chat, request = week_with_one_pending()
+    chat.model.script["yes please"] = decision(OwnerReplyIntent.APPROVE_NAMED_REQUEST, request)
+    lost = chat.ask("yes please", "SM-A", save=False)  # The reply was never saved or sent.
+    assert not lost.committed
+    return chat, request
+
+
+def test_a_resent_message_cannot_approve_a_question_that_was_never_saved() -> None:
+    chat, request = asked_but_reply_lost()
+    resent = chat.ask("yes please", "SM-B")
+    assert not resent.committed and status_of(chat, request) == CalendarStatus.PENDING_APPROVAL
+    approved = chat.ask("yes please", "SM-C")  # SM-B's question was saved and seen.
+    assert approved.committed and status_of(chat, request) == CalendarStatus.CONFIRMED
+
+
+def test_a_redelivered_lost_question_cannot_approve_after_a_later_one_was_saved() -> None:
+    chat, request = asked_but_reply_lost()
+    later = chat.ask("ok", "SM-B")
+    assert not later.committed
+    chat.model.script["ok"] = decision(OwnerReplyIntent.APPROVE_NAMED_REQUEST, request)
+    redelivered = chat.ask("yes please", "SM-A")  # Received before SM-B's question.
+    assert not redelivered.committed and status_of(chat, request) == CalendarStatus.PENDING_APPROVAL
+    approved = chat.ask("yes please", "SM-C")
+    assert approved.committed and status_of(chat, request) == CalendarStatus.CONFIRMED
+
+
+def test_a_message_received_before_the_question_was_asked_asks_again() -> None:
+    chat, request = week_with_one_pending()
+    chat.model.script["yes please"] = decision(OwnerReplyIntent.APPROVE_NAMED_REQUEST, request)
+    early = chat.now
+    chat.ask("ok", "SM-A")  # Asks and is saved.
+    stale = chat.ask("yes please", "SM-B", received_at=early)
+    assert not stale.committed and status_of(chat, request) == CalendarStatus.PENDING_APPROVAL
+    assert chat.ask("yes please", "SM-C").committed
+
+
+def test_without_a_way_to_check_saved_replies_nothing_is_ever_named() -> None:
+    chat, request = week_with_one_pending()
+    chat.service._reply_lookup = None
+    chat.model.script["yes please"] = decision(OwnerReplyIntent.APPROVE_NAMED_REQUEST, request)
+    chat.ask("yes please")
+    assert not chat.ask("yes please").committed
     assert status_of(chat, request) == CalendarStatus.PENDING_APPROVAL

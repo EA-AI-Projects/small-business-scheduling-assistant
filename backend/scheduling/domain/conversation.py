@@ -57,7 +57,7 @@ from scheduling.domain.lifecycle import (
     LifecycleService,
     StaleVersion,
 )
-from scheduling.domain.owner_calendar_questions import OwnerCalendarQuestions
+from scheduling.domain.owner_calendar_questions import OwnerCalendarQuestions, ReplyLookup
 from scheduling.domain.owner_reply_classification import (
     Confidence,
     OwnerReplyClassifier,
@@ -162,6 +162,7 @@ class ConversationService:
                  owner_number: str, states: ConversationStateStore | None = None,
                  owner_questions: OwnerCalendarQuestions | None = None,
                  owner_reply_classifier: OwnerReplyClassifier | None = None,
+                 reply_lookup: ReplyLookup | None = None,
                  counteroffers: "CounterofferService | None" = None) -> None:
         self._repository = repository
         self._interpreter = interpreter
@@ -177,6 +178,9 @@ class ConversationService:
         self._owner_classifier = (
             owner_reply_classifier if owner_reply_classifier is not None
             else interpreter if isinstance(interpreter, OwnerReplyClassifier) else None)
+        # The SMS store that holds saved replies; without it no request ever counts as named.
+        self._reply_lookup = (reply_lookup if reply_lookup is not None
+                              else consent if isinstance(consent, ReplyLookup) else None)
         self._counteroffers = counteroffers
 
     def handle(self, receipt: InboundReceipt) -> ConversationOutcome:
@@ -630,9 +634,15 @@ class ConversationService:
         zone = ZoneInfo(policy.timezone)
         if questions.is_fresh_question(body, now.astimezone(zone).date()):
             return None  # A complete calendar question; it cannot approve anything.
-        # A redelivery of the message that asked the question must ask again: the reply
-        # to it may never have been saved, so the owner has not seen the question.
-        was_named = bool(context.clarified_request) and context.clarified_by != receipt.provider_id
+        # A request counts as named only if the question's reply was durably saved, and only
+        # for a message received after the question was asked. A redelivery of the asking
+        # message, or any earlier message, must ask again.
+        was_named = (
+            bool(context.clarified_request) and context.clarified_by != receipt.provider_id
+            and context.clarified_at is not None and receipt.received_at > context.clarified_at
+            and self._reply_lookup is not None
+            and self._reply_lookup.read_reply_text(
+                receipt.business_id, context.clarified_by) is not None)
         named = next((target for target in targets
                       if was_named and target.appointment_id == context.clarified_request), None)
         if self._owner_classifier is None:

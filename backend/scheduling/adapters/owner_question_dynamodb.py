@@ -44,7 +44,8 @@ class DynamoQuestionContexts:
             item.get("fingerprint", {}).get("S", ""),
             item.get("clarified_request", {}).get("S", ""),
             int(item.get("clarified_version", {"N": "0"})["N"]),
-            item.get("clarified_by", {}).get("S", ""))
+            item.get("clarified_by", {}).get("S", ""),
+            datetime.fromisoformat(item["clarified_at"]["S"]) if "clarified_at" in item else None)
 
     def put_context(self, context: QuestionContext) -> None:
         item: dict[str, Any] = {
@@ -64,6 +65,8 @@ class DynamoQuestionContexts:
         for name in ("receipt_id", "fingerprint", "clarified_request", "clarified_by"):
             if getattr(context, name):
                 item[name] = {"S": getattr(context, name)}
+        if context.clarified_at is not None:
+            item["clarified_at"] = {"S": context.clarified_at.isoformat()}
         if context.ask is not None:
             item["ask"] = {"S": context.ask.value}
         self._client.put_item(TableName=self._table, Item=item)

@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from hashlib import sha256
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 from zoneinfo import ZoneInfo
 
 from scheduling.domain.appointments import Appointment
@@ -69,6 +69,7 @@ class QuestionContext:
     clarified_request: str = ""  # Request the assistant last asked the owner about.
     clarified_version: int = 0  # Its version when asked; approval needs the same version.
     clarified_by: str = ""  # Inbound message that asked; its redelivery must ask again.
+    clarified_at: datetime | None = None  # When it asked; only later messages may answer.
 
     def expired(self, now: datetime) -> bool:
         return now >= self.expires_at
@@ -93,6 +94,13 @@ class InMemoryQuestionContexts:
     def put_context(self, context: QuestionContext) -> None:
         with self._lock:
             self._contexts[(context.business_id, context.sender)] = context
+
+
+@runtime_checkable
+class ReplyLookup(Protocol):
+    """Whether the reply to an inbound message was durably saved."""
+
+    def read_reply_text(self, business_id: str, provider_id: str) -> str | None: ...
 
 
 class QuestionRepository(Protocol):
@@ -308,7 +316,7 @@ class OwnerCalendarQuestions:
         if context is not None:
             self._contexts.put_context(replace(
                 context, clarified_request=request_id, clarified_version=version,
-                clarified_by=receipt_id))
+                clarified_by=receipt_id, clarified_at=now))
 
     def apply_followup(self, business_id: str, sender: str, now: datetime, receipt_id: str,
                        statuses: frozenset[CalendarStatus] | None,
@@ -396,7 +404,7 @@ class OwnerCalendarQuestions:
             context, skip=following if following < len(entries) else 0, ask=None,
             expires_at=now + QUESTION_LIFETIME, page_start=skip, receipt_id=receipt_id,
             fingerprint=fingerprint, clarified_request="", clarified_version=0,
-            clarified_by=""))
+            clarified_by="", clarified_at=None))
         return text
 
     def _items(self, business_id: str, days: list[date], zone: ZoneInfo,
