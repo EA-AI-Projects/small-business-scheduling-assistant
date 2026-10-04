@@ -7,6 +7,7 @@ from typing import Any
 import boto3  # type: ignore[import-untyped]
 
 from scheduling.adapters.conversation_state_dynamodb import DynamoConversationStates
+from scheduling.adapters.counteroffer_dynamodb import DynamoCounterofferStore
 from scheduling.adapters.dynamodb import DynamoDBCalendarRepository
 from scheduling.adapters.openai_messages import OpenAIMessageInterpreter
 from scheduling.adapters.owner_question_dynamodb import DynamoQuestionContexts
@@ -15,6 +16,7 @@ from scheduling.domain.conversation import ConversationService
 from scheduling.domain.holds import HoldService
 from scheduling.domain.lifecycle import LifecycleService
 from scheduling.domain.owner_calendar_questions import OwnerCalendarQuestions
+from scheduling.domain.owner_counteroffer import CounterofferService
 from scheduling.domain.sms_ingress import InboundReceipt
 from scheduling.domain.sms_processing import ReceiptProcessor, process_sqs_batch
 
@@ -50,6 +52,9 @@ def handler(event: dict[str, Any], _context: object) -> dict[str, list[dict[str,
             LifecycleService(calendar, clock), store, clock,
             os.environ["OWNER_NUMBER"], states,
             owner_questions=OwnerCalendarQuestions(calendar, DynamoQuestionContexts(dynamo, table)),
+            counteroffers=CounterofferService(
+                calendar, store, DynamoCounterofferStore(dynamo, table),
+                os.environ["OWNER_NUMBER"]),
         )
 
     processor = ReceiptProcessor(store, None, business_id, clock,

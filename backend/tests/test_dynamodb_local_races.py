@@ -267,6 +267,27 @@ def test_client_erasure_releases_reservations_and_removes_linked_records(
         "request_hash": {"S": "synthetic-hash"},
     })
 
+    from scheduling.adapters.counteroffer_dynamodb import DynamoCounterofferStore
+    from scheduling.domain.owner_counteroffer import (
+        Counteroffer,
+        OfferState,
+        counteroffer_failure_outbox,
+        counteroffer_outbox,
+    )
+
+    offers = DynamoCounterofferStore(env.client, env.table)
+    offer = Counteroffer(
+        env.business, "co-erase", "+15005550009", pending.appointment_id, 1,
+        "synthetic-client", "+14155550101", START, 60, "Synthetic offer text.",
+        OfferState.PROPOSED, 1, START, START + timedelta(minutes=30))
+    assert offers.put_draft(offer)
+    confirmed_offer = offers.confirm(offer, "SM-erase", START, counteroffer_outbox(
+        replace(offer, version=2), START))
+    assert confirmed_offer is not None
+    offers.record_failure(confirmed_offer, "SLOT_UNAVAILABLE", START,
+                          counteroffer_failure_outbox(confirmed_offer, START))
+    assert offers.read(env.business, "co-erase") is not None
+
     lease = repo.acquire_client_send(env.business, "synthetic-client")
     with pytest.raises(RecordConflict):
         repo.erase_client(env.business, "synthetic-client")
@@ -281,6 +302,11 @@ def test_client_erasure_releases_reservations_and_removes_linked_records(
     remaining = repo._scan_items()
     assert not any(item["SK"]["S"].startswith(("NOTE#", "SMS#", "OUTBOX#"))
                    for item in remaining if item["PK"]["S"] == f"BUSINESS#{env.business}")
+    assert not any(item["SK"]["S"].startswith("COUNTEROFFER")
+                   for item in remaining if item["PK"]["S"] == f"BUSINESS#{env.business}")
+    assert offers.read(env.business, "co-erase") is None
+    assert offers.read_confirmed_for_client(env.business, "synthetic-client") is None
+    assert not offers.put_draft(offer)  # The erased client can no longer receive offers.
     assert not any(item["PK"]["S"].startswith(f"VISITS#{env.business}#")
                    for item in remaining)
     assert not any(item["SK"]["S"] == command_key for item in remaining)
@@ -715,3 +741,44 @@ def test_retire_pending_outbox_before_cutoff_leaves_the_due_index(race_env: Race
         "Retired record stayed in the due index")
     kept = _get(env, f"BUSINESS#{env.business}", f"OUTBOX#{new}")
     assert kept is not None and kept["delivery_state"]["S"] == "PENDING"
+
+
+def test_two_concurrent_counteroffer_confirmations_queue_exactly_one_client_text(
+        race_env: RaceEnv) -> None:
+    from scheduling.adapters.counteroffer_dynamodb import DynamoCounterofferStore
+    from scheduling.domain.owner_counteroffer import (
+        Counteroffer,
+        OfferState,
+        counteroffer_outbox,
+    )
+
+    env = race_env
+    store = DynamoCounterofferStore(env.client, env.table)
+    offer = Counteroffer(
+        env.business, "co-race", "+15005550009", env.appointment_id("request"), 1,
+        "synthetic-client", "+15005550006", START, 60, "Synthetic offer text.",
+        OfferState.PROPOSED, 1, START, START + timedelta(minutes=30))
+    store.put_draft(offer)
+    store.put_draft(offer)  # A redelivered owner message rewrites the same proposal.
+    barrier = Barrier(2)
+
+    def attempt(message: str) -> bool:
+        barrier.wait(timeout=5)
+        confirmed = store.confirm(
+            offer, message, START,
+            counteroffer_outbox(replace(offer, version=2), START))
+        return confirmed is not None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [future.result() for future in [
+            pool.submit(attempt, "SM-1"), pool.submit(attempt, "SM-2")]]
+    assert results.count(True) == 1
+    stored = store.read(env.business, "co-race")
+    assert stored is not None and stored.state == OfferState.CONFIRMED and stored.version == 2
+    assert store.read_active(env.business, "+15005550009") == stored
+    assert store.read_confirmed_for_client(env.business, "synthetic-client") == stored
+    outbox = DynamoOutboxStore(env.client, env.table)
+    record = outbox.get(env.business, "counteroffer#co-race")
+    assert record is not None and record.template == "owner-counteroffer"
+    assert record.recipient == "client" and record.event_version == 2
+    assert not store.put_draft(offer)  # A finished offer cannot be reopened.
