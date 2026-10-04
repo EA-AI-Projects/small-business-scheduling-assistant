@@ -255,6 +255,12 @@ def test_client_erasure_releases_reservations_and_removes_linked_records(
         **repo._business_key(env.business, "OUTBOX#synthetic-notice"),
         "appointment_id": {"S": confirmed.appointment_id},
     })
+    env.client.put_item(TableName=env.table, Item={
+        **repo._business_key(env.business, "OUTBOX#welcome#synthetic-client"),
+        "entity_id": {"S": "synthetic-client"},
+        "recipient": {"S": "client"},
+        "template": {"S": "welcome"},
+    })
     command_key = _command_sort_key("synthetic-client", "cancel", "synthetic-receipt")
     env.client.put_item(TableName=env.table, Item={
         **repo._business_key(env.business, command_key),

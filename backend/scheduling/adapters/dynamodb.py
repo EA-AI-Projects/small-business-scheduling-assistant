@@ -470,6 +470,7 @@ class DynamoDBCalendarRepository:
                         or sk in client_command_keys
                         or fields.get("client_id") == client_id
                         or fields.get("actor_id") == client_id
+                        or (sk.startswith("OUTBOX#") and fields.get("entity_id") == client_id)
                         or any(fields.get(name) in appointment_ids for name in (
                             "appointment_id", "hold_id", "entity_id", "event_id", "replacement_id"))
                         or fields.get("entity_id") in receipt_ids
