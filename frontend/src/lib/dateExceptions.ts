@@ -16,21 +16,28 @@ function minutes(time: string): number {
 
 /**
  * Local-minute ranges that a saved date exception closes on `day` (YYYY-MM-DD, business timezone).
- * A closed date is one whole-day range; custom hours close the time before, between, and after the
- * open windows. A date with no exception has no ranges (normal weekly hours apply).
+ * A closed date is one whole-day range. Custom hours close the weekday's normal weekly windows minus
+ * the exception's open windows (nothing if that leaves no time). A date with no exception has no ranges.
  */
 export function closedRanges(policy: AvailabilityPolicy | null | undefined, day: string): ClosedRange[] {
   const windows = policy?.date_exceptions?.[day];
-  if (!windows) return [];
+  if (!policy || !windows) return [];
   if (windows.length === 0) return [{ startMinute: 0, endMinute: MINUTES_PER_DAY, wholeDay: true }];
-  const open = windows.map((item) => ({ start: minutes(item.opens), end: minutes(item.closes) }))
-    .sort((a, b) => a.start - b.start);
+  // Monday = 0, matching the backend's date.weekday().
+  const weekday = (new Date(`${day}T12:00:00Z`).getUTCDay() + 6) % 7;
+  const open = windows.map((item) => ({ start: minutes(item.opens), end: minutes(item.closes) }));
   const ranges: ClosedRange[] = [];
-  let cursor = 0;
-  for (const item of open) {
-    if (item.start > cursor) ranges.push({ startMinute: cursor, endMinute: item.start, wholeDay: false });
-    cursor = Math.max(cursor, item.end);
+  const normal = [...(policy.weekly_windows?.[String(weekday)] ?? [])]
+    .map((item) => ({ start: minutes(item.opens), end: minutes(item.closes) }))
+    .sort((a, b) => a.start - b.start);
+  for (const window of normal) {
+    let cursor = window.start;
+    for (const item of [...open].sort((a, b) => a.start - b.start)) {
+      if (item.end <= cursor || item.start >= window.end) continue;
+      if (item.start > cursor) ranges.push({ startMinute: cursor, endMinute: item.start, wholeDay: false });
+      cursor = Math.max(cursor, item.end);
+    }
+    if (cursor < window.end) ranges.push({ startMinute: cursor, endMinute: window.end, wholeDay: false });
   }
-  if (cursor < MINUTES_PER_DAY) ranges.push({ startMinute: cursor, endMinute: MINUTES_PER_DAY, wholeDay: false });
   return ranges;
 }

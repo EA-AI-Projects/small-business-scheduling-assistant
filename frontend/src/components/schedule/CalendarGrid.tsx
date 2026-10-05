@@ -88,8 +88,8 @@ export function CalendarGrid({ days, events, policy, zone, selectedId, onSelect,
               aria-label={day === today ? `${dayTitle(day)}, today` : dayTitle(day)}>
               {closedRanges(policy, day).map((range) => (
                 <div key={`closed-${range.startMinute}`} className="cal-closed" role="note" data-date-exception=""
-                  aria-label={`${range.wholeDay ? "Closed (date exception)" : "Closed outside exception hours"}, ${
-                    minuteLabel(range.startMinute)} to ${minuteLabel(range.endMinute)}, ${dayTitle(day)}`}
+                  aria-label={`${range.wholeDay ? "Closed (date exception)" : "Closed (date exception hours)"}, ${
+                    minuteLabel(range.startMinute)}–${minuteLabel(range.endMinute)}, ${dayTitle(day)}`}
                   style={{ top: `${(range.startMinute / MINUTES_PER_DAY) * 100}%`,
                     height: `${((range.endMinute - range.startMinute) / MINUTES_PER_DAY) * 100}%` }}>
                   <span>{range.wholeDay ? "Closed (date exception)" : "Closed (date exception hours)"}</span>
