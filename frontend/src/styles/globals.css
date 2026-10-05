@@ -167,6 +167,8 @@ code { font-size: .9em; }
 .cal-head-day.today .cal-date { background: var(--color-primary); color: var(--color-on-primary); }
 .cal-hour-label { height: var(--hour-px); padding-right: .4rem; text-align: right; font-size: .7rem; color: var(--color-text-subtle); transform: translateY(-.55em); }
 .cal-col { position: relative; height: calc(var(--hour-px) * 24); border-left: 1px solid var(--color-border-soft); background-image: linear-gradient(var(--color-border-soft) 1px, transparent 1px); background-size: 100% var(--hour-px); }
+.cal-closed { position: absolute; left: 0; right: 0; z-index: 0; overflow: hidden; padding: .2rem .35rem; border-left: 4px dotted var(--color-unavailable-edge); background: var(--color-inactive-bg); color: var(--color-inactive-ink); font-size: .72rem; font-style: italic; pointer-events: none; }
+.cal-closed span { display: block; }
 .cal-now { position: absolute; left: 0; right: 0; height: 0; border-top: 2px solid var(--color-now); z-index: 1; pointer-events: none; }
 .cal-now::before { content: ""; position: absolute; left: -5px; top: -6px; width: 10px; height: 10px; border-radius: 50%; background: var(--color-now); }
 .cal-event { position: absolute; z-index: 1; display: block; overflow: hidden; min-height: 1.4rem; padding: .15rem .3rem; border-radius: 6px; border: 1px solid var(--color-surface); border-left-width: 4px; text-align: left; font-size: .78rem; font-weight: 400; line-height: 1.25; }

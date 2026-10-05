@@ -1,12 +1,13 @@
 """Owner policy changes are versioned and preserve future reservations."""
 
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from scheduling.adapters.memory import InMemoryCalendarRepository
-from scheduling.domain.availability import pilot_policy
+from scheduling.domain.availability import AvailabilityService, LocalWindow, pilot_policy
 from scheduling.domain.calendar import CalendarEvent, CalendarStatus
 from scheduling.domain.holds import CreateHold, HoldService, IdempotencyKeyReused, RevisionConflict
 from scheduling.domain.owner_policy import (
@@ -132,3 +133,30 @@ def test_revision_read_race_replays_same_key_policy_result() -> None:
     )
     assert result.record.version == 1
     assert repository.read_revision("business-1") == 1
+
+
+def test_saved_closure_and_shortened_hours_remove_time_from_offered_availability() -> None:
+    repository = InMemoryCalendarRepository()
+    owner = OwnerPolicyService(repository, lambda: NOW)
+    availability = AvailabilityService(repository)
+    owner.seed("business-1", "owner-1", "seed")
+    closed_day, short_day = date(2026, 9, 30), date(2026, 10, 1)  # Wednesday, Thursday
+    zone_hour = lambda starts: sorted(
+        start.astimezone(ZoneInfo("America/Los_Angeles")).hour for start in starts
+    )
+
+    before_closed = availability.find_starts("business-1", closed_day, 60, NOW)
+    before_short = availability.find_starts("business-1", short_day, 60, NOW)
+    assert before_closed and zone_hour(before_short)[-1] >= 15
+
+    edited = replace(pilot_policy(), date_exceptions={
+        closed_day: (),
+        short_day: (LocalWindow(time(9), time(12)),),
+    })
+    owner.apply(PolicyCommand("business-1", "owner-1", "exceptions", 1, 1, edited))
+
+    assert availability.find_starts("business-1", closed_day, 60, NOW) == ()
+    short = availability.find_starts("business-1", short_day, 60, NOW)
+    hours = zone_hour(short)
+    assert hours[0] == 9 and hours[-1] == 11  # last 60-minute start is 11:00 for a 12:00 close
+    assert set(short) < set(before_short)

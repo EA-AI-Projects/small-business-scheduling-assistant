@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
-import type { CalendarEvent } from "@/api/types";
+import type { AvailabilityPolicy, CalendarEvent } from "@/api/types";
+import { closedRanges } from "@/lib/dateExceptions";
 import { layoutDay, MINUTES_PER_DAY, type PlacedEvent } from "@/lib/calendarLayout";
 import { dayTitle, localInput, localTime, statusLabel, todayKey } from "@/lib/time";
 
@@ -15,6 +16,12 @@ function hourLabel(hour: number): string {
   return `${hour % 12 === 0 ? 12 : hour % 12} ${hour < 12 ? "AM" : "PM"}`;
 }
 
+function minuteLabel(minute: number): string {
+  if (minute >= MINUTES_PER_DAY) return "midnight";
+  const hour = Math.floor(minute / 60);
+  return `${hour % 12 === 0 ? 12 : hour % 12}:${String(minute % 60).padStart(2, "0")} ${hour < 12 ? "AM" : "PM"}`;
+}
+
 function eventLabel(placed: PlacedEvent, zone: string, day: string): string {
   const { event } = placed;
   const extra = `${placed.continuesBefore ? ", continues from previous day" : ""}${
@@ -23,8 +30,8 @@ function eventLabel(placed: PlacedEvent, zone: string, day: string): string {
     dayTitle(day)}${extra}`;
 }
 
-export function CalendarGrid({ days, events, zone, selectedId, onSelect, onSlotPress }: {
-  days: string[]; events: CalendarEvent[]; zone: string; selectedId: string | null;
+export function CalendarGrid({ days, events, policy, zone, selectedId, onSelect, onSlotPress }: {
+  days: string[]; events: CalendarEvent[]; policy?: AvailabilityPolicy | null; zone: string; selectedId: string | null;
   onSelect: (id: string, element: HTMLElement) => void;
   /** A press on an empty part of a day column (not on an item, heading, or the gutter). */
   onSlotPress: (column: HTMLElement, x: number, y: number) => void;
@@ -79,6 +86,15 @@ export function CalendarGrid({ days, events, zone, selectedId, onSelect, onSlotP
                 if (click.target === click.currentTarget) onSlotPress(click.currentTarget, click.clientX, click.clientY);
               }}
               aria-label={day === today ? `${dayTitle(day)}, today` : dayTitle(day)}>
+              {closedRanges(policy, day).map((range) => (
+                <div key={`closed-${range.startMinute}`} className="cal-closed" role="note" data-date-exception=""
+                  aria-label={`${range.wholeDay ? "Closed (date exception)" : "Closed (date exception hours)"}, ${
+                    minuteLabel(range.startMinute)}–${minuteLabel(range.endMinute)}, ${dayTitle(day)}`}
+                  style={{ top: `${(range.startMinute / MINUTES_PER_DAY) * 100}%`,
+                    height: `${((range.endMinute - range.startMinute) / MINUTES_PER_DAY) * 100}%` }}>
+                  <span>{range.wholeDay ? "Closed (date exception)" : "Closed (date exception hours)"}</span>
+                </div>
+              ))}
               {layoutDay(events, day, zone).map((placed) => (
                 <EventBlock key={placed.event.event_id} placed={placed} zone={zone} day={day}
                   selected={placed.event.event_id === selectedId} onSelect={onSelect} />
