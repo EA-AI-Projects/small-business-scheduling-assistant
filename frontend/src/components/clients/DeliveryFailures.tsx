@@ -5,7 +5,7 @@ import { path } from "@/lib/api";
 import { localStamp } from "@/lib/time";
 import { errorMessage, useOwner } from "@/owner/OwnerContext";
 
-/** Texts the carrier reported as failed, so the owner can follow up by phone. */
+/** Failed outbound texts, including refusals before a carrier send. */
 export function DeliveryFailures() {
   const { api, stamp, data } = useOwner();
   const [failures, setFailures] = useState<SmsDeliveryFailure[] | null>(null);
@@ -29,7 +29,7 @@ export function DeliveryFailures() {
       <div className="card-list" aria-label="Text delivery failures">
         {failures?.map((failure) => (
           <div key={failure.outbox_id} className="client-row">
-            <div>{failure.recipient}</div>
+            <div>{failure.recipient === "client" ? "Client" : failure.recipient === "owner" ? "Owner" : failure.recipient}</div>
             <div className="meta">
               {`${failure.status}${failure.error_code ? ` (code ${failure.error_code})` : ""} · ${
                 localStamp(failure.observed_at, data.zone)}`}

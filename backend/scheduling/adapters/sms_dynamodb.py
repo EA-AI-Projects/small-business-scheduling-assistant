@@ -18,7 +18,7 @@ from scheduling.domain.sms_ingress import (
     SmsReceiptErased,
     normalize_phone,
 )
-from scheduling.domain.sms_status import STATUS_RANK, SmsDeliveryStatus
+from scheduling.domain.sms_status import STATUS_RANK, SmsDeliveryFailure, SmsDeliveryStatus
 
 
 class SmsDynamoClient(Protocol):
@@ -634,9 +634,9 @@ class DynamoSmsIngressStore(SmsIngressStore):
                 return  # Deleted outbox or stale callback; never recreate evidence.
             raise
 
-    def list_delivery_failures(self, business_id: str) -> tuple[SmsDeliveryStatus, ...]:
-        """Owner follow-up view; a callback never blindly resends an accepted SMS."""
-        failures: list[SmsDeliveryStatus] = []
+    def list_delivery_failures(self, business_id: str) -> tuple[SmsDeliveryFailure, ...]:
+        """Owner follow-up view of provider failures and refused outbound intents."""
+        failures: dict[str, SmsDeliveryFailure] = {}
         start: dict[str, Any] | None = None
         while True:
             arguments: dict[str, Any] = {
@@ -654,15 +654,48 @@ class DynamoSmsIngressStore(SmsIngressStore):
             for item in page.get("Items", ()):
                 status = item["delivery_status"]["S"]
                 if status in {"undelivered", "failed"}:
-                    failures.append(SmsDeliveryStatus(
-                        business_id, item["outbox_id"]["S"], item["provider_id"]["S"],
-                        status, item["recipient"]["S"],
+                    outbox_id = item["outbox_id"]["S"]
+                    failures[outbox_id] = SmsDeliveryFailure(
+                        business_id, outbox_id, item["provider_id"]["S"], status,
+                        item["recipient"]["S"],
                         datetime.fromisoformat(item["observed_at"]["S"]),
                         item["error_code"]["S"] if "error_code" in item else None,
-                    ))
+                    )
             start = page.get("LastEvaluatedKey")
             if start is None:
-                return tuple(failures)
+                break
+
+        start = None
+        while True:
+            arguments = {
+                "TableName": self._table,
+                "KeyConditionExpression": "PK = :pk AND begins_with(SK, :prefix)",
+                "ExpressionAttributeValues": {
+                    ":pk": {"S": f"BUSINESS#{business_id}"},
+                    ":prefix": {"S": "OUTBOX#"},
+                },
+                "ConsistentRead": True,
+            }
+            if start is not None:
+                arguments["ExclusiveStartKey"] = start
+            page = self._client.query(**arguments)
+            for item in page.get("Items", ()):
+                if (item.get("delivery_state", {}).get("S") != "FAILED"
+                        or "last_error_code" not in item
+                        or item["last_error_code"]["S"] == "RETIRED_BEFORE_LIVE_SMS"):
+                    continue
+                outbox_id = item["outbox_id"]["S"]
+                if outbox_id not in failures:
+                    failures[outbox_id] = SmsDeliveryFailure(
+                        business_id, outbox_id, None, "failed",
+                        item["recipient"]["S"],
+                        datetime.fromisoformat(item["last_failed_at"]["S"]),
+                        item["last_error_code"]["S"],
+                    )
+            start = page.get("LastEvaluatedKey")
+            if start is None:
+                return tuple(sorted(failures.values(), key=lambda failure: failure.observed_at,
+                                    reverse=True))
 
     def _purge_owner_message(self, business_id: str, item: dict[str, Any],
                              cutoff: str) -> bool:

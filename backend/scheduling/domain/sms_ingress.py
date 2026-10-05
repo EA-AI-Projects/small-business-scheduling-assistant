@@ -13,7 +13,7 @@ from scheduling.domain.client_records import ACCESS_CODE_PATTERN, ClientProfile
 from scheduling.domain.outbox import DeliveryState, OutboxRecord
 
 if TYPE_CHECKING:
-    from scheduling.domain.sms_status import SmsDeliveryStatus
+    from scheduling.domain.sms_status import SmsDeliveryFailure
 
 PHONE = re.compile(r"^\+[1-9][0-9]{1,14}$")
 STOP_WORDS = frozenset({"STOP", "STOPALL", "UNSUBSCRIBE", "END", "QUIT", "REVOKE", "OPTOUT"})
@@ -113,7 +113,7 @@ class SmsIngressStore(Protocol):
         that outbox ID already exists, in which case it is silently dropped.
         """
         ...
-    def list_delivery_failures(self, business_id: str) -> tuple[SmsDeliveryStatus, ...]: ...
+    def list_delivery_failures(self, business_id: str) -> tuple[SmsDeliveryFailure, ...]: ...
 
 
 class VerifiedClientLookup(Protocol):
