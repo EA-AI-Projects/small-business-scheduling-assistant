@@ -125,7 +125,7 @@ export function ScheduleTab() {
           <p className="empty" role="status">Calendar not loaded yet. If it does not appear, use Refresh.</p>
         ) : (
           <>
-            <CalendarGrid days={days} events={events} zone={data.zone}
+            <CalendarGrid days={days} events={events} policy={data.policy?.record.policy} zone={data.zone}
               selectedId={selectedId} onSelect={select} onSlotPress={pressSlot} />
             {!days.some((day) => layoutDay(events, day, data.zone).length > 0) && (
               <p className="empty" role="status">No scheduled items in this {view === "week" ? "week" : "day"}.</p>
