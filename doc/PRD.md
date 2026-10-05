@@ -123,6 +123,7 @@ Minimal authenticated owner interface:
 - On a phone, the header is a single row that stays at the top of the screen (owner decision, 2026-10-02, #140).
 - Today is marked only by the dark-blue date number in the day header; the today column is not highlighted (owner decision, 2026-10-02, #140).
 - Clicking a client in the client list opens a "Client details" pop-up with collapsible sections: Profile, Text Consent, and Notes. It replaces the side panels on the Clients page (owner decision, 2026-10-02, #140).
+- The client card's Text Consent section shows whether in-person text consent was recorded for the saved phone, with the recorded date. The "They clearly said yes" checkbox stays unchecked for a new recording and is never prechecked from stored status. Changing the saved phone clears the status. Showing STOP/opt-out status is out of scope (owner decision, 2026-10-05, #217).
 - Clicking the date or range title opens a mini month calendar pop-up for jumping to a date (owner decision, 2026-10-02, #140).
 - Block-time defaults: clicking an empty slot starts at that half hour and blocks 1 hour, and both can be edited before saving. The Block time button starts at the next half hour today, or at 9:00 AM on other days. A rejected save keeps the card open with the owner's entries (owner decision, 2026-10-02, #140).
 - View appointments, pending holds, and unavailable blocks in a calendar/list.

@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 
 import type { ClientProfile, InPersonConsentBody } from "@/api/types";
 import { path } from "@/lib/api";
+import { dayKey } from "@/lib/time";
 import { useOwner } from "@/owner/OwnerContext";
 
 /**
@@ -26,7 +27,7 @@ export function ConsentForm({ client, onboarding = false, phoneUnsaved = false, 
   phoneUnsaved?: boolean;
   onSkip?: () => void;
 }) {
-  const { change, notify } = useOwner();
+  const { change, notify, data } = useOwner();
   const [clearYes, setClearYes] = useState(false);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -46,6 +47,13 @@ export function ConsentForm({ client, onboarding = false, phoneUnsaved = false, 
 
   return (
     <div className="stack">
+      {client && (
+        <p className="hint" role="status" data-testid="consent-status">
+          {client.phone_verified_at
+            ? `Consent recorded on ${dayKey(client.phone_verified_at, data.zone)} for ${client.phone_e164}.`
+            : "No consent recorded for this phone."}
+        </p>
+      )}
       <h5>{onboarding ? "Onboarding: record in-person text consent" : "Record in-person text consent"}</h5>
       {onboarding && (
         <p className="hint" role="status">
