@@ -101,11 +101,11 @@ Results of each stage are recorded on #91 without numbers or message text.
 
 **OpenAI:** one interpreter call per plain-language text (`gpt-6-luna`, at most 512 output tokens). Exact commands and offer replies don't call it. Spend is capped by Enrique's OpenAI budget limit.
 
-## 6. Turning texting off (runbook, verified once in stage 3)
+## 6. Turning texting off (runbook, verified 2026-10-05 in #118)
 
-In order of speed; the first two take effect within a minute:
+In order of speed; the first two took effect within a few minutes in the dev verification:
 1. **Stop outbound:** disable the sender trigger. Run `aws lambda list-event-source-mappings --function-name <SmsSenderFunction>`, then `update-event-source-mapping --uuid <id> --no-enabled`. Pending texts stay pending, in the queue and in the DynamoDB outbox, and are sent when the trigger is turned back on. Before turning it back on, count due records through `OutboxDueIndex` and decide whether to retire any (prerequisite 5); purging the queue alone does not stop them. The retire tool is scoped to the one-off pre-stage-3 retirement; retiring anything after stage 3 is a separate decision on #91.
-2. **Stop inbound:** in the Twilio console, clear the number's incoming-message webhook (or point it back to the previous value). Twilio still answers STOP and HELP itself and blocks later texts to anyone who sent STOP, but the app records no opt-out evidence for STOPs received while the webhook is cleared.
+2. **Stop inbound:** in the Twilio console, clear the Messaging Service's incoming-message webhook (or point it back to the previous value). Keep the current URL privately so it can be restored. Twilio still answers STOP and HELP itself and blocks later texts to anyone who sent STOP, but the app records no opt-out evidence for STOPs received while the webhook is cleared.
 3. Disable the outbox dispatch rule: `aws events disable-rule`.
 4. **Stop one tester** before they send STOP: mark their profile inactive in the owner app. An inactive profile is refused by the sender (`CLIENT_UNAVAILABLE` for notifications, `CONSENT_REQUIRED` for conversation replies), and the verified-phone lookup returns nothing for it, so their inbound texts are stored as an unknown sender with no command body and are never run as client commands (STOP is still recorded). Pending texts to them fail permanently rather than waiting. Their stored consent evidence is kept.
 5. Make it permanent with one deploy: `SmsSendEnabled=disabled`, `EnableSmsConversations=disabled`, both new states `DISABLED`, and optionally `EnableSmsIngress=false`. Record the stop on #91.
