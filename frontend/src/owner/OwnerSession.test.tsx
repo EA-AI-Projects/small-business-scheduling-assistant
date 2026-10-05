@@ -57,4 +57,36 @@ describe("session rejection notice", () => {
     expect(host.querySelector(".notice-text")?.textContent).toBe(message);
     expect(host.querySelector('[role="status"]')?.textContent).toBe(message);
   });
+
+  it("ignores a late 401 from the previous token after a new local sign-in", async () => {
+    const reads = Array.from({ length: 8 }, () => pending<Response>());
+    let started = 0;
+    const fetcher = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      expect(input).toBeTruthy();
+      expect(init?.credentials).toBe("omit");
+      return reads[started++]!.promise;
+    });
+    vi.stubGlobal("fetch", fetcher);
+    await act(async () => root.render(<OwnerSession config={config} />));
+
+    async function signIn(token: string) {
+      const form = host.querySelector("form")!;
+      (form.querySelector("input") as HTMLInputElement).value = token;
+      await act(async () => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    }
+
+    await signIn("synthetic-old-token");
+    expect(started).toBe(4);
+    await act(async () => reads[0]!.resolve(new Response("{}", { status: 401 })));
+    expect(host.querySelector("form")).not.toBeNull();
+
+    await signIn("synthetic-new-token");
+    expect(started).toBe(8);
+    expect(host.textContent).toContain("Workspace");
+    expect(fetcher.mock.calls[4]?.[1]?.headers).toEqual({ Authorization: "Bearer synthetic-new-token" });
+
+    await act(async () => reads[1]!.resolve(new Response("{}", { status: 401 })));
+    expect(host.textContent).toContain("Workspace");
+    expect(host.querySelector("form")).toBeNull();
+  });
 });

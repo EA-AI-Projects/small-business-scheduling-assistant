@@ -22,14 +22,17 @@ let noticeCount = 0;
 
 class SessionNoticeGate {
   private rejected = false;
+  private generation = 0;
 
   isRejected() { return this.rejected; }
-  reject() {
-    if (this.rejected) return false;
+  currentGeneration() { return this.generation; }
+  isCurrent(generation: number) { return generation === this.generation; }
+  reject(generation: number) {
+    if (!this.isCurrent(generation) || this.rejected) return false;
     this.rejected = true;
     return true;
   }
-  reset() { this.rejected = false; }
+  reset() { this.generation += 1; this.rejected = false; }
 }
 
 export default function OwnerPage() {
@@ -81,8 +84,11 @@ export function OwnerSession({ config }: { config: OwnerConfig }) {
   useEffect(() => {
     const expiry = token ? tokenExpiry(token) : null;
     if (expiry === null) return;
+    const generation = sessionGuard.currentGeneration();
     const timer = window.setTimeout(() => {
-      if (!sessionGuard.isRejected()) endSession("Your session expired. Sign in again.");
+      if (sessionGuard.isCurrent(generation) && !sessionGuard.isRejected()) {
+        endSession("Your session expired. Sign in again.");
+      }
     }, Math.max(0, expiry - Date.now() - 30_000));
     return () => window.clearTimeout(timer);
   }, [token, endSession, sessionGuard]);
@@ -90,8 +96,8 @@ export function OwnerSession({ config }: { config: OwnerConfig }) {
   // A 401 means an expired token or a Cognito user who is not the owner. The hosted UI
   // cookie would silently sign that same user in again, so end it through hosted UI logout
   // and return here; the next Sign in then asks for credentials.
-  const rejectSession = useCallback(() => {
-    if (!sessionGuard.reject()) return;
+  const rejectSession = useCallback((generation: number) => {
+    if (!sessionGuard.reject(generation)) return;
     const message = "Your session ended. Sign in again.";
     endSession(message);
     const url = logoutUrl(config, window.location.origin);
@@ -105,13 +111,14 @@ export function OwnerSession({ config }: { config: OwnerConfig }) {
   // with the api object, so a new token gets a fresh guard.
   const api = useMemo(() => {
     if (!token) return null;
+    const generation = sessionGuard.currentGeneration();
     let acted = false;
     return new OwnerApi(config, token, () => {
       if (acted) return;
       acted = true;
-      rejectSession();
+      rejectSession(generation);
     });
-  }, [config, token, rejectSession]);
+  }, [config, token, rejectSession, sessionGuard]);
 
   const signIn = useCallback(() => {
     authorizeUrl(config, window.location.origin)
