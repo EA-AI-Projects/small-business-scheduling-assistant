@@ -950,6 +950,7 @@ class DynamoDBCalendarRepository:
             assert before is not None
             event_version = before.version
         for intent in commit.outbox:
+            notice_block = block if block is not None else before
             writes.append(fresh_put({
                 **self._business_key(business_id, f"OUTBOX#{intent.outbox_id}"),
                 **due_keys(DeliveryState.PENDING, commit.decision_at, intent.outbox_id),
@@ -963,6 +964,9 @@ class DynamoDBCalendarRepository:
                 "dispatch_after": {"S": _instant(commit.decision_at)},
                 "attempts": {"N": "0"},
                 "event_version": {"N": str(event_version)},
+                **({"block_start_at": {"S": _instant(notice_block.start_at)},
+                    "block_end_at": {"S": _instant(notice_block.end_at)}}
+                   if notice_block is not None else {}),
             }))
         if len(writes) > 100:
             raise ValueError("Owner calendar transaction exceeds DynamoDB item limit")
