@@ -82,14 +82,6 @@ class OwnerReplyClassifier(Protocol):
     def classify_owner_reply(self, body: str, context: OwnerReplyContext) -> OwnerReplyProposal: ...
 
 
-def _tokens(body: str) -> list[str]:
-    return re.findall(r"[a-z']+", body.lower().replace("\u2019", "'"))
-
-
-def _words(body: str) -> set[str]:
-    return set(_tokens(body))
-
-
 # The model may only classify. A proposed approve, decline, or offer send acts only when the
 # whole reply, trimmed, lowercased, and without trailing "." or "!", is exactly one of these
 # short replies (optionally followed by "thanks" or "thank you"). Anything longer or hedged

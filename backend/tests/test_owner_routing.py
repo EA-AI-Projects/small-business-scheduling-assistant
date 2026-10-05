@@ -267,7 +267,7 @@ def test_model_confirm_needs_sending_words_and_cancel_needs_cancelling_words() -
     chat, request = one_pending()
     chat.ask(ASK)
     chat.model.script["banana"] = proposal(OwnerReplyIntent.CONFIRM_OFFER)
-    assert "still waiting" in chat.ask("banana").text and not chat.offers.outbox
+    assert "Reply YES to send exactly that offer" in chat.ask("banana").text and not chat.offers.outbox
     chat.model.script["forget it"] = proposal(OwnerReplyIntent.CANCEL_OFFER)
     cancelled = chat.ask("forget it")
     assert "I cancelled the offer to Avery Example" in cancelled.text
