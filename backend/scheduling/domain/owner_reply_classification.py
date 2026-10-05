@@ -83,12 +83,16 @@ class OwnerReplyClassifier(Protocol):
 
 
 # The model may only classify. A proposed approve, decline, or offer send acts only when the
-# whole reply, trimmed, lowercased, and without trailing "." or "!", is exactly one of these
+# whole reply, trimmed, lowercased, and without one trailing "." or "!", is exactly one of these
 # short replies (optionally followed by "thanks" or "thank you"). Anything longer or hedged
 # gets one clarifying question and changes nothing (owner decision, #177). "?" never matches.
 APPROVE_REPLIES = frozenset({
     "yes", "y", "yep", "yeah", "yes please", "ok", "okay", "ok please", "sure", "approve",
     "approved", "approve it", "approve please", "confirm", "confirmed", "send it",
+    "yes send it"})
+# Sending an open offer is not approving a request, so it has its own, smaller list.
+SEND_OFFER_REPLIES = frozenset({
+    "yes", "y", "yep", "yeah", "yes please", "ok", "okay", "ok please", "sure", "send it",
     "yes send it"})
 DECLINE_REPLIES = frozenset({
     "decline", "decline it", "decline please", "please decline", "declined", "reject",
@@ -98,7 +102,7 @@ _THANKS = re.compile(r"(?: thanks| thank you)$")
 
 def _plain(body: str) -> str:
     text = re.sub(r"\s+", " ", body.strip().lower().replace("\u2019", "'"))
-    text = re.sub(r"[.!]+$", "", text).strip()
+    text = re.sub(r"[.!]$", "", text).strip()  # One trailing mark only.
     return _THANKS.sub("", text)
 
 
@@ -120,7 +124,7 @@ def supports_decline(body: str) -> bool:
 
 
 def supports_offer_send(body: str) -> bool:
-    return _plain(body) in APPROVE_REPLIES
+    return _plain(body) in SEND_OFFER_REPLIES
 
 
 def supports_offer_cancel(body: str) -> bool:

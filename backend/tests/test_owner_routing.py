@@ -858,3 +858,40 @@ def test_dynamo_payloads_persist_and_read_the_creation_time() -> None:
     legacy = dict(_appointment_payload(appointment))
     del legacy["created_at"]
     assert _appointment_from_payload(legacy).created_at is None
+
+
+# --- Review round 5 (#177) ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("phrase", [
+    "approve", "approved", "approve it", "approve please"])
+def test_approve_words_never_send_an_open_offer(phrase: str) -> None:
+    chat, request = one_pending()
+    chat.ask(ASK)
+    chat.model.script[phrase] = proposal(OwnerReplyIntent.CONFIRM_OFFER)
+    reply = chat.ask(phrase)
+    assert "Reply YES to send exactly that offer, or NO to cancel it" in reply.text
+    assert f"reply APPROVE {request[:8]}" in reply.text
+    assert not reply.committed and not chat.offers.outbox
+    assert chat.offer_state() == OfferState.PROPOSED
+
+
+@pytest.mark.parametrize("phrase", ["yes...", "sure...", "ok!!", "yes.!", "approve..", "decline..."])
+def test_more_than_one_trailing_mark_asks_instead_of_acting(phrase: str) -> None:
+    from scheduling.domain.owner_reply_classification import (
+        supports_approval,
+        supports_decline,
+        supports_offer_send,
+    )
+    assert not (supports_approval(phrase) or supports_decline(phrase)
+                or supports_offer_send(phrase))
+    chat, request = one_pending()
+    chat.model.script[phrase] = proposal(
+        DECLINE if phrase.startswith("decline") else APPROVE, request)
+    assert not chat.ask(phrase).committed
+    assert chat.status(request) == CalendarStatus.PENDING_APPROVAL
+
+
+def test_one_trailing_mark_still_acts() -> None:
+    from scheduling.domain.owner_reply_classification import supports_approval
+    assert supports_approval("yes.") and supports_approval("Sure!") and supports_approval("ok")
