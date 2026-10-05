@@ -242,8 +242,11 @@ def match_selection(body: str, options: tuple[datetime, ...], zone: ZoneInfo,
             if bare and 1 <= hour <= len(options):
                 candidates.add(hour - 1)
         else:
-            if bare and 1 <= hour <= len(options):
-                candidates.add(hour - 1)  # "2" may be option 2 or 2 o'clock.
+            if bare and re.fullmatch(r"\d+", text) and 1 <= hour <= len(options):
+                candidates.add(hour - 1)
+                candidates &= scope
+                return ((Selection.MATCH, next(iter(candidates))) if candidates else
+                        (Selection.UNMATCHED, None))
             if meridiem:
                 hours = {hour % 12 + (12 if meridiem == "pm" else 0)} if 1 <= hour <= 12 else set()
             elif hour == 0 or hour > 12:

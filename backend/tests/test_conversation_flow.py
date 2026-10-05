@@ -15,6 +15,7 @@ from scheduling.domain.conversation import (
     MessageProposal,
 )
 from scheduling.domain.conversation_state import (
+    ConversationState,
     InMemoryConversationStates,
     PromptKind,
 )
@@ -211,6 +212,44 @@ def test_time_offered_on_two_days_needs_the_option_number() -> None:
     assert booked.text.startswith("Requested Thu Oct 1 at 8:00 AM")
 
 
+def test_bare_indices_select_remembered_booking_options_before_clock_hours() -> None:
+    offered = options((30, 8, 0), (30, 10, 0), (30, 13, 0))
+    for reply, expected in (("1", "8:00 AM"), ("2", "10:00 AM"),
+                            ("3", "1:00 PM"), ("option 1", "8:00 AM"),
+                            ("1 PM", "1:00 PM"), ("10 AM", "10:00 AM")):
+        chat = Harness()
+        chat.states.put_state(ConversationState(
+            "pilot", "+14155550101", "offer-1", PromptKind.OFFER, NOW,
+            NOW + timedelta(minutes=30), offered, client_id="client-1"))
+        booked = chat.text(reply)
+        assert booked.committed, reply
+        assert booked.text.startswith(f"Requested Wed Sep 30 at {expected}"), reply
+        assert "pending owner approval" in booked.text
+        assert booked.appointment_id is not None
+        assert chat.status(booked.appointment_id) == CalendarStatus.PENDING_APPROVAL
+
+
+def test_bare_number_offer_keeps_rejection_and_availability_checks() -> None:
+    offered = options((30, 8, 0), (30, 10, 0), (30, 13, 0))
+    for reply in ("4", "not 1", "8 or 1", "9 AM"):
+        chat = Harness()
+        chat.states.put_state(ConversationState(
+            "pilot", "+14155550101", "offer-1", PromptKind.OFFER, NOW,
+            NOW + timedelta(minutes=30), offered, client_id="client-1"))
+        result = chat.text(reply)
+        assert not result.committed, reply
+        assert chat.calendar() == ()
+
+    chat = Harness()
+    chat.states.put_state(ConversationState(
+        "pilot", "+14155550101", "offer-1", PromptKind.OFFER, NOW,
+        NOW + timedelta(minutes=30), offered, client_id="client-1"))
+    chat.hold(offered[0], "new-conflict")
+    result = chat.text("1")
+    assert not result.committed
+    assert "no longer open" in result.text
+
+
 def test_new_request_replaces_the_previous_offer() -> None:
     chat = Harness()
     chat.model.replies["Tomorrow?"] = ask("availability", TOMORROW)
@@ -341,6 +380,28 @@ def test_reschedule_offers_replacements_and_keeps_the_original_confirmed() -> No
     assert "Thu Oct 1 at 9:00 AM visit" in moved.text and "remains confirmed" in moved.text
     assert moved.appointment_id is not None
     assert chat.status(visit) == CalendarStatus.CONFIRMED
+    replacement = chat.store.read_appointment(moved.appointment_id)
+    assert replacement is not None and replacement.replaces_appointment_id == visit
+
+
+def test_bare_number_selects_remembered_reschedule_option() -> None:
+    chat = Harness()
+    visit = chat.hold(THURSDAY, "visit", confirm=True)
+    original = chat.store.read_appointment(visit)
+    assert original is not None
+    chat.states.put_state(ConversationState(
+        "pilot", "+14155550101", "move-offer", PromptKind.OFFER, NOW,
+        NOW + timedelta(minutes=30),
+        (datetime(2026, 10, 2, 8, tzinfo=ZONE).astimezone(UTC),
+         datetime(2026, 10, 2, 10, tzinfo=ZONE).astimezone(UTC),
+         datetime(2026, 10, 2, 13, tzinfo=ZONE).astimezone(UTC)),
+        visit, original.version, "client-1"))
+    moved = chat.text("1")
+    assert moved.committed and moved.appointment_id is not None
+    assert moved.text.startswith("Requested a move to Fri Oct 2 at 8:00 AM")
+    assert "pending owner approval" in moved.text
+    assert chat.status(visit) == CalendarStatus.CONFIRMED
+    assert chat.status(moved.appointment_id) == CalendarStatus.PENDING_APPROVAL
     replacement = chat.store.read_appointment(moved.appointment_id)
     assert replacement is not None and replacement.replaces_appointment_id == visit
 
