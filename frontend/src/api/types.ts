@@ -91,11 +91,11 @@ export interface ClientNote {
   legal_hold_reason: string | null;
 }
 
-/** A text that the carrier reported as failed or undelivered (`SmsDeliveryStatus`). */
+/** A failed outbound text, either refused before send or reported by the carrier. */
 export interface SmsDeliveryFailure {
   business_id: string;
   outbox_id: string;
-  provider_id: string;
+  provider_id: string | null;
   status: string;
   recipient: string;
   observed_at: string;

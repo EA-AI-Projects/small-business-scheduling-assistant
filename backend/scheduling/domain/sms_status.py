@@ -35,5 +35,18 @@ class SmsDeliveryStatus:
             raise ValueError("Invalid provider error code")
 
 
+@dataclass(frozen=True)
+class SmsDeliveryFailure:
+    """Owner-facing failure from either the sender or the provider."""
+
+    business_id: str
+    outbox_id: str
+    provider_id: str | None
+    status: str
+    recipient: str
+    observed_at: datetime
+    error_code: str | None
+
+
 class SmsStatusStore(Protocol):
     def put_status(self, status: SmsDeliveryStatus) -> None: ...

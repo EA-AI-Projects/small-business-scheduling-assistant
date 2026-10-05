@@ -29,9 +29,22 @@ class FakeDynamo:
         return {"Item": PROFILE_ITEM} if kwargs["Key"]["SK"]["S"] == "CLIENT#client-1" else {}
 
     def query(self, **kwargs: Any) -> dict[str, Any]:
-        if kwargs["ExpressionAttributeValues"][":prefix"] == {"S": "SMS_CONSENT#"}:
+        prefix = kwargs["ExpressionAttributeValues"][":prefix"]
+        if prefix == {"S": "SMS_CONSENT#"}:
             return {}  # no earlier consent for this client
-        assert kwargs["ExpressionAttributeValues"][":prefix"] == {"S": "SMS_STATUS#"}
+        if prefix == {"S": "OUTBOX#"}:
+            return {"Items": [
+                {"outbox_id": {"S": "out-2"}, "delivery_state": {"S": "FAILED"},
+                 "recipient": {"S": "client"}, "last_failed_at": {"S": STAMP},
+                 "last_error_code": {"S": "CONSENT_REQUIRED"}},
+                {"outbox_id": {"S": "out-1"}, "delivery_state": {"S": "FAILED"},
+                 "recipient": {"S": "client"}, "last_failed_at": {"S": STAMP},
+                 "last_error_code": {"S": "PROVIDER_ERROR"}},
+                {"outbox_id": {"S": "out-3"}, "delivery_state": {"S": "FAILED"},
+                 "recipient": {"S": "owner"}, "last_failed_at": {"S": STAMP},
+                 "last_error_code": {"S": "RETIRED_BEFORE_LIVE_SMS"}},
+            ]}
+        assert prefix == {"S": "SMS_STATUS#"}
         return {"Items": [{
             "delivery_status": {"S": "failed"}, "outbox_id": {"S": "out-1"},
             "provider_id": {"S": "SM1"}, "recipient": {"S": "+14155550101"},
@@ -72,4 +85,7 @@ def test_cognito_owner_app_records_consent_and_lists_failures(
     assert len(dynamo.transactions) == 1
     failures = api.get(f"{base}/sms-delivery-failures", headers=auth)
     assert failures.status_code == 200
-    assert failures.json()[0]["error_code"] == "30007"
+    assert {failure["outbox_id"]: failure["error_code"] for failure in failures.json()} == {
+        "out-1": "30007", "out-2": "CONSENT_REQUIRED",
+    }
+    assert next(f for f in failures.json() if f["outbox_id"] == "out-2")["recipient"] == "client"
