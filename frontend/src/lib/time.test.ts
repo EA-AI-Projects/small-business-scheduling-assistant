@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { rangeTitle, stepDate, todayKey } from "./time";
+import { rangeAnnouncement, rangeTitle, stepDate, todayKey } from "./time";
 
 // Boundary: the calendar header's date state. Not covered: rendering, menu focus, layout.
 describe("calendar navigation dates", () => {
@@ -37,5 +37,15 @@ describe("calendar navigation dates", () => {
     expect(rangeTitle("2026-10-02", "week")).toBe("Sep – Oct 2026");
     expect(rangeTitle("2026-10-14", "week")).toBe("Oct 2026");
     expect(rangeTitle("2026-12-31", "week")).toBe("Dec 2026 – Jan 2027");
+  });
+
+  it("announces each business-local week while preserving the Day title", () => {
+    const first = at("2026-10-07T02:00:00Z"); // October 6 in Los Angeles.
+    const next = stepDate(first, "week", 1);
+    expect(rangeAnnouncement(first, "week")).toBe("October 5 – 11, 2026");
+    expect(rangeAnnouncement(next, "week")).toBe("October 12 – 18, 2026");
+    expect(rangeTitle(first, "week")).toBe(rangeTitle(next, "week"));
+    expect(rangeAnnouncement("2026-12-31", "week")).toBe("December 28, 2026 – January 3, 2027");
+    expect(rangeAnnouncement(first, "day")).toBe(rangeTitle(first, "day"));
   });
 });

@@ -77,6 +77,25 @@ export function rangeTitle(date: string, view: CalendarView): string {
   return startMonth === endMonth ? `${startMonth} ${endYear}` : `${startMonth} – ${endMonth} ${endYear}`;
 }
 
+/** Spoken range for the selected business-local week; Day view keeps its existing title. */
+export function rangeAnnouncement(date: string, view: CalendarView): string {
+  if (view === "day") return rangeTitle(date, view);
+  const days = datesForView(date, "week");
+  const first = days[0] ?? date;
+  const last = days[days.length - 1] ?? date;
+  const format = (value: string, options: Intl.DateTimeFormatOptions) =>
+    new Date(`${value}T12:00:00Z`).toLocaleDateString("en-US", { timeZone: "UTC", ...options });
+  const startYear = format(first, { year: "numeric" });
+  const endYear = format(last, { year: "numeric" });
+  const startMonth = format(first, { month: "long" });
+  const endMonth = format(last, { month: "long" });
+  const startDay = format(first, { day: "numeric" });
+  const endDay = format(last, { day: "numeric" });
+  if (startYear !== endYear) return `${startMonth} ${startDay}, ${startYear} – ${endMonth} ${endDay}, ${endYear}`;
+  if (startMonth !== endMonth) return `${startMonth} ${startDay} – ${endMonth} ${endDay}, ${endYear}`;
+  return `${startMonth} ${startDay} – ${endDay}, ${endYear}`;
+}
+
 /** Compact header title for narrow screens: "Fri, Oct 2" for a day; the week title is already short. */
 export function rangeTitleShort(date: string, view: CalendarView): string {
   if (view === "week") return rangeTitle(date, view);
