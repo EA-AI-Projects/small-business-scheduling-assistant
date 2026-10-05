@@ -11,11 +11,12 @@ Use this skill when Enrique wants to turn a product idea or large requirement in
 
 - Summarize the desired user outcome in a few sentences. Ask the smallest set of focused questions needed to settle business rules, scope, edge cases, priority, and acceptance checks. Number questions when a reply is needed.
 - Do not invent business policy. Continue shaping independent parts while answers are pending.
-- Check existing documents and issues for decisions or overlapping work. Record accepted decisions in the relevant product document.
+- Check existing documents and issues for decisions or overlapping work. Capture accepted decisions in the issue drafts and identify the product documents that implementation must update. Do not edit those documents during planning unless Enrique asks for the edit now.
 
 ## Propose
 
 - Draft one parent issue for the overall outcome and sub-issues small enough for a focused, reviewable PR. Split phases or stages into separate issues.
+- Include required product, architecture, and operational documentation changes in the acceptance checks of the issue that implements the related behavior. Create a separate documentation sub-issue only when Enrique requests one or the document must be completed as an independently reviewable prerequisite.
 - Give each sub-issue a clear outcome, acceptance checks, dependencies, and next owner. Use explicit issue links for dependencies; the parent relationship only groups the work.
 - Show Enrique a compact proposal: requirement summary, parent issue, ordered sub-issues, open decisions, and any document changes. Ask for one review of the requirement and breakdown before publishing. Revise until approved.
 
