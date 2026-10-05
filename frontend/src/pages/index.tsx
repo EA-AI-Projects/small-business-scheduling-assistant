@@ -20,6 +20,18 @@ interface Notice { id: number; message: string; error: boolean }
 
 let noticeCount = 0;
 
+class SessionNoticeGate {
+  private rejected = false;
+
+  isRejected() { return this.rejected; }
+  reject() {
+    if (this.rejected) return false;
+    this.rejected = true;
+    return true;
+  }
+  reset() { this.rejected = false; }
+}
+
 export default function OwnerPage() {
   if (config instanceof ConfigError) {
     return <Shell signedIn={false} onAuth={null}><p className="notice error">{config.message}</p></Shell>;
@@ -35,10 +47,15 @@ export function OwnerSession({ config }: { config: OwnerConfig }) {
   const [session, setSession] = useState(0);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [completing, setCompleting] = useState(true);
+  // A rejected session owns the notice until a new sign-in. Late request handlers can
+  // run before their provider unmounts, so the guard must take effect synchronously.
+  const sessionGuard = useMemo(() => new SessionNoticeGate(), []);
 
   // An empty message clears the notice. Each notice gets a new id so a repeated message is announced again.
-  const notify = useCallback((message: string, error = false) =>
-    setNotice(message ? { id: ++noticeCount, message, error } : null), []);
+  const notify = useCallback((message: string, error = false) => {
+    if (sessionGuard.isRejected()) return;
+    setNotice(message ? { id: ++noticeCount, message, error } : null);
+  }, [sessionGuard]);
 
   const endSession = useCallback((message: string | null) => {
     setToken(null);
@@ -64,15 +81,17 @@ export function OwnerSession({ config }: { config: OwnerConfig }) {
   useEffect(() => {
     const expiry = token ? tokenExpiry(token) : null;
     if (expiry === null) return;
-    const timer = window.setTimeout(() => endSession("Your session expired. Sign in again."),
-      Math.max(0, expiry - Date.now() - 30_000));
+    const timer = window.setTimeout(() => {
+      if (!sessionGuard.isRejected()) endSession("Your session expired. Sign in again.");
+    }, Math.max(0, expiry - Date.now() - 30_000));
     return () => window.clearTimeout(timer);
-  }, [token, endSession]);
+  }, [token, endSession, sessionGuard]);
 
   // A 401 means an expired token or a Cognito user who is not the owner. The hosted UI
   // cookie would silently sign that same user in again, so end it through hosted UI logout
   // and return here; the next Sign in then asks for credentials.
   const rejectSession = useCallback(() => {
+    if (!sessionGuard.reject()) return;
     const message = "Your session ended. Sign in again.";
     endSession(message);
     const url = logoutUrl(config, window.location.origin);
@@ -80,7 +99,7 @@ export function OwnerSession({ config }: { config: OwnerConfig }) {
       markSessionRejected(message);
       window.location.assign(url);
     }
-  }, [config, endSession]);
+  }, [config, endSession, sessionGuard]);
 
   // Parallel reads can all return 401; only the first one per token acts. The guard lives
   // with the api object, so a new token gets a fresh guard.
@@ -106,6 +125,11 @@ export function OwnerSession({ config }: { config: OwnerConfig }) {
     if (url) window.location.assign(url);
   }, [config, endSession]);
 
+  const signInLocally = useCallback((value: string) => {
+    sessionGuard.reset();
+    setToken(value);
+  }, [sessionGuard]);
+
   // Signed in, the notice renders right under the sticky header (inside Workspace); signed out there is no header.
   const noticeBar = <NoticeBar notice={notice} onDismiss={() => setNotice(null)} />;
   return (
@@ -116,7 +140,7 @@ export function OwnerSession({ config }: { config: OwnerConfig }) {
       ) : completing ? (
         <p className="muted">Checking sign-in…</p>
       ) : config.authMode === "local" ? (
-        <LocalSignIn onToken={setToken} />
+        <LocalSignIn onToken={signInLocally} />
       ) : (
         <section className="welcome card">
           <h2>Your schedule, in one place.</h2>
