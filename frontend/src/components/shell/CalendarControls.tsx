@@ -5,8 +5,10 @@ import { PopoverCard } from "../PopoverCard";
 import { MiniCalendar } from "./MiniCalendar";
 
 /** Today, previous/next, range title (opens a date picker) and Day/Week selector. State lives with the caller. */
-export function CalendarControls({ title, shortTitle, view, date, today, disabled = false, onToday, onStep, onView, onPick }: {
+export function CalendarControls({ title, shortTitle, announcement = title, view, date, today, disabled = false, onToday, onStep, onView, onPick }: {
   title: string;
+  /** Spoken date range; can be fuller than the compact visible title. */
+  announcement?: string;
   /** Compact title for narrow screens; defaults to `title`. */
   shortTitle?: string;
   /** Disable every control, e.g. while the business timezone is still loading. */
@@ -53,7 +55,7 @@ export function CalendarControls({ title, shortTitle, view, date, today, disable
           <span className="range-title-caret" aria-hidden="true" />
         </button>
       </h2>
-      <span className="visually-hidden" aria-live="polite">{title}</span>
+      <span className="visually-hidden" aria-live="polite">{announcement}</span>
       {picking && (
         <PopoverCard title="Choose a date" getAnchor={getAnchor} returnFocus={returnFocus}
           variant="dropdown" onClose={() => setPicking(false)}>

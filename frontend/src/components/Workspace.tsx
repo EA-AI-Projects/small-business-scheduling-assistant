@@ -1,6 +1,6 @@
 import { useEffect, useRef, type ReactNode } from "react";
 
-import { rangeTitle, rangeTitleShort, todayKey } from "@/lib/time";
+import { rangeAnnouncement, rangeTitle, rangeTitleShort, todayKey } from "@/lib/time";
 import { useOwner, type Tab } from "@/owner/OwnerContext";
 
 import { ClientsTab } from "./clients/ClientsTab";
@@ -43,6 +43,7 @@ export function Workspace({ onSignOut, account, notice }: {
         trailing={<AccountMenu email={account.email} local={account.local} onSignOut={onSignOut} />}>
         {tab === "schedule" ? (
           <CalendarControls title={loaded ? rangeTitle(date, view) : "Loading…"}
+            announcement={loaded ? rangeAnnouncement(date, view) : "Loading…"}
             shortTitle={loaded ? rangeTitleShort(date, view) : undefined} view={view} disabled={!loaded} onToday={goToday}
             date={date} today={loaded ? todayKey(data.zone) : ""} onPick={goToDate} onStep={stepRange} onView={setView} />
         ) : (
