@@ -16,6 +16,7 @@ from scheduling.domain.outbox import (
     OutboxRecord,
     PermanentDeliveryFailure,
 )
+from scheduling.domain.owner_calendar import UnavailableBlock
 from scheduling.domain.sms_ingress import ConsentEvidence, InboundReceipt, Keyword, SenderRole
 
 # Sendable numbers are Twilio magic test numbers (+1500555xxxx): they belong to no person and are not
@@ -31,6 +32,11 @@ class Records:
                                      "123 Test Street", HomeSize.SMALL, 60, True, 1,
                                      NOW, NOW, NOW)
         self.send_claimed = False
+        self.block: UnavailableBlock | None = None
+
+    def read_block(self, business_id: str, block_id: str) -> UnavailableBlock | None:
+        return self.block if (business_id == "pilot" and self.block is not None
+                              and self.block.block_id == block_id) else None
 
     def read_appointment(self, appointment_id: str) -> Appointment | None:
         return self.appointment if appointment_id == self.appointment.appointment_id else None
@@ -233,6 +239,36 @@ def test_owner_stop_blocks_owner_notifications() -> None:
     with pytest.raises(PermanentDeliveryFailure, match="OPTED_OUT"):
         sender.deliver(record("owner", "hold-request"))
     assert messages.calls == []
+
+
+def test_block_create_and_remove_render_committed_local_interval_at_adapter_boundary() -> None:
+    sender, messages, _, records = setup()
+    start = datetime(2026, 11, 2, 18, tzinfo=UTC)
+    end = datetime(2026, 11, 2, 20, tzinfo=UTC)
+    records.block = UnavailableBlock("block-1", "pilot", start, end, 1)
+    created = replace(record("owner", "block_time"), entity_id="block-1",
+                      block_start_at=start, block_end_at=end)
+    assert sender.deliver(created) == "SM-synthetic"
+    assert messages.calls[-1]["to"] == "+15005550009"
+    assert "Mon Nov 2, 2026 at 10:00 AM PST" in messages.calls[-1]["body"]
+    assert "Mon Nov 2, 2026 at 12:00 PM PST" in messages.calls[-1]["body"]
+    assert "block_time" not in messages.calls[-1]["body"]
+
+    records.block = None
+    removed = replace(created, template="remove_block")
+    assert sender.deliver(removed) == "SM-synthetic"
+    assert "unblocked" in messages.calls[-1]["body"]
+    assert "Mon Nov 2, 2026 at 10:00 AM PST" in messages.calls[-1]["body"]
+    assert "remove_block" not in messages.calls[-1]["body"]
+
+    with pytest.raises(PermanentDeliveryFailure, match="CLIENT_UNAVAILABLE"):
+        sender.deliver(replace(created, recipient="client"))
+    with pytest.raises(PermanentDeliveryFailure, match="EVENT_SUPERSEDED"):
+        sender.deliver(created)
+    records.block = UnavailableBlock("block-1", "pilot", start, end, 2)
+    with pytest.raises(PermanentDeliveryFailure, match="EVENT_SUPERSEDED"):
+        sender.deliver(removed)
+    assert len(messages.calls) == 2
 
 
 def test_conversation_reply_uses_persisted_verified_receipt_and_current_consent() -> None:

@@ -18,6 +18,7 @@ from scheduling.domain.lifecycle import (
     EXPIRED_REPLACEMENT_WAITING_TEMPLATE,
 )
 from scheduling.domain.outbox import DeliveryFailure, OutboxRecord, PermanentDeliveryFailure
+from scheduling.domain.owner_calendar import UnavailableBlock
 from scheduling.domain.owner_counteroffer import (
     COUNTEROFFER_FAILED_TEMPLATE,
     COUNTEROFFER_TEMPLATE,
@@ -49,6 +50,7 @@ class SchedulingRecords(Protocol):
     def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None: ...
     def read_policy(self, business_id: str) -> AvailabilityPolicy: ...
     def read_calendar(self, business_id: str) -> CalendarSnapshot: ...
+    def read_block(self, business_id: str, block_id: str) -> UnavailableBlock | None: ...
     def read_replacement_guard(
         self, business_id: str, original_id: str) -> ReplacementGuard | None: ...
     def acquire_client_send(self, business_id: str, client_id: str) -> str: ...
@@ -249,6 +251,28 @@ class TwilioSmsSender:
 
     def _render(self, record: OutboxRecord, appointment: Appointment | None,
                 profile: ClientProfile | None) -> str:
+        if record.template in BLOCK_TEMPLATES:
+            if record.recipient != "owner":
+                raise PermanentDeliveryFailure("TEMPLATE_RECIPIENT_MISMATCH")
+            if record.block_start_at is None or record.block_end_at is None:
+                raise PermanentDeliveryFailure("ENTITY_UNAVAILABLE")
+            current = self._records.read_block(record.business_id, record.entity_id)
+            if record.template == "remove_block":
+                if current is not None:
+                    raise PermanentDeliveryFailure("EVENT_SUPERSEDED")
+            elif (current is None or current.version != record.event_version
+                  or current.start_at != record.block_start_at
+                  or current.end_at != record.block_end_at):
+                raise PermanentDeliveryFailure("EVENT_SUPERSEDED")
+            start = record.block_start_at.astimezone(self._timezone)
+            end = record.block_end_at.astimezone(self._timezone)
+            action = {"block_time": "blocked", "edit_block": "updated",
+                      "remove_block": "unblocked"}[record.template]
+            return (f"Owner calendar {action}: {start.strftime('%a %b')} {start.day}, "
+                    f"{start.year} at {start.strftime('%I:%M %p').lstrip('0')} "
+                    f"{start.strftime('%Z')} to {end.strftime('%a %b')} {end.day}, "
+                    f"{end.year} at {end.strftime('%I:%M %p').lstrip('0')} "
+                    f"{end.strftime('%Z')}. Check the current calendar.")
         if (record.template not in BLOCK_TEMPLATES and appointment is not None
                 and record.event_version != appointment.version):
             raise PermanentDeliveryFailure("EVENT_SUPERSEDED")
@@ -306,9 +330,7 @@ def render_notification(template: str, recipient: str, appointment: Appointment 
                         now: datetime | None = None) -> str:
     """Render a notification body from trusted records; callers check event freshness."""
     if template in BLOCK_TEMPLATES:
-        if recipient != "owner":
-            raise PermanentDeliveryFailure("TEMPLATE_RECIPIENT_MISMATCH")
-        return f"Owner calendar updated ({template}). Check the current calendar."
+        raise PermanentDeliveryFailure("ENTITY_UNAVAILABLE")
     if appointment is None:
         if recipient != "owner":
             raise PermanentDeliveryFailure("ENTITY_UNAVAILABLE")

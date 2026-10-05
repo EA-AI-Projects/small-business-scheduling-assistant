@@ -50,6 +50,8 @@ class OutboxRecord:
     attempts: int = 0
     lease_token: str | None = None
     provider_id: str | None = None
+    block_start_at: datetime | None = None
+    block_end_at: datetime | None = None
 
 
 class OutboxStore(Protocol):

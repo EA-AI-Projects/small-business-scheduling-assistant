@@ -117,6 +117,10 @@ class DynamoOutboxStore:
             attempts=int(item.get("attempts", {"N": "0"})["N"]),
             lease_token=item["lease_token"]["S"] if "lease_token" in item else None,
             provider_id=item["provider_id"]["S"] if "provider_id" in item else None,
+            block_start_at=(datetime.fromisoformat(item["block_start_at"]["S"])
+                            if "block_start_at" in item else None),
+            block_end_at=(datetime.fromisoformat(item["block_end_at"]["S"])
+                          if "block_end_at" in item else None),
         )
 
     def due(self, now: datetime, limit: int) -> Iterator[tuple[str, str]]:
