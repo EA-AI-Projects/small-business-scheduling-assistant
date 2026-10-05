@@ -9,7 +9,7 @@ import { ConsentForm } from "./ConsentForm";
 const change = vi.fn(async () => true);
 const notify = vi.fn();
 vi.mock("@/owner/OwnerContext", () => ({
-  useOwner: () => ({ change, notify, data: { zone: "UTC" } }),
+  useOwner: () => ({ change, notify, data: { zone: "America/Los_Angeles" } }),
 }));
 
 const base = { client_id: "synthetic-client", name: "Synthetic Client",
@@ -43,6 +43,12 @@ describe("Text Consent status", () => {
     expect(status()).toBe("Consent recorded on 2026-09-28 for +14155550101.");
     expect(checkbox().checked).toBe(false);
     expect(status()).not.toMatch(/enabled|STOP|opt/i);
+  });
+
+  it("shows the recorded date in the business timezone", async () => {
+    // 01:30 UTC on Sep 29 is 6:30 PM PDT on Sep 28.
+    await render({ ...base, phone_verified_at: "2026-09-29T01:30:00+00:00" } as ClientProfile);
+    expect(status()).toBe("Consent recorded on 2026-09-28 for +14155550101.");
   });
 
   it("shows no consent for an unconsented client", async () => {
