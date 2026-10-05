@@ -253,12 +253,12 @@ def test_after_a_calendar_answer_only_a_plain_yes_answers_the_offer() -> None:
 
 def test_model_confirm_works_only_while_the_offer_prompt_is_the_latest_message() -> None:
     chat, request = one_pending()
-    chat.model.script["Go ahead"] = proposal(OwnerReplyIntent.CONFIRM_OFFER)
+    chat.model.script["send it"] = proposal(OwnerReplyIntent.CONFIRM_OFFER)
     chat.ask(ASK)
     chat.ask(WEEK)
-    assert "still waiting" in chat.ask("Go ahead").text and not chat.offers.outbox
+    assert "still waiting" in chat.ask("send it").text and not chat.offers.outbox
     chat.ask(ASK)  # A fresh prompt is now the latest message.
-    sent = chat.ask("Go ahead")
+    sent = chat.ask("send it")
     assert sent.text.startswith("Queued the offer") and len(chat.offers.outbox) == 1
     assert chat.status(request) == CalendarStatus.PENDING_APPROVAL
 
@@ -418,7 +418,7 @@ def test_after_the_question_was_sent_only_text_that_says_approve_can_approve() -
     chat.ask("ok")  # The question names the request; its reply is saved and SENT.
     assert not chat.ask("Go ahead").committed  # No approving word in the text.
     assert not chat.ask("don't approve it").committed
-    approved = chat.ask("Yes, approve it")
+    approved = chat.ask("approve it")
     assert approved.committed and chat.status(request) == CalendarStatus.CONFIRMED
 
 
@@ -549,24 +549,6 @@ def test_a_model_context_is_bounded_and_has_no_phone_numbers_or_full_names() -> 
 # --- Review round 1 (#177) ---------------------------------------------------------------
 
 
-@pytest.mark.parametrize("phrase", [
-    "Don't decline it yet", "no, do not decline", "No problem", "No", "cancel", "nope",
-    "Yes, decline it", "wait, don't reject that"])
-def test_a_model_decline_needs_an_explicit_decline_word_and_no_negator(phrase: str) -> None:
-    chat, request = one_pending()
-    chat.model.script[phrase] = proposal(DECLINE, request)
-    reply = chat.ask(phrase)
-    assert not reply.committed and chat.status(request) == CalendarStatus.PENDING_APPROVAL
-
-
-@pytest.mark.parametrize("phrase", ["decline it", "Please decline", "reject that one"])
-def test_a_clear_model_decline_still_declines_the_single_request(phrase: str) -> None:
-    chat, request = one_pending()
-    chat.model.script[phrase] = proposal(DECLINE, request)
-    assert chat.ask(phrase).committed
-    assert chat.status(request) == CalendarStatus.DECLINED
-
-
 def test_a_bare_no_cancels_an_open_offer_but_never_declines_a_request() -> None:
     chat, request = one_pending()
     chat.model.hostile = True
@@ -687,64 +669,121 @@ def test_a_lapsed_question_about_avery_never_lets_a_plain_yes_approve_blake() ->
     assert chat.ask("yes").committed  # The new question names Blake and was sent.
 
 
-@pytest.mark.parametrize("phrase", [
-    "Decline, I can't that day", "Decline it, not available", "Please deny, won't work"])
-def test_a_negator_after_the_decline_word_does_not_block_a_clear_decline(phrase: str) -> None:
-    chat, request = one_pending()
-    chat.model.script[phrase] = proposal(DECLINE, request)
-    assert chat.ask(phrase).committed and chat.status(request) == CalendarStatus.DECLINED
-
-
-@pytest.mark.parametrize("phrase", [
-    "Don't decline it yet", "no, do not decline", "No problem", "wait, don't reject that"])
-def test_a_negator_before_the_decline_word_still_refuses(phrase: str) -> None:
-    chat, request = one_pending()
-    chat.model.script[phrase] = proposal(DECLINE, request)
-    assert not chat.ask(phrase).committed
-    assert chat.status(request) == CalendarStatus.PENDING_APPROVAL
-
-
-SELF_RETRACTING_APPROVALS = [
+HEDGED_OR_LONG_APPROVALS = [
+    # B3 (self-retracting)
     "ok actually hold off", "Sure, actually let's not", "yes, I mean no",
     "ok on second thought no", "ok, please stop", "yes, scratch that",
     "yes, hold it for her", "yes send it, I'll wait", "yes but not yet", "yes, not yet",
-    "yes nevermind"]
-SELF_RETRACTING_DECLINES = [
+    "yes nevermind", "wait, yes", "no, yes", "don't approve it", "yes, don't send it",
+    # B5 (hedges)
+    "maybe ok", "yes? let me think", "ok I'll think about it", "should I say yes?",
+    "ok, let me check first", "yes later", "ok maybe tomorrow",
+    # Natural but longer replies
+    "Yes, approve it", "Go ahead", "ok thanks a lot", "yes!!!?"]
+HEDGED_OR_LONG_DECLINES = [
+    # B3
     "decline... wait", "decline, hold on", "Reject? No, never mind",
     "I said decline but not yet", "decline. no wait", "decline it. actually don't",
-    "decline, not yet", "decline it, however wait", "deny it unless she calls"]
+    "decline, not yet", "decline it, however wait", "deny it unless she calls",
+    "Don't decline it yet", "no, do not decline", "No problem", "wait, don't reject that",
+    "Yes, decline it",
+    # B4 (reasons) are a known limit: they ask instead of declining
+    "Decline, I can't that day", "Decline it, not available", "Please deny, won't work",
+    "Decline? I can't decide", "Decline? Can't decide", "Reject? I can't tell",
+    "decline, can't say", "deny? i can't remember if she rebooked",
+    "decline... I can't. Let me think", "decline? unavailable? hmm",
+    # B5
+    "maybe decline", "should I decline?", "decline? let me think", "decline later",
+    "decline tomorrow if she doesn't reply", "I don't know whether to decline",
+    "Hold off for now, I might decline it later", "no", "cancel", "nope"]
+APPROVE_ALLOWLIST = [
+    "yes", "y", "yep", "yeah", "yes please", "ok", "okay", "ok please", "sure", "approve",
+    "approved", "approve it", "approve please", "confirm", "confirmed", "send it",
+    "yes send it", "  Yes!  ", "OK.", "yes thanks", "approve it thank you", "Sure!"]
+DECLINE_ALLOWLIST = [
+    "decline", "decline it", "decline please", "please decline", "declined", "reject",
+    "reject it", "deny", "deny it", "Decline.", "DECLINE!", "decline thanks",
+    "reject it thank you"]
 
 
-@pytest.mark.parametrize("phrase", SELF_RETRACTING_APPROVALS)
-def test_a_self_retracting_reply_never_approves_or_sends(phrase: str) -> None:
-    from scheduling.domain.owner_reply_classification import (
-        supports_approval,
-        supports_offer_send,
-    )
-    assert not supports_approval(phrase) and not supports_offer_send(phrase)
+@pytest.mark.parametrize("phrase", HEDGED_OR_LONG_APPROVALS)
+def test_a_hedged_or_long_reply_never_approves_or_sends_and_asks_naming_the_request(
+        phrase: str) -> None:
     chat, request = one_pending()
-    chat.model.script[phrase] = proposal(APPROVE, request)
-    assert not chat.ask(phrase).committed
-    assert chat.status(request) == CalendarStatus.PENDING_APPROVAL
+    chat.model.script[phrase] = proposal(APPROVE, request)  # Always-approve model.
+    asked = chat.ask(phrase)
+    assert not asked.committed and chat.status(request) == CalendarStatus.PENDING_APPROVAL
+    assert "Do you want to approve Avery Example" in asked.text
+    assert "Reply APPROVE to confirm, or DECLINE" in asked.text
+    # The same for an open offer under a confirm_offer model.
     chat.ask(ASK)
     chat.model.script[phrase] = proposal(OwnerReplyIntent.CONFIRM_OFFER)
-    chat.ask(phrase)
-    assert not chat.offers.outbox
+    reply = chat.ask(phrase)
+    assert not chat.offers.outbox and chat.offer_state() == OfferState.PROPOSED
+    assert "Reply YES to send exactly that offer, or NO to cancel it" in reply.text or \
+        "still waiting" in reply.text
 
 
-@pytest.mark.parametrize("phrase", SELF_RETRACTING_DECLINES)
-def test_a_self_retracting_reply_never_declines(phrase: str) -> None:
+@pytest.mark.parametrize("phrase", HEDGED_OR_LONG_DECLINES)
+def test_a_hedged_or_long_reply_never_declines_and_asks_naming_the_request(phrase: str) -> None:
+    chat, request = one_pending()
+    chat.model.script[phrase] = proposal(DECLINE, request)  # Always-decline model.
+    asked = chat.ask(phrase)
+    assert not asked.committed and chat.status(request) == CalendarStatus.PENDING_APPROVAL
+    if phrase.lower() not in ("no", "cancel", "nope"):
+        assert "Do you want to decline Avery Example" in asked.text
+        assert "Reply DECLINE to confirm, or APPROVE" in asked.text
+
+
+@pytest.mark.parametrize("phrase", APPROVE_ALLOWLIST)
+def test_every_approve_allowlist_phrase_approves_when_the_other_gates_hold(phrase: str) -> None:
+    chat, request = one_pending()
+    chat.model.script[phrase] = proposal(APPROVE, request)
+    assert chat.ask(phrase).committed
+    assert chat.status(request) == CalendarStatus.CONFIRMED
+
+
+@pytest.mark.parametrize("phrase", DECLINE_ALLOWLIST)
+def test_every_decline_allowlist_phrase_declines_when_the_other_gates_hold(phrase: str) -> None:
     chat, request = one_pending()
     chat.model.script[phrase] = proposal(DECLINE, request)
-    assert not chat.ask(phrase).committed
+    assert chat.ask(phrase).committed
+    assert chat.status(request) == CalendarStatus.DECLINED
+
+
+@pytest.mark.parametrize("phrase", ["yes", "ok", "Sure!", "send it", "yes send it", "yes thanks"])
+def test_allowlist_phrases_send_an_offer_when_its_prompt_is_the_latest_message(
+        phrase: str) -> None:
+    chat, request = one_pending()
+    chat.model.script[phrase] = proposal(OwnerReplyIntent.CONFIRM_OFFER)
+    chat.ask(ASK)
+    # "send it" and "yes thanks" are not deterministic plain yes replies; the model path
+    # sends them only because the whole reply is on the allowlist.
+    sent = chat.ask(phrase)
+    assert sent.text.startswith("Queued the offer") and len(chat.offers.outbox) == 1
     assert chat.status(request) == CalendarStatus.PENDING_APPROVAL
 
 
-@pytest.mark.parametrize("phrase", [
-    "wait, yes", "no, yes", "don't approve it", "yes, don't send it"])
-def test_a_negator_near_an_approval_blocks_it(phrase: str) -> None:
-    from scheduling.domain.owner_reply_classification import supports_approval
-    assert not supports_approval(phrase)
+def test_the_allowlist_never_accepts_a_question_mark_or_text_outside_the_list() -> None:
+    from scheduling.domain.owner_reply_classification import (
+        supports_approval,
+        supports_decline,
+        supports_offer_send,
+    )
+    for text in ("yes?", "ok?", "sure ?", "yes yes", "ok then", "no", "decline?"):
+        assert not supports_approval(text) and not supports_decline(text), text
+        assert not supports_offer_send(text), text
+
+
+def test_the_decline_question_names_the_request_and_a_plain_decline_then_acts() -> None:
+    chat, request = one_pending()
+    chat.model.script["maybe decline"] = proposal(DECLINE, request)
+    chat.model.script["decline"] = proposal(DECLINE, request)
+    asked = chat.ask("maybe decline")
+    assert "Do you want to decline Avery Example, Thu Oct 1 at 9:00 AM" in asked.text
+    assert chat.status(request) == CalendarStatus.PENDING_APPROVAL
+    assert chat.ask("decline").committed  # The question was sent, so the plain reply acts.
+    assert chat.status(request) == CalendarStatus.DECLINED
 
 
 def _set_hold_minutes(chat: Chat, minutes: int) -> None:

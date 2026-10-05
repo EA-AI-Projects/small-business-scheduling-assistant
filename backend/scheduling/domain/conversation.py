@@ -776,16 +776,24 @@ class ConversationService:
             candidate = named if gated else (targets[0] if len(targets) == 1 else None)
             reference = (proposal.request_reference or "").lower()
             if (candidate is not None and len(targets) == 1 and len(reference) >= 8
-                    and candidate.appointment_id.startswith(reference)
-                    and (supports_approval(body) if approving else supports_decline(body))):
-                return self._decide(receipt, candidate,
-                                    Action.APPROVE if approving else Action.DECLINE)
+                    and candidate.appointment_id.startswith(reference)):
+                if supports_approval(body) if approving else supports_decline(body):
+                    return self._decide(receipt, candidate,
+                                        Action.APPROVE if approving else Action.DECLINE)
+                # A decision in words other than a short plain reply: ask, naming the request
+                # and the plain reply that would act. Nothing changes.
+                return self._ask_decision(receipt, candidate, approving, now)
             return unsure("That request may have changed." if was_named
                           else "I wasn't sure what you meant.")
         if intent == OwnerReplyIntent.CONFIRM_OFFER:
             if (offers is not None and view is not None and live and kind == "offer_prompt"
                     and supports_offer_send(body)):
                 return offers.confirm_offer(view.offer, receipt, now, targets)
+            if offers is not None and view is not None and live and kind == "offer_prompt":
+                return ConversationOutcome(
+                    "I wasn't sure what you meant. Reply YES to send exactly that offer, or NO "
+                    f"to cancel it. To approve the original request, reply APPROVE "
+                    f"{view.offer.request_id[:8]}.")
             return unsure("I wasn't sure what you meant.")
         if intent == OwnerReplyIntent.CANCEL_OFFER:
             if offers is not None and view is not None and live and supports_offer_cancel(body):
@@ -802,6 +810,16 @@ class ConversationService:
             return self._explain(receipt.business_id, receipt.sender, now, targets, view,
                                  intent == OwnerReplyIntent.CALENDAR_QUESTION)
         return unsure("I wasn't sure what you meant.")
+
+    def _ask_decision(self, receipt: InboundReceipt, target: Appointment, approving: bool,
+                      now: datetime) -> ConversationOutcome:
+        self._owner_questions.mark_clarified(
+            receipt.business_id, receipt.sender, now, target.appointment_id, target.version,
+            receipt.provider_id)
+        verb, other = ("approve", "DECLINE") if approving else ("decline", "APPROVE")
+        return ConversationOutcome(
+            f"Do you want to {verb} {self._request_line(receipt.business_id, target)}? "
+            f"Reply {verb.upper()} to confirm, or {other}. Nothing has changed.")
 
     def _offer_ref(self, view: "OfferView") -> PendingRef:
         assert self._counteroffers is not None
