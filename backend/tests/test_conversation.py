@@ -102,6 +102,10 @@ class TimedOut(Interpreter):
         self.calls.append(context)
         raise TimeoutError("synthetic model timeout")
 
+    def classify_owner_reply(self, body: str, context: object) -> object:
+        self.calls.append(context)  # type: ignore[arg-type]
+        raise TimeoutError("synthetic model timeout")
+
 
 def calendar_state(store: InMemoryCalendarRepository) -> tuple[tuple[str, str, int], ...]:
     appointments = (store.read_appointment(event.event_id)
@@ -394,11 +398,13 @@ def test_model_timeout_gives_safe_retry_and_writes_nothing() -> None:
                                   lambda: NOW, "+14155559999")
     hold_id = pending(store)
     before = calendar_state(store)
-    for message in (receipt("Can you come Friday?"),
-                    receipt("Looks fine to me", role=SenderRole.OWNER, provider_id="SM-owner")):
+    for message, expected in (
+            (receipt("Can you come Friday?"), "try again later"),
+            (receipt("Looks fine to me", role=SenderRole.OWNER, provider_id="SM-owner"),
+             "couldn't tell what you meant")):
         result = service.handle(message)
         assert not result.committed
-        assert "try again later" in result.text
+        assert expected in result.text
     assert len(model.calls) == 2
     assert calendar_state(store) == before
     assert store.read_appointment(hold_id).status == CalendarStatus.PENDING_APPROVAL  # type: ignore[union-attr]

@@ -96,6 +96,7 @@ class PendingHold:
     buffer_minutes: int
     calendar_revision: int
     replaces_appointment_id: str | None = None
+    created_at: datetime | None = None  # When the hold was made (the command clock).
 
     def calendar_event(self) -> CalendarEvent:
         return CalendarEvent(
@@ -253,6 +254,7 @@ class HoldService:
                 buffer_minutes=policy.minimum_visit_gap_minutes,
                 calendar_revision=revision + 1,
                 replaces_appointment_id=command.replaces_appointment_id,
+                created_at=now.astimezone(UTC),
             )
             commit = HoldCommit(
                 command=command,

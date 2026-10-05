@@ -173,6 +173,7 @@ class InMemoryCalendarRepository:
                 buffer_minutes=commit.result.buffer_minutes,
                 version=1,
                 replaces_appointment_id=original_id,
+                created_at=commit.result.created_at,
             )
             self._idempotency[key] = IdempotencyRecord(commit.request_hash, commit.result)
             self._audit[commit.audit_id] = commit

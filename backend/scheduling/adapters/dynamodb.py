@@ -93,6 +93,7 @@ def _hold_payload(hold: PendingHold) -> dict[str, Any]:
         "buffer_minutes": hold.buffer_minutes,
         "calendar_revision": hold.calendar_revision,
         "replaces_appointment_id": hold.replaces_appointment_id,
+        "created_at": _instant(hold.created_at) if hold.created_at else None,
     }
 
 
@@ -122,6 +123,7 @@ def _appointment_payload(appointment: Appointment) -> dict[str, Any]:
         "buffer_minutes": appointment.buffer_minutes,
         "version": appointment.version,
         "replaces_appointment_id": appointment.replaces_appointment_id,
+        "created_at": _instant(appointment.created_at) if appointment.created_at else None,
     }
 
 
@@ -141,6 +143,8 @@ def _appointment_from_payload(raw: dict[str, Any]) -> Appointment:
         buffer_minutes=raw["buffer_minutes"],
         version=raw["version"],
         replaces_appointment_id=raw["replaces_appointment_id"],
+        created_at=(datetime.fromisoformat(raw["created_at"])
+                    if raw.get("created_at") else None),
     )
 
 
@@ -1090,6 +1094,8 @@ class DynamoDBCalendarRepository:
             buffer_minutes=raw["buffer_minutes"],
             calendar_revision=raw["calendar_revision"],
             replaces_appointment_id=raw.get("replaces_appointment_id"),
+            created_at=(datetime.fromisoformat(raw["created_at"])
+                        if raw.get("created_at") else None),
         )
         return IdempotencyRecord(item["request_hash"]["S"], response)
 
@@ -1115,6 +1121,8 @@ class DynamoDBCalendarRepository:
                 item["replaces_appointment_id"]["S"]
                 if "replaces_appointment_id" in item else None
             ),
+            created_at=(datetime.fromisoformat(item["created_at"]["S"])
+                        if "created_at" in item else None),
         )
 
     def read_pending_requests(self, business_id: str, now: datetime) -> tuple[Appointment, ...]:
@@ -1296,6 +1304,8 @@ class DynamoDBCalendarRepository:
             "hold_due_pk": {"S": "HOLD#PENDING"},
             "hold_due_sk": {"S": f"{_instant(hold.hold_expires_at)}#{hold.hold_id}"},
         }
+        if hold.created_at is not None:
+            metadata["created_at"] = {"S": _instant(hold.created_at)}
         if hold.replaces_appointment_id is not None:
             metadata["replaces_appointment_id"] = {"S": hold.replaces_appointment_id}
         idempotency = {
@@ -1405,6 +1415,8 @@ class DynamoDBCalendarRepository:
         }
         if appointment.hold_expires_at is not None:
             item["hold_expires_at"] = {"S": _instant(appointment.hold_expires_at)}
+        if appointment.created_at is not None:
+            item["created_at"] = {"S": _instant(appointment.created_at)}
         if appointment.replaces_appointment_id is not None:
             item["replaces_appointment_id"] = {"S": appointment.replaces_appointment_id}
         return item

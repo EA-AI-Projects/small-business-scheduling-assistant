@@ -1,5 +1,6 @@
 """The verified owner can ask read-only calendar questions over SMS (#174)."""
 
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -312,8 +313,8 @@ def test_ambiguous_ranges_and_unrelated_texts_are_not_answered_as_calendar_quest
     assert "one day or one week at a time" in chat.ask(
         "What do I have tomorrow and Friday?").text
     reply = chat.ask("Please bring up the thermostat settings")
-    assert reply.text.startswith("Reply YES to approve")  # Existing owner fallback.
-    assert not reply.committed
+    assert reply.text.startswith("I wasn't sure what you meant")  # The model could not say.
+    assert "Reply YES to approve" not in reply.text and not reply.committed
 
 
 def test_dynamo_context_round_trips_without_message_text() -> None:
@@ -342,6 +343,17 @@ def test_dynamo_context_round_trips_without_message_text() -> None:
         2, "SM-1", "abc", "SM-2", 4, "SM-9", NOW)
     store.put_context(context)
     assert store.read_context("pilot", OWNER) == context
+    answered = replace(context, answered_at=NOW + timedelta(minutes=1))
+    store.put_context(answered)
+    assert store.read_context("pilot", OWNER) == answered
+    # The TTL keeps a clarifying question for 24 hours after it was asked, past the conversation.
+    stored = items[("BUSINESS#pilot", f"OWNER_QUESTION#{OWNER}")]
+    assert stored["answered_at"] == {"S": (NOW + timedelta(minutes=1)).isoformat()}
+    assert stored["expires_at_epoch"] == {"N": str(int((NOW + timedelta(hours=24)).timestamp()))}
+    plain = replace(context, clarified_at=None, clarified_request="", clarified_by="")
+    store.put_context(plain)
+    assert items[("BUSINESS#pilot", f"OWNER_QUESTION#{OWNER}")]["expires_at_epoch"] == {
+        "N": str(int(plain.expires_at.timestamp()))}
     assert store.read_context("pilot", "+14155550123") is None
     partial = QuestionContext("pilot", OWNER, View.SUMMARY, None, None, None, 0, Ask.RANGE,
                               NOW, NOW + timedelta(minutes=10))
@@ -412,9 +424,9 @@ def test_an_approval_needs_the_request_to_have_been_named_first() -> None:
 def test_a_correct_decline_after_the_request_was_named_declines_it() -> None:
     chat, request = week_with_one_pending()
     chat.ask("ok")  # Unclear: asks, naming the request.
-    chat.model.script["no thanks, decline it"] = decision(
+    chat.model.script["decline it"] = decision(
         OwnerReplyIntent.DECLINE_NAMED_REQUEST, request)
-    declined = chat.ask("no thanks, decline it")
+    declined = chat.ask("decline it")
     assert declined.committed and declined.text.startswith("Declined: Blake Sample")
     assert status_of(chat, request) == CalendarStatus.DECLINED
 
@@ -479,11 +491,14 @@ def test_request_x_gone_and_y_arrived_is_not_approved_on_the_old_question() -> N
     assert chat.snapshot() != before
 
 
-def test_exact_commands_and_replies_outside_a_calendar_conversation_skip_the_model() -> None:
+def test_exact_commands_skip_the_model_and_a_plain_yes_needs_it_outside_a_conversation() -> None:
     chat = Chat()
     request = chat.hold("c1", local(10, 1, 9), "a")
-    approved = chat.ask("Yes")  # No calendar question open: unchanged owner behavior.
+    assert not chat.ask("Yes").committed  # The model has no verdict, so the owner is asked.
+    chat.model.script["Yes"] = decision(OwnerReplyIntent.APPROVE_NAMED_REQUEST, request)
+    approved = chat.ask("Yes")  # No conversation open: the model judges one pending request.
     assert approved.committed and status_of(chat, request) == CalendarStatus.CONFIRMED
+    chat.model.classified.clear()
     other = chat.hold("c2", local(10, 5, 9), "b")
     chat.ask("What is next week looking like?")
     exact = chat.ask(f"APPROVE {other[:8]}")

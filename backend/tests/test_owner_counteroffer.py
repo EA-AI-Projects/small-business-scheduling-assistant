@@ -26,6 +26,12 @@ from scheduling.domain.owner_counteroffer import (
     InMemoryCounterofferStore,
     OfferState,
 )
+from scheduling.domain.owner_reply_classification import (
+    Confidence,
+    OwnerReplyContext,
+    OwnerReplyIntent,
+    OwnerReplyProposal,
+)
 from scheduling.domain.sms_ingress import ConsentEvidence, InboundReceipt, Keyword, SenderRole
 
 NOW = datetime(2026, 9, 29, 17, tzinfo=UTC)  # Tue Sep 29, 10:00 AM Pacific
@@ -41,8 +47,19 @@ EXPECTED_TEXT = (
 
 
 class NeverModel:
+    """A hostile model: it calls every owner reply a decision about the one pending request.
+
+    Backend validation, not the model, must keep an open offer from being approved.
+    """
+
     def propose(self, body: str, context: MessageContext) -> MessageProposal:
         return MessageProposal("clarify", None, None, None, True)
+
+    def classify_owner_reply(self, body: str, context: OwnerReplyContext) -> OwnerReplyProposal:
+        if len(context.pending) != 1:
+            return OwnerReplyProposal(OwnerReplyIntent.UNCLEAR, None, Confidence.HIGH)
+        return OwnerReplyProposal(OwnerReplyIntent.APPROVE_NAMED_REQUEST,
+                                  context.pending[0].ref, Confidence.HIGH)
 
 
 class Consent:
@@ -168,8 +185,11 @@ def test_yes_that_confirms_an_offer_never_approves_the_request(world: World) -> 
     assert "already queued" in again.text
     assert world.status(request) == (CalendarStatus.PENDING_APPROVAL, 1)
     assert len(world.store.outbox) == 1
-    # Without an offer in play, YES keeps its normal meaning.
-    world.say("Looks good")  # Unrelated message clears the absorbed state.
+    # Another reply while the sent offer is still absorbed is not an approval either.
+    assert "Nothing was approved" in world.say("Looks good").text
+    assert world.status(request) == (CalendarStatus.PENDING_APPROVAL, 1)
+    # Once the notice window has passed, YES has its normal meaning again.
+    world.clock[0] = NOW + timedelta(hours=2)
     assert world.say("YES").committed
     assert world.status(request)[0] == CalendarStatus.CONFIRMED
 
@@ -211,13 +231,14 @@ def test_decline_or_revision_or_other_message_sends_nothing(world: World) -> Non
     assert not world.store.outbox and not world.messages.calls
 
 
-def test_unrelated_message_clears_the_offer_so_a_later_yes_cannot_send_it(world: World) -> None:
-    world.pending()
+def test_unrelated_message_keeps_the_offer_and_says_so(world: World) -> None:
+    request = world.pending()
     world.say(ASK)
-    assert "I cancelled the offer to Avery Sample" in world.say("What is the weather?").text
-    assert state_of(world) == OfferState.DISCARDED
-    world.say("YES")
-    assert not world.store.outbox
+    reply = world.say("What is the weather?").text
+    assert "still waiting" in reply and "cancelled" not in reply
+    assert state_of(world) == OfferState.PROPOSED
+    assert world.status(request) == (CalendarStatus.PENDING_APPROVAL, 1)
+    assert world.say("YES").text.startswith("Queued the offer")  # Still sends what was reviewed.
 
 
 def test_cancelled_or_expired_offer_is_not_followed_by_approval_on_a_bare_ok(
@@ -230,13 +251,12 @@ def test_cancelled_or_expired_offer_is_not_followed_by_approval_on_a_bare_ok(
     for reply in ("ok", "ok thanks", "yes"):
         assert "Nothing was approved" in world.say(reply).text
         assert world.status(request) == held
-    # A reply that is neither a send intent nor a command cancels it, then "yes".
-    world.say(ASK)
+    # A reply that is neither a plain YES/NO nor a command leaves the offer waiting.
     for phrase in ("yes send the offer", "send it now", "approve it now"):
         world.say(ASK)
-        assert "Reply YES to send exactly that offer" in world.say(phrase).text
+        assert "reply YES to send it or NO to cancel it" in world.say(phrase).text
         assert state_of(world) == OfferState.PROPOSED
-    world.say("What is the weather?")  # Cancels the offer.
+    world.say("no")
     assert "Nothing was approved" in world.say("yes").text
     assert world.status(request) == held
     # Expired, "yes", then "ok".
@@ -381,7 +401,7 @@ def test_approval_like_replies_never_fall_through_to_approving(
     request = world.pending()
     world.say(ASK)
     reply = world.say(phrase).text
-    assert "Reply YES to send exactly that offer, or NO to cancel it" in reply
+    assert "reply YES to send it or NO to cancel it" in reply
     assert f"APPROVE {request[:8]}" in reply
     assert world.status(request) == (CalendarStatus.PENDING_APPROVAL, 1)
     assert not world.store.outbox
@@ -411,8 +431,7 @@ def test_exact_approve_command_still_works_and_cancelling_is_announced(world: Wo
 
     other = world.pending(THURSDAY_9AM + timedelta(days=1), "client-2", "again")
     world.say(f"Offer 2pm instead for {other[:8]}")
-    cancelled = world.say("What is the weather like?").text
-    assert "I cancelled the offer to Blake Example; nothing was sent." in cancelled
+    assert "Blake Example" in world.say("no").text and state_of(world) == OfferState.DISCARDED
 
 
 def test_repeat_yes_is_absorbed_only_while_the_request_is_still_pending(world: World) -> None:

@@ -78,19 +78,27 @@ TOOL: dict[str, Any] = {
     },
 }
 OWNER_REPLY_INSTRUCTIONS = (
-    "The business owner just replied to a scheduling assistant that is answering calendar "
-    "questions. You only classify the reply; the backend decides whether anything happens "
-    "and never approves or declines on your word alone. "
-    "Intents: approve_named_request only when the reply clearly and unambiguously approves "
-    "the specific request listed under Named request, and decline_named_request likewise "
-    "for declining it; copy its ref exactly. If no request is named, or the reply could "
-    "instead be asking to see or narrow the calendar (for example 'confirmed please', 'yes "
-    "please', 'ok thanks' right after a calendar answer), do not choose an approval: use "
-    "calendar_followup when it asks to change the status or dates shown, otherwise unclear. "
-    "For calendar_followup set statuses to the statuses to show (confirmed, pending, "
-    "unavailable) and date_from/date_to only if the reply names a new range. "
-    "Use unclear when unsure. Set confidence to high only when you are certain; "
-    "when in doubt choose unclear or low. Always call classify_owner_reply exactly once."
+    "The business owner just texted a scheduling assistant. Use the recent context to decide "
+    "what the reply means. You only classify it; the backend decides whether anything "
+    "happens and never approves, declines, or sends anything on your word alone. "
+    "Last assistant message says what the owner is replying to: calendar_answer (a calendar "
+    "summary), approval_question (the assistant asked which request, and named one), "
+    "offer_prompt (a drafted counteroffer text awaits YES or NO), "
+    "offer_with_calendar_answer (a calendar answer was sent while a drafted offer still "
+    "waits), offer_closed (an offer was cancelled, sent, or lapsed), or none. "
+    "Intents: approve_named_request or decline_named_request only when the reply clearly "
+    "decides the one request listed under Named request, or, when last message is none and "
+    "exactly one request is pending, that request; copy its ref exactly. A short yes right "
+    "after a calendar answer, an offer, or a closed offer is not an approval: 'confirmed "
+    "please', 'yes please', 'ok thanks', 'go ahead' are not approvals then. "
+    "confirm_offer when the reply clearly tells the assistant to send the drafted offer; "
+    "cancel_offer when it clearly withdraws it. calendar_followup when it asks to change "
+    "the statuses or dates already shown (set statuses to confirmed, pending, unavailable "
+    "and date_from/date_to only for a new range). calendar_question for a calendar "
+    "question that lacks a day or week. how_to when the owner asks how to approve or "
+    "decline or what the assistant can do. Anything else, or any doubt: unclear. "
+    "Set confidence to high only when you are certain; when in doubt choose unclear or "
+    "low. Always call classify_owner_reply exactly once."
 )
 OWNER_REPLY_TOOL: dict[str, Any] = {
     "type": "function",
@@ -209,6 +217,8 @@ class OpenAIMessageInterpreter:
             f"Timezone: {context.timezone}",
             f"Last assistant message: {context.last_kind}",
             f"Calendar view: {context.view}; statuses shown: {', '.join(context.statuses) or 'none'}",
+            "Open offer: " + (f"ref {context.offer.ref}, {context.offer.client}, "
+                              f"new time {context.offer.when}" if context.offer else "none"),
             "Range shown: " + (f"{context.range_first} to {context.range_last}"
                                if context.range_first and context.range_last else "none"),
             "Named request: " + (f"ref {named.ref}, {named.client}, {named.when}"

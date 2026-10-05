@@ -7,6 +7,12 @@ from fastapi.testclient import TestClient
 from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.domain.conversation import MessageContext, MessageProposal
 from scheduling.domain.owner_policy import OwnerPolicyService, PolicyCommand
+from scheduling.domain.owner_reply_classification import (
+    Confidence,
+    OwnerReplyContext,
+    OwnerReplyIntent,
+    OwnerReplyProposal,
+)
 from scheduling.local_owner import create_local_owner_app, seed_synthetic_data
 from scheduling.local_texts import OfflineInterpreter, TextSimulator
 
@@ -178,6 +184,13 @@ class Plain:
             return MessageProposal("availability", None, None, None, False,
                                    "2026-09-30", "2026-09-30")
         return MessageProposal("clarify", None, None, None, True)
+
+    def classify_owner_reply(self, body: str, context: OwnerReplyContext) -> OwnerReplyProposal:
+        """A plain yes with exactly one request pending is a decision."""
+        if body.lower() == "yes" and len(context.pending) == 1:
+            return OwnerReplyProposal(OwnerReplyIntent.APPROVE_NAMED_REQUEST,
+                                      context.pending[0].ref, Confidence.HIGH)
+        return OwnerReplyProposal(OwnerReplyIntent.UNCLEAR, None, Confidence.HIGH)
 
 
 def test_plain_language_booking_and_owner_yes_in_the_simulator() -> None:
