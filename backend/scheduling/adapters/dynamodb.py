@@ -9,6 +9,7 @@ from uuid import uuid4
 from scheduling.adapters.outbox_aws import due_keys
 from scheduling.domain.appointments import Appointment, ReplacementGuard
 from scheduling.domain.availability import AvailabilityPolicy, HolidayCalendar, LocalWindow
+from scheduling.domain.booking_invitations import InvitationIntent
 from scheduling.domain.booking_outreach import OutreachRecord, OutreachSettings
 from scheduling.domain.calendar import CalendarEvent, CalendarSnapshot, CalendarStatus
 from scheduling.domain.client_records import (
@@ -267,6 +268,139 @@ class DynamoDBCalendarRepository:
                 return existing
             raise RevisionConflict("Outreach settings version changed") from exc
         return OutreachRecord(settings, next_version)
+
+    def read_confirmed_for_client(self, business_id: str, client_id: str,
+                                  run_at: datetime, end_at: datetime) -> tuple[int, tuple[Appointment, ...]]:
+        snapshot = self.read_calendar(business_id)
+        matches: list[Appointment] = []
+        for event in snapshot.events:
+            if (event.status != CalendarStatus.CONFIRMED or event.start_at > end_at
+                    or event.end_at <= run_at):
+                continue
+            appointment = self.read_appointment(event.event_id)
+            if (appointment is not None and appointment.business_id == business_id
+                    and appointment.client_id == client_id
+                    and appointment.status == CalendarStatus.CONFIRMED):
+                matches.append(appointment)
+        return snapshot.revision, tuple(matches)
+
+    def reserve_invitation(self, intent: InvitationIntent, settings_version: int,
+                           calendar_revision: int, profile: ClientProfile) -> bool:
+        """Reserve a separate intent, never an active SMS outbox record."""
+        business_id = intent.business_id
+        client_hash = sha256(intent.client_id.encode()).hexdigest()
+        cutoff = intent.repeat_cutoff_at
+        try:
+            self._client.transact_write_items(TransactItems=[
+                {"ConditionCheck": {"TableName": self._table,
+                    "Key": self._business_key(business_id, "SETTINGS#BOOKING_OUTREACH"),
+                    "ConditionExpression": "#version = :version",
+                    "ExpressionAttributeNames": {"#version": "version"},
+                    "ExpressionAttributeValues": {":version": {"N": str(settings_version)}}}},
+                {"ConditionCheck": {"TableName": self._table,
+                    "Key": self._business_key(business_id, "CALENDAR#REVISION"),
+                    "ConditionExpression": "revision = :revision",
+                    "ExpressionAttributeValues": {":revision": {"N": str(calendar_revision)}}}},
+                {"ConditionCheck": {"TableName": self._table,
+                    "Key": self._business_key(business_id, f"CLIENT#{intent.client_id}"),
+                    "ConditionExpression": ("#version = :version AND active = :active "
+                        "AND phone_e164 = :phone AND phone_verified_at = :verified"),
+                    "ExpressionAttributeNames": {"#version": "version"},
+                    "ExpressionAttributeValues": {
+                        ":version": {"N": str(profile.version)}, ":active": {"BOOL": True},
+                        ":phone": {"S": profile.phone_e164},
+                        ":verified": {"S": _instant(intent.verified_at)},
+                    }}},
+                {"ConditionCheck": {"TableName": self._table,
+                    "Key": self._business_key(business_id,
+                        f"SMS_CONSENT_CURRENT#{profile.phone_e164}"),
+                    "ConditionExpression": "client_id = :client AND #method = :method AND agreed_at = :at",
+                    "ExpressionAttributeNames": {"#method": "method"},
+                    "ExpressionAttributeValues": {":client": {"S": intent.client_id},
+                        ":method": {"S": "in_person"},
+                        ":at": {"S": _instant(intent.verified_at)}}}},
+                {"ConditionCheck": {"TableName": self._table,
+                    "Key": self._business_key(business_id,
+                        f"SMS_SUPPRESS#{profile.phone_e164}"),
+                    "ConditionExpression": "attribute_not_exists(PK)"}},
+                {"ConditionCheck": {"TableName": self._table,
+                    "Key": self._business_key(business_id,
+                        f"SMS_OPTOUT#{profile.phone_e164}"),
+                    "ConditionExpression": "attribute_not_exists(PK) OR attribute_exists(cleared_at)"}},
+                self._erasure_check(business_id, intent.client_id),
+                {"Update": {"TableName": self._table,
+                    "Key": self._business_key(business_id,
+                        f"INVITATION_GUARD#{client_hash}"),
+                    "UpdateExpression": ("SET pending_intent_id = :intent, "
+                        "last_selected_run_at = :run"),
+                    "ConditionExpression": ("attribute_not_exists(pending_intent_id) "
+                        "AND (attribute_not_exists(last_selected_run_at) "
+                        "OR last_selected_run_at < :run) "
+                        "AND (attribute_not_exists(last_sent_at) OR last_sent_at <= :cutoff)"),
+                    "ExpressionAttributeValues": {":intent": {"S": intent.intent_id},
+                        ":run": {"S": _instant(intent.run_at)},
+                        ":cutoff": {"S": _instant(cutoff)}}}},
+                {"Put": {"TableName": self._table,
+                    "Item": {**self._business_key(business_id,
+                        f"INVITATION#{intent.intent_id}"),
+                        "client_id": {"S": intent.client_id},
+                        "run_at": {"S": _instant(intent.run_at)},
+                        "window_end_at": {"S": _instant(intent.window_end_at)},
+                        "repeat_cutoff_at": {"S": _instant(intent.repeat_cutoff_at)},
+                        "phone_hash": {"S": intent.phone_hash},
+                        "verified_at": {"S": _instant(intent.verified_at)},
+                        "lookahead_weeks": {"N": str(intent.lookahead_weeks)},
+                        "state": {"S": "QUEUED"}},
+                    "ConditionExpression": "attribute_not_exists(PK)"}},
+            ])
+        except Exception as exc:
+            if not _record_transaction_conflict(exc):
+                raise
+            return False
+        return True
+
+    def complete_invitation(self, intent: InvitationIntent,
+                            handed_off_at: datetime | None) -> bool:
+        """Close a reserved intent; only a successful handoff advances repeat history."""
+        if handed_off_at is not None and (
+            handed_off_at.tzinfo is None or handed_off_at < intent.run_at
+        ):
+            raise ValueError("Handoff instant must be aware and after the run")
+        client_hash = sha256(intent.client_id.encode()).hexdigest()
+        guard_update: dict[str, Any] = {
+            "TableName": self._table,
+            "Key": self._business_key(intent.business_id,
+                f"INVITATION_GUARD#{client_hash}"),
+            "ConditionExpression": "pending_intent_id = :intent",
+            "ExpressionAttributeValues": {":intent": {"S": intent.intent_id}},
+            "UpdateExpression": "REMOVE pending_intent_id",
+        }
+        if handed_off_at is not None:
+            guard_update["UpdateExpression"] = (
+                "SET last_sent_at = :sent REMOVE pending_intent_id")
+            guard_update["ExpressionAttributeValues"][":sent"] = {
+                "S": _instant(handed_off_at)}
+        try:
+            self._client.transact_write_items(TransactItems=[
+                {"Update": {"TableName": self._table,
+                    "Key": self._business_key(intent.business_id,
+                        f"INVITATION#{intent.intent_id}"),
+                    "UpdateExpression": "SET #state = :done, completed_at = :at",
+                    "ConditionExpression": "#state = :queued AND client_id = :client",
+                    "ExpressionAttributeNames": {"#state": "state"},
+                    "ExpressionAttributeValues": {
+                        ":done": {"S": "SENT" if handed_off_at else "SUPPRESSED"},
+                        ":at": {"S": _instant(handed_off_at or datetime.now(UTC))},
+                        ":queued": {"S": "QUEUED"},
+                        ":client": {"S": intent.client_id},
+                    }}},
+                {"Update": guard_update},
+            ])
+        except Exception as exc:
+            if not _record_transaction_conflict(exc):
+                raise
+            return False
+        return True
 
     def _sms_guard_checks(self, business_id: str) -> list[dict[str, Any]]:
         """STOP and a scheduling commit must serialize on the same Dynamo items."""
@@ -529,6 +663,7 @@ class DynamoDBCalendarRepository:
                 fields = {name: value.get("S") for name, value in item.items()
                           if isinstance(value, dict)}
                 if (sk == f"CLIENT#{client_id}" or sk == f"PHONE#{phone}"
+                        or sk == f"INVITATION_GUARD#{client_hash}"
                         or sk.startswith((f"NOTE#CLIENT#{client_hash}#",
                                           f"SMS_CONSENT#{phone}#",
                                           f"SMS_OPTOUT_EVENT#{phone}#"))

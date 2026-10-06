@@ -6,8 +6,9 @@ from threading import RLock
 
 from scheduling.domain.appointments import Appointment, ReplacementGuard
 from scheduling.domain.availability import AvailabilityPolicy, pilot_policy
+from scheduling.domain.booking_invitations import InvitationIntent
 from scheduling.domain.booking_outreach import OutreachRecord, OutreachSettings
-from scheduling.domain.calendar import CalendarEvent, CalendarSnapshot
+from scheduling.domain.calendar import CalendarEvent, CalendarSnapshot, CalendarStatus
 from scheduling.domain.client_records import ClientNote, ClientProfile, RecordConflict
 from scheduling.domain.holds import (
     CreateHold,
@@ -37,6 +38,11 @@ class InMemoryCalendarRepository:
         self._policy_replays: dict[tuple[str, str, str, str], PolicyReplay] = {}
         self._outreach: dict[str, OutreachRecord] = {}
         self._outreach_replays: dict[tuple[str, str, str], tuple[OutreachSettings, int, OutreachRecord]] = {}
+        self._invitation_intents: dict[str, InvitationIntent] = {}
+        self._invitation_states: dict[str, str] = {}
+        self._invitation_pending: dict[tuple[str, str], str] = {}
+        self._invitation_last_selected: dict[tuple[str, str], datetime] = {}
+        self._invitation_last_sent: dict[tuple[str, str], datetime] = {}
         self._idempotency: dict[tuple[str, str, str, str], IdempotencyRecord] = {}
         self._transition_idempotency: dict[tuple[str, str, str, str], TransitionRecord] = {}
         self._holds: dict[str, HoldCommit] = {}
@@ -74,6 +80,53 @@ class InMemoryCalendarRepository:
             self._outreach_replays[identity] = (settings, expected_version, result)
             self._audit[f"outreach#{business_id}#{actor_id}#{key}"] = result
             return result
+
+    def read_confirmed_for_client(self, business_id: str, client_id: str,
+                                  run_at: datetime, end_at: datetime) -> tuple[int, tuple[Appointment, ...]]:
+        with self._lock:
+            matches = tuple(appointment for appointment in self._appointments.values()
+                if appointment.business_id == business_id and appointment.client_id == client_id
+                and appointment.status == CalendarStatus.CONFIRMED
+                and appointment.start_at <= end_at and appointment.end_at > run_at)
+            return self._revisions[business_id], matches
+
+    def reserve_invitation(self, intent: InvitationIntent, settings_version: int,
+                           calendar_revision: int, profile: ClientProfile) -> bool:
+        with self._lock:
+            guard = (intent.business_id, intent.client_id)
+            if (self.read_outreach(intent.business_id).version != settings_version
+                    or not self.read_outreach(intent.business_id).settings.enabled
+                    or self._revisions[intent.business_id] != calendar_revision
+                    or self.read_profile(intent.business_id, intent.client_id) != profile
+                    or guard in self._invitation_pending
+                    or (guard in self._invitation_last_selected and
+                        self._invitation_last_selected[guard] >= intent.run_at)
+                    or (guard in self._invitation_last_sent and
+                        self._invitation_last_sent[guard] > intent.repeat_cutoff_at)):
+                return False
+            self._invitation_intents[intent.intent_id] = intent
+            self._invitation_states[intent.intent_id] = "QUEUED"
+            self._invitation_pending[guard] = intent.intent_id
+            self._invitation_last_selected[guard] = intent.run_at
+            return True
+
+    def complete_invitation(self, intent: InvitationIntent,
+                            handed_off_at: datetime | None) -> bool:
+        if handed_off_at is not None and (
+            handed_off_at.tzinfo is None or handed_off_at < intent.run_at
+        ):
+            raise ValueError("Handoff instant must be aware and after the run")
+        with self._lock:
+            guard = (intent.business_id, intent.client_id)
+            if (self._invitation_pending.get(guard) != intent.intent_id
+                    or self._invitation_states.get(intent.intent_id) != "QUEUED"):
+                return False
+            del self._invitation_pending[guard]
+            self._invitation_states[intent.intent_id] = (
+                "SENT" if handed_off_at is not None else "SUPPRESSED")
+            if handed_off_at is not None:
+                self._invitation_last_sent[guard] = handed_off_at
+            return True
 
     def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None:
         with self._lock:
