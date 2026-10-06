@@ -177,8 +177,14 @@ def parse_followup(body: str, today: date, previous: ClientQuestion) -> ClientQu
     ranges = sorted(set(ranges_in(text, today)))
     named = bool(STATUS_CONFIRMED.search(text) or STATUS_PENDING.search(text))
     everything = bool(EVERYTHING.search(text))
-    if not (named or everything or wants_count(text) or LIST_WORDS.search(text)
-            or FOLLOW_UP_CUE.search(rest)):
+    shown_again = named or everything or wants_count(text) or bool(LIST_WORDS.search(text))
+    # "Cleaning Friday instead" or "What about cleaning Friday" may be a new request; "my
+    # visits" or a plural noun points back at the visits already shown.
+    single = re.search(r"\b(?:booking|appointment|cleaning|visit)\b", rest)
+    if ranges and single and not shown_again and not re.search(r"\bmy\b", rest):
+        first, last = ranges[0] if len(ranges) == 1 else (None, None)
+        return ClientQuestion(View.LIST, first, last, BOTH, len(ranges) > 1, True)
+    if not (shown_again or FOLLOW_UP_CUE.search(rest)):
         # A bare range ("Friday") goes to the model, which may read it as a request. With a
         # booking noun ("Booking for Friday") it could mean either: ask which.
         if ranges and BOOKING_NOUN.search(rest):

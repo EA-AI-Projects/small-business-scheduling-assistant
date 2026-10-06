@@ -42,6 +42,8 @@ def test_three_message_sequence_carries_range_and_status_forward() -> None:
         "You have 1 confirmed visit from Mon Oct 5 to Sun Oct 11:\n"
         f"- Tue Oct 6 at 9:00 AM-11:00 AM PDT, confirmed (ref {later[:8]})")
     assert chat.text("And Friday?").text.startswith("You have no confirmed visits on Fri Oct 2.")
+    assert chat.text("What about my visits Friday?").text.startswith(
+        "You have no confirmed visits on Fri Oct 2.")
     summary = chat.text("Summarize my itinerary")  # Every status, for the range just shown.
     assert summary.text.startswith("You have 1 pending request on Fri Oct 2:")
     assert pending[:8] in summary.text
@@ -180,7 +182,8 @@ def test_booking_requests_are_not_read_as_follow_ups() -> None:
         chat.model.replies[text] = ask("availability", "2026-10-02")
         assert "Reply with the number" in chat.text(text).text, text
         chat.text("Do I have bookings this week?")  # Reopen the calendar conversation.
-    for text in ("Booking for Friday", "Appointment on Friday"):
+    for text in ("Booking for Friday", "Appointment on Friday", "Cleaning Friday instead",
+                 "Also cleaning Friday", "Cleaning Friday too", "What about cleaning Friday"):
         assert chat.text(text).text.startswith(
             "Do you want to check the visits you already have for Fri Oct 2"), text
 
