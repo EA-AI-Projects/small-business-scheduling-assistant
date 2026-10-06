@@ -147,7 +147,7 @@ LEAD_IN = re.compile(
 SUMMARY_ASK = re.compile(
     r"^(?:i want|i'd like|i would like|i need|(?:can|could) i (?:get|have|see)|"
     r"(?:please )?(?:give|send|show) me|(?:can|could) you (?:please )?(?:give|send|show) me)"
-    r"\s+(?:a |an |the )?(?:summary|recap|rundown|overview|list)(?: of)?\s+")
+    r"\s+(?:a |an |the )?(?:(?P<summary>summary|recap|rundown|overview)|list)(?: of)?\s+")
 
 
 COURTESY = re.compile(r"(?:hi|hello|hey|thanks|thank you|thx|please|ok|okay)(?: there)?")
@@ -155,7 +155,12 @@ COURTESY = re.compile(r"(?:hi|hello|hey|thanks|thank you|thx|please|ok|okay)(?: 
 
 def _schedule_question(sentence: str) -> str | None:
     """The sentence, without a lead-in, if it is a question about the client's visits."""
-    text = SUMMARY_ASK.sub("summarize ", LEAD_IN.sub("", sentence.strip()))
+    text = sentence.strip()
+    stripped = LEAD_IN.sub("", text)
+    if TRIGGER.search(stripped):  # "Tell me my visits" keeps "tell me" as its question word.
+        text = stripped
+    text = SUMMARY_ASK.sub(
+        lambda match: "summarize " if match["summary"] else "list ", text)
     words = re.findall(r"[a-z']+", RANGE_TOKEN.sub(" ", text))
     if not (TRIGGER.search(text) and SUBJECT.search(text)
             and all(word in QUESTION_WORDS for word in words)):
@@ -180,7 +185,10 @@ def parse(body: str, today: date) -> ClientQuestion | None:
     first, last = ranges[0] if len(ranges) == 1 else (None, None)
     if asked and all(question is not None for question in asked):
         matched = " ".join(question for question in asked if question is not None)
-        view = View.COUNT if wants_count(matched) else View.LIST
+        # A count only when every sentence asks for one: "When are my visits? How many?"
+        # wants the times too.
+        view = (View.COUNT if all(wants_count(question) for question in asked
+                                  if question is not None) else View.LIST)
         return ClientQuestion(view, first, last, statuses_named(matched), len(ranges) > 1,
                               refers_back=bool(REFERS_BACK.search(matched)) and not ranges)
     if len(sentences) != 1:

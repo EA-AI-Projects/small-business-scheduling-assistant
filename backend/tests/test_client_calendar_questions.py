@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from test_conversation_flow import NOW, THURSDAY, Harness, ask
 
 from scheduling.domain.calendar import CalendarEvent, CalendarStatus
-from scheduling.domain.client_calendar_questions import parse
+from scheduling.domain.client_calendar_questions import View, parse
 from scheduling.domain.client_records import ClientProfile, HomeSize
 from scheduling.domain.conversation_state import PromptKind
 from scheduling.domain.holds import CreateHold, HoldService
@@ -232,3 +232,20 @@ def test_times_carry_standard_time_after_the_clock_change() -> None:
     assert chat.text("When is my next cleaning?").text == (
         "You have 1 confirmed visit coming up:\n"
         f"- Tue Nov 3 at 9:00 AM-11:00 AM PST, confirmed (ref {visit[:8]})")
+
+
+def test_polite_wording_and_several_questions_still_match() -> None:
+    today = NOW.date()
+    for text in ("Tell me my visits", "Tell me my schedule for next week",
+                 "Can you tell me when my next visit is?", "I want to know when my cleaning is",
+                 "Hi! When are the cleaners coming? Thanks", "Okay. Do I have anything Friday?"):
+        question = parse(text, today)
+        assert question is not None and not question.ambiguous_booking, text
+    listed = parse("Show me a list of my visits", today)
+    assert listed is not None and not listed.refers_back
+    summary = parse("I want a summary of my itinerary", today)
+    assert summary is not None and summary.refers_back
+    both = parse("When are my visits? How many visits do I have?", today)
+    assert both is not None and both.view == View.LIST
+    count = parse("How many visits do I have this week? How many confirmed visits?", today)
+    assert count is not None and count.view == View.COUNT
