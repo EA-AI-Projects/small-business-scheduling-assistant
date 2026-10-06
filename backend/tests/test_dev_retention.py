@@ -376,7 +376,9 @@ def test_sms_retention_worker_purges_expired_bodies_and_keeps_held_or_current_ev
         store.set_evidence_legal_hold(BUSINESS, sort_key, "synthetic legal hold")
 
     # Consent evidence is one history row plus one current row, so the expired phone has two.
-    assert run.invoke() == {"deleted_sms_bodies": 1, "deleted_sms_evidence": 2}
+    assert run.invoke() == {"deleted_sms_bodies": 1,
+                            "deleted_manual_invitation_bodies": 0,
+                            "deleted_sms_evidence": 2}
 
     def read(sort_key: str) -> Item | None:
         return run.env.client.get_item(TableName=run.env.table, ConsistentRead=True, Key={
