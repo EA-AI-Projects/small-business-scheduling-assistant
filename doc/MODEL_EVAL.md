@@ -41,7 +41,7 @@ The response is a JSON summary of the model's proposals. A failed clarification 
 
 ### Client calendar questions (#241)
 
-Since #241 the model, not keyword rules, decides whether a client text is a calendar question (owner decision, 2026-10-05). The script adds ten client cases. Follow-up cases send the same "Last calendar answer" line the service sends:
+Since #241 the model, not keyword rules, decides whether a client text is a calendar question (owner decision, 2026-10-05). The script adds eleven client cases. Follow-up cases send the same "Last calendar answer" line the service sends:
 - The three texts from the #241 screenshot must be `calendar_question`. The second must ask only about confirmed visits, and the third is a summary.
 - "How many confirmed visits next week?" must be a confirmed-only count for 2026-10-05 to 2026-10-11.
 - A Spanish question and a Spanish follow-up ("¿Y la próxima semana?") must be calendar questions with the right range.
@@ -49,7 +49,12 @@ Since #241 the model, not keyword rules, decides whether a client text is a cale
 - "What times are open Friday?" and "Can I get a cleaning Friday instead?" must stay availability requests.
 - "Booking for Friday?" must clarify.
 
-These cases have not been run against the live model yet. Record the first run's result below before relying on them.
+On 2026-10-05 the owner ran all 20 cases against `gpt-6-luna` with the #245 instructions: **18/20 passed** (summary posted on #246).
+- All three screenshot texts, both Spanish cases, the count, the status-only follow-up, and "Show me all my upcoming visits" (`range_scope: all_upcoming`) passed.
+- Missed: "Can I get a cleaning Friday instead?" during a calendar conversation came back `clarify_booking` (the client would get one extra check-or-request question before the offer).
+- Missed: "Booking for Friday?" came back `availability` (the client would get Friday's open times instead of the check-or-request question #240 requires).
+- Neither miss can write. #246 adds instruction examples for both kinds of text, worded differently from the eval texts so the two cases stay held out.
+- On 2026-10-06, with the #246 instructions, the first rerun passed 19/20: "Can I get a cleaning Friday instead?" was now a request, but "Booking for Friday?" was still `availability`. With an explicit exception added to the availability rule (a short question that only names a booking and a day is `clarify_booking`), two more runs passed **20/20** each. Per-case results are posted on #246. Three runs of a nondeterministic model are evidence, not a guarantee; every reading remains a proposal that writes nothing.
 
 ## Current result
 
