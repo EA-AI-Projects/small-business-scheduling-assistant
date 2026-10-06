@@ -99,6 +99,16 @@ Parameters:
       State of the SMS sender's outbox queue event source mapping. ENABLED only under separate
       live-SMS authorization (#91). Pass the current live state on the first deploy so a deploy
       never changes it silently (scripts/dev/deploy-backend.sh enforces this).
+  BookingInvitationScheduleState:
+    Type: String
+    AllowedValues: [ENABLED, DISABLED]
+    Default: DISABLED
+    Description: Keep invitation selection and promotion off until separately authorized.
+  BookingInvitationDeliveryEnabled:
+    Type: String
+    AllowedValues: [disabled, authorized]
+    Default: disabled
+    Description: Additional invitation send gate; requires separate live-SMS authorization.
 
 Conditions:
   UsePermissionsBoundary: !Not [!Equals [!Ref PermissionsBoundaryArn, '']]
@@ -443,6 +453,7 @@ Resources:
           SCHEDULING_TABLE_NAME: !Ref SchedulingTable
           BUSINESS_ID: !Ref BusinessId
           SMS_SEND_ENABLED: !Ref SmsSendEnabled
+          BOOKING_INVITATION_DELIVERY_ENABLED: !Ref BookingInvitationDeliveryEnabled
           TWILIO_AUTH_TOKEN_PARAM: !Sub '/scheduling/${Environment}/twilio/auth-token'
           TWILIO_ACCOUNT_SID: !Ref TwilioAccountSid
           TWILIO_BUSINESS_NUMBER: !Ref TwilioBusinessNumber
@@ -534,6 +545,37 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub '/aws/lambda/${OutboxDispatchFunction}'
+      RetentionInDays: 30
+  BookingInvitationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: scheduling.workers.booking_invitations.handler
+      Timeout: 60
+      Environment:
+        Variables:
+          SCHEDULING_TABLE_NAME: !Ref SchedulingTable
+          BUSINESS_ID: !Ref BusinessId
+          SMS_SEND_ENABLED: !Ref SmsSendEnabled
+          BOOKING_INVITATION_SELECTION_ENABLED: !Ref BookingInvitationDeliveryEnabled
+          BOOKING_INVITATION_DELIVERY_ENABLED: !Ref BookingInvitationDeliveryEnabled
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:ConditionCheckItem]
+              Resource: !GetAtt SchedulingTable.Arn
+            - Effect: Allow
+              Action: [dynamodb:Query]
+              Resource: !GetAtt SchedulingTable.Arn
+      Events:
+        Sweep:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 minute)
+            State: !Ref BookingInvitationScheduleState
+  BookingInvitationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${BookingInvitationFunction}'
       RetentionInDays: 30
   NoteRetentionFunction:
     Type: AWS::Serverless::Function

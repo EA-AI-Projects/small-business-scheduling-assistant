@@ -210,6 +210,7 @@ schedule_parameter() {
     NoteRetentionFunctionDaily) printf 'NoteRetentionScheduleState' ;;
     SmsRetentionFunctionDaily) printf 'SmsRetentionScheduleState' ;;
     OutboxDispatchFunctionSweep) printf 'OutboxDispatchScheduleState' ;;
+    BookingInvitationFunctionSweep) printf 'BookingInvitationScheduleState' ;;
     *) printf '' ;;
   esac
 }
@@ -357,6 +358,11 @@ CHANGED_PARAMS="$(jq -r --argjson live "${LIVE_PARAMS}" --argjson allowed "${ALL
 if [[ -n "${CHANGED_PARAMS}" ]]; then
   die "refusing: parameters would change that were not given with --param (names only): ${CHANGED_PARAMS}"
 fi
+INVITATION_TARGET="$(jq -r '[.Parameters[] | select(.ParameterKey == "BookingInvitationDeliveryEnabled") | .ParameterValue] | first // "disabled"' <<<"${DESCRIPTION}")"
+if [[ "${INVITATION_TARGET}" == "authorized" ]]; then
+  [[ "${LIVE_SMS_AUTH}" -eq 1 ]] || die "refusing: BookingInvitationDeliveryEnabled=authorized needs separate live-SMS authorization"
+  [[ "$(param_value BookingInvitationDeliveryEnabled)" == "authorized" ]] || die "refusing: pass --param BookingInvitationDeliveryEnabled=authorized explicitly"
+fi
 info "Parameters: unchanged from the live stack."
 
 # Schedule guard: a deploy must never silently change an EventBridge rule's state.
@@ -417,7 +423,7 @@ if [[ -n "${RULE_ROWS}" ]]; then
       fi
     fi
     info "  ${logical} [${action}]: ${live_state} -> ${target_state}${note}"
-    if [[ -n "${param}" && "${param}" == "OutboxDispatchScheduleState" && "${target_state}" == "ENABLED" && "${LIVE_SMS_AUTH}" -ne 1 ]]; then
+    if [[ -n "${param}" && ( "${param}" == "OutboxDispatchScheduleState" || "${param}" == "BookingInvitationScheduleState" ) && "${target_state}" == "ENABLED" && "${LIVE_SMS_AUTH}" -ne 1 ]]; then
       SMS_AUTH_MISSING="${SMS_AUTH_MISSING:+${SMS_AUTH_MISSING}, }${param}"
     fi
   done <<<"${RULE_ROWS}"
