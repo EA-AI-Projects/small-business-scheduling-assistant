@@ -94,6 +94,8 @@ Owns all business rules and state transitions:
 
 ### 3.4 Owner notification and reply handling
 
+For the future scheduled booking invitations in [CONVERSATION.md](CONVERSATION.md#scheduled-booking-invitations-249), keep selection outside the LLM and the ordinary inbound conversation handler. A scheduled worker uses owner settings and current confirmed appointments, writes an idempotent per-client invitation intent, and retains the last successful invitation time. The sender rechecks current eligibility, consent, opt-out, verified phone, and appointment state before provider handoff; suppressed intents are terminal. Replies use the existing booking flow. Keep this worker disabled until the disclosure, campaign, sender identity, and live-SMS prerequisites in [A2P_REGISTRATION.md](A2P_REGISTRATION.md#booking-invitations-249) are resolved.
+
 - Send concise SMS notifications for pending requests and cancellations.
 - Include a unique, non-guessable or otherwise securely scoped request reference when needed to disambiguate concurrent requests.
 - Resolve owner replies against a pending action. If more than one action matches, ask the owner to select/clarify; do not mutate state.

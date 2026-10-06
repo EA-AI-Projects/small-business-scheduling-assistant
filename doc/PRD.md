@@ -92,6 +92,12 @@ An AI-assisted SMS interface that identifies intent, gathers required details, e
 - Do not proactively message other clients about newly available time in the MVP.
 - Rescheduling is handled as a new time request tied to the client. Keep the original confirmed appointment until the replacement is approved; a declined or expired replacement leaves it unchanged. Approval swaps them atomically. The owner confirmed this rule in issue #3. A plain-language reschedule ("Can I move Thursday to Friday?") offers replacement times the same way as a new booking; picking one creates the pending replacement.
 
+### 6.4.1 Owner-configured booking invitations (#248, #249; future work)
+
+The owner may enable a scheduled invitation and choose its local day and time and a one- or two-week lookahead. At each run, consider active clients individually. Invite a client only if they have **no confirmed appointment** from the run instant through the end of the selected lookahead. A pending request does not count as a confirmed appointment. This is a targeted eligibility rule; there is no all-clients blast. At most one invitation may be sent to a client in a lookahead-length interval measured from that client's previous invitation. Changing the schedule or lookahead does not erase the previous-invitation limit. See [CONVERSATION.md](CONVERSATION.md#scheduled-booking-invitations-249) for exact boundaries, examples, and send-time checks.
+
+This is a future feature, not authorization to send invitations. The current public consent script and the known approved A2P campaign material do not establish invitation coverage. Resolve and record the disclosure and campaign requirements, approved sender identity, and separate live-SMS authorization before enabling it; see [A2P_REGISTRATION.md](A2P_REGISTRATION.md#booking-invitations-249).
+
 ### 6.5 SMS conversation behavior
 
 - Support natural-language requests for availability, booking, cancellation, and rescheduling. The language model resolves relative dates and windows ("tomorrow", "Friday afternoon", "this week") into a candidate day range; the backend checks the booking horizon, holidays, working hours, and existing visits before offering times.
