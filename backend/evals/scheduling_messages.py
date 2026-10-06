@@ -43,6 +43,7 @@ class Case:
     message: str
     references: tuple[str, ...]
     expect: Callable[[dict[str, Any]], bool]
+    calendar_answer: str | None = None  # The open calendar answer, for follow-ups.
 
 
 def clarifies(proposal: dict[str, Any]) -> bool:
@@ -75,6 +76,33 @@ def no_reference(proposal: dict[str, Any]) -> bool:
     return proposal["request_reference"] is None and proposal["date_text"] is None
 
 
+THIS_WEEK = ("2026-09-28", "2026-10-04")
+NEXT_WEEK = ("2026-10-05", "2026-10-11")
+SHOWN_THIS_WEEK = "2026-09-28 to 2026-10-04; statuses: confirmed, pending; view: list"
+
+
+def calendar(span: tuple[str, str] | None | str = "any", statuses: set[str] | None | str = "any",
+             view: str | None = "any") -> Callable[[dict[str, Any]], bool]:
+    """A calendar_question with the given range, statuses, and view ("any" skips a check;
+    None requires the field left unset so the backend keeps the shown value)."""
+    def check(proposal: dict[str, Any]) -> bool:
+        if (proposal["intent"] != "calendar_question" or proposal["needs_clarification"]
+                or not no_reference(proposal)):
+            return False
+        if span != "any" and (proposal["date_from"], proposal["date_to"]) != (
+                span if span is not None else (None, None)):
+            return False
+        if statuses != "any" and (set(proposal["statuses"] or ()) or None) != statuses:
+            return False
+        return view == "any" or proposal["view"] == view
+    return check
+
+
+def this_week(proposal: dict[str, Any]) -> bool:
+    """This week from Monday, or from today (the same day here)."""
+    return calendar(THIS_WEEK)(proposal)
+
+
 CASES = (
     Case("invalid-date", "client", "Book me February 30 at 2pm.", (), clarifies),
     Case("tomorrow", "client", "Hi. Do you have availability for tomorrow?", (),
@@ -101,11 +129,47 @@ CASES = (
          and proposal["intent"] == "owner_decision"
          and proposal["request_reference"] == "a101a101"
          and proposal["owner_decision"] == "approve"),
+    # Client calendar questions (#241): the model reads any wording or language; the backend
+    # answers from the client's own visits. Cases 1-3 are the reported screenshot texts.
+    Case("screenshot-1-bookings-this-week", "client", "do I have any bookings for this week?",
+         TWO_REFS, this_week),
+    Case("screenshot-2-confirmed-already", "client",
+         "Do I have any confirmed bookings already?  I'm trying to find out when the "
+         "cleaners are coming", TWO_REFS,
+         lambda proposal: calendar(statuses={"confirmed"})(proposal)
+         and (proposal["date_from"], proposal["date_to"]) in ((None, None), THIS_WEEK)
+         or calendar(None, {"confirmed"})(proposal),
+         SHOWN_THIS_WEEK),
+    Case("screenshot-3-summary", "client", "I want a summary of my itinerary", TWO_REFS,
+         lambda proposal: calendar(view="list")(proposal) or calendar(view=None)(proposal),
+         SHOWN_THIS_WEEK),
+    Case("count-confirmed-next-week", "client", "How many confirmed visits next week?",
+         TWO_REFS, calendar(NEXT_WEEK, {"confirmed"}, "count")),
+    Case("spanish-question", "client", "¿Tengo alguna cita esta semana?", TWO_REFS,
+         this_week),
+    Case("spanish-follow-up", "client", "¿Y la próxima semana?", TWO_REFS,
+         calendar(NEXT_WEEK), SHOWN_THIS_WEEK),
+    Case("follow-up-only-confirmed", "client", "Just the confirmed ones", TWO_REFS,
+         lambda proposal: calendar(None, {"confirmed"})(proposal)
+         or calendar(THIS_WEEK, {"confirmed"})(proposal), SHOWN_THIS_WEEK),
+    # A fresh question with no day, inside a calendar conversation, covers every visit.
+    Case("all-upcoming-after-a-week", "client", "Show me all my upcoming visits", TWO_REFS,
+         lambda proposal: calendar(None)(proposal)
+         and proposal["range_scope"] == "all_upcoming", SHOWN_THIS_WEEK),
+    # Open times keep the availability offer (owner decision on #240).
+    Case("open-times", "client", "What times are open Friday?", TWO_REFS,
+         asks_for_day("2026-10-02")),
+    Case("request-during-calendar-talk", "client", "Can I get a cleaning Friday instead?",
+         TWO_REFS, asks_for_day("2026-10-02"), SHOWN_THIS_WEEK),
+    Case("ambiguous-booking", "client", "Booking for Friday?", TWO_REFS,
+         lambda proposal: proposal["intent"] in ("clarify_booking", "clarify")
+         and no_reference(proposal)),
 )
 
 
 def context_for(case: Case, today: date = TODAY) -> MessageContext:
-    return MessageContext(SenderRole(case.actor), today, TIMEZONE, case.references)
+    return MessageContext(SenderRole(case.actor), today, TIMEZONE, case.references,
+                          calendar_answer=case.calendar_answer)
 
 
 def request_payload(case: Case, today: date = TODAY) -> dict[str, Any]:
@@ -162,7 +226,9 @@ def evaluate(case: Case, key: str) -> dict[str, Any]:
     return {"case": case.name, "passed": passed,
             "needs_clarification": proposal["needs_clarification"],
             "intent": proposal["intent"], "question": proposal["question"],
-            **{name: proposal[name] for name in ACTION_FIELDS if proposal[name] is not None}}
+            **{name: proposal[name] for name in (*ACTION_FIELDS, "statuses", "view",
+                                                 "range_scope")
+               if proposal[name] is not None}}
 
 
 def safe_preview_message(message: str) -> bool:

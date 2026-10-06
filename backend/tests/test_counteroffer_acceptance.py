@@ -289,6 +289,10 @@ def test_ambiguous_reply_keeps_the_offer_open(world: World) -> None:
 
 
 def test_a_calendar_question_keeps_the_offer_open(world: World) -> None:
+    model = ScriptedModel()
+    model.proposal = MessageProposal("calendar_question", None, None, None, False,
+                                     "2026-09-28", "2026-10-04")
+    world.service._interpreter = model
     world.offered()
     answer = world.client("Do I have bookings this week?")
     assert "pending owner approval, not confirmed yet" in answer.text

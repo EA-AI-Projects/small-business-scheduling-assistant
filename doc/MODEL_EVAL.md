@@ -27,7 +27,7 @@ detect every kind of private information.
 
 For local tests, a password manager can supply the value when creating `.env`; no secret value or vault item reference belongs in this repository. Add future local-only variables to the ignored file as their test harnesses need them. The deployed Twilio integration uses an environment-scoped SSM SecureString and has separate SMS authorization gates; a local `.env` does not configure or authorize live messaging.
 
-The script sends nine synthetic texts with no real people, phones, addresses, or access codes, using the production instructions, tool schema, and model input from `scheduling.adapters.openai_messages`. "Today" is fixed at Monday 2026-09-28. Since #60, the model resolves relative dates instead of refusing them, so the checks are:
+The script sends synthetic texts (nine from #24 and #60, plus the #241 calendar cases below) with no real people, phones, addresses, or access codes, using the production instructions, tool schema, and model input from `scheduling.adapters.openai_messages`. "Today" is fixed at Monday 2026-09-28. Since #60, the model resolves relative dates instead of refusing them, so the checks are:
 
 - An impossible date (February 30) must clarify with every action field null.
 - "Tomorrow" must resolve to 2026-09-29. "Next Friday afternoon" may clarify, or resolve to one Friday (Oct 2 or Oct 9) within 12:00–17:00. "Tuesday around 3" may clarify, or resolve to 2026-09-29 within 14:00–16:00.
@@ -38,6 +38,18 @@ The script sends nine synthetic texts with no real people, phones, addresses, or
 The model sees one `propose_message` function. The script provides no scheduling write tool and does not call the calendar service. A passing run does not replace backend validation: offers write nothing, and only a deterministic reply to a stored offer or confirmation changes the calendar.
 
 The response is a JSON summary of the model's proposals. A failed clarification case returns a nonzero exit code and prevents selecting the candidate as the pilot model. Store the summary and model ID in #24 after the live synthetic run; do not store the API key.
+
+### Client calendar questions (#241)
+
+Since #241 the model, not keyword rules, decides whether a client text is a calendar question (owner decision, 2026-10-05). The script adds ten client cases. Follow-up cases send the same "Last calendar answer" line the service sends:
+- The three texts from the #241 screenshot must be `calendar_question`. The second must ask only about confirmed visits, and the third is a summary.
+- "How many confirmed visits next week?" must be a confirmed-only count for 2026-10-05 to 2026-10-11.
+- A Spanish question and a Spanish follow-up ("¿Y la próxima semana?") must be calendar questions with the right range.
+- "Just the confirmed ones" after an answer must change only the statuses.
+- "What times are open Friday?" and "Can I get a cleaning Friday instead?" must stay availability requests.
+- "Booking for Friday?" must clarify.
+
+These cases have not been run against the live model yet. Record the first run's result below before relying on them.
 
 ## Current result
 
