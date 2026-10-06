@@ -1,12 +1,13 @@
 """Durable per-sender offer and confirmation memory in the business table.
 
-One item per sender holds only offered start instants or one appointment ID,
-never message text. Reads enforce expiry; DynamoDB TTL on ``expires_at_epoch``
+One item per sender holds only offered start instants, one appointment ID, or
+the last calendar question's day range and statuses, never message text or
+visit details. Reads enforce expiry; DynamoDB TTL on ``expires_at_epoch``
 removes stale items later. A clear is conditional on the state ID so an older
 reply cannot erase a newer offer.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from hashlib import sha256
 from typing import Any, Protocol
 
@@ -43,6 +44,10 @@ class DynamoConversationStates:
             item.get("appointment_id", {}).get("S"),
             int(item["appointment_version"]["N"]) if "appointment_version" in item else None,
             item.get("client_id", {}).get("S"),
+            date.fromisoformat(item["calendar_first"]["S"]) if "calendar_first" in item else None,
+            date.fromisoformat(item["calendar_last"]["S"]) if "calendar_last" in item else None,
+            tuple(value["S"] for value in item.get("calendar_statuses", {}).get("L", ())),
+            item.get("calendar_view", {}).get("S"),
         )
 
     def put_state(self, state: ConversationState) -> None:
@@ -62,6 +67,13 @@ class DynamoConversationStates:
             item["appointment_version"] = {"N": str(state.appointment_version)}
         if state.client_id is not None:
             item["client_id"] = {"S": state.client_id}
+        if state.calendar_first is not None and state.calendar_last is not None:
+            item["calendar_first"] = {"S": state.calendar_first.isoformat()}
+            item["calendar_last"] = {"S": state.calendar_last.isoformat()}
+        if state.calendar_statuses:
+            item["calendar_statuses"] = {"L": [{"S": value} for value in state.calendar_statuses]}
+        if state.calendar_view is not None:
+            item["calendar_view"] = {"S": state.calendar_view}
         checks: list[dict[str, Any]] = []
         if state.client_id is not None:
             checks.append({"ConditionCheck": {

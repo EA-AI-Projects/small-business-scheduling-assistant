@@ -25,6 +25,7 @@ class PromptKind(StrEnum):
     RESCHEDULE_DAY = "reschedule_day"  # Which day to move a known visit to.
     CHOOSE_CANCEL = "choose_cancel"  # Which of several listed visits to cancel.
     CHOOSE_MOVE = "choose_move"  # Which of several listed visits to move.
+    CALENDAR = "calendar"  # The last calendar question's range and statuses, for follow-ups.
 
 
 CHOICE_KINDS = frozenset({PromptKind.OFFER, PromptKind.CHOOSE_CANCEL, PromptKind.CHOOSE_MOVE})
@@ -42,6 +43,12 @@ class ConversationState:
     appointment_id: str | None = None
     appointment_version: int | None = None
     client_id: str | None = None
+    # A calendar question (#241): its day range (both None for every upcoming visit),
+    # the statuses asked about, and list or count. Never the visits themselves.
+    calendar_first: date | None = None
+    calendar_last: date | None = None
+    calendar_statuses: tuple[str, ...] = ()
+    calendar_view: str | None = None
 
     def __post_init__(self) -> None:
         if self.created_at.tzinfo is None or self.expires_at.tzinfo is None:
@@ -52,6 +59,16 @@ class ConversationState:
             raise ValueError("Offered starts must be timezone-aware")
         if self.kind in CHOICE_KINDS and not 0 < len(self.options) <= MAX_OPTIONS:
             raise ValueError("A list of choices holds one to five options")
+        calendar = (self.calendar_first, self.calendar_last, self.calendar_statuses,
+                    self.calendar_view)
+        if self.kind == PromptKind.CALENDAR:
+            if (self.options or self.appointment_id is not None or not self.calendar_statuses
+                    or self.calendar_view is None
+                    or (self.calendar_first is None) != (self.calendar_last is None)):
+                raise ValueError("A calendar question holds a range and statuses only")
+            return
+        if calendar != (None, None, (), None):
+            raise ValueError("Only a calendar question holds a calendar range")
         if self.kind not in CHOICE_KINDS and (self.options or self.appointment_id is None):
             raise ValueError("A confirmation prompt names one appointment and no options")
         if self.kind in (PromptKind.CHOOSE_CANCEL, PromptKind.CHOOSE_MOVE) and \
