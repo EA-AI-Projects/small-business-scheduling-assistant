@@ -32,6 +32,16 @@ def handler(event: dict[str, Any], _context: object) -> dict[str, list[dict[str,
     require_live_sms_authorization(dict(os.environ))
     table = os.environ["SCHEDULING_TABLE_NAME"]
     dynamo = boto3.client("dynamodb")
+
+    def invitation_enabled() -> bool:
+        if os.environ.get("BOOKING_INVITATION_DELIVERY_ENABLED") != "authorized":
+            return False
+        try:
+            require_live_sms_authorization(dict(os.environ))
+        except RuntimeError:
+            return False
+        return True
+
     sender = TwilioSmsSender(
         Client(
             os.environ["TWILIO_ACCOUNT_SID"],
@@ -41,6 +51,7 @@ def handler(event: dict[str, Any], _context: object) -> dict[str, list[dict[str,
         os.environ["BUSINESS_ID"], os.environ["TWILIO_BUSINESS_NUMBER"],
         os.environ["OWNER_NUMBER"], status_callback=os.environ.get("TWILIO_STATUS_URL"),
         counteroffers=DynamoCounterofferStore(dynamo, table),
+        invitation_send_enabled=invitation_enabled,
     )
     consumer = ConsumeService(DynamoOutboxStore(dynamo, table), sender,
                               lambda: datetime.now(UTC))

@@ -28,6 +28,20 @@ class InvitationIntent:
 
 
 @dataclass(frozen=True)
+class StoredInvitation:
+    intent: InvitationIntent
+    state: str
+    provider_id: str | None = None
+
+
+INVITATION_TEMPLATE = "booking_invitation"
+
+
+def invitation_outbox_id(intent_id: str) -> str:
+    return f"booking-invitation#{intent_id}"
+
+
+@dataclass(frozen=True)
 class SelectionReport:
     scheduled: bool
     examined: int
@@ -45,12 +59,80 @@ class InvitationRepository(Protocol):
                            settings_version: int, calendar_revision: int,
                            profile: ClientProfile) -> bool: ...
     def complete_invitation(self, intent: InvitationIntent,
-                            handed_off_at: datetime | None) -> bool: ...
+                            handed_off_at: datetime | None,
+                            provider_id: str | None = None) -> bool: ...
+    def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None: ...
+    def read_last_invitation_sent(self, business_id: str, client_id: str) -> datetime | None: ...
+    def queued_invitations(self, business_id: str, limit: int = 100) -> tuple[StoredInvitation, ...]: ...
+    def promote_invitation(self, intent: InvitationIntent,
+                           settings_version: int, now: datetime) -> bool: ...
 
 
 class ConsentRepository(Protocol):
     def read_consent(self, business_id: str, phone_e164: str) -> ConsentEvidence | None: ...
     def is_opted_out(self, business_id: str, phone_e164: str) -> bool: ...
+
+
+class InvitationEligibilityRepository(Protocol):
+    def read_outreach(self, business_id: str) -> OutreachRecord: ...
+    def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None: ...
+    def read_confirmed_for_client(self, business_id: str, client_id: str,
+                                  run_at: datetime, end_at: datetime) -> tuple[int, tuple[Appointment, ...]]: ...
+    def read_last_invitation_sent(self, business_id: str, client_id: str) -> datetime | None: ...
+
+
+def invitation_problem(intent: InvitationIntent, records: InvitationEligibilityRepository,
+                       consent: ConsentRepository, now: datetime) -> str | None:
+    """Safe reason code from authoritative state immediately before handoff."""
+    if not records.read_outreach(intent.business_id).settings.enabled:
+        return "DISABLED"
+    if now.tzinfo is None or now.astimezone(UTC) > intent.window_end_at:
+        return "WINDOW_EXPIRED"
+    profile = records.read_profile(intent.business_id, intent.client_id)
+    if profile is None or not profile.active:
+        return "CLIENT_UNAVAILABLE"
+    if (profile.phone_verified_at != intent.verified_at
+            or sha256(profile.phone_e164.encode()).hexdigest() != intent.phone_hash):
+        return "PHONE_CHANGED"
+    evidence = consent.read_consent(intent.business_id, profile.phone_e164)
+    if (evidence is None or evidence.business_id != intent.business_id
+            or evidence.client_id != intent.client_id or evidence.method != "in_person"
+            or evidence.agreed_at != intent.verified_at):
+        return "CONSENT_REQUIRED"
+    if consent.is_opted_out(intent.business_id, profile.phone_e164):
+        return "OPTED_OUT"
+    _, confirmed = records.read_confirmed_for_client(
+        intent.business_id, intent.client_id, intent.run_at, intent.window_end_at)
+    if confirmed:
+        return "CONFIRMED_BOOKING"
+    last_sent = records.read_last_invitation_sent(intent.business_id, intent.client_id)
+    if last_sent is not None and last_sent > intent.repeat_cutoff_at:
+        return "REPEAT_LIMIT"
+    return None
+
+
+class InvitationPromoter:
+    """Move eligible dormant intents into the existing outbox, without sending."""
+
+    def __init__(self, records: InvitationRepository, consent: ConsentRepository) -> None:
+        self._records = records
+        self._consent = consent
+
+    def run(self, business_id: str, now: datetime) -> dict[str, int]:
+        counts: Counter[str] = Counter()
+        for stored in self._records.queued_invitations(business_id):
+            intent = stored.intent
+            reason = invitation_problem(intent, self._records, self._consent, now)
+            if reason is not None:
+                if self._records.complete_invitation(intent, None):
+                    counts[f"suppressed_{reason}"] += 1
+                continue
+            settings_version = self._records.read_outreach(business_id).version
+            if self._records.promote_invitation(intent, settings_version, now):
+                counts["promoted"] += 1
+            else:
+                counts["raced"] += 1
+        return dict(counts)
 
 
 def _local_instant(wall: datetime, zone: ZoneInfo) -> datetime:

@@ -9,6 +9,14 @@ from zoneinfo import ZoneInfo
 
 from scheduling.domain.appointments import Appointment, ReplacementGuard
 from scheduling.domain.availability import AvailabilityPolicy
+from scheduling.domain.booking_invitations import (
+    INVITATION_TEMPLATE,
+    InvitationIntent,
+    StoredInvitation,
+    invitation_outbox_id,
+    invitation_problem,
+)
+from scheduling.domain.booking_outreach import OutreachRecord
 from scheduling.domain.calendar import CalendarSnapshot, CalendarStatus
 from scheduling.domain.client_records import ClientProfile, RecordConflict, RecordNotFound
 from scheduling.domain.holds import COUNTEROFFER_REQUEST_TEMPLATE
@@ -49,12 +57,21 @@ class SchedulingRecords(Protocol):
     def read_appointment(self, appointment_id: str) -> Appointment | None: ...
     def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None: ...
     def read_policy(self, business_id: str) -> AvailabilityPolicy: ...
+    def read_outreach(self, business_id: str) -> OutreachRecord: ...
+    def read_confirmed_for_client(self, business_id: str, client_id: str,
+                                  run_at: datetime, end_at: datetime) -> tuple[int, tuple[Appointment, ...]]: ...
+    def read_last_invitation_sent(self, business_id: str, client_id: str) -> datetime | None: ...
     def read_calendar(self, business_id: str) -> CalendarSnapshot: ...
     def read_block(self, business_id: str, block_id: str) -> UnavailableBlock | None: ...
     def read_replacement_guard(
         self, business_id: str, original_id: str) -> ReplacementGuard | None: ...
     def acquire_client_send(self, business_id: str, client_id: str) -> str: ...
     def release_client_send(self, business_id: str, client_id: str, token: str) -> None: ...
+    def read_invitation(self, business_id: str, intent_id: str) -> StoredInvitation | None: ...
+    def claim_invitation_handoff(self, intent: InvitationIntent) -> bool: ...
+    def complete_invitation(self, intent: InvitationIntent,
+                            handed_off_at: datetime | None,
+                            provider_id: str | None = None) -> bool: ...
 
 
 class TwilioMessages(Protocol):
@@ -69,7 +86,8 @@ class TwilioSmsSender:
                  owner_number: str, *, timezone: str = "America/Los_Angeles",
                  status_callback: str | None = None,
                  clock: Callable[[], datetime] | None = None,
-                 counteroffers: CounterofferStore | None = None) -> None:
+                 counteroffers: CounterofferStore | None = None,
+                 invitation_send_enabled: Callable[[], bool] | None = None) -> None:
         if not business_id:
             raise ValueError("Business ID is required")
         self._messages = messages
@@ -87,6 +105,7 @@ class TwilioSmsSender:
         self._status_callback = status_callback
         self._clock = clock or (lambda: datetime.now(UTC))
         self._counteroffers = counteroffers
+        self._invitation_send_enabled = invitation_send_enabled or (lambda: False)
 
     def deliver(self, record: OutboxRecord) -> str:
         if record.business_id != self._business_id:
@@ -97,6 +116,8 @@ class TwilioSmsSender:
             return self._deliver_reply(record)
         if record.template == WELCOME_TEMPLATE:
             return self._deliver_welcome(record)
+        if record.template == INVITATION_TEMPLATE:
+            return self._deliver_invitation(record)
         if record.template == COUNTEROFFER_TEMPLATE:
             return self._deliver_counteroffer(record)
         if record.template == COUNTEROFFER_FAILED_TEMPLATE:
@@ -122,6 +143,59 @@ class TwilioSmsSender:
         return self._send(record, to, body,
                           appointment.client_id if record.recipient == "client"
                           and appointment is not None else None)
+
+    def _deliver_invitation(self, record: OutboxRecord) -> str:
+        stored = self._records.read_invitation(record.business_id, record.entity_id)
+        if (stored is None or record.recipient != "client" or record.event_version != 0
+                or record.outbox_id != invitation_outbox_id(record.entity_id)):
+            raise PermanentDeliveryFailure("INVITATION_UNAVAILABLE")
+        intent = stored.intent
+        if stored.state == "SENT" and stored.provider_id:
+            return stored.provider_id  # Outbox completion retry after successful handoff.
+        if stored.state != "OUTBOX":
+            raise PermanentDeliveryFailure("INVITATION_NOT_SENDABLE")
+
+        def check() -> None:
+            if not self._invitation_send_enabled():
+                raise PermanentDeliveryFailure("INVITATION_SEND_DISABLED")
+            reason = invitation_problem(intent, self._records, self._consent, self._clock())
+            if reason is not None:
+                raise PermanentDeliveryFailure(f"INVITATION_{reason}")
+
+        try:
+            check()
+        except PermanentDeliveryFailure:
+            self._records.complete_invitation(intent, None)
+            raise
+        if not self._records.claim_invitation_handoff(intent):
+            raise PermanentDeliveryFailure("INVITATION_NOT_SENDABLE")
+        profile = self._records.read_profile(intent.business_id, intent.client_id)
+        if profile is None:
+            self._records.complete_invitation(intent, None)
+            raise PermanentDeliveryFailure("INVITATION_CLIENT_UNAVAILABLE")
+        to = normalize_phone(profile.phone_e164)
+        window = "one week" if intent.lookahead_weeks == 1 else "two weeks"
+        body = ("Smart Scheduling Assistant: Would you like to book a cleaning visit in the next "
+                f"{window}? "
+                "Reply with a day and time that works for you, or STOP to opt out.")
+        try:
+            provider_id = self._send(record, to, body, intent.client_id, pre_send=check)
+        except PermanentDeliveryFailure:
+            self._records.complete_invitation(intent, None)
+            raise
+        except DeliveryFailure as exc:
+            if exc.code == "CLIENT_SEND_BUSY":
+                # The client lock was held before any provider call. Suppress this
+                # run and release its invitation guard; a later scheduled run may
+                # select the client again when the other send has finished.
+                self._records.complete_invitation(intent, None)
+                raise PermanentDeliveryFailure("INVITATION_CLIENT_SEND_BUSY") from exc
+            # Provider acceptance is uncertain. Keep the durable SENDING claim and
+            # per-client guard for manual reconciliation; never retry this text.
+            raise PermanentDeliveryFailure("INVITATION_HANDOFF_UNCERTAIN") from exc
+        if not self._records.complete_invitation(intent, self._clock(), provider_id):
+            raise PermanentDeliveryFailure("INVITATION_HANDOFF_RECONCILE")
+        return provider_id
 
     def _deliver_welcome(self, record: OutboxRecord) -> str:
         """First enrollment text: only to the phone verified by the consent that queued it."""
@@ -213,7 +287,8 @@ class TwilioSmsSender:
                           receipt.client_id if receipt.role == SenderRole.CLIENT else None)
 
     def _send(self, record: OutboxRecord, to: str, body: str,
-              client_id: str | None = None) -> str:
+              client_id: str | None = None,
+              pre_send: Callable[[], None] | None = None) -> str:
         # Synthetic test numbers (555-0100 to 555-0199 in any area code) never reach Twilio.
         if FICTIONAL_NUMBER.fullmatch(to):
             raise PermanentDeliveryFailure("FICTIONAL_NUMBER")
@@ -231,8 +306,12 @@ class TwilioSmsSender:
             except RecordConflict as exc:
                 raise DeliveryFailure("CLIENT_SEND_BUSY") from exc
         evidence_written = False
+        provider_started = False
         try:
+            if pre_send is not None:
+                pre_send()
             try:
+                provider_started = True
                 result = self._messages.create(**kwargs)
             except Exception as exc:
                 # Never leak provider diagnostics, body, or destination to the outbox.
@@ -246,7 +325,7 @@ class TwilioSmsSender:
         finally:
             # A timeout or evidence-write failure may follow provider acceptance.
             # Keep the claim until an operator reconciles that uncertain send.
-            if evidence_written and token is not None and client_id is not None:
+            if (not provider_started or evidence_written) and token is not None and client_id is not None:
                 self._records.release_client_send(record.business_id, client_id, token)
 
     def _render(self, record: OutboxRecord, appointment: Appointment | None,

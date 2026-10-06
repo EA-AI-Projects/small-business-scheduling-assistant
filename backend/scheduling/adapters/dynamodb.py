@@ -9,7 +9,12 @@ from uuid import uuid4
 from scheduling.adapters.outbox_aws import due_keys
 from scheduling.domain.appointments import Appointment, ReplacementGuard
 from scheduling.domain.availability import AvailabilityPolicy, HolidayCalendar, LocalWindow
-from scheduling.domain.booking_invitations import InvitationIntent
+from scheduling.domain.booking_invitations import (
+    INVITATION_TEMPLATE,
+    InvitationIntent,
+    StoredInvitation,
+    invitation_outbox_id,
+)
 from scheduling.domain.booking_outreach import OutreachRecord, OutreachSettings
 from scheduling.domain.calendar import CalendarEvent, CalendarSnapshot, CalendarStatus
 from scheduling.domain.client_records import (
@@ -359,13 +364,111 @@ class DynamoDBCalendarRepository:
             return False
         return True
 
+    def read_invitation(self, business_id: str, intent_id: str) -> StoredInvitation | None:
+        item = self._get(self._business_key(business_id, f"INVITATION#{intent_id}"))
+        if item is None:
+            return None
+        intent = InvitationIntent(
+            business_id, item["client_id"]["S"], intent_id,
+            datetime.fromisoformat(item["run_at"]["S"]),
+            datetime.fromisoformat(item["window_end_at"]["S"]),
+            datetime.fromisoformat(item["repeat_cutoff_at"]["S"]),
+            item["phone_hash"]["S"],
+            datetime.fromisoformat(item["verified_at"]["S"]),
+            int(item["lookahead_weeks"]["N"]),
+        )
+        return StoredInvitation(intent, item["state"]["S"],
+                                item.get("provider_id", {}).get("S"))
+
+    def read_last_invitation_sent(self, business_id: str, client_id: str) -> datetime | None:
+        guard = self._get(self._business_key(business_id,
+            f"INVITATION_GUARD#{sha256(client_id.encode()).hexdigest()}"))
+        if guard is None or "last_sent_at" not in guard:
+            return None
+        return datetime.fromisoformat(guard["last_sent_at"]["S"])
+
+    def queued_invitations(self, business_id: str, limit: int = 100) -> tuple[StoredInvitation, ...]:
+        items = self._query(business_id, "PK = :pk AND begins_with(SK, :prefix)",
+                            {":prefix": {"S": "INVITATION#"}})
+        return tuple(record for item in items
+                     if item.get("state", {}).get("S") == "QUEUED"
+                     and (record := self.read_invitation(
+                         business_id, item["SK"]["S"].removeprefix("INVITATION#")))
+                     is not None)[:limit]
+
+    def promote_invitation(self, intent: InvitationIntent,
+                           settings_version: int, now: datetime) -> bool:
+        """Move one dormant intent to the ordinary delivery outbox exactly once."""
+        outbox_id = invitation_outbox_id(intent.intent_id)
+        due = due_keys(DeliveryState.PENDING, now, outbox_id)
+        try:
+            self._client.transact_write_items(TransactItems=[
+                {"ConditionCheck": {"TableName": self._table,
+                    "Key": self._business_key(intent.business_id,
+                        "SETTINGS#BOOKING_OUTREACH"),
+                    "ConditionExpression": "#version = :version",
+                    "ExpressionAttributeNames": {"#version": "version"},
+                    "ExpressionAttributeValues": {":version": {"N": str(settings_version)}}}},
+                {"Update": {"TableName": self._table,
+                    "Key": self._business_key(intent.business_id,
+                        f"INVITATION#{intent.intent_id}"),
+                    "UpdateExpression": "SET #state = :outbox",
+                    "ConditionExpression": "#state = :queued",
+                    "ExpressionAttributeNames": {"#state": "state"},
+                    "ExpressionAttributeValues": {":outbox": {"S": "OUTBOX"},
+                        ":queued": {"S": "QUEUED"}}}},
+                {"Put": {"TableName": self._table,
+                    "Item": {**self._business_key(intent.business_id,
+                        f"OUTBOX#{outbox_id}"), **due,
+                        "outbox_id": {"S": outbox_id},
+                        "entity_id": {"S": intent.intent_id},
+                        "client_id": {"S": intent.client_id},
+                        "recipient": {"S": "client"},
+                        "template": {"S": INVITATION_TEMPLATE},
+                        "event_version": {"N": "0"},
+                        "delivery_state": {"S": DeliveryState.PENDING.value},
+                        "created_at": {"S": _instant(now)},
+                        "next_attempt_at": {"S": _instant(now)},
+                        "dispatch_after": {"S": _instant(now)}},
+                    "ConditionExpression": "attribute_not_exists(PK)"}},
+            ])
+        except Exception as exc:
+            if not _record_transaction_conflict(exc):
+                raise
+            return False
+        return True
+
+    def claim_invitation_handoff(self, intent: InvitationIntent) -> bool:
+        try:
+            self._client.update_item(
+                TableName=self._table,
+                Key=self._business_key(intent.business_id,
+                    f"INVITATION#{intent.intent_id}"),
+                UpdateExpression="SET #state = :sending",
+                ConditionExpression="#state = :outbox",
+                ExpressionAttributeNames={"#state": "state"},
+                ExpressionAttributeValues={":sending": {"S": "SENDING"},
+                    ":outbox": {"S": "OUTBOX"}},
+            )
+        except Exception as exc:
+            response = getattr(exc, "response", {})
+            if isinstance(response, dict) and response.get("Error", {}).get("Code") == (
+                "ConditionalCheckFailedException"
+            ):
+                return False
+            raise
+        return True
+
     def complete_invitation(self, intent: InvitationIntent,
-                            handed_off_at: datetime | None) -> bool:
+                            handed_off_at: datetime | None,
+                            provider_id: str | None = None) -> bool:
         """Close a reserved intent; only a successful handoff advances repeat history."""
         if handed_off_at is not None and (
             handed_off_at.tzinfo is None or handed_off_at < intent.run_at
         ):
             raise ValueError("Handoff instant must be aware and after the run")
+        if (handed_off_at is None) != (provider_id is None):
+            raise ValueError("Successful handoff requires a provider ID")
         client_hash = sha256(intent.client_id.encode()).hexdigest()
         guard_update: dict[str, Any] = {
             "TableName": self._table,
@@ -385,14 +488,20 @@ class DynamoDBCalendarRepository:
                 {"Update": {"TableName": self._table,
                     "Key": self._business_key(intent.business_id,
                         f"INVITATION#{intent.intent_id}"),
-                    "UpdateExpression": "SET #state = :done, completed_at = :at",
-                    "ConditionExpression": "#state = :queued AND client_id = :client",
+                    "UpdateExpression": ("SET #state = :done, completed_at = :at" +
+                        (", provider_id = :provider" if provider_id else "")),
+                    "ConditionExpression": ("#state = :sending AND client_id = :client"
+                        if provider_id else
+                        "#state IN (:queued, :outbox, :sending) AND client_id = :client"),
                     "ExpressionAttributeNames": {"#state": "state"},
                     "ExpressionAttributeValues": {
                         ":done": {"S": "SENT" if handed_off_at else "SUPPRESSED"},
                         ":at": {"S": _instant(handed_off_at or datetime.now(UTC))},
-                        ":queued": {"S": "QUEUED"},
+                        ":sending": {"S": "SENDING"},
                         ":client": {"S": intent.client_id},
+                        **({":provider": {"S": provider_id}} if provider_id else {}),
+                        **({":queued": {"S": "QUEUED"},
+                            ":outbox": {"S": "OUTBOX"}} if not provider_id else {}),
                     }}},
                 {"Update": guard_update},
             ])

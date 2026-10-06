@@ -2,18 +2,29 @@
 
 from datetime import UTC, datetime, time, timedelta
 from hashlib import sha256
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
+
+import pytest
 
 from scheduling.adapters.dynamodb import DynamoDBCalendarRepository
 from scheduling.adapters.memory import InMemoryCalendarRepository
-from scheduling.domain.booking_invitations import InvitationSelector, scheduled_window
+from scheduling.adapters.sms_twilio import TwilioSmsSender
+from scheduling.domain.booking_invitations import (
+    InvitationPromoter,
+    InvitationSelector,
+    scheduled_window,
+)
 from scheduling.domain.booking_outreach import OutreachRecord, OutreachSettings, update_outreach
-from scheduling.domain.client_records import ClientRecordService, HomeSize
+from scheduling.domain.client_records import ClientRecordService, HomeSize, RecordConflict
+from scheduling.domain.conversation import ConversationService
+from scheduling.domain.conversation_state import InMemoryConversationStates
 from scheduling.domain.holds import CreateHold, HoldService
 from scheduling.domain.lifecycle import Action, ActorRole, AppointmentCommand, LifecycleService
+from scheduling.domain.outbox import PermanentDeliveryFailure
 from scheduling.domain.owner_calendar import OwnerAction, OwnerCalendarCommand, OwnerCalendarService
 from scheduling.domain.owner_policy import OwnerPolicyService
-from scheduling.domain.sms_ingress import ConsentEvidence
+from scheduling.domain.sms_ingress import ConsentEvidence, InboundReceipt, Keyword, SenderRole
 
 BUSINESS = "pilot"
 RUN = datetime(2026, 10, 19, 16, tzinfo=UTC)  # Monday 9:00 PDT
@@ -23,6 +34,7 @@ class Consent:
     def __init__(self) -> None:
         self.evidence: dict[str, ConsentEvidence] = {}
         self.stopped: set[str] = set()
+        self.outbound: list[str] = []
 
     def read_consent(self, business_id: str, phone_e164: str) -> ConsentEvidence | None:
         return self.evidence.get(f"{business_id}:{phone_e164}")
@@ -30,9 +42,28 @@ class Consent:
     def is_opted_out(self, business_id: str, phone_e164: str) -> bool:
         return f"{business_id}:{phone_e164}" in self.stopped
 
+    def record_outbound(self, business_id: str, phone_e164: str,
+                        provider_id: str, sent_at: datetime) -> None:
+        self.outbound.append(provider_id)
+
+
+class SafeRecords(InMemoryCalendarRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.send_claimed = False
+
+    def acquire_client_send(self, business_id: str, client_id: str) -> str:
+        assert not self.send_claimed
+        self.send_claimed = True
+        return "synthetic-lease"
+
+    def release_client_send(self, business_id: str, client_id: str, token: str) -> None:
+        assert token == "synthetic-lease"
+        self.send_claimed = False
+
 
 def setup() -> tuple[InMemoryCalendarRepository, Consent, InvitationSelector]:
-    records = InMemoryCalendarRepository()
+    records = SafeRecords()
     OwnerPolicyService(records, lambda: RUN).seed(BUSINESS, "owner", "seed")
     consent = Consent()
     selector = InvitationSelector(records, consent)
@@ -146,8 +177,10 @@ def test_sent_interval_and_suppression_survive_repeated_runs() -> None:
     enable(records, 2)
     assert selector.run(BUSINESS, RUN).queued == 1
     first = next(iter(records._invitation_intents.values()))
-    assert records.complete_invitation(first, RUN)
-    assert not records.complete_invitation(first, RUN)
+    assert records.promote_invitation(first, records.read_outreach(BUSINESS).version, RUN)
+    assert records.claim_invitation_handoff(first)
+    assert records.complete_invitation(first, RUN, "synthetic-provider-1")
+    assert not records.complete_invitation(first, RUN, "synthetic-provider-1")
     assert selector.run(BUSINESS, RUN).queued == 0
     next_week = RUN + timedelta(days=7)
     assert selector.run(BUSINESS, next_week).queued == 0
@@ -210,3 +243,211 @@ def test_durable_intent_transaction_is_separate_from_sms_outbox() -> None:
                  if action.get("Put", {}).get("Item", {}).get("SK", {}).get("S", "")
                  == f"INVITATION#{intent.intent_id}")
     assert "phone_e164" not in saved and "body" not in saved
+
+
+def test_promoted_outbox_keeps_client_link_for_batched_erasure() -> None:
+    class Client:
+        writes: list[dict[str, object]] | None = None
+
+        def transact_write_items(self, **kwargs: object) -> dict[str, object]:
+            self.writes = kwargs["TransactItems"]  # type: ignore[assignment]
+            return {}
+
+    records, consent, selector = setup()
+    client_id = client(records, consent, 302)
+    enable(records)
+    assert selector.run(BUSINESS, RUN).queued == 1
+    intent = next(iter(records._invitation_intents.values()))
+    fake = Client()
+    durable = DynamoDBCalendarRepository(fake, "synthetic-table")  # type: ignore[arg-type]
+    assert durable.promote_invitation(intent, 1, RUN)
+    assert fake.writes is not None
+    outbox = next(action["Put"]["Item"] for action in fake.writes
+                  if action.get("Put", {}).get("Item", {}).get("SK", {}).get("S", "")
+                  .startswith("OUTBOX#booking-invitation#"))
+    assert outbox["client_id"]["S"] == client_id
+    assert "phone_e164" not in outbox and "body" not in outbox
+
+
+def test_invitation_promotes_once_and_sender_uses_exact_copy() -> None:
+    records, consent, selector = setup()
+    client(records, consent, 501)
+    enable(records)
+    assert selector.run(BUSINESS, RUN).queued == 1
+    promoter = InvitationPromoter(records, consent)
+    assert promoter.run(BUSINESS, RUN) == {"promoted": 1}
+    assert promoter.run(BUSINESS, RUN) == {}
+    outbox = next(iter(records._invitation_outbox.values()))
+
+    class Messages:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, str]] = []
+
+        def create(self, **kwargs: str) -> SimpleNamespace:
+            self.calls.append(kwargs)
+            return SimpleNamespace(sid="SM-synthetic-invitation")
+
+    messages = Messages()
+    sender = TwilioSmsSender(messages, records, consent, BUSINESS, "+14155550000",
+                             "+14155559999", clock=lambda: RUN,
+                             invitation_send_enabled=lambda: True)
+    assert sender.deliver(outbox) == "SM-synthetic-invitation"
+    assert messages.calls[0]["body"] == (
+        "Smart Scheduling Assistant: Would you like to book a cleaning visit in the next "
+        "one week? Reply with a day and time that works for you, or STOP to opt out.")
+    assert "Synthetic Client" not in messages.calls[0]["body"]
+    assert consent.outbound == ["SM-synthetic-invitation"]
+    assert records.read_last_invitation_sent(BUSINESS, "synthetic-501") == RUN
+    assert sender.deliver(outbox) == "SM-synthetic-invitation"
+    assert len(messages.calls) == 1
+
+    class NoModel:
+        def propose(self, body: str, context: object) -> None:
+            raise AssertionError("Exact command must not invoke the model")
+
+    conversation = ConversationService(
+        records, NoModel(), HoldService(records), LifecycleService(records, lambda: RUN),
+        consent, lambda: RUN, "+14155559999", InMemoryConversationStates())
+    result = conversation.handle(InboundReceipt(
+        BUSINESS, "SM-synthetic-reply", "+14155550501", "+14155550000",
+        "BOOK 2026-10-20 09:00", RUN, SenderRole.CLIENT, "synthetic-501",
+        Keyword.OTHER, True))
+    assert result.committed
+    assert "owner approval" in result.text.lower()
+
+
+@pytest.mark.parametrize("change", ["booking", "optout", "settings", "phone", "global"])
+def test_invitation_suppresses_changed_state_before_provider_handoff(change: str) -> None:
+    records, consent, selector = setup()
+    target = client(records, consent, 601)
+    enable(records)
+    assert selector.run(BUSINESS, RUN).queued == 1
+    assert InvitationPromoter(records, consent).run(BUSINESS, RUN) == {"promoted": 1}
+    outbox = next(iter(records._invitation_outbox.values()))
+    intent = next(iter(records._invitation_intents.values()))
+    if change == "booking":
+        appointment(records, target, RUN + timedelta(days=1), "new-booking")
+    elif change == "optout":
+        consent.stopped.add("pilot:+14155550601")
+    elif change == "settings":
+        update_outreach(records, BUSINESS, "owner", "disable", 1,
+                        OutreachSettings(False, 0, time(9), 1))
+    elif change == "phone":
+        profile = records.read_profile(BUSINESS, target)
+        assert profile is not None
+        ClientRecordService(records).save_profile(BUSINESS, target, profile.name,
+            "+14155550699", profile.service_address, profile.home_size, 60,
+            True, profile.version, 180, RUN)
+
+    class Messages:
+        calls = 0
+
+        def create(self, **kwargs: str) -> SimpleNamespace:
+            self.calls += 1
+            return SimpleNamespace(sid="SM-unexpected")
+
+    messages = Messages()
+    sender = TwilioSmsSender(messages, records, consent, BUSINESS, "+14155550000",
+                             "+14155559999", clock=lambda: RUN,
+                             invitation_send_enabled=lambda: change != "global")
+    with pytest.raises(PermanentDeliveryFailure):
+        sender.deliver(outbox)
+    assert messages.calls == 0
+    assert records.read_invitation(BUSINESS, intent.intent_id).state == "SUPPRESSED"  # type: ignore[union-attr]
+    assert records.read_last_invitation_sent(BUSINESS, target) is None
+
+
+def test_stop_arriving_after_send_claim_suppresses_without_provider_call() -> None:
+    records, consent, selector = setup()
+    client(records, consent, 701)
+    enable(records)
+    assert selector.run(BUSINESS, RUN).queued == 1
+    assert InvitationPromoter(records, consent).run(BUSINESS, RUN) == {"promoted": 1}
+    outbox = next(iter(records._invitation_outbox.values()))
+
+    original_acquire = records.acquire_client_send
+
+    def acquire(business_id: str, client_id: str) -> str:
+        token = original_acquire(business_id, client_id)
+        consent.stopped.add("pilot:+14155550701")
+        return token
+
+    records.acquire_client_send = acquire  # type: ignore[method-assign]
+
+    class Messages:
+        calls = 0
+
+        def create(self, **kwargs: str) -> SimpleNamespace:
+            self.calls += 1
+            return SimpleNamespace(sid="SM-unexpected")
+
+    messages = Messages()
+    sender = TwilioSmsSender(messages, records, consent, BUSINESS, "+14155550000",
+                             "+14155559999", clock=lambda: RUN,
+                             invitation_send_enabled=lambda: True)
+    with pytest.raises(PermanentDeliveryFailure, match="INVITATION_OPTED_OUT"):
+        sender.deliver(outbox)
+    assert messages.calls == 0
+    assert not records.send_claimed
+
+
+def test_uncertain_provider_acceptance_is_held_for_reconciliation() -> None:
+    records, consent, selector = setup()
+    target = client(records, consent, 801)
+    enable(records)
+    assert selector.run(BUSINESS, RUN).queued == 1
+    assert InvitationPromoter(records, consent).run(BUSINESS, RUN) == {"promoted": 1}
+    outbox = next(iter(records._invitation_outbox.values()))
+    intent = next(iter(records._invitation_intents.values()))
+
+    class Messages:
+        calls = 0
+
+        def create(self, **kwargs: str) -> None:
+            self.calls += 1
+            raise RuntimeError("Synthetic provider timeout after possible acceptance")
+
+    messages = Messages()
+    sender = TwilioSmsSender(messages, records, consent, BUSINESS, "+14155550000",
+                             "+14155559999", clock=lambda: RUN,
+                             invitation_send_enabled=lambda: True)
+    with pytest.raises(PermanentDeliveryFailure, match="INVITATION_HANDOFF_UNCERTAIN"):
+        sender.deliver(outbox)
+    with pytest.raises(PermanentDeliveryFailure, match="INVITATION_NOT_SENDABLE"):
+        sender.deliver(outbox)
+    assert messages.calls == 1
+    assert records.read_invitation(BUSINESS, intent.intent_id).state == "SENDING"  # type: ignore[union-attr]
+    assert records._invitation_pending[(BUSINESS, target)] == intent.intent_id
+
+
+def test_busy_client_send_suppresses_without_holding_future_invitations() -> None:
+    records, consent, selector = setup()
+    target = client(records, consent, 901)
+    enable(records)
+    assert selector.run(BUSINESS, RUN).queued == 1
+    assert InvitationPromoter(records, consent).run(BUSINESS, RUN) == {"promoted": 1}
+    outbox = next(iter(records._invitation_outbox.values()))
+    intent = next(iter(records._invitation_intents.values()))
+
+    def busy(_business_id: str, _client_id: str) -> str:
+        raise RecordConflict("Another client send holds the lock")
+
+    records.acquire_client_send = busy  # type: ignore[method-assign]
+
+    class Messages:
+        calls = 0
+
+        def create(self, **kwargs: str) -> SimpleNamespace:
+            self.calls += 1
+            return SimpleNamespace(sid="SM-unexpected")
+
+    messages = Messages()
+    sender = TwilioSmsSender(messages, records, consent, BUSINESS, "+14155550000",
+                             "+14155559999", clock=lambda: RUN,
+                             invitation_send_enabled=lambda: True)
+    with pytest.raises(PermanentDeliveryFailure, match="INVITATION_CLIENT_SEND_BUSY"):
+        sender.deliver(outbox)
+    assert messages.calls == 0
+    assert records.read_invitation(BUSINESS, intent.intent_id).state == "SUPPRESSED"  # type: ignore[union-attr]
+    assert (BUSINESS, target) not in records._invitation_pending
+    assert selector.run(BUSINESS, RUN + timedelta(days=7)).queued == 1
