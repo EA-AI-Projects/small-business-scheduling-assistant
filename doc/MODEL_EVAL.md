@@ -49,7 +49,7 @@ Since #241 the model, not keyword rules, decides whether a client text is a cale
 - "What times are open Friday?" and "Can I get a cleaning Friday instead?" must stay availability requests.
 - "Booking for Friday?" must clarify.
 
-On 2026-10-05 the owner ran all 20 cases against `gpt-6-luna` with the #245 instructions (no key or message content left the owner's machine except the synthetic texts): **18/20 passed**.
+On 2026-10-05 the owner ran all 20 cases against `gpt-6-luna` with the #245 instructions and shared the JSON summary: **18/20 passed**.
 - All three screenshot texts, both Spanish cases, the count, the status-only follow-up, and "Show me all my upcoming visits" (`range_scope: all_upcoming`) passed. Follow-ups left unchanged fields null or `keep`, as instructed.
 - Missed: "Can I get a cleaning Friday instead?" during a calendar conversation came back `clarify_booking` (the client would get one extra check-or-request question before the offer).
 - Missed: "Booking for Friday?" came back `availability` (the client would get Friday's open times instead of the check-or-request question #240 requires).
