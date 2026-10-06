@@ -1,5 +1,9 @@
 # Two-way SMS in dev: authorization packet (issue #91)
 
+## Future booking invitation gate (#249)
+
+The staged dev SMS authorization in this plan covers the described scheduling conversations and notifications, not scheduled booking invitations. Keep invitation scheduling and sending disabled through these stages. Before a separate invitation rollout, resolve the consent, campaign, sender identity, and live-SMS questions in [A2P_REGISTRATION.md](A2P_REGISTRATION.md#booking-invitations-249), then review an explicit run plan: owner-selected weekday/time and one- or two-week window, expected eligible count, test recipients, per-client repeat limit, suppression on state changes, monitoring, and a disable/rollback action. The current approved campaign must not be assumed to cover invitation texts.
+
 This packet asks Enrique to authorize texting in the synthetic `dev` environment, one stage at a time, for himself and a few authorized testers only. Nothing in this document authorizes a deployment, a Twilio change, or a live text. Each stage below needs its own explicit "go" on #91.
 
 ## Summary for Enrique
