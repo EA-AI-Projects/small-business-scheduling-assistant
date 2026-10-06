@@ -6,11 +6,13 @@ from threading import RLock
 
 from scheduling.domain.appointments import Appointment, ReplacementGuard
 from scheduling.domain.availability import AvailabilityPolicy, pilot_policy
+from scheduling.domain.booking_outreach import OutreachRecord, OutreachSettings
 from scheduling.domain.calendar import CalendarEvent, CalendarSnapshot
 from scheduling.domain.client_records import ClientNote, ClientProfile, RecordConflict
 from scheduling.domain.holds import (
     CreateHold,
     HoldCommit,
+    IdempotencyKeyReused,
     IdempotencyRecord,
     OutboxIntent,
     RevisionConflict,
@@ -33,6 +35,8 @@ class InMemoryCalendarRepository:
         self._policies: dict[str, AvailabilityPolicy] = {}
         self._policy_versions: dict[str, int] = {}
         self._policy_replays: dict[tuple[str, str, str, str], PolicyReplay] = {}
+        self._outreach: dict[str, OutreachRecord] = {}
+        self._outreach_replays: dict[tuple[str, str, str], tuple[OutreachSettings, int, OutreachRecord]] = {}
         self._idempotency: dict[tuple[str, str, str, str], IdempotencyRecord] = {}
         self._transition_idempotency: dict[tuple[str, str, str, str], TransitionRecord] = {}
         self._holds: dict[str, HoldCommit] = {}
@@ -47,6 +51,29 @@ class InMemoryCalendarRepository:
         self._clients: dict[tuple[str, str], ClientProfile] = {}
         self._client_phones: dict[tuple[str, str], str] = {}
         self._client_notes: dict[tuple[str, str, str], ClientNote] = {}
+
+    def read_outreach(self, business_id: str) -> OutreachRecord:
+        with self._lock:
+            return self._outreach.get(business_id, OutreachRecord(OutreachSettings(), 0))
+
+    def save_outreach(self, business_id: str, actor_id: str, key: str,
+                      expected_version: int, settings: OutreachSettings) -> OutreachRecord:
+        with self._lock:
+            identity = (business_id, actor_id, key)
+            previous = self._outreach_replays.get(identity)
+            if previous is not None:
+                old_settings, old_version, result = previous
+                if old_settings != settings or old_version != expected_version:
+                    raise IdempotencyKeyReused("Key already used for another outreach edit")
+                return result
+            current = self.read_outreach(business_id)
+            if current.version != expected_version:
+                raise RevisionConflict("Outreach settings version changed")
+            result = OutreachRecord(settings, expected_version + 1)
+            self._outreach[business_id] = result
+            self._outreach_replays[identity] = (settings, expected_version, result)
+            self._audit[f"outreach#{business_id}#{actor_id}#{key}"] = result
+            return result
 
     def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None:
         with self._lock:
