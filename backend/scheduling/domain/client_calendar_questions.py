@@ -1,11 +1,15 @@
 """Read-only answers to a verified client's questions about their own visits.
 
-A question is recognized deterministically, or proposed by the model as the
-``calendar_question`` intent with an optional day range. Either way the answer
-text comes only from the client's own current visits, read for that message:
-confirmed visits and unexpired pending requests that have not ended yet. No
-other client's visits, owner blocks, notes, or profile fields are read into it,
-and nothing here writes a booking, a hold, or conversation memory.
+The model interprets the question, in any wording or language, as the
+``calendar_question`` intent with a day range, the statuses asked about, and
+list or count (#241). The answer text comes only from the client's own current
+visits, read for that message: confirmed visits and unexpired pending requests
+that have not ended yet. No other client's visits, owner blocks, notes, or
+profile fields are read into it, and nothing here writes a booking or a hold.
+
+The only fixed word rules here guard replies that could otherwise write: a bare
+yes, no, or pick right after a calendar answer, and a status word that keeps a
+reply from answering an owner counteroffer.
 """
 
 import re
@@ -24,65 +28,14 @@ from scheduling.domain.conversation_state import (
     normalized,
     when_text,
 )
-from scheduling.domain.owner_calendar_questions import (
-    RANGE_TOKEN,
-    STATUS_CONFIRMED,
-    STATUS_PENDING,
-)
-from scheduling.domain.owner_calendar_questions import _ranges as ranges_in
 
 CONFIRMED = CalendarStatus.CONFIRMED
 PENDING = CalendarStatus.PENDING_APPROVAL
 BOTH = frozenset({CONFIRMED, PENDING})
 NOUNS = {CONFIRMED: ("confirmed visit", "confirmed visits"),
          PENDING: ("pending request", "pending requests")}
+STATUS_NAMES = {"confirmed": CONFIRMED, "pending": PENDING}
 MAX_RANGE_DAYS = 62
-MAX_AMBIGUOUS_WORDS = 6
-
-# A question about the client's own visits: one sentence that starts like a
-# schedule question, names a visit, and uses only schedule-question words. Any
-# other word (a change, a preference, open times, a price) sends the text to
-# the model instead, so a request is never swallowed by a read-only answer.
-TRIGGER = re.compile(
-    r"^(?:do i have|have i got|am i|is my|are my|when|how many|what|what's|show|list|"
-    r"tell me|give me|summarize|summarise|recap)\b")
-SUBJECT = re.compile(
-    r"\b(?:bookings?|booked|appointments?|visits?|cleanings?|cleaners?|requests?|scheduled|"
-    r"schedule|itinerary|calendar|anything)\b")
-COUNTED = re.compile(r"\b(?:bookings?|appointments?|visits?|cleanings?|requests?)\b")
-QUESTION_WORDS = frozenset({
-    "do", "i", "have", "got", "am", "is", "are", "my", "the", "a", "an", "any", "anything",
-    "when", "what", "what's", "whats", "how", "many", "show", "list", "tell", "me", "time",
-    "booking", "bookings", "booked", "appointment", "appointments", "visit", "visits",
-    "cleaning", "cleanings", "cleaner", "cleaners", "request", "requests", "scheduled",
-    "schedule", "itinerary", "calendar", "coming", "up", "upcoming", "next", "this", "week",
-    "on", "for", "in", "at", "still", "yet", "confirmed", "pending", "approved", "and", "or",
-    "both", "all", "of", "s", "give", "summarize", "summarise", "recap", "summary"})
-# "Summarize my itinerary" right after a calendar answer means the range just shown.
-REFERS_BACK = re.compile(r"\b(?:summari[sz]e|summary|recap)\b")
-# A short follow-up to the last calendar answer: only range, status, and view words.
-MAX_FOLLOW_UP_WORDS = 8
-FOLLOW_UP_WORDS = frozenset({
-    "what", "what's", "whats", "about", "and", "how", "many", "just", "only", "the", "ones",
-    "one", "those", "them", "confirmed", "pending", "request", "requests", "awaiting",
-    "unconfirmed", "approved", "visit", "visits", "cleaning", "cleanings", "booking",
-    "bookings", "appointment", "appointments", "show", "list", "me", "all", "both",
-    "everything", "instead", "for", "on", "in", "ok", "okay", "my", "of",
-    "this", "next", "week", "s", "count", "so", "too", "also", "or"})
-# Words that make a short text refer back to the last answer ("And Friday?").
-FOLLOW_UP_CUE = re.compile(
-    r"\b(?:what|what's|whats|about|and|how|just|only|ones|those|them|instead|so|too|also)\b")
-EVERYTHING = re.compile(r"\b(?:all|both|everything)\b")
-LIST_WORDS = re.compile(r"\b(?:show|list)\b")
-# A short question that only names a booking ("Booking for Friday?") could mean
-# either checking a visit or requesting a new one.
-BOOKING_NOUN = re.compile(r"\b(?:bookings?|appointments?|cleanings?|visits?)\b")
-AMBIGUOUS_FILLER = frozenset({"a", "an", "any", "the", "for", "on", "my", "this", "next",
-                              "week", "s"})
-
-
-def wants_count(body: str) -> bool:
-    return bool(re.search(r"\bhow many\b", body, re.IGNORECASE))
 
 
 class View(StrEnum):
@@ -96,107 +49,33 @@ class ClientQuestion:
     first: date | None  # None with last: every upcoming visit.
     last: date | None
     statuses: frozenset[CalendarStatus]
-    multiple_ranges: bool = False
     ambiguous_booking: bool = False  # Check visits, or request a new cleaning?
-    refers_back: bool = False  # No range of its own: a follow-up keeps the last one.
 
 
-def _clean(body: str) -> str:
-    return re.sub(r"\s+", " ", normalized(body).replace("?", " ")).strip()
-
-
-def asks_for_list(body: str) -> bool:
-    return bool(re.search(r"\b(?:show|list|which|when|what)\b", _clean(body)))
-
-
-def mentions_status(body: str) -> bool:
-    text = _clean(body)
-    return bool(STATUS_CONFIRMED.search(text) or STATUS_PENDING.search(text)
-                or EVERYTHING.search(text))
-
-
+# Write guards. A calendar answer offers nothing to pick or confirm, so these replies
+# right after one are told that nothing changed instead of acting on an older prompt.
 ACTION_LIKE = re.compile(
     r"(?:option\s*)?\d{1,2}|(?:the\s+)?(?:first|second|third|fourth|fifth|last)(?:\s+one)?"
     r"|that one|this one")
+STATUS_WORD = re.compile(r"\b(?:confirmed|pending|requests?|unconfirmed|all|both)\b")
 
 
 def is_action_like(body: str) -> bool:
     """A bare yes, no, number, or pick: an answer to a prompt a calendar answer never asks."""
     return (is_affirmative(body) or is_negative(body)
-            or bool(ACTION_LIKE.fullmatch(_clean(body))))
+            or bool(ACTION_LIKE.fullmatch(normalized(body).rstrip("?"))))
 
 
-def statuses_named(body: str) -> frozenset[CalendarStatus]:
-    """Statuses the text asks about; both unless it names exactly one."""
-    text = _clean(body)
-    confirmed = bool(STATUS_CONFIRMED.search(text))
-    pending = bool(STATUS_PENDING.search(text)) or "approval" in text
-    if confirmed != pending:
-        return frozenset({CONFIRMED if confirmed else PENDING})
-    return BOTH
+def mentions_status(body: str) -> bool:
+    """"Confirmed" is also a yes; inside a calendar conversation it names a status, so it
+    must not answer an owner counteroffer."""
+    return bool(STATUS_WORD.search(normalized(body)))
 
 
-def parse(body: str, today: date) -> ClientQuestion | None:
-    """A question about the client's own visits, or None for every other text."""
-    text = _clean(body)
-    # One sentence only: "When is my visit? Cancel it" is a change, not a question.
-    if not text or re.search(r"[.!?;]", re.sub(r"[.!?\s]+$", "", body)):
+def statuses_from_proposal(names: tuple[str, ...] | None) -> frozenset[CalendarStatus] | None:
+    if not names:
         return None
-    ranges = sorted(set(ranges_in(text, today)))
-    first, last = ranges[0] if len(ranges) == 1 else (None, None)
-    words = re.findall(r"[a-z']+", RANGE_TOKEN.sub(" ", text))
-    if TRIGGER.search(text) and SUBJECT.search(text) and all(
-            word in QUESTION_WORDS for word in words):
-        if wants_count(text) and not COUNTED.search(text):
-            return None  # "How many cleaners are coming?" is not a visit count.
-        view = View.COUNT if wants_count(text) else View.LIST
-        return ClientQuestion(view, first, last, statuses_named(text), len(ranges) > 1,
-                              refers_back=bool(REFERS_BACK.search(text)) and not ranges)
-    asked = normalized(body).endswith("?")
-    # A clock time ("Cleaning Friday 10?") is a booking request: the model reads it.
-    timed = bool(re.search(r"\d", RANGE_TOKEN.sub(" ", text)))
-    if (asked and not timed and BOOKING_NOUN.search(text) and len(text.split()) <= MAX_AMBIGUOUS_WORDS
-            and all(word in AMBIGUOUS_FILLER or BOOKING_NOUN.fullmatch(word)
-                    for word in words)):
-        return ClientQuestion(View.LIST, first, last, BOTH, len(ranges) > 1, True)
-    return None
-
-
-def parse_followup(body: str, today: date, previous: ClientQuestion) -> ClientQuestion | None:
-    """A short follow-up ("What about next week?", "Just confirmed ones") to the last
-    calendar question, merged with its range, statuses, and view; None for other text."""
-    text = _clean(body)
-    if (not text or len(text.split()) > MAX_FOLLOW_UP_WORDS
-            or re.search(r"[.!?;]", re.sub(r"[.!?\s]+$", "", body))):
-        return None
-    rest = RANGE_TOKEN.sub(" ", text)
-    words = re.findall(r"[a-z']+", rest)
-    # A clock time ("Friday 10") or a word outside the list is a request: the model reads it.
-    if re.search(r"\d", rest) or not all(word in FOLLOW_UP_WORDS for word in words):
-        return None
-    ranges = sorted(set(ranges_in(text, today)))
-    named = bool(STATUS_CONFIRMED.search(text) or STATUS_PENDING.search(text))
-    everything = bool(EVERYTHING.search(text))
-    shown_again = named or everything or wants_count(text) or bool(LIST_WORDS.search(text))
-    # "Cleaning Friday instead" or "What about cleaning Friday" may be a new request; "my
-    # visits" or a plural noun points back at the visits already shown.
-    single = re.search(r"\b(?:booking|appointment|cleaning|visit)\b", rest)
-    if ranges and single and not shown_again and not re.search(r"\bmy\b", rest):
-        first, last = ranges[0] if len(ranges) == 1 else (None, None)
-        return ClientQuestion(View.LIST, first, last, BOTH, len(ranges) > 1, True)
-    if not (shown_again or FOLLOW_UP_CUE.search(rest)):
-        # A bare range ("Friday") goes to the model, which may read it as a request. With a
-        # booking noun ("Booking for Friday") it could mean either: ask which.
-        if ranges and BOOKING_NOUN.search(rest):
-            first, last = ranges[0] if len(ranges) == 1 else (None, None)
-            return ClientQuestion(View.LIST, first, last, BOTH, len(ranges) > 1, True)
-        return None
-    first, last = ranges[0] if len(ranges) == 1 else (previous.first, previous.last)
-    statuses = (BOTH if everything else statuses_named(text) if named
-                else previous.statuses)
-    view = (View.COUNT if wants_count(text) else View.LIST if LIST_WORDS.search(text)
-            else previous.view)
-    return ClientQuestion(view, first, last, statuses, len(ranges) > 1)
+    return frozenset(STATUS_NAMES[name] for name in names if name in STATUS_NAMES) or None
 
 
 def _span(first: date, last: date) -> str:
@@ -235,9 +114,6 @@ def answer(question: ClientQuestion, visits: tuple[Appointment, ...], now: datet
     """Reply text from ``visits``: the client's own current visits, read for this message."""
     if question.ambiguous_booking:
         return booking_choice(question)
-    if question.multiple_ranges:
-        return ("I can check one day or one week at a time. Which do you mean: tomorrow, "
-                "a weekday like Friday, this week, next week, or a date?")
     today = now.astimezone(zone).date()
     first, last = question.first, question.last
     if first is not None and last is not None:

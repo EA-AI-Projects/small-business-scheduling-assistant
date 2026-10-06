@@ -6,7 +6,7 @@ current state, and policy before calling the existing transactional services.
 
 import re
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Protocol
 from zoneinfo import ZoneInfo
@@ -25,16 +25,12 @@ from scheduling.domain.client_calendar_questions import (
     MAX_RANGE_DAYS,
     ClientQuestion,
     View,
-    asks_for_list,
     is_action_like,
     mentions_status,
-    parse_followup,
     range_from_proposal,
-    statuses_named,
-    wants_count,
+    statuses_from_proposal,
 )
 from scheduling.domain.client_calendar_questions import answer as answer_client_question
-from scheduling.domain.client_calendar_questions import parse as parse_client_question
 from scheduling.domain.client_records import ClientProfile
 from scheduling.domain.conversation_state import (
     MAX_OPTIONS,
@@ -134,9 +130,9 @@ class MessageContext:
     timezone: str
     references: tuple[str, ...]
     horizon_days: int = 14
-    # The range of the client's last calendar answer, still open for follow-ups:
-    # "YYYY-MM-DD to YYYY-MM-DD", "all upcoming", or None.
-    calendar_range: str | None = None
+    # The client's last calendar answer, still open for follow-ups, e.g.
+    # "2026-09-28 to 2026-10-04; statuses: confirmed; view: list", or None.
+    calendar_answer: str | None = None
 
 
 @dataclass(frozen=True)
@@ -158,6 +154,10 @@ class MessageProposal:
     time_from: str | None = None
     time_to: str | None = None
     target_date: str | None = None
+    # A calendar question (#241): "confirmed" and/or "pending", and "list" or "count";
+    # None when the text does not say (a follow-up then keeps the last answer's).
+    statuses: tuple[str, ...] | None = None
+    view: str | None = None
 
 
 @dataclass(frozen=True)
@@ -251,9 +251,7 @@ class ConversationService:
                 policy.timezone,
                 tuple(target.appointment_id[:8] for target in targets[:MAX_CONTEXT_APPOINTMENTS]),
                 policy.booking_horizon_days,
-                None if calendar is None else "all upcoming" if calendar.first is None
-                else f"{calendar.first.isoformat()} to {calendar.last.isoformat()}"
-                if calendar.last is not None else None,
+                self._calendar_line(calendar),
             )
             proposal = self._exact_command(receipt.body, context, targets)
         except (OSError, ValueError, TypeError, KeyError, RuntimeError):
@@ -286,22 +284,14 @@ class ConversationService:
             answered = self._answer(receipt, prompt, targets, policy, now)
             if answered is not None:
                 return answered
-            if receipt.role == SenderRole.CLIENT:
-                question = parse_client_question(receipt.body, context.today)
-                if question is not None and question.refers_back and calendar is not None:
-                    question = replace(question, first=calendar.first, last=calendar.last)
-                if question is None and calendar is not None:
-                    question = parse_followup(receipt.body, context.today, calendar)
-                    if question is None and is_action_like(receipt.body):
-                        # The calendar answer offered nothing to pick or confirm.
-                        return self._with_offer_note(receipt, now, ConversationOutcome(
-                            "I only listed your visits, so nothing was booked or cancelled. "
-                            "To change one, tell me which visit and what you'd like (for "
-                            "example, cancel my Friday visit), or tell me a day to request "
-                            "a new cleaning."))
-                if question is not None:
-                    return self._client_calendar(receipt, question, prompt, targets, policy,
-                                                 now)
+            if (receipt.role == SenderRole.CLIENT and calendar is not None
+                    and is_action_like(receipt.body)):
+                # Write guard: the calendar answer offered nothing to pick or confirm.
+                return self._with_offer_note(receipt, now, ConversationOutcome(
+                    "I only listed your visits, so nothing was booked or cancelled. "
+                    "To change one, tell me which visit and what you'd like (for "
+                    "example, cancel my Friday visit), or tell me a day to request "
+                    "a new cleaning."))
             try:
                 proposal = self._interpreter.propose(receipt.body, context)
             except (OSError, ValueError, TypeError, KeyError, RuntimeError):
@@ -312,9 +302,7 @@ class ConversationService:
         moving = (prompt if prompt is not None and prompt.kind == PromptKind.RESCHEDULE_DAY
                   and not prompt.expired(now) else None)
         unclear = proposal.needs_clarification or proposal.intent in ("clarify", "unsupported")
-        if (unclear and calendar is not None and receipt.role == SenderRole.CLIENT
-                and not re.search(r"\b(?:cancel|reschedule)\b", receipt.body or "",
-                                  re.IGNORECASE)):
+        if unclear and calendar is not None and receipt.role == SenderRole.CLIENT:
             # Keep the calendar conversation open for the answer; nothing changes.
             return self._with_offer_note(receipt, now, ConversationOutcome(
                 "I wasn't sure what you meant. Should I check another day or status, or do "
@@ -340,17 +328,16 @@ class ConversationService:
         if receipt.role != SenderRole.CLIENT:
             return ConversationOutcome(self._clarify(receipt.role, "clarify"))
         if proposal.intent in ("calendar_question", "clarify_booking"):
-            # The model only resolves the day range; the statuses and the answer do not
-            # depend on it.
+            # The model reads the question in any wording or language: range, statuses, and
+            # list or count. What it leaves unset keeps the open conversation's value. The
+            # answer itself is built from the client's own visits, never from model text.
             span = range_from_proposal(proposal.date_from, proposal.date_to)
-            body = receipt.body or ""
             if span == (None, None) and calendar is not None:
                 span = (calendar.first, calendar.last)  # A follow-up keeps the last range.
-            statuses = (statuses_named(body) if mentions_status(body) or calendar is None
-                        else calendar.statuses)
-            view = (View.COUNT if wants_count(body)
-                    else calendar.view if calendar is not None and not asks_for_list(body)
-                    else View.LIST)
+            statuses = (statuses_from_proposal(proposal.statuses)
+                        or (calendar.statuses if calendar is not None else BOTH))
+            view = (View(proposal.view) if proposal.view in ("list", "count")
+                    else calendar.view if calendar is not None else View.LIST)
             question = ClientQuestion(
                 view,
                 *(span if span is not None else (date.max, date.min)),
@@ -657,7 +644,7 @@ class ConversationService:
             text += ("\nI closed my earlier question, so nothing was booked or cancelled. "
                      "Ask again when you're ready.")
         today = now.astimezone(zone).date()
-        answered = (not question.ambiguous_booking and not question.multiple_ranges
+        answered = (not question.ambiguous_booking
                     and (question.first is None or question.last is None
                          or (question.first <= question.last and question.last >= today
                              and (question.last - question.first).days < MAX_RANGE_DAYS)))
@@ -680,6 +667,18 @@ class ConversationService:
         note = (self._acceptance.reminder(receipt, now) if self._acceptance is not None
                 else None)
         return ConversationOutcome(f"{outcome.text}\n{note}") if note else outcome
+
+    @staticmethod
+    def _calendar_line(calendar: ClientQuestion | None) -> str | None:
+        """What the model may know of the open calendar answer: no visits, only its terms."""
+        if calendar is None:
+            return None
+        span = ("all upcoming" if calendar.first is None or calendar.last is None
+                else f"{calendar.first.isoformat()} to {calendar.last.isoformat()}")
+        names = ", ".join(name for name, status in (("confirmed", CalendarStatus.CONFIRMED),
+                                                    ("pending", CalendarStatus.PENDING_APPROVAL))
+                          if status in calendar.statuses)
+        return f"{span}; statuses: {names}; view: {calendar.view.value}"
 
     @staticmethod
     def _calendar_context(prompt: ConversationState | None,

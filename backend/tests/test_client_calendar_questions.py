@@ -1,17 +1,20 @@
 """A verified client's calendar questions are answered from their own current visits only.
 
-Boundary: the conversation service with the in-memory calendar and a scripted model. It
-checks routing, the answer text, data isolation, and that nothing is written. It does not
-cover the real model's wording or DynamoDB reads.
+Boundary: the conversation service with the in-memory calendar and a scripted model that
+stands in for the model's reading of each text (range, statuses, list or count). It checks
+the answer text, data isolation, and that nothing is written. Whether the real model reads
+a given wording or language that way is covered by the synthetic model evaluation
+(`backend/evals/scheduling_messages.py`), not here.
 """
 
 from datetime import UTC, datetime, timedelta
 
 from test_conversation_flow import NOW, THURSDAY, Harness, ask
 
+from evals.scheduling_messages import CASES
 from scheduling.domain.calendar import CalendarEvent, CalendarStatus
-from scheduling.domain.client_calendar_questions import parse
 from scheduling.domain.client_records import ClientProfile, HomeSize
+from scheduling.domain.conversation import ConversationOutcome, MessageProposal
 from scheduling.domain.conversation_state import PromptKind
 from scheduling.domain.holds import CreateHold, HoldService
 from scheduling.domain.lifecycle import Action, ActorRole, AppointmentCommand, LifecycleService
@@ -19,6 +22,20 @@ from scheduling.domain.sms_ingress import InboundReceipt, Keyword, SenderRole
 
 FRIDAY = THURSDAY + timedelta(days=1)  # Fri Oct 2, 9:00 AM local.
 NEXT_TUESDAY = THURSDAY + timedelta(days=5)  # Tue Oct 6, 9:00 AM local.
+THIS_WEEK = ("2026-09-28", "2026-10-04")
+
+
+def cal(first: str | None = None, last: str | None = None,
+        statuses: tuple[str, ...] | None = None, view: str | None = None,
+        intent: str = "calendar_question") -> MessageProposal:
+    """What the model proposes for a calendar question."""
+    return MessageProposal(intent, None, None, None, False, first, last or first,
+                           statuses=statuses, view=view)
+
+
+def asked(chat: Harness, text: str, proposal: MessageProposal) -> ConversationOutcome:
+    chat.model.replies[text] = proposal
+    return chat.text(text)
 
 
 def week_with_visits() -> tuple[Harness, str, str]:
@@ -38,63 +55,63 @@ def unchanged(chat: Harness, before: tuple[tuple[str, str, int], ...]) -> None:
                              and state.appointment_id is None)
 
 
-def test_do_i_have_bookings_this_week_lists_confirmed_and_pending_separately() -> None:
+def test_bookings_this_week_lists_confirmed_and_pending_separately() -> None:
     chat, confirmed, pending = week_with_visits()
     before = chat.calendar()
-    reply = chat.text("Do I have bookings this week?")
+    reply = asked(chat, "Do I have bookings this week?", cal(*THIS_WEEK))
     assert not reply.committed
     assert reply.text == (
         "You have 1 confirmed visit, 1 pending request from Tue Sep 29 to Sun Oct 4:\n"
         f"- Thu Oct 1 at 9:00 AM-11:00 AM PDT, confirmed (ref {confirmed[:8]})\n"
         f"- Fri Oct 2 at 9:00 AM-11:00 AM PDT, pending owner approval, not confirmed yet "
         f"(ref {pending[:8]})")
-    assert chat.model.calls == []  # Recognized without the model.
     unchanged(chat, before)
 
 
-def test_when_are_the_cleaners_coming_lists_every_upcoming_visit() -> None:
+def test_a_question_in_spanish_gets_the_same_grounded_answer() -> None:
+    chat, confirmed, _ = week_with_visits()
+    reply = asked(chat, "¿Tengo citas confirmadas esta semana?",
+                  cal(*THIS_WEEK, statuses=("confirmed",)))
+    assert reply.text.startswith("You have 1 confirmed visit from Tue Sep 29 to Sun Oct 4:")
+    assert confirmed[:8] in reply.text
+    assert "You also have 1 pending request" in reply.text
+
+
+def test_no_range_lists_every_upcoming_visit() -> None:
     chat, confirmed, _ = week_with_visits()
     later = chat.hold(NEXT_TUESDAY, "tue", confirm=True)
-    reply = chat.text("When are the cleaners coming?")
+    reply = asked(chat, "When are the cleaners coming?", cal())
     assert reply.text.startswith("You have 2 confirmed visits, 1 pending request coming up:")
-    assert f"Thu Oct 1 at 9:00 AM-11:00 AM PDT, confirmed (ref {confirmed[:8]})" in reply.text
-    assert f"Tue Oct 6 at 9:00 AM-11:00 AM PDT, confirmed (ref {later[:8]})" in reply.text
-    assert chat.model.calls == []
+    assert confirmed[:8] in reply.text and later[:8] in reply.text
 
 
 def test_ambiguous_booking_asks_whether_to_check_or_request() -> None:
     chat, _, _ = week_with_visits()
     before = chat.calendar()
-    reply = chat.text("Booking for Friday?")
+    reply = asked(chat, "Booking for Friday?", cal("2026-10-02", intent="clarify_booking"))
     assert reply.text == (
         "Do you want to check the visits you already have for Fri Oct 2, or request a new "
         "cleaning? Ask \"Do I have a visit Fri Oct 2?\" or \"What times are open Fri Oct 2?\"")
-    assert chat.model.calls == []
-    unchanged(chat, before)
-    # The model can raise the same question for wording the parser does not know.
-    chat.model.replies["About that booking thing"] = ask("clarify_booking")
-    assert chat.text("About that booking thing").text.startswith(
-        "Do you want to check the visits you already have, or request a new cleaning?")
+    assert asked(chat, "About that booking thing", cal(intent="clarify_booking")).text \
+        .startswith("Do you want to check the visits you already have, or request a new")
     unchanged(chat, before)
 
 
 def test_no_matching_visits_says_so_and_how_to_ask_for_one() -> None:
     chat, _, _ = week_with_visits()
-    reply = chat.text("Do I have a cleaning tomorrow?")
-    assert reply.text == ("You have no confirmed visits or pending requests on Wed Sep 30. "
-                          "To ask for a cleaning, tell me what day works.")
-    empty = Harness()
-    assert empty.text("When is my next cleaning?").text == (
-        "You have no confirmed visits or pending requests coming up. To ask for a cleaning, "
-        "tell me what day works.")
+    assert asked(chat, "Do I have a cleaning tomorrow?", cal("2026-09-30")).text == (
+        "You have no confirmed visits or pending requests on Wed Sep 30. "
+        "To ask for a cleaning, tell me what day works.")
 
 
-def test_status_questions_never_hide_or_promote_a_pending_request() -> None:
+def test_status_filters_never_hide_or_promote_a_pending_request() -> None:
     chat, _, pending = week_with_visits()
-    count = chat.text("How many confirmed visits this week?")
+    count = asked(chat, "How many confirmed visits this week?",
+                  cal(*THIS_WEEK, statuses=("confirmed",), view="count"))
     assert count.text == ("You have 1 confirmed visit from Tue Sep 29 to Sun Oct 4.\n"
                           "You also have 1 pending request from Tue Sep 29 to Sun Oct 4.")
-    friday = chat.text("Is my Friday cleaning confirmed?")
+    friday = asked(chat, "Is my Friday cleaning confirmed?",
+                   cal("2026-10-02", statuses=("confirmed",), view="list"))
     assert friday.text == (
         "You have no confirmed visits on Fri Oct 2.\n"
         "You also have 1 pending request on Fri Oct 2.\n"
@@ -110,7 +127,7 @@ def test_answers_show_only_this_clients_visits() -> None:
     other = HoldService(chat.store).create(CreateHold(
         "pilot", "client-2", "client-2", "other", THURSDAY + timedelta(hours=3), 120),
         NOW).hold_id
-    reply = chat.text("What's on my schedule this week?")
+    reply = asked(chat, "What's on my schedule this week?", cal(*THIS_WEEK))
     assert "1 confirmed visit, 1 pending request" in reply.text
     assert other[:8] not in reply.text
     assert "Jordan" not in reply.text and "12:00 PM" not in reply.text
@@ -121,110 +138,92 @@ def test_owner_blocks_are_not_shown_to_a_client() -> None:
     block_start = THURSDAY + timedelta(hours=4)
     chat.store.replace_for_test("pilot", 0, (CalendarEvent(
         "block-1", block_start, block_start + timedelta(hours=2), CalendarStatus.UNAVAILABLE),))
-    reply = chat.text("Do I have anything Thursday?")
-    assert reply.text == ("You have no confirmed visits or pending requests on Thu Oct 1. "
-                          "To ask for a cleaning, tell me what day works.")
+    assert asked(chat, "Do I have anything Thursday?", cal("2026-10-01")).text == (
+        "You have no confirmed visits or pending requests on Thu Oct 1. "
+        "To ask for a cleaning, tell me what day works.")
 
 
 def test_each_answer_reads_the_calendar_as_it_is_now() -> None:
     chat, confirmed, pending = week_with_visits()
-    assert "1 pending request" in chat.text("Do I have bookings this week?").text
+    assert "1 pending request" in asked(chat, "Do I have bookings this week?",
+                                        cal(*THIS_WEEK)).text
     LifecycleService(chat.store, lambda: chat.now).apply(AppointmentCommand(
         "pilot", pending, "owner", ActorRole.OWNER, Action.APPROVE, "ok-later", 1))
     LifecycleService(chat.store, lambda: chat.now).apply(AppointmentCommand(
         "pilot", confirmed, "client-1", ActorRole.CLIENT, Action.CANCEL, "gone", 2))
-    again = chat.text("Do I have bookings this week?")
-    assert again.text == (
+    assert chat.text("Do I have bookings this week?").text == (
         "You have 1 confirmed visit from Tue Sep 29 to Sun Oct 4:\n"
         f"- Fri Oct 2 at 9:00 AM-11:00 AM PDT, confirmed (ref {pending[:8]})")
 
 
-def test_model_proposed_question_uses_only_its_range_and_writes_nothing() -> None:
-    chat, confirmed, _ = week_with_visits()
-    before = chat.calendar()
-    chat.model.replies["Anything on the books for me Thursday?"] = ask(
-        "calendar_question", "2026-10-01", "2026-10-01")
-    reply = chat.text("Anything on the books for me Thursday?")
-    assert reply.text == ("You have 1 confirmed visit on Thu Oct 1:\n"
-                          f"- Thu Oct 1 at 9:00 AM-11:00 AM PDT, confirmed (ref {confirmed[:8]})")
-    unchanged(chat, before)
-
-
 def test_a_question_closes_an_open_offer_so_a_later_pick_books_nothing() -> None:
     chat, _, _ = week_with_visits()
-    chat.model.replies["Anything Wednesday?"] = ask("availability", "2026-09-30")
-    assert "Reply with the number" in chat.text("Anything Wednesday?").text
+    assert "Reply with the number" in asked(chat, "Anything Wednesday?",
+                                            ask("availability", "2026-09-30")).text
     before = chat.calendar()
-    reply = chat.text("When is my next visit?")
+    reply = asked(chat, "When is my next visit?", cal())
     assert reply.text.endswith("I closed my earlier question, so nothing was booked or "
                                "cancelled. Ask again when you're ready.")
     assert not chat.text("1").committed
     assert chat.calendar() == before
 
 
-def test_open_times_and_change_requests_keep_their_existing_routes() -> None:
-    today = NOW.date()
-    for text in ("What times are open Friday?", "Do you have availability tomorrow?",
-                 "Can I move my Thursday visit?", "I need to cancel my cleaning",
-                 "Anything tomorrow?", "When can the cleaners come Friday?",
-                 # A question followed by a change is a change.
-                 "When is the cleaning tomorrow? We have to call it off",
-                 "Is my visit Friday? Let's drop it", "When is my visit? Remove it please",
-                 "What time is my cleaning? Make it 10 am",
-                 "When are you coming Friday? Please push it to Monday",
-                 # Open times in other words keep the availability offer.
-                 "Which day works best for a cleaning next week?",
-                 "When is the earliest cleaning next week?",
-                 "What's the soonest visit you have Friday?",
-                 # Not about the schedule.
-                 "How many hours is a cleaning?", "How many cleaners are coming?",
-                 "What does a cleaning cost?",
-                 # A plain booking request, not a question.
-                 "Cleaning Friday", "Visit tomorrow", "A cleaning next week",
-                 "Cleaning Friday 10?",
-                 # "There" may mean open appointments, not the client's own.
-                 "What appointments are there Friday?"):
-        assert parse(text, today) is None, text
-
-
 def test_unverified_sender_gets_no_calendar_answer() -> None:
     chat, _, _ = week_with_visits()
+    chat.model.replies["Do I have bookings this week?"] = cal(*THIS_WEEK)
     reply = chat.service.handle(InboundReceipt(
         "pilot", "SM-x", "+14155550199", "+14155550000", "Do I have bookings this week?",
         NOW, SenderRole.CLIENT, "client-1", Keyword.OTHER, True))
     assert reply.text == "This sender needs a verified client profile and consent."
+    assert chat.model.calls == []  # The model is not consulted for an unverified sender.
 
 
-def test_dates_are_bounded_to_upcoming_visits_and_one_range() -> None:
+def test_unusable_or_past_ranges_ask_for_a_day() -> None:
     chat, _, _ = week_with_visits()
-    assert chat.text("Do I have anything yesterday?").text == (
+    assert asked(chat, "Anything yesterday?", cal("2026-09-28")).text == (
         "That date has passed. I can check visits that haven't happened yet: ask about "
         "today or a later day.")
-    assert chat.text("Do I have anything Friday or next week?").text.startswith(
-        "I can check one day or one week at a time.")
-    for proposed in (ask("calendar_question", "2026-10-09", "2026-10-02"),
-                     ask("calendar_question", "2026-10-01", "2026-12-31")):
-        chat.model.replies["Anything on the books for me?"] = proposed
-        assert chat.text("Anything on the books for me?").text.startswith(
+    for proposed in (cal("2026-10-09", "2026-10-02"), cal("2026-10-01", "2026-12-31")):
+        assert asked(chat, f"Anything {proposed.date_from}?", proposed).text.startswith(
             "Which day or week do you mean?")
-
-
-def test_model_path_question_also_closes_an_open_offer() -> None:
-    chat, _, _ = week_with_visits()
-    chat.model.replies["Anything Wednesday?"] = ask("availability", "2026-09-30")
-    chat.text("Anything Wednesday?")
-    chat.model.replies["Any idea where I'm at with you all?"] = ask("calendar_question")
-    reply = chat.text("Any idea where I'm at with you all?")
-    assert reply.text.startswith("You have 1 confirmed visit, 1 pending request coming up:")
-    assert reply.text.endswith("nothing was booked or cancelled. Ask again when you're ready.")
-    state = chat.states.read_state("pilot", "+14155550101")
-    assert state is not None and state.kind == PromptKind.CALENDAR
 
 
 def test_times_carry_standard_time_after_the_clock_change() -> None:
     chat = Harness()
     chat.now = datetime(2026, 10, 30, 17, tzinfo=UTC)  # Fri Oct 30, 10:00 AM PDT.
     visit = chat.hold(datetime(2026, 11, 3, 17, tzinfo=UTC), "nov", confirm=True)
-    assert chat.text("When is my next cleaning?").text == (
+    assert asked(chat, "When is my next cleaning?", cal()).text == (
         "You have 1 confirmed visit coming up:\n"
         f"- Tue Nov 3 at 9:00 AM-11:00 AM PST, confirmed (ref {visit[:8]})")
+
+
+def _raw(intent: str, first: str | None = None, last: str | None = None,
+         statuses: list[str] | None = None, view: str | None = None) -> dict[str, object]:
+    return {"intent": intent, "request_reference": None, "date_text": None,
+            "date_from": first, "date_to": last, "time_from": None, "time_to": None,
+            "target_date": None, "owner_decision": None, "needs_clarification": False,
+            "question": None, "statuses": statuses, "view": view}
+
+
+def test_calendar_eval_cases_accept_the_intended_reading_only() -> None:
+    """Guards the eval expectations themselves; the live run checks the real model."""
+    cases = {case.name: case for case in CASES}
+    good = {
+        "screenshot-1-bookings-this-week": _raw("calendar_question", *THIS_WEEK),
+        "screenshot-2-confirmed-already": _raw("calendar_question", statuses=["confirmed"]),
+        "screenshot-3-summary": _raw("calendar_question", view="list"),
+        "count-confirmed-next-week": _raw("calendar_question", "2026-10-05", "2026-10-11",
+                                          ["confirmed"], "count"),
+        "spanish-question": _raw("calendar_question", *THIS_WEEK),
+        "spanish-follow-up": _raw("calendar_question", "2026-10-05", "2026-10-11"),
+        "follow-up-only-confirmed": _raw("calendar_question", statuses=["confirmed"]),
+        "open-times": _raw("availability", "2026-10-02", "2026-10-02"),
+        "request-during-calendar-talk": _raw("availability", "2026-10-02", "2026-10-02"),
+        "ambiguous-booking": _raw("clarify_booking", "2026-10-02", "2026-10-02"),
+    }
+    for name, proposal in good.items():
+        assert cases[name].expect(proposal), name
+        wrong = (_raw("availability", "2026-10-02", "2026-10-02")
+                 if proposal["intent"] != "availability"
+                 else _raw("calendar_question", "2026-10-02", "2026-10-02"))
+        assert not cases[name].expect(wrong), name

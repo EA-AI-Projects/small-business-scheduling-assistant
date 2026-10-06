@@ -21,7 +21,8 @@ DATE_SHAPE = re.compile(r"\d{4}-\d{2}-\d{2}")
 TIME_SHAPE = re.compile(r"\d{2}:\d{2}")
 URL = "https://api.openai.com/v1/responses"
 INSTRUCTIONS = (
-    "Interpret one text message sent to a home-cleaning business. You only propose an "
+    "Interpret one text message sent to a home-cleaning business. The text may be in any "
+    "language or wording; read what the sender means. You only propose an "
     "interpretation. The backend checks the calendar, offers real open times, and changes "
     "nothing until the sender picks an offered option or confirms. "
     "Resolve relative dates such as today, tomorrow, Friday, this week, or next week using "
@@ -38,13 +39,20 @@ INSTRUCTIONS = (
     "cancel when a client wants to cancel or cannot make a visit: target_date is the day of "
     "that visit if the text names it. "
     "calendar_question when a client asks about visits or requests they already have "
-    "(whether they have a booking, when the cleaners are coming, how many visits, whether "
-    "one is confirmed), not about open times: set date_from and date_to to the asked day "
-    "range, or null for all upcoming visits. When Last calendar answer is given, a short "
-    "follow-up about it (another day or week, the week after, only confirmed ones) is also "
-    "calendar_question: give the new range, or null to keep the range shown. clarify_booking, with date_from and date_to "
-    "if a day is named, when a client's text could mean either checking an existing "
-    "booking or requesting a new one. "
+    "rather than open times: whether they have bookings, when the cleaners are coming, how "
+    "many visits, whether one is confirmed, or a summary of their schedule or itinerary. "
+    "Set date_from and date_to to the asked day range, or null for all upcoming visits. "
+    "Set statuses to [\"confirmed\"] or [\"pending\"] when the client asks only about "
+    "confirmed visits or only about pending requests, [\"confirmed\", \"pending\"] when "
+    "they ask for both or everything, otherwise null. Set view to count when they ask how "
+    "many, list when they ask when, which, or for a summary, otherwise null. "
+    "When Last calendar answer is given, the client is continuing that conversation: a "
+    "follow-up (another day or week, the week after, only confirmed ones, how many, a "
+    "summary) is calendar_question, and any field the follow-up does not change stays null "
+    "so the backend keeps the shown value. "
+    "clarify_booking, with date_from and date_to if a day is named, when the text could "
+    "mean either checking an existing booking or requesting a new one. "
+    "For every other intent, statuses and view are null. "
     "owner_decision when the owner approves or declines a request. "
     "Copy request_reference only when one of the available references appears literally in "
     "the text; never invent one. "
@@ -78,10 +86,13 @@ TOOL: dict[str, Any] = {
                                "enum": ["approve", "decline", None]},
             "needs_clarification": {"type": "boolean"},
             "question": {"type": ["string", "null"]},
+            "statuses": {"type": ["array", "null"],
+                         "items": {"type": "string", "enum": ["confirmed", "pending"]}},
+            "view": {"type": ["string", "null"], "enum": ["list", "count", None]},
         },
         "required": ["intent", "request_reference", "date_text", "date_from", "date_to",
                      "time_from", "time_to", "target_date", "owner_decision",
-                     "needs_clarification", "question"],
+                     "needs_clarification", "question", "statuses", "view"],
         "additionalProperties": False,
     },
 }
@@ -138,8 +149,8 @@ ACTION_FIELDS = ("request_reference", "date_text", *DATE_FIELDS, *TIME_FIELDS, "
 
 
 def model_input(body: str, context: MessageContext) -> str:
-    calendar = (f"Last calendar answer: {context.calendar_range}\n"
-                if context.calendar_range else "")
+    calendar = (f"Last calendar answer: {context.calendar_answer}\n"
+                if context.calendar_answer else "")
     return (
         f"Actor: {context.actor.value}\n"
         f"Today: {context.today.isoformat()} ({context.today.strftime('%A')})\n"
@@ -206,7 +217,11 @@ class OpenAIMessageInterpreter:
                 or any(raw[name] is not None and not (
                     isinstance(raw[name], str) and TIME_SHAPE.fullmatch(raw[name]))
                     for name in TIME_FIELDS)
-                or (raw["question"] is not None and not isinstance(raw["question"], str))):
+                or (raw["question"] is not None and not isinstance(raw["question"], str))
+                or (raw["statuses"] is not None and not (
+                    isinstance(raw["statuses"], list) and len(raw["statuses"]) <= 2
+                    and all(item in ("confirmed", "pending") for item in raw["statuses"])))
+                or raw["view"] not in ("list", "count", None)):
             raise ValueError("Model proposal values are invalid")
         if raw["needs_clarification"] and (raw["intent"] != "clarify"
                                            or any(raw[name] is not None for name in ACTION_FIELDS)):
@@ -216,7 +231,9 @@ class OpenAIMessageInterpreter:
         return MessageProposal(raw["intent"], raw["request_reference"], raw["date_text"],
                                raw["owner_decision"], raw["needs_clarification"],
                                raw["date_from"], raw["date_to"], raw["time_from"],
-                               raw["time_to"], raw["target_date"])
+                               raw["time_to"], raw["target_date"],
+                               tuple(raw["statuses"]) if raw["statuses"] else None,
+                               raw["view"])
 
 
     def classify_owner_reply(self, body: str, context: OwnerReplyContext) -> OwnerReplyProposal:
