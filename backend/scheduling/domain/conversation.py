@@ -20,6 +20,15 @@ from scheduling.domain.availability import (
     available_starts,
 )
 from scheduling.domain.calendar import CalendarSnapshot, CalendarStatus
+from scheduling.domain.client_calendar_questions import (
+    BOTH,
+    ClientQuestion,
+    View,
+    range_from_proposal,
+    statuses_named,
+)
+from scheduling.domain.client_calendar_questions import answer as answer_client_question
+from scheduling.domain.client_calendar_questions import parse as parse_client_question
 from scheduling.domain.client_records import ClientProfile
 from scheduling.domain.conversation_state import (
     MAX_OPTIONS,
@@ -257,6 +266,10 @@ class ConversationService:
             answered = self._answer(receipt, prompt, targets, policy, now)
             if answered is not None:
                 return answered
+            if receipt.role == SenderRole.CLIENT:
+                question = parse_client_question(receipt.body, context.today)
+                if question is not None:
+                    return self._client_calendar(question, prompt, targets, policy, now)
             try:
                 proposal = self._interpreter.propose(receipt.body, context)
             except (OSError, ValueError, TypeError, KeyError, RuntimeError):
@@ -284,6 +297,17 @@ class ConversationService:
         # offer or a question, never directly to a write.
         if receipt.role != SenderRole.CLIENT:
             return ConversationOutcome(self._clarify(receipt.role, "clarify"))
+        if proposal.intent in ("calendar_question", "clarify_booking"):
+            # The model only resolves the day range; the statuses and the answer do not
+            # depend on it.
+            span = range_from_proposal(proposal.date_from, proposal.date_to)
+            body = receipt.body or ""
+            question = ClientQuestion(
+                View.COUNT if re.search(r"\bhow many\b", body, re.IGNORECASE) else View.LIST,
+                *(span if span is not None else (date.max, date.min)),
+                statuses_named(body) if proposal.intent == "calendar_question" else BOTH,
+                ambiguous_booking=proposal.intent == "clarify_booking")
+            return self._client_calendar(question, prompt, targets, policy, now, forgotten=True)
         if proposal.intent == "cancel":
             return self._ask_cancel(receipt, proposal, targets, policy, now)
         if proposal.intent == "reschedule":
@@ -566,6 +590,22 @@ class ConversationService:
             return ConversationOutcome("That visit changed. Please tell me again which one you mean.")
         return (self._confirm_cancel(receipt, chosen, zone, now) if cancelling
                 else self._ask_day(receipt, chosen, zone, now))
+
+    def _client_calendar(self, question: ClientQuestion, prompt: ConversationState | None,
+                         targets: tuple[Appointment, ...], policy: AvailabilityPolicy,
+                         now: datetime, forgotten: bool = False) -> ConversationOutcome:
+        """Answer from the client's own current visits. Writes nothing to the calendar.
+
+        A question closes any open offer or question, and says so, so a later "yes" or
+        number cannot act on a prompt the client has moved on from.
+        """
+        if not forgotten:
+            self._forget(prompt)
+        text = answer_client_question(question, targets, now, ZoneInfo(policy.timezone))
+        if prompt is not None and not prompt.expired(now):
+            text += ("\nI closed my earlier question, so nothing was booked or cancelled. "
+                     "Ask again when you're ready.")
+        return ConversationOutcome(text)
 
     def _book_option(self, receipt: InboundReceipt, prompt: ConversationState, start: datetime,
                      targets: tuple[Appointment, ...], policy: AvailabilityPolicy,
