@@ -5,7 +5,7 @@ checks routing, the answer text, data isolation, and that nothing is written. It
 cover the real model's wording or DynamoDB reads.
 """
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 from test_conversation_flow import NOW, THURSDAY, Harness, ask
 
@@ -161,7 +161,21 @@ def test_open_times_and_change_requests_keep_their_existing_routes() -> None:
     today = NOW.date()
     for text in ("What times are open Friday?", "Do you have availability tomorrow?",
                  "Can I move my Thursday visit?", "I need to cancel my cleaning",
-                 "Anything tomorrow?", "When can the cleaners come Friday?"):
+                 "Anything tomorrow?", "When can the cleaners come Friday?",
+                 # A question followed by a change is a change.
+                 "When is the cleaning tomorrow? We have to call it off",
+                 "Is my visit Friday? Let's drop it", "When is my visit? Remove it please",
+                 "What time is my cleaning? Make it 10 am",
+                 "When are you coming Friday? Please push it to Monday",
+                 # Open times in other words keep the availability offer.
+                 "Which day works best for a cleaning next week?",
+                 "When is the earliest cleaning next week?",
+                 "What's the soonest visit you have Friday?",
+                 # Not about the schedule.
+                 "How many hours is a cleaning?", "How many cleaners are coming?",
+                 "What does a cleaning cost?",
+                 # A plain booking request, not a question.
+                 "Cleaning Friday", "Visit tomorrow", "A cleaning next week"):
         assert parse(text, today) is None, text
 
 
@@ -171,3 +185,37 @@ def test_unverified_sender_gets_no_calendar_answer() -> None:
         "pilot", "SM-x", "+14155550199", "+14155550000", "Do I have bookings this week?",
         NOW, SenderRole.CLIENT, "client-1", Keyword.OTHER, True))
     assert reply.text == "This sender needs a verified client profile and consent."
+
+
+def test_dates_are_bounded_to_upcoming_visits_and_one_range() -> None:
+    chat, _, _ = week_with_visits()
+    assert chat.text("Do I have anything yesterday?").text == (
+        "That date has passed. I can check visits that haven't happened yet: ask about "
+        "today or a later day.")
+    assert chat.text("Do I have anything Friday or next week?").text.startswith(
+        "I can check one day or one week at a time.")
+    for proposed in (ask("calendar_question", "2026-10-09", "2026-10-02"),
+                     ask("calendar_question", "2026-10-01", "2026-12-31")):
+        chat.model.replies["Anything on the books for me?"] = proposed
+        assert chat.text("Anything on the books for me?").text.startswith(
+            "Which day or week do you mean?")
+
+
+def test_model_path_question_also_closes_an_open_offer() -> None:
+    chat, _, _ = week_with_visits()
+    chat.model.replies["Anything Wednesday?"] = ask("availability", "2026-09-30")
+    chat.text("Anything Wednesday?")
+    chat.model.replies["Any idea where I'm at with you all?"] = ask("calendar_question")
+    reply = chat.text("Any idea where I'm at with you all?")
+    assert reply.text.startswith("You have 1 confirmed visit, 1 pending request coming up:")
+    assert reply.text.endswith("nothing was booked or cancelled. Ask again when you're ready.")
+    assert chat.states.read_state("pilot", "+14155550101") is None
+
+
+def test_times_carry_standard_time_after_the_clock_change() -> None:
+    chat = Harness()
+    chat.now = datetime(2026, 10, 30, 17, tzinfo=UTC)  # Fri Oct 30, 10:00 AM PDT.
+    visit = chat.hold(datetime(2026, 11, 3, 17, tzinfo=UTC), "nov", confirm=True)
+    assert chat.text("When is my next cleaning?").text == (
+        "You have 1 confirmed visit coming up:\n"
+        f"- Tue Nov 3 at 9:00 AM-11:00 AM PST, confirmed (ref {visit[:8]})")

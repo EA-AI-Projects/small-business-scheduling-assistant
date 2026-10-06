@@ -32,23 +32,34 @@ NOUNS = {CONFIRMED: ("confirmed visit", "confirmed visits"),
 MAX_RANGE_DAYS = 62
 MAX_AMBIGUOUS_WORDS = 6
 
-# A question about the client's own visits. Open times, and anything that asks
-# for a change, go to the model instead and keep their existing handling.
+# A question about the client's own visits: one sentence that starts like a
+# schedule question, names a visit, and uses only schedule-question words. Any
+# other word (a change, a preference, open times, a price) sends the text to
+# the model instead, so a request is never swallowed by a read-only answer.
 TRIGGER = re.compile(
-    r"\b(?:do i have|have i got|am i|is my|are my|when|how many|what|"
-    r"what's|which|show|list|tell me)\b")
+    r"^(?:do i have|have i got|am i|is my|are my|when|how many|what|what's|show|list|"
+    r"tell me)\b")
 SUBJECT = re.compile(
     r"\b(?:bookings?|booked|appointments?|visits?|cleanings?|cleaners?|requests?|scheduled|"
-    r"schedule|itinerary|calendar|coming|anything)\b")
-NOT_A_QUESTION = re.compile(
-    r"\b(?:open|openings?|available|availability|free|slots?|times|cancel\w*|reschedul\w*|"
-    r"move|change|switch|instead|can|could|would|want|wanna|need|book|"
-    r"can't|cannot|won't)\b")
-# A short message that only names a booking ("Booking for Friday?") could mean
+    r"schedule|itinerary|calendar|anything)\b")
+COUNTED = re.compile(r"\b(?:bookings?|appointments?|visits?|cleanings?|requests?)\b")
+QUESTION_WORDS = frozenset({
+    "do", "i", "have", "got", "am", "is", "are", "my", "the", "a", "an", "any", "anything",
+    "when", "what", "what's", "whats", "how", "many", "show", "list", "tell", "me", "time",
+    "booking", "bookings", "booked", "appointment", "appointments", "visit", "visits",
+    "cleaning", "cleanings", "cleaner", "cleaners", "request", "requests", "scheduled",
+    "schedule", "itinerary", "calendar", "coming", "up", "upcoming", "next", "this", "week",
+    "on", "for", "in", "at", "still", "yet", "confirmed", "pending", "approved", "and", "or",
+    "both", "all", "of", "s", "there"})
+# A short question that only names a booking ("Booking for Friday?") could mean
 # either checking a visit or requesting a new one.
 BOOKING_NOUN = re.compile(r"\b(?:bookings?|appointments?|cleanings?|visits?)\b")
 AMBIGUOUS_FILLER = frozenset({"a", "an", "any", "the", "for", "on", "my", "this", "next",
                               "week", "s"})
+
+
+def wants_count(body: str) -> bool:
+    return bool(re.search(r"\bhow many\b", body, re.IGNORECASE))
 
 
 class View(StrEnum):
@@ -83,17 +94,22 @@ def statuses_named(body: str) -> frozenset[CalendarStatus]:
 def parse(body: str, today: date) -> ClientQuestion | None:
     """A question about the client's own visits, or None for every other text."""
     text = _clean(body)
-    if not text:
+    # One sentence only: "When is my visit? Cancel it" is a change, not a question.
+    if not text or re.search(r"[.!?;]", re.sub(r"[.!?\s]+$", "", body)):
         return None
     ranges = sorted(set(ranges_in(text, today)))
     first, last = ranges[0] if len(ranges) == 1 else (None, None)
-    view = View.COUNT if "how many" in text else View.LIST
-    if TRIGGER.search(text) and SUBJECT.search(text) and not NOT_A_QUESTION.search(text):
+    words = re.findall(r"[a-z']+", RANGE_TOKEN.sub(" ", text))
+    if TRIGGER.search(text) and SUBJECT.search(text) and all(
+            word in QUESTION_WORDS for word in words):
+        if wants_count(text) and not COUNTED.search(text):
+            return None  # "How many cleaners are coming?" is not a visit count.
+        view = View.COUNT if wants_count(text) else View.LIST
         return ClientQuestion(view, first, last, statuses_named(text), len(ranges) > 1)
-    rest = RANGE_TOKEN.sub(" ", text)
-    words = re.findall(r"[a-z']+", rest)
-    if (BOOKING_NOUN.search(rest) and len(text.split()) <= MAX_AMBIGUOUS_WORDS
-            and all(word in AMBIGUOUS_FILLER or BOOKING_NOUN.fullmatch(word) for word in words)):
+    asked = normalized(body).endswith("?")
+    if (asked and BOOKING_NOUN.search(text) and len(text.split()) <= MAX_AMBIGUOUS_WORDS
+            and all(word in AMBIGUOUS_FILLER or BOOKING_NOUN.fullmatch(word)
+                    for word in words)):
         return ClientQuestion(View.LIST, first, last, BOTH, len(ranges) > 1, True)
     return None
 

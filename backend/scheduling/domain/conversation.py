@@ -26,6 +26,7 @@ from scheduling.domain.client_calendar_questions import (
     View,
     range_from_proposal,
     statuses_named,
+    wants_count,
 )
 from scheduling.domain.client_calendar_questions import answer as answer_client_question
 from scheduling.domain.client_calendar_questions import parse as parse_client_question
@@ -303,7 +304,7 @@ class ConversationService:
             span = range_from_proposal(proposal.date_from, proposal.date_to)
             body = receipt.body or ""
             question = ClientQuestion(
-                View.COUNT if re.search(r"\bhow many\b", body, re.IGNORECASE) else View.LIST,
+                View.COUNT if wants_count(body) else View.LIST,
                 *(span if span is not None else (date.max, date.min)),
                 statuses_named(body) if proposal.intent == "calendar_question" else BOTH,
                 ambiguous_booking=proposal.intent == "clarify_booking")
