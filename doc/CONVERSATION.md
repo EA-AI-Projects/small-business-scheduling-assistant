@@ -16,6 +16,25 @@ An offer or confirmation question stays valid for **30 minutes**. A later answer
 
 When a specific time is open, the offer is that single time, answered with "yes". When it is not, the three nearest open times are offered instead. Offers prefer on-the-hour starts, then half-hour starts, and spread across the requested days.
 
+## Client calendar questions
+
+A verified client can ask about their own schedule by text (#240; PRD 6.5). The answer is read-only and built in `client_calendar_questions.py` from the client's own current visits, read for that message.
+
+| Example text | Reply |
+| --- | --- |
+| "Do I have bookings this week?" | "You have 1 confirmed visit, 1 pending request from Tue Sep 29 to Sun Oct 4:" then one line per visit, such as "Thu Oct 1 at 9:00 AM-11:00 AM PDT, confirmed (ref …)" or "…, pending owner approval, not confirmed yet (ref …)". |
+| "When are the cleaners coming?" | Every upcoming visit, labeled the same way. |
+| "How many confirmed visits next week?" | The count, plus "You also have 1 pending request …" when one exists. |
+| "Booking for Friday?" | "Do you want to check the visits you already have for Fri Oct 2, or request a new cleaning?" with an example question for each. Nothing else happens. |
+| "What times are open Friday?" | Unchanged: an availability offer (see above). |
+
+- **Recognized.** Common phrasings ("do I have", "when is my", "when are the cleaners", "how many visits", "what's on my schedule") are matched deterministically without the model, but only as one sentence made entirely of schedule-question words. Anything else (a second sentence such as "When is my visit? Cancel it", a change, a preference, open times like "the earliest cleaning", or an unrelated question like "How many hours is a cleaning?") goes to the normal flow. Other wording reaches the model, which may propose `calendar_question` with a day range, or `clarify_booking` when the text could mean checking or requesting; the model supplies no visit facts. The check-or-request question is asked without the model only for a short question ending in "?"; "Cleaning Friday" is still a booking request.
+- **Grounded and scoped.** The answer lists only the sender's own confirmed visits and unexpired pending requests that have not ended, read for that message, so an answer after an approval, cancellation, or expiry reflects it. Other clients' visits, owner blocks, notes, and profile fields are never read into the answer. A client with more than 8 active visits gets the existing "contact the owner" reply.
+- **Statuses.** Confirmed and pending are labeled separately; pending always says "not confirmed yet". A question that names one status ("confirmed", "pending", "request") filters to it but still reports the other ("You also have …"), so a pending request is never hidden or implied to be confirmed.
+- **Dates.** One day or one week ("tomorrow", "Friday", "this week", "next week", a date); no day means every upcoming visit. Past days are refused, and a range starting in the past starts today. Several ranges in one text get a question asking for one. Times are in the business timezone with its abbreviation.
+- **No writes, no lingering prompt.** A question creates no request, hold, or cancellation. It closes any open offer, visit list, or cancel confirmation, and the reply adds "I closed my earlier question, so nothing was booked or cancelled", so a later "yes" or number cannot act on it. An open owner counteroffer is left as it is (normal chatter rules, see [SCHEDULING_CONTRACTS.md](SCHEDULING_CONTRACTS.md#client-acceptance-176)). Follow-ups such as "what about next week?" are #241.
+- **Checks.** `backend/tests/test_client_calendar_questions.py` drives these cases through the conversation service with a scripted model and the in-memory calendar.
+
 ## What cannot cause a write
 
 - **Model output never selects a write.** The model proposes an intent, a resolved day range, a time window, and the day of an existing visit. Its output is schema-validated: dates must be `YYYY-MM-DD`, times `HH:MM`, and a clarification carries no action fields. The backend rejects impossible dates, past dates, and days beyond the booking horizon before any offer.

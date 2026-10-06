@@ -288,6 +288,14 @@ def test_ambiguous_reply_keeps_the_offer_open(world: World) -> None:
     assert world.client("YES").committed
 
 
+def test_a_calendar_question_keeps_the_offer_open(world: World) -> None:
+    world.offered()
+    answer = world.client("Do I have bookings this week?")
+    assert "pending owner approval, not confirmed yet" in answer.text
+    assert not answer.committed
+    assert world.client("YES").committed  # The counteroffer is still there to accept.
+
+
 def test_a_new_client_request_replaces_the_offer(world: World) -> None:
     world.offered()
     world.client("BOOK 2026-10-02 10:00")

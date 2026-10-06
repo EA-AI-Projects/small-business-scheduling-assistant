@@ -37,6 +37,12 @@ INSTRUCTIONS = (
     "the new preferred time if given. "
     "cancel when a client wants to cancel or cannot make a visit: target_date is the day of "
     "that visit if the text names it. "
+    "calendar_question when a client asks about visits or requests they already have "
+    "(whether they have a booking, when the cleaners are coming, how many visits, whether "
+    "one is confirmed), not about open times: set date_from and date_to to the asked day "
+    "range, or null for all upcoming visits. clarify_booking, with date_from and date_to "
+    "if a day is named, when a client's text could mean either checking an existing "
+    "booking or requesting a new one. "
     "owner_decision when the owner approves or declines a request. "
     "Copy request_reference only when one of the available references appears literally in "
     "the text; never invent one. "
@@ -56,8 +62,8 @@ TOOL: dict[str, Any] = {
         "type": "object",
         "properties": {
             "intent": {"type": "string", "enum": [
-                "availability", "request_booking", "reschedule", "cancel", "owner_decision",
-                "clarify", "unsupported",
+                "availability", "request_booking", "reschedule", "cancel", "calendar_question",
+                "clarify_booking", "owner_decision", "clarify", "unsupported",
             ]},
             "request_reference": {"type": ["string", "null"]},
             "date_text": {"type": ["string", "null"]},
