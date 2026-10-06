@@ -67,8 +67,11 @@ FOLLOW_UP_WORDS = frozenset({
     "one", "those", "them", "confirmed", "pending", "request", "requests", "awaiting",
     "unconfirmed", "approved", "visit", "visits", "cleaning", "cleanings", "booking",
     "bookings", "appointment", "appointments", "show", "list", "me", "all", "both",
-    "everything", "instead", "then", "for", "on", "in", "please", "ok", "okay", "my", "of",
+    "everything", "instead", "for", "on", "in", "ok", "okay", "my", "of",
     "this", "next", "week", "s", "count", "so", "too", "also", "or"})
+# Words that make a short text refer back to the last answer ("And Friday?").
+FOLLOW_UP_CUE = re.compile(
+    r"\b(?:what|what's|whats|about|and|how|just|only|ones|those|them|instead|so|too|also)\b")
 EVERYTHING = re.compile(r"\b(?:all|both|everything)\b")
 LIST_WORDS = re.compile(r"\b(?:show|list)\b")
 # A short question that only names a booking ("Booking for Friday?") could mean
@@ -166,13 +169,21 @@ def parse_followup(body: str, today: date, previous: ClientQuestion) -> ClientQu
     if (not text or len(text.split()) > MAX_FOLLOW_UP_WORDS
             or re.search(r"[.!?;]", re.sub(r"[.!?\s]+$", "", body))):
         return None
-    words = re.findall(r"[a-z']+", RANGE_TOKEN.sub(" ", text))
-    if not all(word in FOLLOW_UP_WORDS for word in words):
+    rest = RANGE_TOKEN.sub(" ", text)
+    words = re.findall(r"[a-z']+", rest)
+    # A clock time ("Friday 10") or a word outside the list is a request: the model reads it.
+    if re.search(r"\d", rest) or not all(word in FOLLOW_UP_WORDS for word in words):
         return None
     ranges = sorted(set(ranges_in(text, today)))
     named = bool(STATUS_CONFIRMED.search(text) or STATUS_PENDING.search(text))
     everything = bool(EVERYTHING.search(text))
-    if not (ranges or named or everything or wants_count(text) or LIST_WORDS.search(text)):
+    if not (named or everything or wants_count(text) or LIST_WORDS.search(text)
+            or FOLLOW_UP_CUE.search(rest)):
+        # A bare range ("Friday") goes to the model, which may read it as a request. With a
+        # booking noun ("Booking for Friday") it could mean either: ask which.
+        if ranges and BOOKING_NOUN.search(rest):
+            first, last = ranges[0] if len(ranges) == 1 else (None, None)
+            return ClientQuestion(View.LIST, first, last, BOTH, len(ranges) > 1, True)
         return None
     first, last = ranges[0] if len(ranges) == 1 else (previous.first, previous.last)
     statuses = (BOTH if everything else statuses_named(text) if named

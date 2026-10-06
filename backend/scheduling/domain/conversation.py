@@ -265,7 +265,12 @@ class ConversationService:
                 receipt, now, targets, self._calendar_last(receipt, targets, now))
             if countered is not None:
                 return countered
-        if receipt.role == SenderRole.CLIENT and self._acceptance is not None:
+        # Inside a calendar conversation only a plain YES or NO answers an owner counteroffer;
+        # "Just the confirmed one", "1", or "the first one" is about the calendar answer.
+        body = receipt.body or ""
+        plain = is_negative(body) or (is_affirmative(body) and not mentions_status(body))
+        if (receipt.role == SenderRole.CLIENT and self._acceptance is not None
+                and (calendar is None or plain)):
             # A reply to the owner's counteroffer (#176) is matched only to this client's
             # own current offer; every other message falls through unchanged.
             # A calendar answer asks nothing, so it is not a newer prompt to answer.
@@ -307,12 +312,16 @@ class ConversationService:
         moving = (prompt if prompt is not None and prompt.kind == PromptKind.RESCHEDULE_DAY
                   and not prompt.expired(now) else None)
         unclear = proposal.needs_clarification or proposal.intent in ("clarify", "unsupported")
-        if unclear and calendar is not None and receipt.role == SenderRole.CLIENT:
+        if (unclear and calendar is not None and receipt.role == SenderRole.CLIENT
+                and not re.search(r"\b(?:cancel|reschedule)\b", receipt.body or "",
+                                  re.IGNORECASE)):
             # Keep the calendar conversation open for the answer; nothing changes.
             return self._with_offer_note(receipt, now, ConversationOutcome(
                 "I wasn't sure what you meant. Should I check another day or status, or do "
                 "you want to request or change a visit?"))
-        self._forget(prompt)
+        if not (receipt.role == SenderRole.CLIENT
+                and proposal.intent in ("calendar_question", "clarify_booking")):
+            self._forget(prompt)  # A calendar answer below replaces the prompt itself.
         if unclear:
             return ConversationOutcome(self._clarify(
                 receipt.role, proposal.intent, receipt.body or "", targets))
@@ -347,8 +356,7 @@ class ConversationService:
                 *(span if span is not None else (date.max, date.min)),
                 statuses if proposal.intent == "calendar_question" else BOTH,
                 ambiguous_booking=proposal.intent == "clarify_booking")
-            return self._client_calendar(receipt, question, prompt, targets, policy, now,
-                                         forgotten=True)
+            return self._client_calendar(receipt, question, prompt, targets, policy, now)
         if proposal.intent == "cancel":
             return self._ask_cancel(receipt, proposal, targets, policy, now)
         if proposal.intent == "reschedule":
@@ -634,15 +642,14 @@ class ConversationService:
 
     def _client_calendar(self, receipt: InboundReceipt, question: ClientQuestion,
                          prompt: ConversationState | None, targets: tuple[Appointment, ...],
-                         policy: AvailabilityPolicy, now: datetime,
-                         forgotten: bool = False) -> ConversationOutcome:
+                         policy: AvailabilityPolicy, now: datetime) -> ConversationOutcome:
         """Answer from the client's own current visits. Writes nothing to the calendar.
 
         A question closes any open offer or question, and says so, so a later "yes" or
         number cannot act on a prompt the client has moved on from.
         """
-        if not forgotten:
-            self._forget(prompt)
+        if prompt is not None and prompt.kind != PromptKind.CALENDAR:
+            self._forget(prompt)  # An offer or confirmation is closed; the reply says so.
         zone = ZoneInfo(policy.timezone)
         text = answer_client_question(question, targets, now, zone)
         if (prompt is not None and not prompt.expired(now)
@@ -662,10 +669,9 @@ class ConversationService:
                 calendar_first=question.first, calendar_last=question.last,
                 calendar_statuses=tuple(sorted(status.value for status in question.statuses)),
                 calendar_view=question.view.value))
-        elif (prompt is not None and prompt.kind == PromptKind.CALENDAR
-              and not prompt.expired(now)):
-            # A question this answer only clarified keeps the last range for the reply.
-            self._states.put_state(prompt)
+        elif prompt is not None and prompt.kind == PromptKind.CALENDAR and prompt.expired(now):
+            self._forget(prompt)
+        # A question this answer only clarified leaves an open calendar conversation as it was.
         return self._with_offer_note(receipt, now, ConversationOutcome(text))
 
     def _with_offer_note(self, receipt: InboundReceipt, now: datetime,

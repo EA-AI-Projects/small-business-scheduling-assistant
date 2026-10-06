@@ -160,6 +160,37 @@ def test_calendar_answer_reminds_of_an_open_counteroffer_and_yes_still_accepts_i
     assert world.client("YES").committed
 
 
+def test_inside_a_calendar_conversation_only_plain_yes_or_no_answers_a_counteroffer(
+        world: World) -> None:  # noqa: F811 - pytest fixture
+    world.offered()
+    before = dict(world.repository._appointments)
+    world.client("Do I have bookings this week?")
+    for reply in ("Just the confirmed one", "the first one", "1", "confirmed"):
+        outcome = world.client(reply)
+        assert not outcome.committed, reply
+    assert world.repository._appointments == before
+    assert world.client("NO").text.startswith("OK, I won't request that time.")
+
+
+def test_booking_requests_are_not_read_as_follow_ups() -> None:
+    chat, _, _ = week_with_visits()
+    chat.text("Do I have bookings this week?")
+    for text in ("Cleaning Friday 10 please", "Friday 10", "Cleaning next week please",
+                 "Friday please", "Friday"):
+        chat.model.replies[text] = ask("availability", "2026-10-02")
+        assert "Reply with the number" in chat.text(text).text, text
+        chat.text("Do I have bookings this week?")  # Reopen the calendar conversation.
+    for text in ("Booking for Friday", "Appointment on Friday"):
+        assert chat.text(text).text.startswith(
+            "Do you want to check the visits you already have for Fri Oct 2"), text
+
+
+def test_a_cancel_clarification_keeps_its_specific_question() -> None:
+    chat, _, _ = week_with_visits()
+    chat.text("Do I have bookings this week?")
+    assert chat.text("Cancel my visit").text == "Which visit would you like to cancel? Tell me its day."
+
+
 class FakeDynamo:
     def __init__(self) -> None:
         self.item: dict[str, Any] | None = None
