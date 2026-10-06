@@ -229,9 +229,9 @@ class OpenAIMessageInterpreter:
                 or raw["view"] not in ("list", "count", None)
                 or raw["range_scope"] not in ("dates", "all_upcoming", "keep", None)):
             raise ValueError("Model proposal values are invalid")
-        if raw["range_scope"] == "dates" and raw["date_from"] is None:
-            raise ValueError("A dated range needs its dates")
         calendar = raw["intent"] in ("calendar_question", "clarify_booking")
+        if calendar and raw["range_scope"] == "dates" and raw["date_from"] is None:
+            raise ValueError("A dated range needs its dates")
         if raw["needs_clarification"] and (raw["intent"] != "clarify"
                                            or any(raw[name] is not None for name in ACTION_FIELDS)):
             raise ValueError("Ambiguous proposal contains an action")

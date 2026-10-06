@@ -181,7 +181,18 @@ def test_calendar_fields_are_dropped_on_other_intents(monkeypatch: pytest.Monkey
                         lambda *_args, **_kwargs: response(proposal(
                             intent="availability", request_reference=None, owner_decision=None,
                             date_from="2026-10-02", date_to="2026-10-02",
-                            statuses=["confirmed"], view="count", range_scope="dates")))
+                            statuses=["confirmed"], view="count", range_scope="all_upcoming")))
     context = MessageContext(SenderRole.CLIENT, date(2026, 9, 29), "America/Los_Angeles", ())
     result = OpenAIMessageInterpreter("synthetic-key").propose("Friday?", context)
     assert (result.statuses, result.view, result.range_scope) == (None, None, None)
+
+
+def test_a_stray_range_scope_does_not_break_a_booking_request(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("scheduling.adapters.openai_messages.urlopen",
+                        lambda *_args, **_kwargs: response(proposal(
+                            intent="availability", request_reference=None, owner_decision=None,
+                            range_scope="dates")))
+    context = MessageContext(SenderRole.CLIENT, date(2026, 9, 29), "America/Los_Angeles", ())
+    result = OpenAIMessageInterpreter("synthetic-key").propose("A cleaning soon?", context)
+    assert result.intent == "availability" and result.range_scope is None
