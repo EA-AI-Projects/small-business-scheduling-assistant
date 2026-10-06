@@ -49,11 +49,13 @@ class Script:
     def __init__(self) -> None:
         self.replies: dict[str, MessageProposal] = {}
         self.calls: list[str] = []
+        self.contexts: list[MessageContext] = []
         self.owner: dict[str, OwnerReplyIntent] = {}  # Owner reply text to what the model says.
         self.classified: list[str] = []
 
     def propose(self, body: str, context: MessageContext) -> MessageProposal:
         self.calls.append(body)
+        self.contexts.append(context)
         return self.replies.get(body, CLARIFY)
 
     def classify_owner_reply(self, body: str, context: OwnerReplyContext) -> OwnerReplyProposal:

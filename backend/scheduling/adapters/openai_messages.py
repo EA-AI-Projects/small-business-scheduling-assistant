@@ -40,7 +40,9 @@ INSTRUCTIONS = (
     "calendar_question when a client asks about visits or requests they already have "
     "(whether they have a booking, when the cleaners are coming, how many visits, whether "
     "one is confirmed), not about open times: set date_from and date_to to the asked day "
-    "range, or null for all upcoming visits. clarify_booking, with date_from and date_to "
+    "range, or null for all upcoming visits. When Last calendar answer is given, a short "
+    "follow-up about it (another day or week, the week after, only confirmed ones) is also "
+    "calendar_question: give the new range, or null to keep the range shown. clarify_booking, with date_from and date_to "
     "if a day is named, when a client's text could mean either checking an existing "
     "booking or requesting a new one. "
     "owner_decision when the owner approves or declines a request. "
@@ -136,12 +138,15 @@ ACTION_FIELDS = ("request_reference", "date_text", *DATE_FIELDS, *TIME_FIELDS, "
 
 
 def model_input(body: str, context: MessageContext) -> str:
+    calendar = (f"Last calendar answer: {context.calendar_range}\n"
+                if context.calendar_range else "")
     return (
         f"Actor: {context.actor.value}\n"
         f"Today: {context.today.isoformat()} ({context.today.strftime('%A')})\n"
         f"Timezone: {context.timezone}\n"
         f"Booking horizon: {context.horizon_days} days\n"
         f"Available references: {', '.join(context.references) or 'none'}\n"
+        f"{calendar}"
         f"Inbound text: {body}"
     )
 

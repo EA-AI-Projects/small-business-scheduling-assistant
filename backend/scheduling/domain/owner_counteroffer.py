@@ -763,6 +763,15 @@ class CounterofferAcceptance:
             return None
         return offer
 
+    def reminder(self, receipt: InboundReceipt, now: datetime) -> str | None:
+        """One line naming the client's open offer and what YES does, or None."""
+        offer = self._open_offer(receipt)
+        if offer is None or offer.state != OfferState.CONFIRMED or offer.expired(now):
+            return None
+        zone = ZoneInfo(self._repository.read_policy(receipt.business_id).timezone)
+        return (f"The owner's offer of {when_text(offer.proposed_start, zone)} is still open: "
+                "reply YES to request it, or NO to turn it down.")
+
     def supersede_for_new_request(self, receipt: InboundReceipt) -> None:
         """A new client request replaces the open offer, as it replaces any other prompt."""
         offer = self._open_offer(receipt)

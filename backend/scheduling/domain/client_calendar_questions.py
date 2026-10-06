@@ -16,7 +16,14 @@ from zoneinfo import ZoneInfo
 
 from scheduling.domain.appointments import Appointment
 from scheduling.domain.calendar import CalendarStatus
-from scheduling.domain.conversation_state import clock_text, day_text, normalized, when_text
+from scheduling.domain.conversation_state import (
+    clock_text,
+    day_text,
+    is_affirmative,
+    is_negative,
+    normalized,
+    when_text,
+)
 from scheduling.domain.owner_calendar_questions import (
     RANGE_TOKEN,
     STATUS_CONFIRMED,
@@ -38,7 +45,7 @@ MAX_AMBIGUOUS_WORDS = 6
 # the model instead, so a request is never swallowed by a read-only answer.
 TRIGGER = re.compile(
     r"^(?:do i have|have i got|am i|is my|are my|when|how many|what|what's|show|list|"
-    r"tell me)\b")
+    r"tell me|give me|summarize|summarise|recap)\b")
 SUBJECT = re.compile(
     r"\b(?:bookings?|booked|appointments?|visits?|cleanings?|cleaners?|requests?|scheduled|"
     r"schedule|itinerary|calendar|anything)\b")
@@ -50,7 +57,20 @@ QUESTION_WORDS = frozenset({
     "cleaning", "cleanings", "cleaner", "cleaners", "request", "requests", "scheduled",
     "schedule", "itinerary", "calendar", "coming", "up", "upcoming", "next", "this", "week",
     "on", "for", "in", "at", "still", "yet", "confirmed", "pending", "approved", "and", "or",
-    "both", "all", "of", "s", "there"})
+    "both", "all", "of", "s", "give", "summarize", "summarise", "recap", "summary"})
+# "Summarize my itinerary" right after a calendar answer means the range just shown.
+REFERS_BACK = re.compile(r"\b(?:summari[sz]e|summary|recap)\b")
+# A short follow-up to the last calendar answer: only range, status, and view words.
+MAX_FOLLOW_UP_WORDS = 8
+FOLLOW_UP_WORDS = frozenset({
+    "what", "what's", "whats", "about", "and", "how", "many", "just", "only", "the", "ones",
+    "one", "those", "them", "confirmed", "pending", "request", "requests", "awaiting",
+    "unconfirmed", "approved", "visit", "visits", "cleaning", "cleanings", "booking",
+    "bookings", "appointment", "appointments", "show", "list", "me", "all", "both",
+    "everything", "instead", "then", "for", "on", "in", "please", "ok", "okay", "my", "of",
+    "this", "next", "week", "s", "count", "so", "too", "also", "or"})
+EVERYTHING = re.compile(r"\b(?:all|both|everything)\b")
+LIST_WORDS = re.compile(r"\b(?:show|list)\b")
 # A short question that only names a booking ("Booking for Friday?") could mean
 # either checking a visit or requesting a new one.
 BOOKING_NOUN = re.compile(r"\b(?:bookings?|appointments?|cleanings?|visits?)\b")
@@ -75,10 +95,32 @@ class ClientQuestion:
     statuses: frozenset[CalendarStatus]
     multiple_ranges: bool = False
     ambiguous_booking: bool = False  # Check visits, or request a new cleaning?
+    refers_back: bool = False  # No range of its own: a follow-up keeps the last one.
 
 
 def _clean(body: str) -> str:
     return re.sub(r"\s+", " ", normalized(body).replace("?", " ")).strip()
+
+
+def asks_for_list(body: str) -> bool:
+    return bool(re.search(r"\b(?:show|list|which|when|what)\b", _clean(body)))
+
+
+def mentions_status(body: str) -> bool:
+    text = _clean(body)
+    return bool(STATUS_CONFIRMED.search(text) or STATUS_PENDING.search(text)
+                or EVERYTHING.search(text))
+
+
+ACTION_LIKE = re.compile(
+    r"(?:option\s*)?\d{1,2}|(?:the\s+)?(?:first|second|third|fourth|fifth|last)(?:\s+one)?"
+    r"|that one|this one")
+
+
+def is_action_like(body: str) -> bool:
+    """A bare yes, no, number, or pick: an answer to a prompt a calendar answer never asks."""
+    return (is_affirmative(body) or is_negative(body)
+            or bool(ACTION_LIKE.fullmatch(_clean(body))))
 
 
 def statuses_named(body: str) -> frozenset[CalendarStatus]:
@@ -105,13 +147,39 @@ def parse(body: str, today: date) -> ClientQuestion | None:
         if wants_count(text) and not COUNTED.search(text):
             return None  # "How many cleaners are coming?" is not a visit count.
         view = View.COUNT if wants_count(text) else View.LIST
-        return ClientQuestion(view, first, last, statuses_named(text), len(ranges) > 1)
+        return ClientQuestion(view, first, last, statuses_named(text), len(ranges) > 1,
+                              refers_back=bool(REFERS_BACK.search(text)) and not ranges)
     asked = normalized(body).endswith("?")
-    if (asked and BOOKING_NOUN.search(text) and len(text.split()) <= MAX_AMBIGUOUS_WORDS
+    # A clock time ("Cleaning Friday 10?") is a booking request: the model reads it.
+    timed = bool(re.search(r"\d", RANGE_TOKEN.sub(" ", text)))
+    if (asked and not timed and BOOKING_NOUN.search(text) and len(text.split()) <= MAX_AMBIGUOUS_WORDS
             and all(word in AMBIGUOUS_FILLER or BOOKING_NOUN.fullmatch(word)
                     for word in words)):
         return ClientQuestion(View.LIST, first, last, BOTH, len(ranges) > 1, True)
     return None
+
+
+def parse_followup(body: str, today: date, previous: ClientQuestion) -> ClientQuestion | None:
+    """A short follow-up ("What about next week?", "Just confirmed ones") to the last
+    calendar question, merged with its range, statuses, and view; None for other text."""
+    text = _clean(body)
+    if (not text or len(text.split()) > MAX_FOLLOW_UP_WORDS
+            or re.search(r"[.!?;]", re.sub(r"[.!?\s]+$", "", body))):
+        return None
+    words = re.findall(r"[a-z']+", RANGE_TOKEN.sub(" ", text))
+    if not all(word in FOLLOW_UP_WORDS for word in words):
+        return None
+    ranges = sorted(set(ranges_in(text, today)))
+    named = bool(STATUS_CONFIRMED.search(text) or STATUS_PENDING.search(text))
+    everything = bool(EVERYTHING.search(text))
+    if not (ranges or named or everything or wants_count(text) or LIST_WORDS.search(text)):
+        return None
+    first, last = ranges[0] if len(ranges) == 1 else (previous.first, previous.last)
+    statuses = (BOTH if everything else statuses_named(text) if named
+                else previous.statuses)
+    view = (View.COUNT if wants_count(text) else View.LIST if LIST_WORDS.search(text)
+            else previous.view)
+    return ClientQuestion(view, first, last, statuses, len(ranges) > 1)
 
 
 def _span(first: date, last: date) -> str:

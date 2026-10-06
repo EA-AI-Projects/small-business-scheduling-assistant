@@ -12,6 +12,7 @@ from test_conversation_flow import NOW, THURSDAY, Harness, ask
 from scheduling.domain.calendar import CalendarEvent, CalendarStatus
 from scheduling.domain.client_calendar_questions import parse
 from scheduling.domain.client_records import ClientProfile, HomeSize
+from scheduling.domain.conversation_state import PromptKind
 from scheduling.domain.holds import CreateHold, HoldService
 from scheduling.domain.lifecycle import Action, ActorRole, AppointmentCommand, LifecycleService
 from scheduling.domain.sms_ingress import InboundReceipt, Keyword, SenderRole
@@ -29,8 +30,12 @@ def week_with_visits() -> tuple[Harness, str, str]:
 
 
 def unchanged(chat: Harness, before: tuple[tuple[str, str, int], ...]) -> None:
+    """No calendar write, and no offer or confirmation is left to answer (#241 keeps only
+    the calendar question's range and statuses)."""
     assert chat.calendar() == before
-    assert chat.states.read_state("pilot", "+14155550101") is None
+    state = chat.states.read_state("pilot", "+14155550101")
+    assert state is None or (state.kind == PromptKind.CALENDAR and not state.options
+                             and state.appointment_id is None)
 
 
 def test_do_i_have_bookings_this_week_lists_confirmed_and_pending_separately() -> None:
@@ -175,7 +180,10 @@ def test_open_times_and_change_requests_keep_their_existing_routes() -> None:
                  "How many hours is a cleaning?", "How many cleaners are coming?",
                  "What does a cleaning cost?",
                  # A plain booking request, not a question.
-                 "Cleaning Friday", "Visit tomorrow", "A cleaning next week"):
+                 "Cleaning Friday", "Visit tomorrow", "A cleaning next week",
+                 "Cleaning Friday 10?",
+                 # "There" may mean open appointments, not the client's own.
+                 "What appointments are there Friday?"):
         assert parse(text, today) is None, text
 
 
@@ -209,7 +217,8 @@ def test_model_path_question_also_closes_an_open_offer() -> None:
     reply = chat.text("Any idea where I'm at with you all?")
     assert reply.text.startswith("You have 1 confirmed visit, 1 pending request coming up:")
     assert reply.text.endswith("nothing was booked or cancelled. Ask again when you're ready.")
-    assert chat.states.read_state("pilot", "+14155550101") is None
+    state = chat.states.read_state("pilot", "+14155550101")
+    assert state is not None and state.kind == PromptKind.CALENDAR
 
 
 def test_times_carry_standard_time_after_the_clock_change() -> None:
