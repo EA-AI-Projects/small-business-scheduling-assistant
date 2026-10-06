@@ -9,6 +9,7 @@ from uuid import uuid4
 from scheduling.adapters.outbox_aws import due_keys
 from scheduling.domain.appointments import Appointment, ReplacementGuard
 from scheduling.domain.availability import AvailabilityPolicy, HolidayCalendar, LocalWindow
+from scheduling.domain.booking_outreach import OutreachRecord, OutreachSettings
 from scheduling.domain.calendar import CalendarEvent, CalendarSnapshot, CalendarStatus
 from scheduling.domain.client_records import (
     ClientNote,
@@ -20,6 +21,7 @@ from scheduling.domain.client_records import (
 from scheduling.domain.holds import (
     CreateHold,
     HoldCommit,
+    IdempotencyKeyReused,
     IdempotencyRecord,
     PendingHold,
     RevisionConflict,
@@ -199,6 +201,72 @@ class DynamoDBCalendarRepository:
         self._client = client
         self._table = table_name
         self._sms_sender_guard = sms_sender_guard
+
+    def read_outreach(self, business_id: str) -> OutreachRecord:
+        item = self._get(self._business_key(business_id, "SETTINGS#BOOKING_OUTREACH"))
+        if item is None:
+            return OutreachRecord(OutreachSettings(), 0)
+        payload = json.loads(item["payload"]["S"])
+        return OutreachRecord(OutreachSettings(
+            enabled=payload["enabled"], weekday=payload["weekday"],
+            local_time=time.fromisoformat(payload["local_time"]) if payload["local_time"] else None,
+            lookahead_weeks=payload["lookahead_weeks"],
+        ), int(item["version"]["N"]))
+
+    def save_outreach(self, business_id: str, actor_id: str, key: str,
+                      expected_version: int, settings: OutreachSettings) -> OutreachRecord:
+        identity = self._business_key(business_id,
+            _command_sort_key(actor_id, "edit_booking_outreach", key))
+        payload = json.dumps({"enabled": settings.enabled, "weekday": settings.weekday,
+            "local_time": settings.local_time.isoformat(timespec="minutes") if settings.local_time else None,
+            "lookahead_weeks": settings.lookahead_weeks}, sort_keys=True)
+        request_hash = sha256(json.dumps([expected_version, payload]).encode()).hexdigest()
+
+        def replay() -> OutreachRecord | None:
+            old = self._get(identity)
+            if old is None:
+                return None
+            if old["request_hash"]["S"] != request_hash:
+                raise IdempotencyKeyReused("Key already used for another outreach edit")
+            return OutreachRecord(settings, int(old["version"]["N"]))
+
+        existing = replay()
+        if existing is not None:
+            return existing
+        next_version = expected_version + 1
+        record_key = self._business_key(business_id, "SETTINGS#BOOKING_OUTREACH")
+        condition = "attribute_not_exists(PK)" if expected_version == 0 else "#version = :old"
+        put: dict[str, Any] = {"TableName": self._table,
+            "Item": {**record_key, "payload": {"S": payload}, "version": {"N": str(next_version)}},
+            "ConditionExpression": condition}
+        if expected_version:
+            put["ExpressionAttributeNames"] = {"#version": "version"}
+            put["ExpressionAttributeValues"] = {":old": {"N": str(expected_version)}}
+        audit_key = sha256(json.dumps([business_id, actor_id, key]).encode()).hexdigest()
+        try:
+            self._client.transact_write_items(TransactItems=[
+                {"Put": put},
+                {"Put": {"TableName": self._table,
+                    "Item": {**identity, "request_hash": {"S": request_hash},
+                             "version": {"N": str(next_version)}},
+                    "ConditionExpression": "attribute_not_exists(PK)"}},
+                {"Put": {"TableName": self._table,
+                    "Item": {**self._business_key(business_id, f"AUDIT#outreach#{audit_key}"),
+                             "action": {"S": "edit_booking_outreach"},
+                             "actor_id": {"S": actor_id},
+                             "source": {"S": "owner_api"},
+                             "created_at": {"S": _instant(datetime.now(UTC))},
+                             "version": {"N": str(next_version)}},
+                    "ConditionExpression": "attribute_not_exists(PK)"}},
+            ])
+        except Exception as exc:
+            if not _record_transaction_conflict(exc):
+                raise
+            existing = replay()
+            if existing is not None:
+                return existing
+            raise RevisionConflict("Outreach settings version changed") from exc
+        return OutreachRecord(settings, next_version)
 
     def _sms_guard_checks(self, business_id: str) -> list[dict[str, Any]]:
         """STOP and a scheduling commit must serialize on the same Dynamo items."""

@@ -21,6 +21,17 @@ export type RemoveBlockBody = Schemas["RemoveBlockBody"];
 export type ManualAppointmentBody = Schemas["ManualAppointmentBody"];
 export type PolicyEditBody = Schemas["PolicyEditBody"];
 export type PolicyBody = Schemas["PolicyBody"];
+export type OutreachEditBody = Schemas["OutreachEditBody"];
+
+export interface OutreachState {
+  settings: {
+    enabled: boolean;
+    weekday: number | null;
+    local_time: string | null;
+    lookahead_weeks: number | null;
+  };
+  version: number;
+}
 
 export type CalendarStatus = "PENDING_APPROVAL" | "CONFIRMED" | "UNAVAILABLE" | "CANCELLED"
   | "DECLINED" | "EXPIRED";

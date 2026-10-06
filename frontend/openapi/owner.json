@@ -349,6 +349,77 @@
         "title": "MoveBlockBody",
         "type": "object"
       },
+      "OutreachEditBody": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_version": {
+            "minimum": 0.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/OutreachSettingsBody"
+          }
+        },
+        "required": [
+          "expected_version",
+          "settings"
+        ],
+        "title": "OutreachEditBody",
+        "type": "object"
+      },
+      "OutreachSettingsBody": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "local_time": {
+            "anyOf": [
+              {
+                "format": "time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Time"
+          },
+          "lookahead_weeks": {
+            "anyOf": [
+              {
+                "maximum": 2.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lookahead Weeks"
+          },
+          "weekday": {
+            "anyOf": [
+              {
+                "maximum": 6.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weekday"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "title": "OutreachSettingsBody",
+        "type": "object"
+      },
       "PolicyBody": {
         "additionalProperties": false,
         "properties": {
@@ -1084,6 +1155,112 @@
           }
         ],
         "summary": "Move Block"
+      }
+    },
+    "/v1/owner/businesses/{business_id}/booking-outreach": {
+      "get": {
+        "operationId": "get_booking_outreach_v1_owner_businesses__business_id__booking_outreach_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "business_id",
+            "required": true,
+            "schema": {
+              "title": "Business Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Get Booking Outreach V1 Owner Businesses  Business Id  Booking Outreach Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Booking Outreach"
+      },
+      "put": {
+        "operationId": "edit_booking_outreach_v1_owner_businesses__business_id__booking_outreach_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "business_id",
+            "required": true,
+            "schema": {
+              "title": "Business Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OutreachEditBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Edit Booking Outreach V1 Owner Businesses  Business Id  Booking Outreach Put"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Edit Booking Outreach"
       }
     },
     "/v1/owner/businesses/{business_id}/calendar": {

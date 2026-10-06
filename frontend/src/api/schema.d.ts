@@ -92,6 +92,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/owner/businesses/{business_id}/booking-outreach": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Booking Outreach */
+        get: operations["get_booking_outreach_v1_owner_businesses__business_id__booking_outreach_get"];
+        /** Edit Booking Outreach */
+        put: operations["edit_booking_outreach_v1_owner_businesses__business_id__booking_outreach_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/owner/businesses/{business_id}/calendar": {
         parameters: {
             query?: never;
@@ -470,6 +488,23 @@ export interface components {
              */
             start_at: string;
         };
+        /** OutreachEditBody */
+        OutreachEditBody: {
+            /** Expected Version */
+            expected_version: number;
+            settings: components["schemas"]["OutreachSettingsBody"];
+        };
+        /** OutreachSettingsBody */
+        OutreachSettingsBody: {
+            /** Enabled */
+            enabled: boolean;
+            /** Local Time */
+            local_time?: string | null;
+            /** Lookahead Weeks */
+            lookahead_weeks?: number | null;
+            /** Weekday */
+            weekday?: number | null;
+        };
         /** PolicyBody */
         PolicyBody: {
             /** Booking Horizon Days */
@@ -817,6 +852,74 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["RemoveBlockBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_booking_outreach_v1_owner_businesses__business_id__booking_outreach_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                business_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    edit_booking_outreach_v1_owner_businesses__business_id__booking_outreach_put: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                business_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OutreachEditBody"];
             };
         };
         responses: {

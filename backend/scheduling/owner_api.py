@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -24,6 +25,7 @@ from scheduling.adapters.dynamodb import DynamoClient, DynamoDBCalendarRepositor
 from scheduling.adapters.sms_dynamodb import DynamoSmsIngressStore
 from scheduling.domain.appointments import Appointment
 from scheduling.domain.availability import AvailabilityPolicy, HolidayCalendar, LocalWindow
+from scheduling.domain.booking_outreach import OutreachRepository, OutreachSettings, update_outreach
 from scheduling.domain.client_records import (
     ClientRecordRepository,
     ClientRecordService,
@@ -90,6 +92,7 @@ class OwnerRepository(Protocol):
     def read_appointment(self, appointment_id: str) -> Appointment | None: ...
     def read_block(self, business_id: str, block_id: str) -> UnavailableBlock | None: ...
     def read_policy_record(self, business_id: str) -> PolicyRecord | None: ...
+    def read_outreach(self, business_id: str) -> object: ...
 
 
 class StrictModel(BaseModel):
@@ -148,6 +151,21 @@ class PolicyEditBody(StrictModel):
     expected_revision: int = Field(ge=0)
     expected_version: int = Field(gt=0)
     policy: PolicyBody
+
+
+class OutreachSettingsBody(StrictModel):
+    enabled: bool
+    weekday: int | None = Field(default=None, ge=0, le=6)
+    local_time: time | None = None
+    lookahead_weeks: int | None = Field(default=None, ge=1, le=2)
+
+    def settings(self) -> OutreachSettings:
+        return OutreachSettings(self.enabled, self.weekday, self.local_time, self.lookahead_weeks)
+
+
+class OutreachEditBody(StrictModel):
+    expected_version: int = Field(ge=0)
+    settings: OutreachSettingsBody
 
 
 class HoldBody(StrictModel):
@@ -487,6 +505,23 @@ def create_owner_app(
         if record is None:
             raise _error("POLICY_NOT_CONFIGURED", "Persist the pilot policy first", 404)
         return {"record": record, "calendar_revision": store.read_revision(business_id)}
+
+    @app.get("/v1/owner/businesses/{business_id}/booking-outreach")
+    def get_booking_outreach(business_id: str,
+                             owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:
+        del owner
+        return cast(OutreachRepository, repository).read_outreach(business_id)
+
+    @app.put("/v1/owner/businesses/{business_id}/booking-outreach")
+    def edit_booking_outreach(business_id: str, body: OutreachEditBody,
+                              owner: Annotated[OwnerPrincipal, Depends(principal)],
+                              request_key: Annotated[str, Depends(key)]) -> object:
+        outreach = cast(OutreachRepository, repository)
+        if body.settings.enabled and store.read_policy_record(business_id) is None:
+            raise _error("POLICY_NOT_CONFIGURED", "Save the business timezone policy first", 409)
+        return run(lambda: update_outreach(outreach, business_id, owner.actor_id, request_key,
+                                           body.expected_version, body.settings.settings()),
+                   lambda: jsonable_encoder(outreach.read_outreach(business_id)))
 
     @app.get("/v1/owner/businesses/{business_id}/local-time")
     def resolve_local_time(business_id: str, value: str,
