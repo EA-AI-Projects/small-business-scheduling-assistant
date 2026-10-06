@@ -881,3 +881,49 @@ class DynamoSmsIngressStore(SmsIngressStore):
             start = page.get("LastEvaluatedKey")
             if start is None:
                 return removed
+
+    def purge_expired_manual_invitation_bodies(self, business_id: str,
+                                                now: datetime) -> int:
+        """Remove custom invitation text at 90 days, independent of DynamoDB TTL lag."""
+        if now.tzinfo is None:
+            raise ValueError("Retention clock must be timezone-aware")
+        cutoff = _instant(now - timedelta(days=90))
+        start: dict[str, Any] | None = None
+        removed = 0
+        while True:
+            arguments: dict[str, Any] = {
+                "TableName": self._table,
+                "KeyConditionExpression": "PK = :pk AND begins_with(SK, :prefix)",
+                "ExpressionAttributeValues": {
+                    ":pk": {"S": f"BUSINESS#{business_id}"},
+                    ":prefix": {"S": "INVITATION#"},
+                },
+                "ConsistentRead": True,
+            }
+            if start is not None:
+                arguments["ExclusiveStartKey"] = start
+            page = self._client.query(**arguments)
+            for item in page.get("Items", ()):
+                if "manual_message" not in item or item["run_at"]["S"] > cutoff:
+                    continue
+                try:
+                    self._client.update_item(
+                        TableName=self._table,
+                        Key=self._key(business_id, item["SK"]["S"]),
+                        UpdateExpression="REMOVE manual_message",
+                        ConditionExpression="manual_message = :body AND run_at <= :cutoff",
+                        ExpressionAttributeValues={
+                            ":body": item["manual_message"],
+                            ":cutoff": {"S": cutoff},
+                        },
+                    )
+                except Exception as exc:
+                    response = getattr(exc, "response", {})
+                    if (isinstance(response, dict) and response.get("Error", {}).get("Code")
+                            == "ConditionalCheckFailedException"):
+                        continue
+                    raise
+                removed += 1
+            start = page.get("LastEvaluatedKey")
+            if start is None:
+                return removed

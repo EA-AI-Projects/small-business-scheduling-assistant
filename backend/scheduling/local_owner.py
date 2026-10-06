@@ -37,7 +37,12 @@ from scheduling.domain.owner_calendar import (
     OwnerCalendarService,
 )
 from scheduling.domain.owner_policy import OwnerPolicyService
-from scheduling.local_texts import OfflineInterpreter, TextSimulator, mount_text_simulator
+from scheduling.local_texts import (
+    LocalConsent,
+    OfflineInterpreter,
+    TextSimulator,
+    mount_text_simulator,
+)
 from scheduling.owner_api import OwnerPrincipal, create_owner_app
 
 BUSINESS_ID = "pilot"
@@ -132,7 +137,9 @@ def create_local_owner_app(token: str | None, now: datetime | None = None,
     repository = InMemoryCalendarRepository()
     current = clock or (lambda: datetime.now(UTC))
     seed_synthetic_data(repository, now or current())
-    app = create_owner_app(repository, verifier, clock, cors_origins=LOCAL_APP_ORIGINS,
+    app = create_owner_app(repository, verifier, clock, invitation_consent=LocalConsent(repository),
+                           manual_invitation_enabled=lambda: True,
+                           cors_origins=LOCAL_APP_ORIGINS,
                            allow_loopback_http=True)
     simulator = TextSimulator(repository, interpreter or OfflineInterpreter(), BUSINESS_ID,
                               current)
