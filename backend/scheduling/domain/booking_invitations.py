@@ -25,6 +25,7 @@ class InvitationIntent:
     phone_hash: str
     verified_at: datetime
     lookahead_weeks: int
+    manual_message: str | None = None
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,10 @@ class StoredInvitation:
 INVITATION_TEMPLATE = "booking_invitation"
 
 
+class ManualRunKeyConflict(Exception):
+    """A manual run key was replayed with different invitation text."""
+
+
 def invitation_outbox_id(intent_id: str) -> str:
     return f"booking-invitation#{intent_id}"
 
@@ -47,17 +52,21 @@ class SelectionReport:
     examined: int
     queued: int
     reasons: dict[str, int]
+    next_cursor: str | None = None
 
 
 class InvitationRepository(Protocol):
     def read_outreach(self, business_id: str) -> OutreachRecord: ...
     def read_policy(self, business_id: str) -> AvailabilityPolicy: ...
     def list_profiles(self, business_id: str) -> tuple[ClientProfile, ...]: ...
+    def list_profiles_after(self, business_id: str, cursor: str | None,
+                            limit: int) -> tuple[tuple[ClientProfile, ...], str | None]: ...
     def read_confirmed_for_client(self, business_id: str, client_id: str,
                                   run_at: datetime, end_at: datetime) -> tuple[int, tuple[Appointment, ...]]: ...
     def reserve_invitation(self, intent: InvitationIntent,
                            settings_version: int, calendar_revision: int,
                            profile: ClientProfile) -> bool: ...
+    def read_invitation(self, business_id: str, intent_id: str) -> StoredInvitation | None: ...
     def complete_invitation(self, intent: InvitationIntent,
                             handed_off_at: datetime | None,
                             provider_id: str | None = None) -> bool: ...
@@ -84,7 +93,7 @@ class InvitationEligibilityRepository(Protocol):
 def invitation_problem(intent: InvitationIntent, records: InvitationEligibilityRepository,
                        consent: ConsentRepository, now: datetime) -> str | None:
     """Safe reason code from authoritative state immediately before handoff."""
-    if not records.read_outreach(intent.business_id).settings.enabled:
+    if intent.manual_message is None and not records.read_outreach(intent.business_id).settings.enabled:
         return "DISABLED"
     if now.tzinfo is None or now.astimezone(UTC) > intent.window_end_at:
         return "WINDOW_EXPIRED"
@@ -106,7 +115,7 @@ def invitation_problem(intent: InvitationIntent, records: InvitationEligibilityR
     if confirmed:
         return "CONFIRMED_BOOKING"
     last_sent = records.read_last_invitation_sent(intent.business_id, intent.client_id)
-    if last_sent is not None and last_sent > intent.repeat_cutoff_at:
+    if intent.manual_message is None and last_sent is not None and last_sent > intent.repeat_cutoff_at:
         return "REPEAT_LIMIT"
     return None
 
@@ -238,3 +247,68 @@ class InvitationSelector:
             else:
                 reasons["duplicate_or_changed"] += 1
         return SelectionReport(True, examined, queued, dict(reasons))
+
+
+class ManualInvitationService:
+    """Select one owner's on-demand run without a per-client repeat limit."""
+
+    def __init__(self, records: InvitationRepository, consent: ConsentRepository) -> None:
+        self._records = records
+        self._consent = consent
+
+    def run(self, business_id: str, now: datetime, request_key: str,
+            message: str | None = None, cursor: str | None = None) -> SelectionReport:
+        if now.tzinfo is None or not business_id or not request_key:
+            raise ValueError("Manual run needs a business, key and aware time")
+        weeks = self._records.read_outreach(business_id).settings.lookahead_weeks
+        if weeks not in (1, 2):
+            raise ValueError("Choose a one or two week lookahead first")
+        end_at = now + timedelta(weeks=weeks)
+        reasons: Counter[str] = Counter()
+        queued = examined = 0
+        profiles, next_cursor = (
+            self._records.list_profiles_after(business_id, cursor, 10)
+            if message is not None else (self._records.list_profiles(business_id), None))
+        for profile in profiles:
+            examined += 1
+            if not profile.active or profile.phone_verified_at is None:
+                reasons["unavailable"] += 1
+                continue
+            evidence = self._consent.read_consent(business_id, profile.phone_e164)
+            if (evidence is None or evidence.business_id != business_id
+                    or evidence.client_id != profile.client_id or evidence.method != "in_person"
+                    or evidence.agreed_at != profile.phone_verified_at):
+                reasons["consent"] += 1
+                continue
+            if self._consent.is_opted_out(business_id, profile.phone_e164):
+                reasons["opted_out"] += 1
+                continue
+            revision, confirmed = self._records.read_confirmed_for_client(
+                business_id, profile.client_id, now, end_at)
+            if confirmed:
+                reasons["confirmed"] += 1
+                continue
+            if message is None:
+                queued += 1
+                continue
+            identity = f"{business_id}\0{profile.client_id}\0{request_key}"
+            intent = InvitationIntent(
+                business_id, profile.client_id, sha256(identity.encode()).hexdigest(),
+                now, end_at, now, sha256(profile.phone_e164.encode()).hexdigest(),
+                profile.phone_verified_at, weeks, message)
+            current = self._consent.read_consent(business_id, profile.phone_e164)
+            if current != evidence or self._consent.is_opted_out(business_id, profile.phone_e164):
+                reasons["consent_changed"] += 1
+                continue
+            if self._records.reserve_invitation(intent, 0, revision, profile):
+                queued += 1
+            else:
+                existing = self._records.read_invitation(business_id, intent.intent_id)
+                if (existing is not None and existing.intent.client_id == profile.client_id
+                        and existing.intent.manual_message == message):
+                    reasons["already_queued"] += 1
+                elif existing is not None and existing.intent.manual_message != message:
+                    raise ManualRunKeyConflict("Manual invitation key already used with other text")
+                else:
+                    reasons["duplicate_or_changed"] += 1
+        return SelectionReport(True, examined, queued, dict(reasons), next_cursor)

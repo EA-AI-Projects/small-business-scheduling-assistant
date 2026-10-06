@@ -92,6 +92,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/owner/businesses/{business_id}/booking-invitations/manual": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Preview Manual Invitations */
+        get: operations["preview_manual_invitations_v1_owner_businesses__business_id__booking_invitations_manual_get"];
+        put?: never;
+        /** Send Manual Invitations */
+        post: operations["send_manual_invitations_v1_owner_businesses__business_id__booking_invitations_manual_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/owner/businesses/{business_id}/booking-outreach": {
         parameters: {
             query?: never;
@@ -470,6 +488,13 @@ export interface components {
              * Format: date-time
              */
             start_at: string;
+        };
+        /** ManualInvitationBody */
+        ManualInvitationBody: {
+            /** Cursor */
+            cursor?: string | null;
+            /** Message */
+            message: string;
         };
         /** MoveBlockBody */
         MoveBlockBody: {
@@ -852,6 +877,74 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["RemoveBlockBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preview_manual_invitations_v1_owner_businesses__business_id__booking_invitations_manual_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                business_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    send_manual_invitations_v1_owner_businesses__business_id__booking_invitations_manual_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                business_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManualInvitationBody"];
             };
         };
         responses: {

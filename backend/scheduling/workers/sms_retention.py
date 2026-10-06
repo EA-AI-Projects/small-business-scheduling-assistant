@@ -17,5 +17,7 @@ def handler(_event: dict[str, Any], _context: object) -> dict[str, int]:
     now = datetime.now(UTC)
     business_id = os.environ["BUSINESS_ID"]
     bodies = store.purge_expired_bodies(business_id, now, owner_number)
+    invitations = store.purge_expired_manual_invitation_bodies(business_id, now)
     evidence = store.purge_expired_evidence(business_id, now)
-    return {"deleted_sms_bodies": bodies, "deleted_sms_evidence": evidence}
+    return {"deleted_sms_bodies": bodies, "deleted_manual_invitation_bodies": invitations,
+            "deleted_sms_evidence": evidence}

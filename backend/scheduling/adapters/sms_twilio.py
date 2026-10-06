@@ -87,7 +87,8 @@ class TwilioSmsSender:
                  status_callback: str | None = None,
                  clock: Callable[[], datetime] | None = None,
                  counteroffers: CounterofferStore | None = None,
-                 invitation_send_enabled: Callable[[], bool] | None = None) -> None:
+                 invitation_send_enabled: Callable[[], bool] | None = None,
+                 manual_invitation_send_enabled: Callable[[], bool] | None = None) -> None:
         if not business_id:
             raise ValueError("Business ID is required")
         self._messages = messages
@@ -106,6 +107,7 @@ class TwilioSmsSender:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._counteroffers = counteroffers
         self._invitation_send_enabled = invitation_send_enabled or (lambda: False)
+        self._manual_invitation_send_enabled = manual_invitation_send_enabled or (lambda: False)
 
     def deliver(self, record: OutboxRecord) -> str:
         if record.business_id != self._business_id:
@@ -156,7 +158,9 @@ class TwilioSmsSender:
             raise PermanentDeliveryFailure("INVITATION_NOT_SENDABLE")
 
         def check() -> None:
-            if not self._invitation_send_enabled():
+            enabled = (self._manual_invitation_send_enabled() if intent.manual_message is not None
+                       else self._invitation_send_enabled())
+            if not enabled:
                 raise PermanentDeliveryFailure("INVITATION_SEND_DISABLED")
             reason = invitation_problem(intent, self._records, self._consent, self._clock())
             if reason is not None:
@@ -175,9 +179,9 @@ class TwilioSmsSender:
             raise PermanentDeliveryFailure("INVITATION_CLIENT_UNAVAILABLE")
         to = normalize_phone(profile.phone_e164)
         window = "one week" if intent.lookahead_weeks == 1 else "two weeks"
-        body = ("Smart Scheduling Assistant: Would you like to book a cleaning visit in the next "
-                f"{window}? "
-                "Reply with a day and time that works for you, or STOP to opt out.")
+        body = intent.manual_message or (
+            "Smart Scheduling Assistant: Would you like to book a cleaning visit in the next "
+            f"{window}? Reply with a day and time that works for you, or STOP to opt out.")
         try:
             provider_id = self._send(record, to, body, intent.client_id, pre_send=check)
         except PermanentDeliveryFailure:

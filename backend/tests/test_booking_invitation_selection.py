@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
+from fastapi.testclient import TestClient
 
 from scheduling.adapters.dynamodb import DynamoDBCalendarRepository
 from scheduling.adapters.memory import InMemoryCalendarRepository
@@ -13,6 +14,7 @@ from scheduling.adapters.sms_twilio import TwilioSmsSender
 from scheduling.domain.booking_invitations import (
     InvitationPromoter,
     InvitationSelector,
+    ManualInvitationService,
     scheduled_window,
 )
 from scheduling.domain.booking_outreach import OutreachRecord, OutreachSettings, update_outreach
@@ -25,6 +27,7 @@ from scheduling.domain.outbox import PermanentDeliveryFailure
 from scheduling.domain.owner_calendar import OwnerAction, OwnerCalendarCommand, OwnerCalendarService
 from scheduling.domain.owner_policy import OwnerPolicyService
 from scheduling.domain.sms_ingress import ConsentEvidence, InboundReceipt, Keyword, SenderRole
+from scheduling.owner_api import OwnerPrincipal, create_owner_app
 
 BUSINESS = "pilot"
 RUN = datetime(2026, 10, 19, 16, tzinfo=UTC)  # Monday 9:00 PDT
@@ -90,6 +93,125 @@ def enable(records: InMemoryCalendarRepository, weeks: int = 1) -> None:
     update_outreach(records, BUSINESS, "owner", f"enable-{weeks}",
                     records.read_outreach(BUSINESS).version,
                     OutreachSettings(True, 0, time(9), weeks))
+
+
+def test_manual_run_has_no_repeat_limit_and_uses_custom_text() -> None:
+    records, consent, _ = setup()
+    target = client(records, consent, 501)
+    update_outreach(records, BUSINESS, "owner", "manual-window", 0,
+                    OutreachSettings(False, None, None, 1))
+    service = ManualInvitationService(records, consent)
+    text = "Smart Scheduling Assistant: Book a visit this week. Reply with a time or STOP."
+    assert service.run(BUSINESS, RUN, "preview").queued == 1
+    assert service.run(BUSINESS, RUN, "click-1", text).queued == 1
+    retried = service.run(BUSINESS, RUN, "click-1", text)
+    assert retried.queued == 0 and retried.reasons["already_queued"] == 1
+
+    class Messages:
+        def __init__(self) -> None:
+            self.bodies: list[str] = []
+
+        def create(self, **kwargs: str) -> SimpleNamespace:
+            self.bodies.append(kwargs["body"])
+            return SimpleNamespace(sid=f"SM-manual-{len(self.bodies)}")
+
+    messages = Messages()
+    sender = TwilioSmsSender(messages, records, consent, BUSINESS, "+14155550000",
+                             "+14155559999", clock=lambda: RUN + timedelta(minutes=1),
+                             manual_invitation_send_enabled=lambda: True)
+    first = next(iter(records._invitation_outbox.values()))
+    assert sender.deliver(first) == "SM-manual-1"
+    assert records.read_last_invitation_sent(BUSINESS, target) is None
+    assert service.run(BUSINESS, RUN + timedelta(minutes=1), "click-2", text).queued == 1
+    second = tuple(records._invitation_outbox.values())[-1]
+    assert sender.deliver(second) == "SM-manual-2"
+    assert messages.bodies == [text, text]
+
+
+def test_manual_send_gate_suppresses_before_provider_call() -> None:
+    records, consent, _ = setup()
+    client(records, consent, 501)
+    update_outreach(records, BUSINESS, "owner", "manual-window", 0,
+                    OutreachSettings(False, None, None, 1))
+    ManualInvitationService(records, consent).run(BUSINESS, RUN, "click", "Book now or STOP")
+
+    class Messages:
+        def create(self, **kwargs: str) -> None:
+            raise AssertionError("provider call without campaign authorization")
+
+    sender = TwilioSmsSender(Messages(), records, consent, BUSINESS, "+14155550000",
+                             "+14155559999", clock=lambda: RUN)
+    with pytest.raises(PermanentDeliveryFailure):
+        sender.deliver(next(iter(records._invitation_outbox.values())))
+
+
+def test_owner_manual_preview_and_command_require_separate_gate() -> None:
+    records, consent, _ = setup()
+    client(records, consent, 501)
+    update_outreach(records, BUSINESS, "owner", "manual-window", 0,
+                    OutreachSettings(False, None, None, 1))
+    authorized = False
+    app = TestClient(create_owner_app(
+        records, lambda token: OwnerPrincipal("owner", BUSINESS), lambda: RUN,
+        invitation_consent=consent, manual_invitation_enabled=lambda: authorized))
+    url = f"/v1/owner/businesses/{BUSINESS}/booking-invitations/manual"
+    headers = {"Authorization": "Bearer owner", "Idempotency-Key": "one-click"}
+    assert app.get(url, headers=headers).json()["eligible"] == 1
+    body = {"message": "Smart Scheduling Assistant: Book a cleaning visit or STOP."}
+    assert app.post(url, headers=headers, json=body).status_code == 409
+    assert records._invitation_outbox == {}
+    authorized = True
+    assert app.post(url, headers=headers, json=body).json()["queued"] == 1
+    replay = app.post(url, headers=headers, json=body).json()
+    assert replay["queued"] == 0 and replay["already_queued"] == 1
+
+
+def test_manual_dynamo_reservation_queues_outbox_without_frequency_guard() -> None:
+    class Client:
+        writes: list[dict[str, object]] | None = None
+
+        def transact_write_items(self, **kwargs: object) -> dict[str, object]:
+            self.writes = kwargs["TransactItems"]  # type: ignore[assignment]
+            return {}
+
+    records, consent, _ = setup()
+    client_id = client(records, consent, 501)
+    update_outreach(records, BUSINESS, "owner", "manual-window", 0,
+                    OutreachSettings(False, None, None, 1))
+    assert ManualInvitationService(records, consent).run(
+        BUSINESS, RUN, "click", "Book a visit or STOP").queued == 1
+    intent = next(iter(records._invitation_intents.values()))
+    profile = records.read_profile(BUSINESS, client_id)
+    assert profile is not None
+    fake = Client()
+    durable = DynamoDBCalendarRepository(fake, "synthetic-table")  # type: ignore[arg-type]
+    assert durable.reserve_invitation(intent, 0, 1, profile)
+    assert fake.writes is not None
+    written = [item["Put"]["Item"] for item in fake.writes if "Put" in item]
+    assert any(item["SK"]["S"] == f"INVITATION#{intent.intent_id}"
+               and item["manual_message"]["S"] == "Book a visit or STOP"
+               and "expires_at_epoch" in item for item in written)
+    assert any(item["SK"]["S"].startswith("OUTBOX#booking-invitation#")
+               for item in written)
+    assert all("INVITATION_GUARD#" not in str(action) for action in fake.writes)
+
+
+def test_manual_run_pages_clients_and_retries_a_page_with_same_key() -> None:
+    records, consent, _ = setup()
+    for number in range(501, 513):
+        client(records, consent, number)
+    update_outreach(records, BUSINESS, "owner", "manual-window", 0,
+                    OutreachSettings(False, None, None, 1))
+    service = ManualInvitationService(records, consent)
+    text = "Smart Scheduling Assistant: Book a visit or STOP."
+    first = service.run(BUSINESS, RUN, "one-click", text)
+    assert first.queued == 10 and first.next_cursor == "synthetic-510"
+    replay = service.run(BUSINESS, RUN, "one-click", text)
+    assert replay.queued == 0 and replay.reasons["already_queued"] == 10
+    assert replay.next_cursor == first.next_cursor
+    last = service.run(BUSINESS, RUN, "one-click", text, first.next_cursor)
+    assert last.queued == 2 and last.next_cursor is None
+    assert len(records._invitation_outbox) == 12
 
 
 def appointment(records: InMemoryCalendarRepository, client_id: str,

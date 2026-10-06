@@ -6,6 +6,7 @@ an owner principal. No request field or HTTP header can assert an actor role.
 """
 
 import json
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
@@ -25,6 +26,12 @@ from scheduling.adapters.dynamodb import DynamoClient, DynamoDBCalendarRepositor
 from scheduling.adapters.sms_dynamodb import DynamoSmsIngressStore
 from scheduling.domain.appointments import Appointment
 from scheduling.domain.availability import AvailabilityPolicy, HolidayCalendar, LocalWindow
+from scheduling.domain.booking_invitations import (
+    ConsentRepository,
+    InvitationRepository,
+    ManualInvitationService,
+    ManualRunKeyConflict,
+)
 from scheduling.domain.booking_outreach import OutreachRepository, OutreachSettings, update_outreach
 from scheduling.domain.client_records import (
     ClientRecordRepository,
@@ -168,6 +175,18 @@ class OutreachEditBody(StrictModel):
     settings: OutreachSettingsBody
 
 
+class ManualInvitationBody(StrictModel):
+    message: str = Field(min_length=1, max_length=500)
+    cursor: str | None = Field(default=None, min_length=1, max_length=200)
+
+    @field_validator("message")
+    @classmethod
+    def valid_message(cls, value: str) -> str:
+        if not value.strip() or "STOP" not in value.upper():
+            raise ValueError("Include invitation text and STOP opt-out instructions")
+        return value.strip()
+
+
 class HoldBody(StrictModel):
     client_id: str = Field(min_length=1)
     start_at: datetime
@@ -280,6 +299,8 @@ def create_owner_app(
     clock: Callable[[], datetime] | None = None,
     sms_store: SmsIngressStore | None = None,
     *,
+    invitation_consent: ConsentRepository | None = None,
+    manual_invitation_enabled: Callable[[], bool] | None = None,
     cors_origins: tuple[str, ...] = (),
     allow_loopback_http: bool = False,
 ) -> FastAPI:
@@ -512,6 +533,47 @@ def create_owner_app(
         del owner
         return cast(OutreachRepository, repository).read_outreach(business_id)
 
+    @app.get("/v1/owner/businesses/{business_id}/booking-invitations/manual")
+    def preview_manual_invitations(business_id: str,
+                                   owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:
+        del owner
+        if store.read_policy_record(business_id) is None:
+            raise _error("POLICY_NOT_CONFIGURED", "Save the business policy first", 409)
+        consent = invitation_consent or sms_store
+        if consent is None:
+            raise _error("SMS_UNAVAILABLE", "SMS consent records are unavailable", 503)
+        try:
+            report = ManualInvitationService(cast(InvitationRepository, repository), consent).run(
+                business_id, now(), "preview")
+        except ValueError as exc:
+            raise _error("OUTREACH_NOT_CONFIGURED", str(exc), 409) from exc
+        return {"eligible": report.queued, "examined": report.examined,
+                "reasons": report.reasons,
+                "delivery_enabled": bool(manual_invitation_enabled and manual_invitation_enabled())}
+
+    @app.post("/v1/owner/businesses/{business_id}/booking-invitations/manual")
+    def send_manual_invitations(business_id: str, body: ManualInvitationBody,
+                                owner: Annotated[OwnerPrincipal, Depends(principal)],
+                                request_key: Annotated[str, Depends(key)]) -> object:
+        del owner
+        if store.read_policy_record(business_id) is None:
+            raise _error("POLICY_NOT_CONFIGURED", "Save the business policy first", 409)
+        consent = invitation_consent or sms_store
+        if consent is None or not manual_invitation_enabled or not manual_invitation_enabled():
+            raise _error("MANUAL_INVITATIONS_DISABLED",
+                         "Manual SMS delivery needs its own campaign and rollout authorization", 409)
+        try:
+            report = ManualInvitationService(cast(InvitationRepository, repository), consent).run(
+                business_id, now(), request_key, body.message, body.cursor)
+        except ManualRunKeyConflict as exc:
+            raise _error("IDEMPOTENCY_KEY_REUSED", str(exc), 409) from exc
+        except ValueError as exc:
+            raise _error("OUTREACH_NOT_CONFIGURED", str(exc), 409) from exc
+        return {"queued": report.queued, "examined": report.examined,
+                "already_queued": report.reasons.get("already_queued", 0),
+                "next_cursor": report.next_cursor,
+                "reasons": report.reasons}
+
     @app.put("/v1/owner/businesses/{business_id}/booking-outreach")
     def edit_booking_outreach(business_id: str, body: OutreachEditBody,
                               owner: Annotated[OwnerPrincipal, Depends(principal)],
@@ -651,4 +713,8 @@ def create_persisted_owner_app(client: DynamoClient, table_name: str,
     """Build the non-local owner API with strongly read DynamoDB state."""
     return create_owner_app(DynamoDBCalendarRepository(client, table_name), verify_token,
                             clock, DynamoSmsIngressStore(client, table_name),
+                            manual_invitation_enabled=lambda: (
+                                os.environ.get("MANUAL_INVITATION_DELIVERY_ENABLED") == "authorized"
+                                and os.environ.get("SMS_RETENTION_SCHEDULE_STATE") == "ENABLED"
+                                and os.environ.get("SMS_SEND_ENABLED") == "authorized"),
                             cors_origins=cors_origins)

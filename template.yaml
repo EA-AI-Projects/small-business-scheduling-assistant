@@ -109,6 +109,11 @@ Parameters:
     AllowedValues: [disabled, authorized]
     Default: disabled
     Description: Additional invitation send gate; requires separate live-SMS authorization.
+  ManualInvitationDeliveryEnabled:
+    Type: String
+    AllowedValues: [disabled, authorized]
+    Default: disabled
+    Description: Separate custom manual invitation campaign and delivery authorization.
 
 Conditions:
   UsePermissionsBoundary: !Not [!Equals [!Ref PermissionsBoundaryArn, '']]
@@ -288,6 +293,9 @@ Resources:
           COGNITO_CLIENT_ID: !Ref OwnerUserPoolClient
           OWNER_SUB: !Ref OwnerSub
           OWNER_APP_ORIGIN: !Ref OwnerAppOrigin
+          SMS_SEND_ENABLED: !Ref SmsSendEnabled
+          MANUAL_INVITATION_DELIVERY_ENABLED: !Ref ManualInvitationDeliveryEnabled
+          SMS_RETENTION_SCHEDULE_STATE: !Ref SmsRetentionScheduleState
       Policies:
         - Statement:
             - Effect: Allow
@@ -454,6 +462,8 @@ Resources:
           BUSINESS_ID: !Ref BusinessId
           SMS_SEND_ENABLED: !Ref SmsSendEnabled
           BOOKING_INVITATION_DELIVERY_ENABLED: !Ref BookingInvitationDeliveryEnabled
+          MANUAL_INVITATION_DELIVERY_ENABLED: !Ref ManualInvitationDeliveryEnabled
+          SMS_RETENTION_SCHEDULE_STATE: !Ref SmsRetentionScheduleState
           TWILIO_AUTH_TOKEN_PARAM: !Sub '/scheduling/${Environment}/twilio/auth-token'
           TWILIO_ACCOUNT_SID: !Ref TwilioAccountSid
           TWILIO_BUSINESS_NUMBER: !Ref TwilioBusinessNumber

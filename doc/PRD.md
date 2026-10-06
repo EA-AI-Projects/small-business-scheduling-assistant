@@ -98,6 +98,8 @@ The owner may enable a scheduled invitation and choose its local day and time an
 
 This is a future feature, not authorization to send invitations. On 2026-10-06, the owner approved the exact invitation copy and sender label and confirmed current consent and A2P campaign coverage (#252); see [A2P_REGISTRATION.md](A2P_REGISTRATION.md#booking-invitations-249-252). Separate live-SMS authorization is still required before enabling sends.
 
+The owner may also trigger a one-off run from Settings with custom booking-invitation text. It uses the saved one- or two-week lookahead and current eligibility checks, including consent and opt-out. Manual runs have no per-client repeat limit; each click has its own idempotency key. The owner previews the eligible count and confirms the send. Custom-message delivery requires a separate Twilio campaign and rollout authorization; the manual send gate defaults to disabled.
+
 ### 6.5 SMS conversation behavior
 
 - Support natural-language requests for availability, booking, cancellation, and rescheduling. The language model resolves relative dates and windows ("tomorrow", "Friday afternoon", "this week") into a candidate day range; the backend checks the booking horizon, holidays, working hours, and existing visits before offering times.

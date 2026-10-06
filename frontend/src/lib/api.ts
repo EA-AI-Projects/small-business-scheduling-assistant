@@ -12,6 +12,8 @@ export interface RequestOptions {
   body?: unknown;
   /** Send a fresh Idempotency-Key; required by scheduling commands and note creation. */
   idempotent?: boolean;
+  /** Reuse a command key when retrying after an uncertain response. */
+  idempotencyKey?: string;
   /** Require an exact success status when the endpoint's completion contract demands one. */
   expectedStatus?: number;
 }
@@ -21,18 +23,21 @@ export type Fetcher = typeof fetch;
 /** Authenticated client for one business. The token is held only by this object. */
 export class OwnerApi {
   private readonly base: string;
+  readonly businessId: string;
 
   constructor(config: OwnerConfig, private readonly token: string,
     private readonly onUnauthorized: () => void,
     // Wrap the global so it is never invoked as a method of this object ("Illegal invocation").
     private readonly fetcher: Fetcher = (input, init) => fetch(input, init)) {
     this.base = `${config.apiBaseUrl}/v1/owner/businesses/${encodeURIComponent(config.businessId)}`;
+    this.businessId = config.businessId;
   }
 
   async request<T>(path: string, options: RequestOptions = {}): Promise<T> {
     const headers: Record<string, string> = { Authorization: `Bearer ${this.token}` };
     if (options.body !== undefined) headers["Content-Type"] = "application/json";
-    if (options.idempotent) headers["Idempotency-Key"] = crypto.randomUUID();
+    if (options.idempotencyKey) headers["Idempotency-Key"] = options.idempotencyKey;
+    else if (options.idempotent) headers["Idempotency-Key"] = crypto.randomUUID();
     let response: Response;
     try {
       response = await this.fetcher(`${this.base}${path}`, {

@@ -213,6 +213,17 @@ class TextSimulator:
                     continue
                 self._seen.add(intent.outbox_id)
                 self._capture(intent, zone)
+            for outbox in self._repository.list_manual_invitation_outbox():
+                if outbox.outbox_id in self._seen:
+                    continue
+                self._seen.add(outbox.outbox_id)
+                stored = self._repository.read_invitation(outbox.business_id, outbox.entity_id)
+                if stored is None or stored.intent.manual_message is None:
+                    continue
+                profile = self._repository.read_profile(outbox.business_id, stored.intent.client_id)
+                if profile is not None:
+                    self._append(profile.client_id, profile.name, "out", "notification",
+                                 stored.intent.manual_message)
 
     def _capture(self, intent: OutboxIntent, zone: ZoneInfo) -> None:
         appointment = self._repository.read_appointment(intent.hold_id)

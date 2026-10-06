@@ -133,6 +133,13 @@ class MemoryDynamo:
             else:
                 self.items[key].pop("legal_hold_reason", None)
             return {}
+        if expression == "REMOVE manual_message":
+            current = self.items[key]
+            if (current["manual_message"] != values[":body"]
+                    or current["run_at"]["S"] > values[":cutoff"]["S"]):
+                raise RuntimeError("retention race")
+            current.pop("manual_message")
+            return {}
         previous = self.items.get(key)
         rank = int(values[":rank"]["N"])
         if previous is not None and int(previous["status_rank"]["N"]) > rank:
@@ -476,6 +483,9 @@ def test_retention_handler_normalizes_owner_number_and_fails_closed(
             seen.append(owner)
             return 0
 
+        def purge_expired_manual_invitation_bodies(self, _b: str, _n: datetime) -> int:
+            return 0
+
         def purge_expired_evidence(self, _b: str, _n: datetime) -> int:
             return 0
 
@@ -494,3 +504,24 @@ def test_retention_handler_normalizes_owner_number_and_fails_closed(
             continue
         raise AssertionError("malformed owner number must fail closed")
     assert seen == ["+14155550100"]
+
+
+def test_manual_invitation_text_is_purged_after_ninety_days() -> None:
+    dynamo = MemoryDynamo()
+    old = "INVITATION#old"
+    recent = "INVITATION#recent"
+    dynamo.items[old] = {
+        "PK": {"S": "BUSINESS#pilot"}, "SK": {"S": old},
+        "run_at": {"S": (NOW - timedelta(days=90)).isoformat(timespec="microseconds")},
+        "manual_message": {"S": "Book or STOP"}, "state": {"S": "SENT"},
+    }
+    dynamo.items[recent] = {
+        "PK": {"S": "BUSINESS#pilot"}, "SK": {"S": recent},
+        "run_at": {"S": (NOW - timedelta(days=89)).isoformat(timespec="microseconds")},
+        "manual_message": {"S": "Book later or STOP"},
+    }
+    store = DynamoSmsIngressStore(dynamo, "synthetic")
+    assert store.purge_expired_manual_invitation_bodies("pilot", NOW) == 1
+    assert "manual_message" not in dynamo.items[old]
+    assert dynamo.items[old]["state"]["S"] == "SENT"
+    assert dynamo.items[recent]["manual_message"]["S"] == "Book later or STOP"

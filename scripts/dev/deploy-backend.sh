@@ -363,6 +363,13 @@ if [[ "${INVITATION_TARGET}" == "authorized" ]]; then
   [[ "${LIVE_SMS_AUTH}" -eq 1 ]] || die "refusing: BookingInvitationDeliveryEnabled=authorized needs separate live-SMS authorization"
   [[ "$(param_value BookingInvitationDeliveryEnabled)" == "authorized" ]] || die "refusing: pass --param BookingInvitationDeliveryEnabled=authorized explicitly"
 fi
+MANUAL_INVITATION_TARGET="$(jq -r '[.Parameters[] | select(.ParameterKey == "ManualInvitationDeliveryEnabled") | .ParameterValue] | first // "disabled"' <<<"${DESCRIPTION}")"
+if [[ "${MANUAL_INVITATION_TARGET}" == "authorized" ]]; then
+  [[ "${LIVE_SMS_AUTH}" -eq 1 ]] || die "refusing: ManualInvitationDeliveryEnabled=authorized needs separate live-SMS authorization"
+  [[ "$(param_value ManualInvitationDeliveryEnabled)" == "authorized" ]] || die "refusing: pass --param ManualInvitationDeliveryEnabled=authorized explicitly"
+  RETENTION_TARGET="$(jq -r '[.Parameters[] | select(.ParameterKey == "SmsRetentionScheduleState") | .ParameterValue] | first // "DISABLED"' <<<"${DESCRIPTION}")"
+  [[ "${RETENTION_TARGET}" == "ENABLED" ]] || die "refusing: manual invitation delivery requires the SMS retention schedule enabled"
+fi
 info "Parameters: unchanged from the live stack."
 
 # Schedule guard: a deploy must never silently change an EventBridge rule's state.

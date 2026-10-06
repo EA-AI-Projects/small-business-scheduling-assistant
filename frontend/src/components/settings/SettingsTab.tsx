@@ -4,6 +4,7 @@ import { SectionHeading } from "../Workspace";
 import { ExceptionForm } from "./ExceptionForm";
 import { PolicySummary } from "./PolicySummary";
 import { OutreachForm } from "./OutreachForm";
+import { ManualInvitationForm } from "./ManualInvitationForm";
 
 export function SettingsTab() {
   const { data } = useOwner();
@@ -15,6 +16,7 @@ export function SettingsTab() {
         {data.policy && <ExceptionForm />}
       </div>
       <OutreachForm />
+      <ManualInvitationForm />
     </>
   );
 }

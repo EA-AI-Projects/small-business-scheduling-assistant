@@ -52,6 +52,9 @@ def handler(event: dict[str, Any], _context: object) -> dict[str, list[dict[str,
         os.environ["OWNER_NUMBER"], status_callback=os.environ.get("TWILIO_STATUS_URL"),
         counteroffers=DynamoCounterofferStore(dynamo, table),
         invitation_send_enabled=invitation_enabled,
+        manual_invitation_send_enabled=lambda: (
+            os.environ.get("MANUAL_INVITATION_DELIVERY_ENABLED") == "authorized"
+            and os.environ.get("SMS_RETENTION_SCHEDULE_STATE") == "ENABLED"),
     )
     consumer = ConsumeService(DynamoOutboxStore(dynamo, table), sender,
                               lambda: datetime.now(UTC))

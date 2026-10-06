@@ -292,6 +292,8 @@ class DynamoDBCalendarRepository:
     def reserve_invitation(self, intent: InvitationIntent, settings_version: int,
                            calendar_revision: int, profile: ClientProfile) -> bool:
         """Reserve a separate intent, never an active SMS outbox record."""
+        if intent.manual_message is not None:
+            return self._reserve_manual_invitation(intent, calendar_revision, profile)
         business_id = intent.business_id
         client_hash = sha256(intent.client_id.encode()).hexdigest()
         cutoff = intent.repeat_cutoff_at
@@ -364,6 +366,72 @@ class DynamoDBCalendarRepository:
             return False
         return True
 
+    def _reserve_manual_invitation(self, intent: InvitationIntent,
+                                   calendar_revision: int, profile: ClientProfile) -> bool:
+        """Atomically queue one manually selected client, without a frequency guard."""
+        business_id = intent.business_id
+        outbox_id = invitation_outbox_id(intent.intent_id)
+        instant = _instant(intent.run_at)
+        try:
+            self._client.transact_write_items(TransactItems=[
+                {"ConditionCheck": {"TableName": self._table,
+                    "Key": self._business_key(business_id, "CALENDAR#REVISION"),
+                    "ConditionExpression": "revision = :revision",
+                    "ExpressionAttributeValues": {":revision": {"N": str(calendar_revision)}}}},
+                {"ConditionCheck": {"TableName": self._table,
+                    "Key": self._business_key(business_id, f"CLIENT#{intent.client_id}"),
+                    "ConditionExpression": ("#version = :version AND active = :active "
+                        "AND phone_e164 = :phone AND phone_verified_at = :verified"),
+                    "ExpressionAttributeNames": {"#version": "version"},
+                    "ExpressionAttributeValues": {
+                        ":version": {"N": str(profile.version)}, ":active": {"BOOL": True},
+                        ":phone": {"S": profile.phone_e164},
+                        ":verified": {"S": _instant(intent.verified_at)}}}},
+                {"ConditionCheck": {"TableName": self._table,
+                    "Key": self._business_key(business_id,
+                        f"SMS_CONSENT_CURRENT#{profile.phone_e164}"),
+                    "ConditionExpression": "client_id = :client AND #method = :method AND agreed_at = :at",
+                    "ExpressionAttributeNames": {"#method": "method"},
+                    "ExpressionAttributeValues": {":client": {"S": intent.client_id},
+                        ":method": {"S": "in_person"},
+                        ":at": {"S": _instant(intent.verified_at)}}}},
+                {"ConditionCheck": {"TableName": self._table,
+                    "Key": self._business_key(business_id, f"SMS_SUPPRESS#{profile.phone_e164}"),
+                    "ConditionExpression": "attribute_not_exists(PK)"}},
+                {"ConditionCheck": {"TableName": self._table,
+                    "Key": self._business_key(business_id, f"SMS_OPTOUT#{profile.phone_e164}"),
+                    "ConditionExpression": "attribute_not_exists(PK) OR attribute_exists(cleared_at)"}},
+                self._erasure_check(business_id, intent.client_id),
+                {"Put": {"TableName": self._table,
+                    "Item": {**self._business_key(business_id, f"INVITATION#{intent.intent_id}"),
+                        "client_id": {"S": intent.client_id},
+                        "run_at": {"S": instant},
+                        "window_end_at": {"S": _instant(intent.window_end_at)},
+                        "repeat_cutoff_at": {"S": instant},
+                        "phone_hash": {"S": intent.phone_hash},
+                        "verified_at": {"S": _instant(intent.verified_at)},
+                        "lookahead_weeks": {"N": str(intent.lookahead_weeks)},
+                        "manual_message": {"S": intent.manual_message or ""},
+                        "expires_at_epoch": {"N": str(int((intent.run_at + timedelta(days=90)).timestamp()))},
+                        "state": {"S": "OUTBOX"}},
+                    "ConditionExpression": "attribute_not_exists(PK)"}},
+                {"Put": {"TableName": self._table,
+                    "Item": {**self._business_key(business_id, f"OUTBOX#{outbox_id}"),
+                        **due_keys(DeliveryState.PENDING, intent.run_at, outbox_id),
+                        "outbox_id": {"S": outbox_id}, "entity_id": {"S": intent.intent_id},
+                        "client_id": {"S": intent.client_id}, "recipient": {"S": "client"},
+                        "template": {"S": INVITATION_TEMPLATE}, "event_version": {"N": "0"},
+                        "delivery_state": {"S": DeliveryState.PENDING.value},
+                        "created_at": {"S": instant}, "next_attempt_at": {"S": instant},
+                        "dispatch_after": {"S": instant}},
+                    "ConditionExpression": "attribute_not_exists(PK)"}},
+            ])
+        except Exception as exc:
+            if not _record_transaction_conflict(exc):
+                raise
+            return False
+        return True
+
     def read_invitation(self, business_id: str, intent_id: str) -> StoredInvitation | None:
         item = self._get(self._business_key(business_id, f"INVITATION#{intent_id}"))
         if item is None:
@@ -376,6 +444,7 @@ class DynamoDBCalendarRepository:
             item["phone_hash"]["S"],
             datetime.fromisoformat(item["verified_at"]["S"]),
             int(item["lookahead_weeks"]["N"]),
+            item.get("manual_message", {}).get("S"),
         )
         return StoredInvitation(intent, item["state"]["S"],
                                 item.get("provider_id", {}).get("S"))
@@ -503,7 +572,7 @@ class DynamoDBCalendarRepository:
                         **({":queued": {"S": "QUEUED"},
                             ":outbox": {"S": "OUTBOX"}} if not provider_id else {}),
                     }}},
-                {"Update": guard_update},
+                *([] if intent.manual_message is not None else [{"Update": guard_update}]),
             ])
         except Exception as exc:
             if not _record_transaction_conflict(exc):
@@ -603,6 +672,28 @@ class DynamoDBCalendarRepository:
                             {":prefix": {"S": "CLIENT#"}})
         return tuple(profile for item in items
                      if (profile := self.read_profile(business_id, item["client_id"]["S"])))
+
+    def list_profiles_after(self, business_id: str, cursor: str | None,
+                            limit: int) -> tuple[tuple[ClientProfile, ...], str | None]:
+        if limit < 1 or limit > 100:
+            raise ValueError("Profile page size must be between 1 and 100")
+        query: dict[str, Any] = {
+            "TableName": self._table,
+            "KeyConditionExpression": "PK = :pk AND begins_with(SK, :prefix)",
+            "ExpressionAttributeValues": {
+                ":pk": {"S": f"BUSINESS#{business_id}"},
+                ":prefix": {"S": "CLIENT#"},
+            },
+            "ConsistentRead": True,
+            "Limit": limit,
+        }
+        if cursor is not None:
+            query["ExclusiveStartKey"] = self._business_key(business_id, f"CLIENT#{cursor}")
+        page = self._client.query(**query)
+        profiles = tuple(profile for item in page.get("Items", ())
+                         if (profile := self.read_profile(business_id, item["client_id"]["S"])))
+        last = page.get("LastEvaluatedKey")
+        return profiles, last["SK"]["S"].removeprefix("CLIENT#") if last else None
 
     def _scan_items(self) -> tuple[dict[str, Any], ...]:
         """Strongly read every partition; deletion is rare and must find old projections."""

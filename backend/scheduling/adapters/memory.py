@@ -102,6 +102,19 @@ class InMemoryCalendarRepository:
                            calendar_revision: int, profile: ClientProfile) -> bool:
         with self._lock:
             guard = (intent.business_id, intent.client_id)
+            if intent.manual_message is not None:
+                if (intent.intent_id in self._invitation_intents
+                        or self._revisions[intent.business_id] != calendar_revision
+                        or self.read_profile(intent.business_id, intent.client_id) != profile):
+                    return False
+                outbox_id = invitation_outbox_id(intent.intent_id)
+                self._invitation_intents[intent.intent_id] = intent
+                self._invitation_states[intent.intent_id] = "OUTBOX"
+                self._invitation_outbox[outbox_id] = OutboxRecord(
+                    intent.business_id, outbox_id, intent.intent_id, "client",
+                    INVITATION_TEMPLATE, 0, DeliveryState.PENDING,
+                    intent.run_at, intent.run_at, intent.run_at)
+                return True
             if (self.read_outreach(intent.business_id).version != settings_version
                     or not self.read_outreach(intent.business_id).settings.enabled
                     or self._revisions[intent.business_id] != calendar_revision
@@ -125,6 +138,11 @@ class InMemoryCalendarRepository:
                 return None
             return StoredInvitation(intent, self._invitation_states[intent_id],
                                     self._invitation_provider_ids.get(intent_id))
+
+    def list_manual_invitation_outbox(self) -> tuple[OutboxRecord, ...]:
+        with self._lock:
+            return tuple(record for record in self._invitation_outbox.values()
+                         if self._invitation_intents[record.entity_id].manual_message is not None)
 
     def read_last_invitation_sent(self, business_id: str, client_id: str) -> datetime | None:
         with self._lock:
@@ -168,15 +186,18 @@ class InMemoryCalendarRepository:
             raise ValueError("Successful handoff requires a provider ID")
         with self._lock:
             guard = (intent.business_id, intent.client_id)
-            if (self._invitation_pending.get(guard) != intent.intent_id
+            if ((intent.manual_message is None and
+                    self._invitation_pending.get(guard) != intent.intent_id)
                     or self._invitation_states.get(intent.intent_id) not in (
                         ("SENDING",) if provider_id else ("QUEUED", "OUTBOX", "SENDING"))):
                 return False
-            del self._invitation_pending[guard]
+            if intent.manual_message is None:
+                del self._invitation_pending[guard]
             self._invitation_states[intent.intent_id] = (
                 "SENT" if handed_off_at is not None else "SUPPRESSED")
-            if handed_off_at is not None:
+            if handed_off_at is not None and intent.manual_message is None:
                 self._invitation_last_sent[guard] = handed_off_at
+            if handed_off_at is not None:
                 assert provider_id is not None
                 self._invitation_provider_ids[intent.intent_id] = provider_id
             return True
@@ -189,6 +210,13 @@ class InMemoryCalendarRepository:
         with self._lock:
             return tuple(sorted((profile for (owner, _), profile in self._clients.items()
                                  if owner == business_id), key=lambda profile: profile.client_id))
+
+    def list_profiles_after(self, business_id: str, cursor: str | None,
+                            limit: int) -> tuple[tuple[ClientProfile, ...], str | None]:
+        remaining = tuple(profile for profile in self.list_profiles(business_id)
+                          if cursor is None or profile.client_id > cursor)
+        page = remaining[:limit]
+        return page, page[-1].client_id if len(remaining) > limit else None
 
     def read_verified_phone(self, business_id: str, phone_e164: str) -> ClientProfile | None:
         with self._lock:
