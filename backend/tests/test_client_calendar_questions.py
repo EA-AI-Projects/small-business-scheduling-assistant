@@ -183,7 +183,11 @@ def test_open_times_and_change_requests_keep_their_existing_routes() -> None:
                  "Cleaning Friday", "Visit tomorrow", "A cleaning next week",
                  "Cleaning Friday 10?",
                  # "There" may mean open appointments, not the client's own.
-                 "What appointments are there Friday?"):
+                 "What appointments are there Friday?",
+                 # A lead-in or a second sentence does not hide a request.
+                 "I want a cleaning Friday", "I want to know what times are open Friday",
+                 "I want a list of open times", "Do I have bookings this week? Book me Friday",
+                 "I'm trying to find out if I can move my visit"):
         assert parse(text, today) is None, text
 
 

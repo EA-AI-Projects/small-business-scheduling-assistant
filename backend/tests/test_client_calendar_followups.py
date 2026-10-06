@@ -51,6 +51,30 @@ def test_three_message_sequence_carries_range_and_status_forward() -> None:
     assert len(chat.calendar()) == 3
 
 
+def test_the_reported_three_message_sequence_is_answered_from_the_calendar() -> None:
+    """The exact texts from the #241 screenshot, which got an offer and then the
+    book/reschedule/cancel menu twice."""
+    chat, confirmed, pending = week_with_visits()
+    later = chat.hold(NEXT_TUESDAY, "tue", confirm=True)
+    before = chat.calendar()
+    week = chat.text("do I have any bookings for this week?")
+    assert week.text.startswith("You have 1 confirmed visit, 1 pending request from Tue Sep 29 "
+                                "to Sun Oct 4:")
+    coming = chat.text("Do I have any confirmed bookings already?  I'm trying to find out "
+                       "when the cleaners are coming")
+    assert coming.text == (
+        "You have 2 confirmed visits coming up:\n"
+        f"- Thu Oct 1 at 9:00 AM-11:00 AM PDT, confirmed (ref {confirmed[:8]})\n"
+        f"- Tue Oct 6 at 9:00 AM-11:00 AM PDT, confirmed (ref {later[:8]})\n"
+        "You also have 1 pending request coming up.\n"
+        f"- Fri Oct 2 at 9:00 AM-11:00 AM PDT, pending owner approval, not confirmed yet "
+        f"(ref {pending[:8]})")
+    summary = chat.text("I want a summary of my itinerary")
+    assert summary.text.startswith("You have 2 confirmed visits, 1 pending request coming up:")
+    assert chat.model.calls == []
+    assert chat.calendar() == before
+
+
 def test_summarize_after_an_upcoming_question_covers_every_upcoming_visit() -> None:
     chat, _, _ = week_with_visits()
     chat.hold(NEXT_TUESDAY, "tue", confirm=True)

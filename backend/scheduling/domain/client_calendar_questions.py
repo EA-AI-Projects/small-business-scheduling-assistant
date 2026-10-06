@@ -57,7 +57,7 @@ QUESTION_WORDS = frozenset({
     "cleaning", "cleanings", "cleaner", "cleaners", "request", "requests", "scheduled",
     "schedule", "itinerary", "calendar", "coming", "up", "upcoming", "next", "this", "week",
     "on", "for", "in", "at", "still", "yet", "confirmed", "pending", "approved", "and", "or",
-    "both", "all", "of", "s", "give", "summarize", "summarise", "recap", "summary"})
+    "both", "all", "of", "s", "give", "already", "summarize", "summarise", "recap", "summary"})
 # "Summarize my itinerary" right after a calendar answer means the range just shown.
 REFERS_BACK = re.compile(r"\b(?:summari[sz]e|summary|recap)\b")
 # A short follow-up to the last calendar answer: only range, status, and view words.
@@ -136,26 +136,60 @@ def statuses_named(body: str) -> frozenset[CalendarStatus]:
     return BOTH
 
 
+# Polite lead-ins dropped before matching: "I'm trying to find out when the cleaners are
+# coming" asks the same as "When are the cleaners coming". Only the rest is matched, so
+# "I want to know what times are open" still goes to the model.
+LEAD_IN = re.compile(
+    r"^(?:(?:i'm|i am) trying to (?:find out|figure out|see)|"
+    r"(?:i want|i'd like|i would like|i need) to (?:know|find out|check|see)|"
+    r"(?:can|could) you (?:please )?tell me|(?:please )?tell me|i was wondering|i wonder)\s+")
+# "I want a summary of my itinerary" asks for a summary, not a booking.
+SUMMARY_ASK = re.compile(
+    r"^(?:i want|i'd like|i would like|i need|(?:can|could) i (?:get|have|see)|"
+    r"(?:please )?(?:give|send|show) me|(?:can|could) you (?:please )?(?:give|send|show) me)"
+    r"\s+(?:a |an |the )?(?:summary|recap|rundown|overview|list)(?: of)?\s+")
+
+
+COURTESY = re.compile(r"(?:hi|hello|hey|thanks|thank you|thx|please|ok|okay)(?: there)?")
+
+
+def _schedule_question(sentence: str) -> str | None:
+    """The sentence, without a lead-in, if it is a question about the client's visits."""
+    text = SUMMARY_ASK.sub("summarize ", LEAD_IN.sub("", sentence.strip()))
+    words = re.findall(r"[a-z']+", RANGE_TOKEN.sub(" ", text))
+    if not (TRIGGER.search(text) and SUBJECT.search(text)
+            and all(word in QUESTION_WORDS for word in words)):
+        return None
+    if wants_count(text) and not COUNTED.search(text):
+        return None  # "How many cleaners are coming?" is not a visit count.
+    return text
+
+
 def parse(body: str, today: date) -> ClientQuestion | None:
     """A question about the client's own visits, or None for every other text."""
     text = _clean(body)
-    # One sentence only: "When is my visit? Cancel it" is a change, not a question.
-    if not text or re.search(r"[.!?;]", re.sub(r"[.!?\s]+$", "", body)):
+    if not text:
         return None
+    # Several sentences count only when each is a schedule question: "Do I have any
+    # confirmed bookings? I'm trying to find out when the cleaners are coming" is one
+    # question, while "When is my visit? Cancel it" is a change.
+    sentences = [part for part in re.split(r"[.!?;]+", normalized(body))
+                 if part.strip() and not COURTESY.fullmatch(part.strip())]
+    asked = [_schedule_question(sentence) for sentence in sentences]
     ranges = sorted(set(ranges_in(text, today)))
     first, last = ranges[0] if len(ranges) == 1 else (None, None)
+    if asked and all(question is not None for question in asked):
+        matched = " ".join(question for question in asked if question is not None)
+        view = View.COUNT if wants_count(matched) else View.LIST
+        return ClientQuestion(view, first, last, statuses_named(matched), len(ranges) > 1,
+                              refers_back=bool(REFERS_BACK.search(matched)) and not ranges)
+    if len(sentences) != 1:
+        return None
     words = re.findall(r"[a-z']+", RANGE_TOKEN.sub(" ", text))
-    if TRIGGER.search(text) and SUBJECT.search(text) and all(
-            word in QUESTION_WORDS for word in words):
-        if wants_count(text) and not COUNTED.search(text):
-            return None  # "How many cleaners are coming?" is not a visit count.
-        view = View.COUNT if wants_count(text) else View.LIST
-        return ClientQuestion(view, first, last, statuses_named(text), len(ranges) > 1,
-                              refers_back=bool(REFERS_BACK.search(text)) and not ranges)
-    asked = normalized(body).endswith("?")
     # A clock time ("Cleaning Friday 10?") is a booking request: the model reads it.
     timed = bool(re.search(r"\d", RANGE_TOKEN.sub(" ", text)))
-    if (asked and not timed and BOOKING_NOUN.search(text) and len(text.split()) <= MAX_AMBIGUOUS_WORDS
+    if (normalized(body).endswith("?") and not timed and BOOKING_NOUN.search(text)
+            and len(text.split()) <= MAX_AMBIGUOUS_WORDS
             and all(word in AMBIGUOUS_FILLER or BOOKING_NOUN.fullmatch(word)
                     for word in words)):
         return ClientQuestion(View.LIST, first, last, BOTH, len(ranges) > 1, True)
