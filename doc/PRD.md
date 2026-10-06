@@ -96,7 +96,7 @@ An AI-assisted SMS interface that identifies intent, gathers required details, e
 
 The owner may enable a scheduled invitation and choose its local day and time and a one- or two-week lookahead. At each run, consider active clients individually. Invite a client only if they have **no confirmed appointment** from the run instant through the end of the selected lookahead. A pending request does not count as a confirmed appointment. This is a targeted eligibility rule; there is no all-clients blast. At most one invitation may be sent to a client in a lookahead-length interval measured from that client's previous invitation. Changing the schedule or lookahead does not erase the previous-invitation limit. See [CONVERSATION.md](CONVERSATION.md#scheduled-booking-invitations-249) for exact boundaries, examples, and send-time checks.
 
-This is a future feature, not authorization to send invitations. The current public consent script and the known approved A2P campaign material do not establish invitation coverage. Resolve and record the disclosure and campaign requirements, approved sender identity, and separate live-SMS authorization before enabling it; see [A2P_REGISTRATION.md](A2P_REGISTRATION.md#booking-invitations-249).
+This is a future feature, not authorization to send invitations. On 2026-10-06, the owner approved the exact invitation copy and sender label and confirmed current consent and A2P campaign coverage (#252); see [A2P_REGISTRATION.md](A2P_REGISTRATION.md#booking-invitations-249-252). Separate live-SMS authorization is still required before enabling sends.
 
 ### 6.5 SMS conversation behavior
 
