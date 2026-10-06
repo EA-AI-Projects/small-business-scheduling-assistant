@@ -132,6 +132,7 @@ def test_long_model_question_returns_normal_clarification_without_calendar_chang
         "date_from": None, "date_to": None, "time_from": None, "time_to": None,
         "target_date": None, "owner_decision": None, "needs_clarification": True,
         "question": "Which date would you prefer? " * 8, "statuses": None, "view": None,
+        "range_scope": None,
     }
     monkeypatch.setattr("scheduling.adapters.openai_messages.urlopen",
                         lambda *_args, **_kwargs: BytesIO(json.dumps({"output": [{

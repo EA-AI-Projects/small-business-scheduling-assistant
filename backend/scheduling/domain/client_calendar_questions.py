@@ -61,7 +61,10 @@ STATUS_WORD = re.compile(r"\b(?:confirmed|pending|requests?|unconfirmed|all|both
 
 
 def is_action_like(body: str) -> bool:
-    """A bare yes, no, number, or pick: an answer to a prompt a calendar answer never asks."""
+    """A bare yes, no, number, or pick: an answer to a prompt a calendar answer never asks.
+    "Just the confirmed one" names a status, so the model reads it as a follow-up."""
+    if mentions_status(body):
+        return False
     return (is_affirmative(body) or is_negative(body)
             or bool(ACTION_LIKE.fullmatch(normalized(body).rstrip("?"))))
 

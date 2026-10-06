@@ -79,6 +79,24 @@ def test_follow_ups_keep_what_they_do_not_change() -> None:
         "2026-10-05 to 2026-10-11; statuses: confirmed; view: list")
 
 
+def test_status_follow_ups_reach_the_model_and_are_not_taken_for_a_yes() -> None:
+    chat, _, _ = week_with_visits()
+    asked(chat, "Do I have bookings this week?", cal(*THIS_WEEK))
+    for text in ("Just the confirmed one", "confirmed", "Confirmed please"):
+        reply = asked(chat, text, cal(statuses=("confirmed",)))
+        assert chat.model.calls[-1] == text
+        assert reply.text.startswith("You have 1 confirmed visit from Tue Sep 29"), text
+
+
+def test_all_upcoming_widens_a_week_conversation() -> None:
+    chat, _, _ = week_with_visits()
+    later = chat.hold(NEXT_TUESDAY, "tue", confirm=True)
+    asked(chat, "Do I have bookings this week?", cal(*THIS_WEEK))
+    reply = asked(chat, "Show me all my upcoming visits", cal(scope="all_upcoming"))
+    assert reply.text.startswith("You have 2 confirmed visits, 1 pending request coming up:")
+    assert later[:8] in reply.text
+
+
 def test_a_follow_up_rereads_the_calendar_after_a_change() -> None:
     chat, _, pending = week_with_visits()
     asked(chat, "Do I have bookings this week?", cal(*THIS_WEEK))

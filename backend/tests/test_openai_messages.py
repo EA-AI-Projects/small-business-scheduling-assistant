@@ -32,6 +32,7 @@ def proposal(**changes: Any) -> dict[str, Any]:
         "date_text": None, "date_from": None, "date_to": None, "time_from": None,
         "time_to": None, "target_date": None, "owner_decision": "approve",
         "needs_clarification": False, "question": None, "statuses": None, "view": None,
+        "range_scope": None,
     }
     result.update(changes)
     return result
@@ -162,7 +163,8 @@ def test_calendar_question_carries_statuses_view_and_the_open_answer(
 
 
 @pytest.mark.parametrize("change", [{"statuses": ["confirmed", "declined"]},
-                                    {"statuses": "confirmed"}, {"view": "table"}])
+                                    {"statuses": "confirmed"}, {"view": "table"},
+                                    {"range_scope": "forever"}, {"range_scope": "dates"}])
 def test_invalid_calendar_fields_are_rejected(monkeypatch: pytest.MonkeyPatch,
                                               change: dict[str, Any]) -> None:
     monkeypatch.setattr("scheduling.adapters.openai_messages.urlopen",
@@ -172,3 +174,14 @@ def test_invalid_calendar_fields_are_rejected(monkeypatch: pytest.MonkeyPatch,
     context = MessageContext(SenderRole.CLIENT, date(2026, 9, 29), "America/Los_Angeles", ())
     with pytest.raises(ValueError):
         OpenAIMessageInterpreter("synthetic-key").propose("Do I have visits?", context)
+
+
+def test_calendar_fields_are_dropped_on_other_intents(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("scheduling.adapters.openai_messages.urlopen",
+                        lambda *_args, **_kwargs: response(proposal(
+                            intent="availability", request_reference=None, owner_decision=None,
+                            date_from="2026-10-02", date_to="2026-10-02",
+                            statuses=["confirmed"], view="count", range_scope="dates")))
+    context = MessageContext(SenderRole.CLIENT, date(2026, 9, 29), "America/Los_Angeles", ())
+    result = OpenAIMessageInterpreter("synthetic-key").propose("Friday?", context)
+    assert (result.statuses, result.view, result.range_scope) == (None, None, None)

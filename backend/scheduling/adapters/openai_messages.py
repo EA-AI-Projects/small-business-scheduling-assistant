@@ -41,7 +41,10 @@ INSTRUCTIONS = (
     "calendar_question when a client asks about visits or requests they already have "
     "rather than open times: whether they have bookings, when the cleaners are coming, how "
     "many visits, whether one is confirmed, or a summary of their schedule or itinerary. "
-    "Set date_from and date_to to the asked day range, or null for all upcoming visits. "
+    "Set range_scope to dates with date_from and date_to for an asked day range, to "
+    "all_upcoming (dates null) when the client asks about all upcoming visits or names no "
+    "day in a new question, or to keep (dates null) only for a follow-up that leaves the "
+    "shown range as it is. "
     "Set statuses to [\"confirmed\"] or [\"pending\"] when the client asks only about "
     "confirmed visits or only about pending requests, [\"confirmed\", \"pending\"] when "
     "they ask for both or everything, otherwise null. Set view to count when they ask how "
@@ -52,7 +55,7 @@ INSTRUCTIONS = (
     "so the backend keeps the shown value. "
     "clarify_booking, with date_from and date_to if a day is named, when the text could "
     "mean either checking an existing booking or requesting a new one. "
-    "For every other intent, statuses and view are null. "
+    "For every other intent, statuses, view, and range_scope are null. "
     "owner_decision when the owner approves or declines a request. "
     "Copy request_reference only when one of the available references appears literally in "
     "the text; never invent one. "
@@ -89,10 +92,12 @@ TOOL: dict[str, Any] = {
             "statuses": {"type": ["array", "null"],
                          "items": {"type": "string", "enum": ["confirmed", "pending"]}},
             "view": {"type": ["string", "null"], "enum": ["list", "count", None]},
+            "range_scope": {"type": ["string", "null"],
+                            "enum": ["dates", "all_upcoming", "keep", None]},
         },
         "required": ["intent", "request_reference", "date_text", "date_from", "date_to",
                      "time_from", "time_to", "target_date", "owner_decision",
-                     "needs_clarification", "question", "statuses", "view"],
+                     "needs_clarification", "question", "statuses", "view", "range_scope"],
         "additionalProperties": False,
     },
 }
@@ -221,8 +226,12 @@ class OpenAIMessageInterpreter:
                 or (raw["statuses"] is not None and not (
                     isinstance(raw["statuses"], list) and len(raw["statuses"]) <= 2
                     and all(item in ("confirmed", "pending") for item in raw["statuses"])))
-                or raw["view"] not in ("list", "count", None)):
+                or raw["view"] not in ("list", "count", None)
+                or raw["range_scope"] not in ("dates", "all_upcoming", "keep", None)):
             raise ValueError("Model proposal values are invalid")
+        if raw["range_scope"] == "dates" and raw["date_from"] is None:
+            raise ValueError("A dated range needs its dates")
+        calendar = raw["intent"] in ("calendar_question", "clarify_booking")
         if raw["needs_clarification"] and (raw["intent"] != "clarify"
                                            or any(raw[name] is not None for name in ACTION_FIELDS)):
             raise ValueError("Ambiguous proposal contains an action")
@@ -232,8 +241,10 @@ class OpenAIMessageInterpreter:
                                raw["owner_decision"], raw["needs_clarification"],
                                raw["date_from"], raw["date_to"], raw["time_from"],
                                raw["time_to"], raw["target_date"],
-                               tuple(raw["statuses"]) if raw["statuses"] else None,
-                               raw["view"])
+                               # Ignored on other intents, as the instructions say.
+                               tuple(raw["statuses"]) if calendar and raw["statuses"] else None,
+                               raw["view"] if calendar else None,
+                               raw["range_scope"] if calendar else None)
 
 
     def classify_owner_reply(self, body: str, context: OwnerReplyContext) -> OwnerReplyProposal:

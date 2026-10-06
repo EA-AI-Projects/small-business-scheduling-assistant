@@ -27,10 +27,12 @@ THIS_WEEK = ("2026-09-28", "2026-10-04")
 
 def cal(first: str | None = None, last: str | None = None,
         statuses: tuple[str, ...] | None = None, view: str | None = None,
-        intent: str = "calendar_question") -> MessageProposal:
-    """What the model proposes for a calendar question."""
+        intent: str = "calendar_question", scope: str | None = None) -> MessageProposal:
+    """What the model proposes for a calendar question; with no dates the range is kept
+    in a follow-up unless ``scope`` says all upcoming."""
     return MessageProposal(intent, None, None, None, False, first, last or first,
-                           statuses=statuses, view=view)
+                           statuses=statuses, view=view,
+                           range_scope=scope or ("dates" if first else "keep"))
 
 
 def asked(chat: Harness, text: str, proposal: MessageProposal) -> ConversationOutcome:
@@ -198,11 +200,12 @@ def test_times_carry_standard_time_after_the_clock_change() -> None:
 
 
 def _raw(intent: str, first: str | None = None, last: str | None = None,
-         statuses: list[str] | None = None, view: str | None = None) -> dict[str, object]:
+         statuses: list[str] | None = None, view: str | None = None,
+         scope: str | None = None) -> dict[str, object]:
     return {"intent": intent, "request_reference": None, "date_text": None,
             "date_from": first, "date_to": last, "time_from": None, "time_to": None,
             "target_date": None, "owner_decision": None, "needs_clarification": False,
-            "question": None, "statuses": statuses, "view": view}
+            "question": None, "statuses": statuses, "view": view, "range_scope": scope}
 
 
 def test_calendar_eval_cases_accept_the_intended_reading_only() -> None:
@@ -220,6 +223,7 @@ def test_calendar_eval_cases_accept_the_intended_reading_only() -> None:
         "open-times": _raw("availability", "2026-10-02", "2026-10-02"),
         "request-during-calendar-talk": _raw("availability", "2026-10-02", "2026-10-02"),
         "ambiguous-booking": _raw("clarify_booking", "2026-10-02", "2026-10-02"),
+        "all-upcoming-after-a-week": _raw("calendar_question", scope="all_upcoming"),
     }
     for name, proposal in good.items():
         assert cases[name].expect(proposal), name

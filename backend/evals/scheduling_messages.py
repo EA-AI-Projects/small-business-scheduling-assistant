@@ -150,7 +150,12 @@ CASES = (
     Case("spanish-follow-up", "client", "¿Y la próxima semana?", TWO_REFS,
          calendar(NEXT_WEEK), SHOWN_THIS_WEEK),
     Case("follow-up-only-confirmed", "client", "Just the confirmed ones", TWO_REFS,
-         calendar(None, {"confirmed"}), SHOWN_THIS_WEEK),
+         lambda proposal: calendar(None, {"confirmed"})(proposal)
+         or calendar(THIS_WEEK, {"confirmed"})(proposal), SHOWN_THIS_WEEK),
+    # A fresh question with no day, inside a calendar conversation, covers every visit.
+    Case("all-upcoming-after-a-week", "client", "Show me all my upcoming visits", TWO_REFS,
+         lambda proposal: calendar(None)(proposal)
+         and proposal["range_scope"] == "all_upcoming", SHOWN_THIS_WEEK),
     # Open times keep the availability offer (owner decision on #240).
     Case("open-times", "client", "What times are open Friday?", TWO_REFS,
          asks_for_day("2026-10-02")),
@@ -221,7 +226,8 @@ def evaluate(case: Case, key: str) -> dict[str, Any]:
     return {"case": case.name, "passed": passed,
             "needs_clarification": proposal["needs_clarification"],
             "intent": proposal["intent"], "question": proposal["question"],
-            **{name: proposal[name] for name in (*ACTION_FIELDS, "statuses", "view")
+            **{name: proposal[name] for name in (*ACTION_FIELDS, "statuses", "view",
+                                                 "range_scope")
                if proposal[name] is not None}}
 
 

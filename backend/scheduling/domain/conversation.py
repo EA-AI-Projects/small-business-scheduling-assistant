@@ -158,6 +158,8 @@ class MessageProposal:
     # None when the text does not say (a follow-up then keeps the last answer's).
     statuses: tuple[str, ...] | None = None
     view: str | None = None
+    # "dates" (date_from/date_to), "all_upcoming", or "keep" the open answer's range.
+    range_scope: str | None = None
 
 
 @dataclass(frozen=True)
@@ -332,7 +334,9 @@ class ConversationService:
             # list or count. What it leaves unset keeps the open conversation's value. The
             # answer itself is built from the client's own visits, never from model text.
             span = range_from_proposal(proposal.date_from, proposal.date_to)
-            if span == (None, None) and calendar is not None:
+            if proposal.range_scope == "all_upcoming":
+                span = (None, None)
+            elif span == (None, None) and calendar is not None:
                 span = (calendar.first, calendar.last)  # A follow-up keeps the last range.
             statuses = (statuses_from_proposal(proposal.statuses)
                         or (calendar.statuses if calendar is not None else BOTH))
