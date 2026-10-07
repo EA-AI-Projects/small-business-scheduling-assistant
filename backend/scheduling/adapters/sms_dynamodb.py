@@ -7,6 +7,7 @@ from typing import Any, Protocol
 from scheduling.adapters.dynamodb import _command_sort_key, _record_transaction_conflict
 from scheduling.adapters.outbox_aws import due_keys
 from scheduling.domain.client_records import ClientProfile, RecordConflict
+from scheduling.domain.conversation_history import MAX_CHARACTERS, HistoryMessage, bounded_history
 from scheduling.domain.outbox import DeliveryState, OutboxRecord
 from scheduling.domain.sms_ingress import (
     ConsentEvidence,
@@ -43,6 +44,8 @@ def _four_year_cutoff(now: datetime) -> str:
 
 
 class DynamoSmsIngressStore(SmsIngressStore):
+    _HISTORY_READ_LIMIT = 64
+
     def __init__(self, client: SmsDynamoClient, table_name: str) -> None:
         self._client = client
         self._table = table_name
@@ -50,6 +53,17 @@ class DynamoSmsIngressStore(SmsIngressStore):
     @staticmethod
     def _key(business_id: str, sort_key: str) -> dict[str, Any]:
         return {"PK": {"S": f"BUSINESS#{business_id}"}, "SK": {"S": sort_key}}
+
+    @staticmethod
+    def _history_key(role: str, actor_id: str, at: str, provider_id: str) -> str:
+        # Client IDs or owner phone are hashed so query traces expose neither.
+        actor = sha256(actor_id.encode()).hexdigest()
+        return f"SMS_HISTORY#{role}#{actor}#{at}#{provider_id}"
+
+    @staticmethod
+    def _invitation_key(client_id: str, at: str, provider_id: str) -> str:
+        actor = sha256(client_id.encode()).hexdigest()
+        return f"SMS_INVITATION#client#{actor}#{at}#{provider_id}"
 
     def _get(self, business_id: str, sort_key: str) -> dict[str, Any] | None:
         return self._client.get_item(TableName=self._table,
@@ -81,6 +95,149 @@ class DynamoSmsIngressStore(SmsIngressStore):
             SenderRole(item["role"]["S"]), item.get("client_id", {}).get("S"),
             Keyword(item["keyword"]["S"]), item["authorized_for_commands"]["BOOL"],
         )
+
+    def read_conversation_history(self, receipt: InboundReceipt,
+                                  now: datetime) -> tuple[HistoryMessage, ...]:
+        """Read one verified actor's 24-hour thread from application records."""
+        if (not receipt.authorized_for_commands or receipt.body is None
+                or receipt.role not in (SenderRole.CLIENT, SenderRole.OWNER)
+                or (receipt.role == SenderRole.CLIENT and not receipt.client_id)
+                or now.tzinfo is None):
+            raise ValueError("History requires a verified sender")
+        if self.read_received(receipt.business_id, receipt.provider_id) != receipt:
+            raise ValueError("History requires the persisted verified receipt")
+        actor_id = receipt.client_id if receipt.role == SenderRole.CLIENT else receipt.sender
+        assert actor_id is not None
+        prefix = f"SMS_HISTORY#{receipt.role.value}#{sha256(actor_id.encode()).hexdigest()}#"
+        start: dict[str, Any] | None = None
+        messages: list[HistoryMessage] = []
+        cutoff = _instant(now - timedelta(hours=24))
+        read = 0
+        while read < self._HISTORY_READ_LIMIT:
+            arguments: dict[str, Any] = {
+                "TableName": self._table,
+                "KeyConditionExpression": "PK = :pk AND SK BETWEEN :from AND :through",
+                "ExpressionAttributeValues": {
+                    ":pk": {"S": f"BUSINESS#{receipt.business_id}"},
+                    ":from": {"S": prefix + cutoff},
+                    ":through": {"S": prefix + _instant(now) + "~"},
+                },
+                "ConsistentRead": True,
+                "ScanIndexForward": False,
+                "Limit": self._HISTORY_READ_LIMIT - read,
+            }
+            if start is not None:
+                arguments["ExclusiveStartKey"] = start
+            page = self._client.query(**arguments)
+            read += len(page.get("Items", ()))
+            for pointer in page.get("Items", ()):
+                item = self._get(receipt.business_id, pointer["record_sk"]["S"])
+                if item is None:
+                    continue
+                outbound = pointer["direction"]["S"] == "outbound"
+                if (item.get("client_id", {}).get("S") != receipt.client_id
+                        if receipt.role == SenderRole.CLIENT else False):
+                    continue
+                if (item.get("recipient" if outbound else "sender", {}).get("S")
+                        != receipt.sender):
+                    continue
+                body = item.get("body", {}).get("S")
+                if body and len(body) <= MAX_CHARACTERS:
+                    messages.append(HistoryMessage(item["provider_id"]["S"],
+                        "assistant" if outbound else receipt.role.value,
+                        datetime.fromisoformat(item["sent_at" if outbound else "received_at"]["S"]),
+                        body, outbound and item.get("template", {}).get("S")
+                        == "booking_invitation"))
+            start = page.get("LastEvaluatedKey")
+            if start is None:
+                break
+        if receipt.role == SenderRole.CLIENT:
+            invite_prefix = (f"SMS_INVITATION#client#"
+                             f"{sha256(actor_id.encode()).hexdigest()}#")
+            page = self._client.query(
+                TableName=self._table,
+                KeyConditionExpression="PK = :pk AND SK BETWEEN :from AND :through",
+                ExpressionAttributeValues={
+                    ":pk": {"S": f"BUSINESS#{receipt.business_id}"},
+                    ":from": {"S": invite_prefix + cutoff},
+                    ":through": {"S": invite_prefix + _instant(now) + "~"},
+                },
+                ConsistentRead=True, ScanIndexForward=False, Limit=1)
+            for pointer in page.get("Items", ()):
+                item = self._get(receipt.business_id, pointer["record_sk"]["S"])
+                if (item is not None and item.get("client_id", {}).get("S") == receipt.client_id
+                        and item.get("recipient", {}).get("S") == receipt.sender
+                        and item.get("body", {}).get("S")
+                        and len(item["body"]["S"]) <= MAX_CHARACTERS
+                        and all(m.provider_id != item["provider_id"]["S"] for m in messages)):
+                    messages.append(HistoryMessage(
+                        item["provider_id"]["S"], "assistant",
+                        datetime.fromisoformat(item["sent_at"]["S"]),
+                        item["body"]["S"], True))
+        return bounded_history(messages, now, receipt.role)
+
+    def purge_expired_outbound_bodies(self, business_id: str, now: datetime,
+                                      owner_number: str) -> int:
+        """Remove accepted outbound text after its 90-day conversation retention."""
+        if now.tzinfo is None:
+            raise ValueError("Retention clock must be timezone-aware")
+        cutoff = _instant(now - timedelta(days=90))
+        start: dict[str, Any] | None = None
+        removed = 0
+        while True:
+            arguments: dict[str, Any] = {
+                "TableName": self._table,
+                "KeyConditionExpression": "PK = :pk AND begins_with(SK, :prefix)",
+                "ExpressionAttributeValues": {
+                    ":pk": {"S": f"BUSINESS#{business_id}"},
+                    ":prefix": {"S": "SMS_OUT#"},
+                },
+                "ConsistentRead": True,
+            }
+            if start is not None:
+                arguments["ExclusiveStartKey"] = start
+            page = self._client.query(**arguments)
+            for item in page.get("Items", ()):
+                if ("body" not in item or "legal_hold_reason" in item
+                        or item["sent_at"]["S"] > cutoff):
+                    continue
+                recipient = item["recipient"]["S"]
+                thread_key = f"SMS_THREAD#{recipient}"
+                if recipient != owner_number:
+                    thread = self._get(business_id, thread_key)
+                    if thread is not None and thread["last_exchange_at"]["S"] > cutoff:
+                        continue
+                try:
+                    writes: list[dict[str, Any]] = []
+                    if recipient != owner_number:
+                        writes.append({"ConditionCheck": {
+                            "TableName": self._table,
+                            "Key": self._key(business_id, thread_key),
+                            "ConditionExpression": "attribute_not_exists(PK) OR "
+                                                   "last_exchange_at <= :cutoff",
+                            "ExpressionAttributeValues": {":cutoff": {"S": cutoff}},
+                        }})
+                    writes.append({"Update": {
+                        "TableName": self._table,
+                        "Key": self._key(business_id, item["SK"]["S"]),
+                        "UpdateExpression": "REMOVE body",
+                        "ConditionExpression": "body = :body AND sent_at <= :cutoff AND "
+                                               "attribute_not_exists(legal_hold_reason)",
+                        "ExpressionAttributeValues": {
+                            ":body": item["body"], ":cutoff": {"S": cutoff},
+                        },
+                    }})
+                    self._client.transact_write_items(TransactItems=writes)
+                except Exception as exc:
+                    response = getattr(exc, "response", {})
+                    if (isinstance(response, dict) and response.get("Error", {}).get("Code")
+                            in {"ConditionalCheckFailedException", "TransactionCanceledException"}):
+                        continue
+                    raise
+                removed += 1
+            start = page.get("LastEvaluatedKey")
+            if start is None:
+                return removed
 
     def read_reply_text(self, business_id: str, provider_id: str) -> str | None:
         item = self._get(business_id, f"SMS#{provider_id}")
@@ -255,6 +412,19 @@ class DynamoSmsIngressStore(SmsIngressStore):
             "TableName": self._table, "Item": item,
             "ConditionExpression": "attribute_not_exists(PK)",
         }}]
+        if receipt.body is not None:
+            writes.append({"Put": {
+                "TableName": self._table,
+                "Item": {**self._key(receipt.business_id, self._history_key(
+                    receipt.role.value, receipt.client_id or receipt.sender,
+                    item["received_at"]["S"],
+                    receipt.provider_id)),
+                    "record_sk": {"S": f"SMS#{receipt.provider_id}"},
+                    "direction": {"S": "inbound"},
+                    **({"client_id": {"S": receipt.client_id}}
+                       if receipt.client_id is not None else {})},
+                "ConditionExpression": "attribute_not_exists(PK)",
+            }})
         if receipt.client_id is not None:
             writes.append(self._erasure_check(receipt.business_id, receipt.client_id))
         writes.append(self._phone_erasure_check(receipt.business_id, receipt.sender))
@@ -395,8 +565,9 @@ class DynamoSmsIngressStore(SmsIngressStore):
         return marker is not None or (legacy is not None and "cleared_at" not in legacy)
 
     def record_outbound(self, business_id: str, phone_e164: str,
-                        provider_id: str, sent_at: datetime) -> None:
-        """Advance the retention clock after provider acceptance, without storing the body."""
+                        provider_id: str, sent_at: datetime, body: str = "",
+                        client_id: str | None = None, template: str = "") -> None:
+        """Record the exact accepted text and advance the retention clock."""
         phone = normalize_phone(phone_e164)
         if not provider_id or sent_at.tzinfo is None:
             raise ValueError("Outbound evidence needs a provider ID and aware timestamp")
@@ -409,11 +580,37 @@ class DynamoSmsIngressStore(SmsIngressStore):
             "recipient": {"S": phone},
             "sent_at": {"S": sent},
         }
+        if body:
+            outbound["body"] = {"S": body}
+        if client_id is not None:
+            outbound["client_id"] = {"S": client_id}
+        if template:
+            outbound["template"] = {"S": template}
         for _ in range(3):
             writes: list[dict[str, Any]] = [{"Put": {
                 "TableName": self._table, "Item": outbound,
                 "ConditionExpression": "attribute_not_exists(PK)",
             }}]
+            if body:
+                writes.append({"Put": {
+                    "TableName": self._table,
+                    "Item": {**self._key(business_id, self._history_key(
+                        "owner" if client_id is None else "client",
+                        client_id or phone, sent, provider_id)),
+                        "record_sk": {"S": receipt_key},
+                        "direction": {"S": "outbound"},
+                        **({"client_id": {"S": client_id}} if client_id is not None else {})},
+                    "ConditionExpression": "attribute_not_exists(PK)",
+                }})
+                if client_id is not None and template == "booking_invitation":
+                    writes.append({"Put": {
+                        "TableName": self._table,
+                        "Item": {**self._key(business_id, self._invitation_key(
+                            client_id, sent, provider_id)),
+                            "record_sk": {"S": receipt_key},
+                            "client_id": {"S": client_id}},
+                        "ConditionExpression": "attribute_not_exists(PK)",
+                    }})
             thread = self._get(business_id, thread_key)
             fields = [field for field in ("last_exchange_at", "last_program_text_at")
                       if thread is None or thread.get(field, {}).get("S", "") < sent]
@@ -433,7 +630,7 @@ class DynamoSmsIngressStore(SmsIngressStore):
             except Exception:
                 if self._get(business_id, receipt_key) is not None:
                     return
-                if len(writes) == 1:
+                if not fields:
                     raise
         raise RuntimeError("SMS thread changed during every outbound attempt")
 

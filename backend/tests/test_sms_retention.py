@@ -87,6 +87,16 @@ class MemoryDynamo:
                 if update["UpdateExpression"] == "REMOVE body, reply_text":
                     items[key].pop("body", None)
                     items[key].pop("reply_text", None)
+                elif update["UpdateExpression"] == "REMOVE body":
+                    current = items[key]
+                    values = update["ExpressionAttributeValues"]
+                    if (current["body"] != values[":body"] or
+                            current["sent_at"]["S"] > values[":cutoff"]["S"] or
+                            ("attribute_not_exists(legal_hold_reason)" in
+                             update["ConditionExpression"] and
+                             "legal_hold_reason" in current)):
+                        raise TransactionCancelled()
+                    current.pop("body")
                 else:
                     current = items.setdefault(key, {"SK": {"S": key}})
                     set_part, _, remove_part = update["UpdateExpression"].partition(" REMOVE ")
@@ -160,6 +170,17 @@ class TransactionCancelled(Exception):
         self.response = {"Error": {"Code": "TransactionCanceledException"}}
 
 
+class HoldBeforeOutboundPurge(MemoryDynamo):
+    def transact_write_items(self, **kwargs: Any) -> dict[str, Any]:
+        if any(action.get("Update", {}).get("UpdateExpression") == "REMOVE body"
+               for action in kwargs["TransactItems"]):
+            for action in kwargs["TransactItems"]:
+                if "Update" in action:
+                    self.items[action["Update"]["Key"]["SK"]["S"]][
+                        "legal_hold_reason"] = {"S": "synthetic hold"}
+        return super().transact_write_items(**kwargs)
+
+
 class NewTextBeforePurge(MemoryDynamo):
     def __init__(self) -> None:
         super().__init__()
@@ -220,6 +241,30 @@ def test_outbound_reply_extends_last_exchange_window() -> None:
     assert store.purge_expired_bodies("pilot", outbound + timedelta(days=90)) == 1
     assert "body" not in dynamo.items["SMS#SM-first"]
     assert dynamo.items["SMS_OUT#SM-out"]["recipient"]["S"] == "+14155550101"
+
+
+def test_outbound_body_is_retained_with_active_thread_then_erased() -> None:
+    dynamo = MemoryDynamo()
+    store = DynamoSmsIngressStore(dynamo, "synthetic")
+    sent = NOW - timedelta(days=100)
+    store.record_outbound("pilot", "+14155550101", "SM-out", sent,
+                          "Exact sent invitation", "client-1", "booking_invitation")
+    assert dynamo.items["SMS_OUT#SM-out"]["body"]["S"] == "Exact sent invitation"
+    store.put_received(_receipt("SM-new", NOW - timedelta(days=1)))
+    assert store.purge_expired_outbound_bodies("pilot", NOW, "+14155550100") == 0
+    assert store.purge_expired_outbound_bodies(
+        "pilot", NOW + timedelta(days=90), "+14155550100") == 1
+    assert "body" not in dynamo.items["SMS_OUT#SM-out"]
+
+
+def test_outbound_purge_loses_to_new_hold_for_owner_and_client() -> None:
+    for recipient, client_id in (("+14155550100", None), ("+14155550101", "client-1")):
+        dynamo = HoldBeforeOutboundPurge()
+        store = DynamoSmsIngressStore(dynamo, "synthetic")
+        store.record_outbound("pilot", recipient, "SM-held", NOW - timedelta(days=100),
+                              "Synthetic sent text", client_id)
+        assert store.purge_expired_outbound_bodies("pilot", NOW, "+14155550100") == 0
+        assert dynamo.items["SMS_OUT#SM-held"]["body"]["S"] == "Synthetic sent text"
 
 
 def test_conversation_reply_is_atomic_idempotent_and_purged_with_sms_body() -> None:
@@ -481,6 +526,10 @@ def test_retention_handler_normalizes_owner_number_and_fails_closed(
 
         def purge_expired_bodies(self, _b: str, _n: datetime, owner: str | None) -> int:
             seen.append(owner)
+            return 0
+
+        def purge_expired_outbound_bodies(self, _b: str, _n: datetime,
+                                          owner: str) -> int:
             return 0
 
         def purge_expired_manual_invitation_bodies(self, _b: str, _n: datetime) -> int:

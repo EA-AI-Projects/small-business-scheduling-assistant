@@ -7,6 +7,30 @@
 
 ## 1. Purpose
 
+### Application-owned SMS history (#270)
+
+The verified SMS receipt identifies one business, sender role, phone, and (for a
+client) client ID. Each persisted inbound text and accepted outbound text gets
+an `SMS_HISTORY#` pointer keyed by role, hashed client ID or owner phone, and timestamp. A history
+read queries at most 64 recent pointers in that actor's 24-hour key range, then reads the pointed-to
+`SMS#` receipt or `SMS_OUT#` provider-handoff evidence consistently. Pointer
+rows have no message body, and client erasure deletes their client-linked rows.
+An additional body-free `SMS_INVITATION#` pointer fetches the latest eligible
+booking invitation with one bounded query, even after a busy thread exceeds
+the recent-pointer budget.
+The sender writes the
+exact rendered outbound text to that evidence only after Twilio accepts the
+send. Queued, suppressed, and failed outbox drafts have no history entry. The
+read does not call Twilio's Messages list API. The resulting 24-hour view is
+limited to 24 whole messages and 12,000 text characters before model input.
+Limitation accepted for #270: if one client changes their verified phone from
+P to Q and back to P within 24 hours, history from the earlier P interval may
+appear in the current P transcript. This unlikely sequence does not block #270
+and is not accommodated.
+Outbound text follows the existing 90-day SMS-body retention and client erasure;
+logs continue to carry no raw message bodies. This read is prepared for the
+model loop in #271; it does not change the current SMS reply routing.
+
 This document makes the AWS deployment and technology choices for the SMS-first scheduling MVP. It uses the existing **NeuroSpineDx** project as a reference for the team's AWS/serverless patterns, but adapts the choices to a small, low-traffic scheduling workload and its most important correctness constraint: no overlapping appointments or active holds.
 
 The goal is low idle cost and low operational overhead—not a large-scale SaaS platform. External services such as SMS and the language-model API remain replaceable integrations. All application-owned compute, data, web hosting, identity, secrets, and logs are deployable on AWS.

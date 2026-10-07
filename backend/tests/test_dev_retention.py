@@ -135,6 +135,9 @@ class RetentionRun:
         if (sort_key == f"CLIENT#{self.client_id}"
                 or sort_key.startswith((self.provider_prefix, f"NOTE#CLIENT#{client_hash}#"))):
             return True
+        if sort_key.startswith((f"SMS_HISTORY#client#{client_hash}#",
+                                f"SMS_INVITATION#client#{client_hash}#")):
+            return True
         for phone in self.phones:
             if sort_key in {f"PHONE#{phone}", f"SMS_THREAD#{phone}", f"SMS_SUPPRESS#{phone}",
                             f"SMS_CONSENT_CURRENT#{phone}", f"SMS_OPTOUT#{phone}"}:
@@ -175,7 +178,8 @@ class RetentionRun:
 
 def purge_risks(items: dict[Key, Item], real_now: datetime,
                 last_visit_end: Callable[[str], datetime | None],
-                margin: timedelta = CLOCK_MARGIN) -> list[str]:
+                margin: timedelta = CLOCK_MARGIN,
+                owner_number: str | None = None) -> list[str]:
     """Name each existing item that a retention run would delete (conservative).
 
     Expiries are evaluated at ``real_now + margin`` so clock skew between this machine and
@@ -201,6 +205,13 @@ def purge_risks(items: dict[Key, Item], real_now: datetime,
             if ("legal_hold_reason" not in item and (owner_expired or (
                     thread is not None and thread["last_exchange_at"]["S"] <= body_cutoff))):
                 risks.append(f"sms body {sk}")
+        elif sk.startswith("SMS_OUT#") and "body" in item and "legal_hold_reason" not in item:
+            recipient = item["recipient"]["S"]
+            thread = items.get((f"BUSINESS#{BUSINESS}", f"SMS_THREAD#{recipient}"))
+            if (item["sent_at"]["S"] <= body_cutoff and
+                    (recipient == owner_number or thread is None or
+                     thread["last_exchange_at"]["S"] <= body_cutoff)):
+                risks.append(f"outbound body {sk}")
         elif sk.startswith(EVIDENCE_PREFIXES) and "legal_hold_reason" not in item:
             field_name = "opted_out_at" if sk.startswith("SMS_OPTOUT") else "agreed_at"
             if item.get(field_name, {}).get("S", "") <= cutoff:
@@ -296,7 +307,8 @@ def _precheck(run: RetentionRun, now: datetime) -> dict[Key, Item]:
     before = _partition(run.env.client, run.env.table)
     assert not [key for key in before if run.owns(key[1])], "Run keys already exist"
     repo = DynamoDBCalendarRepository(run.env.client, run.env.table)
-    risks = purge_risks(before, now, lambda client_id: repo.last_visit_end(BUSINESS, client_id, now))
+    risks = purge_risks(before, now, lambda client_id: repo.last_visit_end(BUSINESS, client_id, now),
+                        owner_number=os.environ.get("OWNER_NUMBER"))
     if risks:
         pytest.fail("Refusing to run: the retention workers would also delete existing "
                     f"{BUSINESS} records (nothing was seeded or invoked): " + "; ".join(risks))
@@ -377,6 +389,7 @@ def test_sms_retention_worker_purges_expired_bodies_and_keeps_held_or_current_ev
 
     # Consent evidence is one history row plus one current row, so the expired phone has two.
     assert run.invoke() == {"deleted_sms_bodies": 1,
+                            "deleted_outbound_bodies": 0,
                             "deleted_manual_invitation_bodies": 0,
                             "deleted_sms_evidence": 2}
 

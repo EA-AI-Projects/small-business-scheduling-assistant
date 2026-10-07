@@ -1,5 +1,18 @@
 # SMS conversation flow and command boundary
 
+## Recent message context (#270)
+
+For a verified client or owner, the application can assemble an ordered rolling
+24-hour transcript from its own inbound receipts and outbound provider-handoff
+records. Each entry carries the sender role, send or receive time, provider ID,
+and exact text. A client's history requires the same business, verified phone,
+and client ID; owner history requires the same business and owner phone. Draft
+outbox messages are absent until provider acceptance. The bound is 24 messages
+and 12,000 characters. Older whole messages are omitted, while the newest
+exchange and the latest booking invitation are preferred; an oversized message
+is omitted rather than shortened. The history builder does not itself call a
+model or authorize scheduling actions; the model loop arrives in #271.
+
 Clients and the owner can text in plain language. The model interprets the text; the calendar changes only when a reply matches something the system itself offered. Issue [#60](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/issues/60) recorded the owner decisions behind this flow. Everything below is exercised with fictional data, an in-memory calendar, and no Twilio, DynamoDB, or live SMS.
 
 ## Scheduled booking invitations (#249)
@@ -142,6 +155,8 @@ Without `OPENAI_API_KEY`, the simulator answers plain language with a question a
 SMS collects only the visit date and time. The owner enters and verifies client profile fields (name, service address, and home size/duration) in the authenticated calendar. A text from a sender without an active, verified profile and matching consent is not authorized for commands. It gets no scheduling reply by SMS, the model is not called, and no scheduling change occurs. If the profile or consent changes after the text arrives, the conversation service refuses the text, and the sender recheck blocks delivery of its reply.
 
 The model receives only the inbound text, actor, current local date and weekday, timezone, booking horizon, and up to eight short active references. It receives no profile name, phone, address, notes, or API key. Model timeouts and malformed output return a safe retry message. Messages over 1,000 characters are rejected intact.
+
+The persisted receipt and each accepted outbound send also create a body-free `SMS_HISTORY#` pointer keyed by verified client ID or owner phone and time. History reads query at most 64 recent pointers in that actor’s rolling 24-hour range and fetch the original records. A separate pointer fetches the latest eligible booking invitation. The final view keeps at most 24 whole messages within 12,000 characters, preserving the latest exchange and invitation when they fit. Older excess messages are omitted. Drafts and failed sends have no pointer. The model loop consumes this view in #271.
 
 The signed Twilio ingress can hand off a verified receipt ID to SQS after persisting it. The worker rereads the stored receipt, rechecks current consent and actor state, and uses the same conversation service as the local exercise, with the DynamoDB conversation memory above. Each SMS scheduling transaction checks STOP markers atomically with the calendar write. A cancelled transaction is terminal for that receipt, so a STOP that is later cleared cannot revive an older request. Offers, questions, and other noncommitted replies are recorded with a stable receipt-based outbox intent; the sender derives the destination from the verified receipt and rechecks consent, opt-out, and the fictional-number refusal. Committed changes are announced by the existing notification texts, which state the full date and time. Reply bodies are purged with inbound bodies 90 days after the last exchange (in the owner's own thread, 90 days after each message, #201). Duplicate webhook or queue delivery cannot create a second logical request or reply. Ingress never passes STOP, HELP, START, or UNSTOP texts to scheduling (the app's STOP words exclude CANCEL, so a bare "Cancel" is an ordinary message, matching dev's Twilio Advanced Opt-Out keywords, #91), but it honours a Twilio `OptOutType` of `START` only for the body START or UNSTOP, so a "Reply YES" answer is still read as an ordinary reply; a STOP or HELP provider tag always wins.
 
