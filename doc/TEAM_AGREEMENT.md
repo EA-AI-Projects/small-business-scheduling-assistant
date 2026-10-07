@@ -1,6 +1,6 @@
 # Human–agent team agreement
 
-This agreement governs work on the Small Business Scheduling Assistant. Enrique owns business decisions. The implementation manager coordinates the work and may delegate bounded tasks to other agents.
+This agreement governs work on Smart Scheduling Assistant. Enrique owns business decisions. The implementation manager coordinates the work and may delegate bounded tasks to other agents.
 
 ## Where decisions and progress live
 
