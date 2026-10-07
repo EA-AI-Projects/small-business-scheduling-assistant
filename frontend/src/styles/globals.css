@@ -142,7 +142,7 @@ code { font-size: .9em; }
   .tab-panel { margin-top: .75rem; }
   .app-header { flex-wrap: nowrap; gap: .15rem; padding: .25rem .35rem; margin: 0 calc(-1 * clamp(1rem, 3vw, 3rem)); border-width: 0 0 1px; border-radius: 0; }
   .app-name { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-  .app-header .brand-mark { width: 1.5rem; height: 1.5rem; }
+  .app-header .brand-mark { width: 1.5rem; height: 1.5rem; background-image: url("/favicon.svg"); }
   .app-header .icon-button { width: 2.25rem; height: 2.25rem; flex: none; }
   .app-header .avatar-button { width: 2.25rem; height: 2.25rem; }
   .app-header .avatar { width: 1.9rem; height: 1.9rem; }
