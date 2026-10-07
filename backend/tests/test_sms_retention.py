@@ -92,7 +92,9 @@ class MemoryDynamo:
                     values = update["ExpressionAttributeValues"]
                     if (current["body"] != values[":body"] or
                             current["sent_at"]["S"] > values[":cutoff"]["S"] or
-                            "legal_hold_reason" in current):
+                            ("attribute_not_exists(legal_hold_reason)" in
+                             update["ConditionExpression"] and
+                             "legal_hold_reason" in current)):
                         raise TransactionCancelled()
                     current.pop("body")
                 else:

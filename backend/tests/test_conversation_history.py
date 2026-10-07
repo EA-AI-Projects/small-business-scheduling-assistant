@@ -68,14 +68,15 @@ def index_records(records: Records) -> None:
         outbound = sk.startswith("SMS_OUT#")
         phone = item["recipient" if outbound else "sender"]["S"]
         role = "client" if "client_id" in item else "owner"
+        actor_id = item["client_id"]["S"] if role == "client" else phone
         at = item["sent_at" if outbound else "received_at"]["S"]
         records.items.append({"PK": item["PK"], "SK": {"S":
-            DynamoSmsIngressStore._history_key(role, phone, at, item["provider_id"]["S"])},
+            DynamoSmsIngressStore._history_key(role, actor_id, at, item["provider_id"]["S"])},
             "record_sk": {"S": sk},
             "direction": {"S": "outbound" if outbound else "inbound"}})
         if outbound and item.get("template", {}).get("S") == "booking_invitation":
             records.items.append({"PK": item["PK"], "SK": {"S":
-                DynamoSmsIngressStore._invitation_key(phone, at, item["provider_id"]["S"])},
+                DynamoSmsIngressStore._invitation_key(actor_id, at, item["provider_id"]["S"])},
                 "record_sk": {"S": sk}})
 
 
@@ -154,3 +155,24 @@ def test_actor_burst_stops_after_fixed_pointer_budget() -> None:
     assert all(message.text != "Text 0" for message in history)
     assert records.pages == 23  # 64 pointers in pages of three, then one invitation query.
     assert records.limits[-2:] == [1, 1]
+
+
+def test_phone_reassignment_does_not_hide_prior_client_invitation() -> None:
+    records = Records()
+    records.items = [
+        sent("old-invite", "Old client's invitation", NOW - timedelta(hours=2),
+             template="booking_invitation", client_id="client-1"),
+        inbound("old-reply", "Old client's reply", NOW - timedelta(minutes=90)),
+        sent("new-invite", "New client's invitation", NOW - timedelta(minutes=80),
+             template="booking_invitation", client_id="client-2"),
+    ]
+    records.items += [inbound(f"new-{i}", f"New text {i}",
+                              NOW - timedelta(minutes=79 - i), client_id="client-2")
+                      for i in range(70)]
+    index_records(records)
+    receipt = InboundReceipt("pilot", "old-reply", PHONE, "+15005550000",
+                             "Old client's reply", NOW - timedelta(minutes=90),
+                             SenderRole.CLIENT, "client-1", Keyword.OTHER, True)
+    history = DynamoSmsIngressStore(records, "table").read_conversation_history(receipt, NOW)
+    assert [message.text for message in history] == [
+        "Old client's invitation", "Old client's reply"]

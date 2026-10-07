@@ -55,14 +55,14 @@ class DynamoSmsIngressStore(SmsIngressStore):
         return {"PK": {"S": f"BUSINESS#{business_id}"}, "SK": {"S": sort_key}}
 
     @staticmethod
-    def _history_key(role: str, phone: str, at: str, provider_id: str) -> str:
-        # Hash the actor so the key does not repeat a phone number in query traces.
-        actor = sha256(phone.encode()).hexdigest()
+    def _history_key(role: str, actor_id: str, at: str, provider_id: str) -> str:
+        # Client IDs or owner phone are hashed so query traces expose neither.
+        actor = sha256(actor_id.encode()).hexdigest()
         return f"SMS_HISTORY#{role}#{actor}#{at}#{provider_id}"
 
     @staticmethod
-    def _invitation_key(phone: str, at: str, provider_id: str) -> str:
-        actor = sha256(phone.encode()).hexdigest()
+    def _invitation_key(client_id: str, at: str, provider_id: str) -> str:
+        actor = sha256(client_id.encode()).hexdigest()
         return f"SMS_INVITATION#client#{actor}#{at}#{provider_id}"
 
     def _get(self, business_id: str, sort_key: str) -> dict[str, Any] | None:
@@ -106,7 +106,9 @@ class DynamoSmsIngressStore(SmsIngressStore):
             raise ValueError("History requires a verified sender")
         if self.read_received(receipt.business_id, receipt.provider_id) != receipt:
             raise ValueError("History requires the persisted verified receipt")
-        prefix = f"SMS_HISTORY#{receipt.role.value}#{sha256(receipt.sender.encode()).hexdigest()}#"
+        actor_id = receipt.client_id if receipt.role == SenderRole.CLIENT else receipt.sender
+        assert actor_id is not None
+        prefix = f"SMS_HISTORY#{receipt.role.value}#{sha256(actor_id.encode()).hexdigest()}#"
         start: dict[str, Any] | None = None
         messages: list[HistoryMessage] = []
         cutoff = _instant(now - timedelta(hours=24))
@@ -151,7 +153,7 @@ class DynamoSmsIngressStore(SmsIngressStore):
                 break
         if receipt.role == SenderRole.CLIENT:
             invite_prefix = (f"SMS_INVITATION#client#"
-                             f"{sha256(receipt.sender.encode()).hexdigest()}#")
+                             f"{sha256(actor_id.encode()).hexdigest()}#")
             page = self._client.query(
                 TableName=self._table,
                 KeyConditionExpression="PK = :pk AND SK BETWEEN :from AND :through",
@@ -414,7 +416,8 @@ class DynamoSmsIngressStore(SmsIngressStore):
             writes.append({"Put": {
                 "TableName": self._table,
                 "Item": {**self._key(receipt.business_id, self._history_key(
-                    receipt.role.value, receipt.sender, item["received_at"]["S"],
+                    receipt.role.value, receipt.client_id or receipt.sender,
+                    item["received_at"]["S"],
                     receipt.provider_id)),
                     "record_sk": {"S": f"SMS#{receipt.provider_id}"},
                     "direction": {"S": "inbound"},
@@ -592,7 +595,8 @@ class DynamoSmsIngressStore(SmsIngressStore):
                 writes.append({"Put": {
                     "TableName": self._table,
                     "Item": {**self._key(business_id, self._history_key(
-                        "owner" if client_id is None else "client", phone, sent, provider_id)),
+                        "owner" if client_id is None else "client",
+                        client_id or phone, sent, provider_id)),
                         "record_sk": {"S": receipt_key},
                         "direction": {"S": "outbound"},
                         **({"client_id": {"S": client_id}} if client_id is not None else {})},
@@ -602,7 +606,7 @@ class DynamoSmsIngressStore(SmsIngressStore):
                     writes.append({"Put": {
                         "TableName": self._table,
                         "Item": {**self._key(business_id, self._invitation_key(
-                            phone, sent, provider_id)),
+                            client_id, sent, provider_id)),
                             "record_sk": {"S": receipt_key},
                             "client_id": {"S": client_id}},
                         "ConditionExpression": "attribute_not_exists(PK)",

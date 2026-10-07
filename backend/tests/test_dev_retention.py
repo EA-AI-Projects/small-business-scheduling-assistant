@@ -135,11 +135,10 @@ class RetentionRun:
         if (sort_key == f"CLIENT#{self.client_id}"
                 or sort_key.startswith((self.provider_prefix, f"NOTE#CLIENT#{client_hash}#"))):
             return True
+        if sort_key.startswith((f"SMS_HISTORY#client#{client_hash}#",
+                                f"SMS_INVITATION#client#{client_hash}#")):
+            return True
         for phone in self.phones:
-            phone_hash = sha256(phone.encode()).hexdigest()
-            if sort_key.startswith((f"SMS_HISTORY#client#{phone_hash}#",
-                                    f"SMS_INVITATION#client#{phone_hash}#")):
-                return True
             if sort_key in {f"PHONE#{phone}", f"SMS_THREAD#{phone}", f"SMS_SUPPRESS#{phone}",
                             f"SMS_CONSENT_CURRENT#{phone}", f"SMS_OPTOUT#{phone}"}:
                 return True
