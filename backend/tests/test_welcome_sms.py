@@ -26,6 +26,15 @@ FROM = "+14155550000"
 OWNER = "+15005550009"
 
 
+class SendableRecords(InMemoryCalendarRepository):
+    def acquire_client_send(self, business_id: str, client_id: str) -> str:
+        assert business_id == "pilot" and client_id == "client-1"
+        return "test-claim"
+
+    def release_client_send(self, business_id: str, client_id: str, token: str) -> None:
+        assert (business_id, client_id, token) == ("pilot", "client-1", "test-claim")
+
+
 class Store:
     """Memory store with the all-or-nothing contract of the DynamoDB one."""
 
@@ -68,7 +77,7 @@ class Messages:
 
 def world() -> tuple[InMemoryCalendarRepository, ClientRecordService, Store, Messages,
                      TwilioSmsSender]:
-    repository = InMemoryCalendarRepository()
+    repository = SendableRecords()
     clients = ClientRecordService(repository)
     clients.save_profile("pilot", "client-1", "Synthetic Client", PHONE, "123 Test Street",
                          HomeSize.SMALL, 60, True, 0, 180, NOW)
