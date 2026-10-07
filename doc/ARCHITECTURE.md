@@ -23,6 +23,10 @@ exact rendered outbound text to that evidence only after Twilio accepts the
 send. Queued, suppressed, and failed outbox drafts have no history entry. The
 read does not call Twilio's Messages list API. The resulting 24-hour view is
 limited to 24 whole messages and 12,000 text characters before model input.
+Limitation accepted for #270: if one client changes their verified phone from
+P to Q and back to P within 24 hours, history from the earlier P interval may
+appear in the current P transcript. This unlikely sequence does not block #270
+and is not accommodated.
 Outbound text follows the existing 90-day SMS-body retention and client erasure;
 logs continue to carry no raw message bodies. This read is prepared for the
 model loop in #271; it does not change the current SMS reply routing.
