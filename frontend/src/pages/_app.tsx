@@ -8,7 +8,8 @@ export default function OwnerApp({ Component, pageProps }: AppProps) {
     <>
       <Head>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>Scheduling · Owner</title>
+        <title>Smart Scheduling Assistant · Owner</title>
+        <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
       </Head>
       <Component {...pageProps} />
     </>

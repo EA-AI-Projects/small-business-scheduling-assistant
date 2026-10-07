@@ -242,7 +242,10 @@ function Shell({ signedIn, onAuth, announcement = null, children }: {
       {/* Signed in, the workspace renders the calendar header with the menu and the account button (sign out). */}
       {!signedIn && (
         <header className="topbar">
-          <div><span className="eyebrow">OWNER WORKSPACE</span><h1>Scheduling</h1></div>
+          <div className="signed-out-brand">
+            <span className="brand-mark" aria-hidden="true" />
+            <div><span className="eyebrow">OWNER WORKSPACE</span><h1>Smart Scheduling Assistant</h1></div>
+          </div>
           <div className="top-actions">
             <span>Signed out</span>
             {onAuth && <button type="button" onClick={onAuth}>Sign in</button>}
@@ -250,7 +253,7 @@ function Shell({ signedIn, onAuth, announcement = null, children }: {
         </header>
       )}
       <main>{children}</main>
-      <footer>Scheduling pilot · Changes appear only after the server confirms them.</footer>
+      <footer>Smart Scheduling Assistant pilot · Changes appear only after the server confirms them.</footer>
     </>
   );
 }
