@@ -1,6 +1,8 @@
-# Small Business Scheduling Assistant
+# Smart Scheduling Assistant
 
 An SMS-first scheduling assistant for a small home-cleaning business. Clients request, reschedule, and cancel visits by text; the owner approves new requests by SMS. A shared scheduling system is the source of truth for availability and appointment status.
+
+The product name is **Smart Scheduling Assistant**. The repository name and deployment identifiers remain stable. The approved visual identity is a black-and-white, nonhuman face with bookworm glasses and freckles. The [primary logo](frontend/public/brand/mark.svg) is the owner app's brand mark; the [simplified favicon](frontend/public/favicon.svg) is for browser tabs and small icon surfaces. See the [product identity decision](doc/PRD.md#1-summary).
 
 ## Project documents
 

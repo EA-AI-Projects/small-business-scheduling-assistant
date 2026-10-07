@@ -1,4 +1,4 @@
-# Small Business Scheduling Assistant
+# Smart Scheduling Assistant
 
 SMS-first scheduling assistant for a small home-cleaning business. Backend: Python 3.12 FastAPI on AWS SAM (`backend/`, `template.yaml`). Owner app: static Next.js + TypeScript (`frontend/`). Work is governed by [doc/TEAM_AGREEMENT.md](doc/TEAM_AGREEMENT.md); accepted decisions live in `doc/PRD.md`, `doc/HLD.md`, `doc/ARCHITECTURE.md`, and `doc/SCHEDULING_CONTRACTS.md`.
 

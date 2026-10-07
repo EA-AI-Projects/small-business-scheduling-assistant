@@ -1,4 +1,4 @@
-# Technical Architecture: Small Business Scheduling Assistant
+# Technical Architecture: Smart Scheduling Assistant
 
 **Status:** Proposed architecture for review  
 **Version:** 0.1  

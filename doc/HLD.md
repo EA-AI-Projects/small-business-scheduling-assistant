@@ -1,4 +1,4 @@
-# High-Level Design: Small Business Scheduling Assistant
+# High-Level Design: Smart Scheduling Assistant
 
 **Status:** Draft for review  
 **Version:** 0.1  
