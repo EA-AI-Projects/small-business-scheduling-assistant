@@ -429,6 +429,19 @@
             ],
             "title": "Lookahead Weeks"
           },
+          "message": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
           "weekday": {
             "anyOf": [
               {

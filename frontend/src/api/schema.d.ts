@@ -527,6 +527,8 @@ export interface components {
             local_time?: string | null;
             /** Lookahead Weeks */
             lookahead_weeks?: number | null;
+            /** Message */
+            message?: string | null;
             /** Weekday */
             weekday?: number | null;
         };

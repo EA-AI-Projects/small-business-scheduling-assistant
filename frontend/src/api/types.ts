@@ -29,6 +29,7 @@ export interface OutreachState {
     weekday: number | null;
     local_time: string | null;
     lookahead_weeks: number | null;
+    message?: string | null;
   };
   version: number;
 }

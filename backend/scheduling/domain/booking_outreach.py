@@ -15,6 +15,7 @@ class OutreachSettings:
     weekday: int | None = None  # Monday = 0, in the business timezone
     local_time: time | None = None
     lookahead_weeks: int | None = None
+    message: str | None = None
 
     def __post_init__(self) -> None:
         if self.weekday is not None and not 0 <= self.weekday <= 6:
@@ -28,6 +29,18 @@ class OutreachSettings:
         if self.enabled and (self.weekday is None or self.local_time is None
                              or self.lookahead_weeks is None):
             raise ValueError("Choose a run day, time, and lookahead before enabling")
+        if self.message is not None and (not self.message.strip() or len(self.message) > 500):
+            raise ValueError("Invitation message must be 1 to 500 characters")
+
+
+def approved_invitation_message(lookahead_weeks: int) -> str:
+    window = "one week" if lookahead_weeks == 1 else "two weeks"
+    return ("Smart Scheduling Assistant: Would you like to book a cleaning visit in the next "
+            f"{window}? Reply with a day and time that works for you, or STOP to opt out.")
+
+
+def invitation_message(settings: OutreachSettings) -> str:
+    return settings.message or approved_invitation_message(settings.lookahead_weeks or 1)
 
 
 @dataclass(frozen=True)

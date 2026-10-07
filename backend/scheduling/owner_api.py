@@ -165,9 +165,18 @@ class OutreachSettingsBody(StrictModel):
     weekday: int | None = Field(default=None, ge=0, le=6)
     local_time: time | None = None
     lookahead_weeks: int | None = Field(default=None, ge=1, le=2)
+    message: str | None = Field(default=None, min_length=1, max_length=500)
 
-    def settings(self) -> OutreachSettings:
-        return OutreachSettings(self.enabled, self.weekday, self.local_time, self.lookahead_weeks)
+    @field_validator("message")
+    @classmethod
+    def nonblank_message(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("Invitation message cannot be blank")
+        return value.strip() if value is not None else None
+
+    def settings(self, previous_message: str | None = None) -> OutreachSettings:
+        return OutreachSettings(self.enabled, self.weekday, self.local_time,
+                                self.lookahead_weeks, self.message or previous_message)
 
 
 class OutreachEditBody(StrictModel):
@@ -182,8 +191,8 @@ class ManualInvitationBody(StrictModel):
     @field_validator("message")
     @classmethod
     def valid_message(cls, value: str) -> str:
-        if not value.strip() or "STOP" not in value.upper():
-            raise ValueError("Include invitation text and STOP opt-out instructions")
+        if not value.strip():
+            raise ValueError("Invitation message cannot be blank")
         return value.strip()
 
 
@@ -582,7 +591,8 @@ def create_owner_app(
         if body.settings.enabled and store.read_policy_record(business_id) is None:
             raise _error("POLICY_NOT_CONFIGURED", "Save the business timezone policy first", 409)
         return run(lambda: update_outreach(outreach, business_id, owner.actor_id, request_key,
-                                           body.expected_version, body.settings.settings()),
+                                           body.expected_version, body.settings.settings(
+                                               outreach.read_outreach(business_id).settings.message)),
                    lambda: jsonable_encoder(outreach.read_outreach(business_id)))
 
     @app.get("/v1/owner/businesses/{business_id}/local-time")

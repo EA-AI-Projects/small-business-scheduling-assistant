@@ -26,6 +26,7 @@ class InvitationIntent:
     verified_at: datetime
     lookahead_weeks: int
     manual_message: str | None = None
+    outreach_version: int | None = None
 
 
 @dataclass(frozen=True)
@@ -93,8 +94,12 @@ class InvitationEligibilityRepository(Protocol):
 def invitation_problem(intent: InvitationIntent, records: InvitationEligibilityRepository,
                        consent: ConsentRepository, now: datetime) -> str | None:
     """Safe reason code from authoritative state immediately before handoff."""
-    if intent.manual_message is None and not records.read_outreach(intent.business_id).settings.enabled:
-        return "DISABLED"
+    if intent.manual_message is None:
+        outreach = records.read_outreach(intent.business_id)
+        if not outreach.settings.enabled:
+            return "DISABLED"
+        if intent.outreach_version is not None and outreach.version != intent.outreach_version:
+            return "SETTINGS_CHANGED"
     if now.tzinfo is None or now.astimezone(UTC) > intent.window_end_at:
         return "WINDOW_EXPIRED"
     profile = records.read_profile(intent.business_id, intent.client_id)
@@ -232,6 +237,7 @@ class InvitationSelector:
                 run_at, end_at, _local_instant(previous_wall, zone),
                 sha256(profile.phone_e164.encode()).hexdigest(),
                 profile.phone_verified_at, record.settings.lookahead_weeks or 1,
+                outreach_version=record.version,
             )
             # Close the read-to-reservation gap for local workflows. DynamoDB also
             # checks these records in the same transaction as the durable guard.
