@@ -8,7 +8,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from zoneinfo import ZoneInfo
 
 from scheduling.domain.appointments import Appointment
@@ -32,6 +32,7 @@ from scheduling.domain.client_calendar_questions import (
 )
 from scheduling.domain.client_calendar_questions import answer as answer_client_question
 from scheduling.domain.client_records import ClientProfile
+from scheduling.domain.conversation_history import HistoryMessage
 from scheduling.domain.conversation_state import (
     MAX_OPTIONS,
     MIN_OPTIONS,
@@ -133,6 +134,8 @@ class MessageContext:
     # The client's last calendar answer, still open for follow-ups, e.g.
     # "2026-09-28 to 2026-10-04; statuses: confirmed; view: list", or None.
     calendar_answer: str | None = None
+    history: tuple[HistoryMessage, ...] = ()
+    prompt_kind: str = "none"
 
 
 @dataclass(frozen=True)
@@ -173,6 +176,17 @@ class MessageInterpreter(Protocol):
     def propose(self, body: str, context: MessageContext) -> MessageProposal: ...
 
 
+class ConversationHistoryReader(Protocol):
+    def read_conversation_history(self, receipt: InboundReceipt,
+                                  now: datetime) -> tuple[HistoryMessage, ...]: ...
+
+
+@runtime_checkable
+class ReadReplyDrafter(Protocol):
+    def draft_read_reply(self, body: str, context: MessageContext,
+                         tool_name: str, tool_result: str) -> str: ...
+
+
 class ConversationRepository(Protocol):
     def read_policy(self, business_id: str) -> AvailabilityPolicy: ...
     def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None: ...
@@ -195,7 +209,8 @@ class ConversationService:
                  owner_reply_classifier: OwnerReplyClassifier | None = None,
                  reply_lookup: ReplyLookup | None = None,
                  counteroffers: "CounterofferService | None" = None,
-                 counteroffer_acceptance: "CounterofferAcceptance | None" = None) -> None:
+                 counteroffer_acceptance: "CounterofferAcceptance | None" = None,
+                 history_reader: ConversationHistoryReader | None = None) -> None:
         self._repository = repository
         self._interpreter = interpreter
         self._holds = holds
@@ -215,6 +230,7 @@ class ConversationService:
                               else consent if isinstance(consent, ReplyLookup) else None)
         self._counteroffers = counteroffers
         self._acceptance = counteroffer_acceptance
+        self._history_reader = history_reader
 
     def handle(self, receipt: InboundReceipt) -> ConversationOutcome:
         if (not receipt.authorized_for_commands or receipt.body is None
@@ -254,6 +270,11 @@ class ConversationService:
                 tuple(target.appointment_id[:8] for target in targets[:MAX_CONTEXT_APPOINTMENTS]),
                 policy.booking_horizon_days,
                 self._calendar_line(calendar),
+                (self._history_reader.read_conversation_history(receipt, now)
+                 if self._history_reader is not None and receipt.role == SenderRole.CLIENT
+                 else ()),
+                (prompt.kind.value if prompt is not None and not prompt.expired(now)
+                 else "none"),
             )
             proposal = self._exact_command(receipt.body, context, targets)
         except (OSError, ValueError, TypeError, KeyError, RuntimeError):
@@ -347,7 +368,12 @@ class ConversationService:
                 *(span if span is not None else (date.max, date.min)),
                 statuses if proposal.intent == "calendar_question" else BOTH,
                 ambiguous_booking=proposal.intent == "clarify_booking")
-            return self._client_calendar(receipt, question, prompt, targets, policy, now)
+            try:
+                outcome = self._client_calendar(receipt, question, prompt, targets, policy, now)
+            except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+                return ConversationOutcome(
+                    "I can't check your current visits right now. Please try again later.")
+            return self._draft_read(receipt, context, "list_client_appointments", outcome)
         if proposal.intent == "cancel":
             return self._ask_cancel(receipt, proposal, targets, policy, now)
         if proposal.intent == "reschedule":
@@ -355,8 +381,29 @@ class ConversationService:
         if proposal.intent in ("availability", "request_booking"):
             original = (self._active_target(receipt, moving.appointment_id, targets)
                         if moving is not None else None)
-            return self._offer_from_proposal(receipt, proposal, policy, now, original)
+            try:
+                outcome = self._offer_from_proposal(receipt, proposal, policy, now, original)
+            except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+                return ConversationOutcome(
+                    "I can't check current openings right now. Please try again later.")
+            return self._draft_read(receipt, context, "list_available_slots", outcome)
         return ConversationOutcome("Please describe the scheduling change you want.")
+
+    def _draft_read(self, receipt: InboundReceipt, context: MessageContext,
+                    tool_name: str, outcome: ConversationOutcome) -> ConversationOutcome:
+        """Let the model phrase a read result; retain the authoritative answer on failure."""
+        if len(outcome.text) > 500:
+            return ConversationOutcome(
+                "That answer is too long for one text. Please ask about a single day.")
+        if (receipt.role != SenderRole.CLIENT or self._history_reader is None
+                or not isinstance(self._interpreter, ReadReplyDrafter)):
+            return outcome
+        try:
+            text = self._interpreter.draft_read_reply(
+                receipt.body or "", context, tool_name, outcome.text)
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+            return outcome
+        return ConversationOutcome(text)
 
     def _targets(self, receipt: InboundReceipt, now: datetime) -> tuple[Appointment, ...]:
         if receipt.role == SenderRole.OWNER:

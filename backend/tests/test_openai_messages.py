@@ -1,7 +1,7 @@
 """The model adapter proposes bounded intent and never receives customer context."""
 
 import json
-from datetime import date
+from datetime import UTC, date, datetime
 from io import BytesIO
 from typing import Any
 from urllib.request import Request
@@ -10,6 +10,7 @@ import pytest
 
 from scheduling.adapters.openai_messages import OpenAIMessageInterpreter
 from scheduling.domain.conversation import MessageContext
+from scheduling.domain.conversation_history import HistoryMessage
 from scheduling.domain.owner_reply_classification import (
     Confidence,
     OwnerReplyContext,
@@ -59,6 +60,57 @@ def test_bounded_model_call_contains_only_refs_actor_and_text(monkeypatch: pytes
     assert requests[0]["max_output_tokens"] == 512
     assert "abc12345" in requests[0]["input"]
     assert "synthetic-key" not in json.dumps(requests[0])
+
+
+def test_date_only_proposal_sees_rolling_history_as_untrusted_data(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list[dict[str, Any]] = []
+
+    def fake_urlopen(request: Request, timeout: int) -> BytesIO:
+        sent.append(json.loads(request.data or b"{}"))
+        return response(proposal(intent="availability", request_reference=None,
+                                 owner_decision=None, date_from="2026-10-13",
+                                 date_to="2026-10-13"))
+
+    monkeypatch.setattr("scheduling.adapters.openai_messages.urlopen", fake_urlopen)
+    context = MessageContext(SenderRole.CLIENT, date(2026, 10, 12),
+                             "America/Los_Angeles", (), 14, None, (
+                                 HistoryMessage("invite", "assistant",
+                                                datetime(2026, 10, 12, tzinfo=UTC),
+                                                "Would you like a cleaning?", True),
+                                 HistoryMessage("answer", "assistant",
+                                                datetime(2026, 10, 12, 1, tzinfo=UTC),
+                                                "1 pm is unavailable."),
+                             ), "offer")
+    result = OpenAIMessageInterpreter("synthetic-key").propose("Oct 13", context)
+    assert result.intent == "availability" and result.date_from == "2026-10-13"
+    assert "1 pm is unavailable" in sent[0]["input"]
+    assert sent[0]["instructions"] != sent[0]["input"]
+    assert "date-only reply" in sent[0]["instructions"]
+
+
+def test_read_draft_requires_verbatim_authoritative_result(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    facts = "I don't have any openings on Tue Oct 13. Would another day work?"
+    drafts = iter((f"Thanks for checking. {facts}",
+                   "Yes, 1:00 PM is open on Tue Oct 13."))
+
+    def fake_urlopen(request: Request, timeout: int) -> BytesIO:
+        payload = json.loads(request.data or b"{}")
+        assert payload["tool_choice"]["name"] == "draft_sms"
+        assert payload["store"] is False and payload["parallel_tool_calls"] is False
+        return BytesIO(json.dumps({"output": [{"type": "function_call",
+                                                "name": "draft_sms",
+                                                "arguments": json.dumps({"text": next(drafts)})}]}).encode())
+
+    monkeypatch.setattr("scheduling.adapters.openai_messages.urlopen", fake_urlopen)
+    model = OpenAIMessageInterpreter("synthetic-key")
+    context = MessageContext(SenderRole.CLIENT, date(2026, 10, 12),
+                             "America/Los_Angeles", ())
+    assert model.draft_read_reply("Oct 13", context, "list_available_slots", facts).startswith(
+        "Thanks for checking.")
+    with pytest.raises(ValueError, match="trusted result"):
+        model.draft_read_reply("Oct 13", context, "list_available_slots", facts)
 
 
 def test_ambiguous_proposal_with_action_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:

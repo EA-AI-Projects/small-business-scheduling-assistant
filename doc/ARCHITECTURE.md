@@ -29,7 +29,28 @@ appear in the current P transcript. This unlikely sequence does not block #270
 and is not accommodated.
 Outbound text follows the existing 90-day SMS-body retention and client erasure;
 logs continue to carry no raw message bodies. This read is prepared for the
-model loop in #271; it does not change the current SMS reply routing.
+read-only model loop in #271.
+
+### Model-led read replies (#271)
+
+The conversation worker passes the verified receipt to the history reader after
+rechecking the sender and consent. The model receives the bounded 24-hour
+transcript as JSON conversation data, separate from system instructions, plus
+business-local date, timezone, horizon, open prompt kind, and short references.
+Its typed interpretation selects at most one `list_available_slots` or
+`list_client_appointments` read for a read-only client question. The service
+derives business and client identity exclusively from the verified receipt;
+model arguments cannot name another actor. Domain availability and client
+calendar code check the current schedule and produce the authoritative SMS
+answer. One final model draft can add only a short conversational wrapper around
+that verbatim answer. Validation rejects added dates, times, or scheduling
+claims and falls back to the backend answer on malformed output or timeout.
+The first model call asks the client to retry later on failure. Each model call
+has an eight-second timeout and no internal retry, keeping the two-call path
+inside the worker's 30-second limit. Receipt leases, stable outbox intents,
+sender rechecks, and no-history drafts keep replay and delivery idempotent.
+This path does not perform a calendar write; direct booking requests follow
+the separately scoped #272 work.
 
 This document makes the AWS deployment and technology choices for the SMS-first scheduling MVP. It uses the existing **NeuroSpineDx** project as a reference for the team's AWS/serverless patterns, but adapts the choices to a small, low-traffic scheduling workload and its most important correctness constraint: no overlapping appointments or active holds.
 
