@@ -217,6 +217,7 @@ class DynamoDBCalendarRepository:
             enabled=payload["enabled"], weekday=payload["weekday"],
             local_time=time.fromisoformat(payload["local_time"]) if payload["local_time"] else None,
             lookahead_weeks=payload["lookahead_weeks"],
+            message=payload.get("message"),
         ), int(item["version"]["N"]))
 
     def save_outreach(self, business_id: str, actor_id: str, key: str,
@@ -225,7 +226,7 @@ class DynamoDBCalendarRepository:
             _command_sort_key(actor_id, "edit_booking_outreach", key))
         payload = json.dumps({"enabled": settings.enabled, "weekday": settings.weekday,
             "local_time": settings.local_time.isoformat(timespec="minutes") if settings.local_time else None,
-            "lookahead_weeks": settings.lookahead_weeks}, sort_keys=True)
+            "lookahead_weeks": settings.lookahead_weeks, "message": settings.message}, sort_keys=True)
         request_hash = sha256(json.dumps([expected_version, payload]).encode()).hexdigest()
 
         def replay() -> OutreachRecord | None:
@@ -357,6 +358,8 @@ class DynamoDBCalendarRepository:
                         "phone_hash": {"S": intent.phone_hash},
                         "verified_at": {"S": _instant(intent.verified_at)},
                         "lookahead_weeks": {"N": str(intent.lookahead_weeks)},
+                        **({"outreach_version": {"N": str(intent.outreach_version)}}
+                           if intent.outreach_version is not None else {}),
                         "state": {"S": "QUEUED"}},
                     "ConditionExpression": "attribute_not_exists(PK)"}},
             ])
@@ -445,6 +448,7 @@ class DynamoDBCalendarRepository:
             datetime.fromisoformat(item["verified_at"]["S"]),
             int(item["lookahead_weeks"]["N"]),
             item.get("manual_message", {}).get("S"),
+            int(item["outreach_version"]["N"]) if "outreach_version" in item else None,
         )
         return StoredInvitation(intent, item["state"]["S"],
                                 item.get("provider_id", {}).get("S"))

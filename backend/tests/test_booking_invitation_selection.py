@@ -157,7 +157,7 @@ def test_owner_manual_preview_and_command_require_separate_gate() -> None:
     url = f"/v1/owner/businesses/{BUSINESS}/booking-invitations/manual"
     headers = {"Authorization": "Bearer owner", "Idempotency-Key": "one-click"}
     assert app.get(url, headers=headers).json()["eligible"] == 1
-    body = {"message": "Smart Scheduling Assistant: Book a cleaning visit or STOP."}
+    body = {"message": "Please book a cleaning visit."}
     assert app.post(url, headers=headers, json=body).status_code == 409
     assert records._invitation_outbox == {}
     authorized = True
@@ -436,6 +436,50 @@ def test_invitation_promotes_once_and_sender_uses_exact_copy() -> None:
         Keyword.OTHER, True))
     assert result.committed
     assert "owner approval" in result.text.lower()
+
+
+def test_scheduled_invitation_uses_saved_custom_text_without_stop() -> None:
+    records, consent, selector = setup()
+    client(records, consent, 501)
+    update_outreach(records, BUSINESS, "owner", "custom-copy", 0,
+                    OutreachSettings(True, 0, time(9), 1, "Please book a cleaning visit."))
+    assert selector.run(BUSINESS, RUN).queued == 1
+    assert InvitationPromoter(records, consent).run(BUSINESS, RUN) == {"promoted": 1}
+
+    class Messages:
+        def __init__(self) -> None:
+            self.bodies: list[str] = []
+
+        def create(self, **kwargs: str) -> SimpleNamespace:
+            self.bodies.append(kwargs["body"])
+            return SimpleNamespace(sid="SM-custom-invitation")
+
+    messages = Messages()
+    sender = TwilioSmsSender(messages, records, consent, BUSINESS, "+14155550000",
+                             "+14155559999", clock=lambda: RUN,
+                             invitation_send_enabled=lambda: True)
+    assert sender.deliver(next(iter(records._invitation_outbox.values()))) == "SM-custom-invitation"
+    assert messages.bodies == ["Please book a cleaning visit."]
+
+
+def test_editing_message_suppresses_already_queued_scheduled_invitation() -> None:
+    records, consent, selector = setup()
+    client(records, consent, 501)
+    enable(records)
+    assert selector.run(BUSINESS, RUN).queued == 1
+    assert InvitationPromoter(records, consent).run(BUSINESS, RUN) == {"promoted": 1}
+    update_outreach(records, BUSINESS, "owner", "edit-copy", 1,
+                    OutreachSettings(True, 0, time(9), 1, "New invitation copy"))
+
+    class Messages:
+        def create(self, **kwargs: str) -> None:
+            raise AssertionError("Changed copy must suppress the queued invitation")
+
+    sender = TwilioSmsSender(Messages(), records, consent, BUSINESS, "+14155550000",
+                             "+14155559999", clock=lambda: RUN,
+                             invitation_send_enabled=lambda: True)
+    with pytest.raises(PermanentDeliveryFailure, match="SETTINGS_CHANGED"):
+        sender.deliver(next(iter(records._invitation_outbox.values())))
 
 
 @pytest.mark.parametrize("change", ["booking", "optout", "settings", "phone", "global"])

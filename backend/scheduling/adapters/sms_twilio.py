@@ -16,7 +16,11 @@ from scheduling.domain.booking_invitations import (
     invitation_outbox_id,
     invitation_problem,
 )
-from scheduling.domain.booking_outreach import OutreachRecord
+from scheduling.domain.booking_outreach import (
+    OutreachRecord,
+    approved_invitation_message,
+    invitation_message,
+)
 from scheduling.domain.calendar import CalendarSnapshot, CalendarStatus
 from scheduling.domain.client_records import ClientProfile, RecordConflict, RecordNotFound
 from scheduling.domain.holds import COUNTEROFFER_REQUEST_TEMPLATE
@@ -178,10 +182,12 @@ class TwilioSmsSender:
             self._records.complete_invitation(intent, None)
             raise PermanentDeliveryFailure("INVITATION_CLIENT_UNAVAILABLE")
         to = normalize_phone(profile.phone_e164)
-        window = "one week" if intent.lookahead_weeks == 1 else "two weeks"
-        body = intent.manual_message or (
-            "Smart Scheduling Assistant: Would you like to book a cleaning visit in the next "
-            f"{window}? Reply with a day and time that works for you, or STOP to opt out.")
+        if intent.manual_message is not None:
+            body = intent.manual_message
+        elif intent.outreach_version is not None:
+            body = invitation_message(self._records.read_outreach(intent.business_id).settings)
+        else:
+            body = approved_invitation_message(intent.lookahead_weeks)
         try:
             provider_id = self._send(record, to, body, intent.client_id, pre_send=check)
         except PermanentDeliveryFailure:

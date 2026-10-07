@@ -7,10 +7,15 @@ import type { OutreachState } from "@/api/types";
 import { OutreachForm } from "./OutreachForm";
 
 const change = vi.fn(async () => true);
+const get = vi.fn(async () => ({ eligible: 3, examined: 4, delivery_enabled: true }));
+const api = { businessId: "pilot", get, request: vi.fn(async (_path: string, options: {
+  body: { settings: OutreachState["settings"] }
+}) => ({ settings: options.body.settings, version: 2 })) };
 let outreach: OutreachState = { settings: { enabled: false, weekday: null,
   local_time: null, lookahead_weeks: null }, version: 0 };
 vi.mock("@/owner/OwnerContext", () => ({
-  useOwner: () => ({ change, data: { outreach, zone: "America/Los_Angeles" } }),
+  useOwner: () => ({ api, change, notify: vi.fn(), refresh: vi.fn(),
+    data: { outreach, zone: "America/Los_Angeles" } }),
 }));
 
 describe("Booking invitation settings", () => {
@@ -18,6 +23,8 @@ describe("Booking invitation settings", () => {
   let root: Root;
   beforeEach(async () => {
     change.mockClear();
+    get.mockClear();
+    api.request.mockClear();
     outreach = { settings: { enabled: false, weekday: null,
       local_time: null, lookahead_weeks: null }, version: 0 };
     (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -43,10 +50,47 @@ describe("Booking invitation settings", () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(time, "09:00");
       time.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    await act(async () => host.querySelector<HTMLButtonElement>("button")!.click());
+    await act(async () => [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Save invitation settings")!.click());
     expect(change).toHaveBeenCalledWith("/booking-outreach", "PUT", {
       expected_version: 0, settings: { enabled: true, weekday: 0,
-        local_time: "09:00", lookahead_weeks: 2 },
+        local_time: "09:00", lookahead_weeks: 2,
+        message: "Smart Scheduling Assistant: Would you like to book a cleaning visit in the next "
+          + "two weeks? Reply with a day and time that works for you, or STOP to opt out." },
     }, "Booking invitation settings saved");
+  });
+
+  it("allows custom text without STOP for the shared invitation message", async () => {
+    const textarea = host.querySelector<HTMLTextAreaElement>("textarea")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(
+        textarea, "Please book a cleaning visit.");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Save invitation settings")!.click());
+    expect(change).toHaveBeenCalledWith("/booking-outreach", "PUT", expect.objectContaining({
+      settings: expect.objectContaining({ message: "Please book a cleaning visit." }),
+    }), "Booking invitation settings saved");
+  });
+
+  it("keeps the new settings version after cancelling a manual send", async () => {
+    outreach = { settings: { enabled: true, weekday: 0, local_time: "09:00",
+      lookahead_weeks: 1, message: "Old text" }, version: 1 };
+    await act(async () => root.render(<OutreachForm />));
+    const textarea = host.querySelector<HTMLTextAreaElement>("textarea")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(
+        textarea, "New text without opt-out phrase");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+    await act(async () => [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Send Invitations Now")!.click());
+    expect(api.request).toHaveBeenCalledWith("/booking-outreach", expect.objectContaining({
+      body: expect.objectContaining({ expected_version: 1 }),
+    }));
+    expect(host.textContent).toContain("Version 2");
+    vi.mocked(window.confirm).mockRestore();
   });
 });

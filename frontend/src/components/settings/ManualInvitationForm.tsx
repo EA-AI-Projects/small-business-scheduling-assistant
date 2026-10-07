@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { useOwner } from "@/owner/OwnerContext";
 
@@ -24,12 +24,6 @@ interface PendingAttempt {
   createdAt: number;
 }
 
-function approvedMessage(weeks: number): string {
-  const window = weeks === 1 ? "one week" : "two weeks";
-  return "Smart Scheduling Assistant: Would you like to book a cleaning visit in the next "
-    + `${window}? Reply with a day and time that works for you, or STOP to opt out.`;
-}
-
 function savedAttempt(storageKey: string): PendingAttempt | null {
   try {
     const value: unknown = JSON.parse(sessionStorage.getItem(storageKey) ?? "null");
@@ -47,19 +41,21 @@ function savedAttempt(storageKey: string): PendingAttempt | null {
   return null;
 }
 
-export function ManualInvitationForm() {
-  const { api, data, notify } = useOwner();
+export function ManualInvitationForm({ message, onMessageChange, prepareSend, lookaheadWeeks }: {
+  message: string;
+  onMessageChange: (value: string) => void;
+  prepareSend: (key: string) => Promise<boolean>;
+  lookaheadWeeks: number | null;
+}) {
+  const { api, data, notify, refresh } = useOwner();
   const storageKey = `manual-booking-invitation-pending:${api.businessId}`;
   const [pending, setPending] = useState(() => savedAttempt(storageKey));
-  const edited = useRef(pending !== null);
-  const [message, setMessage] = useState(() => pending?.message ?? "");
   const [preview, setPreview] = useState<Preview | null>(null);
   const [result, setResult] = useState<string | null>(null);
 
   useEffect(() => {
-    const weeks = data.outreach?.settings.lookahead_weeks;
-    if (!edited.current && weeks) setMessage(approvedMessage(weeks));
-  }, [data.outreach?.settings.lookahead_weeks]);
+    if (pending) onMessageChange(pending.message);
+  }, [pending, onMessageChange]);
 
   useEffect(() => {
     let active = true;
@@ -72,11 +68,27 @@ export function ManualInvitationForm() {
 
   async function send() {
     const text = pending?.message ?? message.trim();
-    if (!preview?.delivery_enabled || !text || !text.toUpperCase().includes("STOP")) return;
-    const count = preview.eligible;
-    if (!pending && !window.confirm(`Queue this message for ${count} eligible client${count === 1 ? "" : "s"}?`)) return;
-    const attempt: PendingAttempt = pending ?? { key: crypto.randomUUID(), message: text,
-      cursor: null, queued: 0, createdAt: Date.now() };
+    if (!text || (!lookaheadWeeks && !pending)) return;
+    let attempt = pending;
+    if (!attempt) {
+      const key = crypto.randomUUID();
+      if (!await prepareSend(key)) return;
+      let current: Preview;
+      try {
+        current = await api.get<Preview>("/booking-invitations/manual");
+        setPreview(current);
+      } catch (error) {
+        notify(error instanceof Error ? error.message : String(error), true);
+        return;
+      }
+      if (!current.delivery_enabled || current.eligible === 0) {
+        notify("Manual delivery is unavailable or no clients are currently eligible", true);
+        return;
+      }
+      const count = current.eligible;
+      if (!window.confirm(`Queue this message for ${count} eligible client${count === 1 ? "" : "s"}?`)) return;
+      attempt = { key, message: text, cursor: null, queued: 0, createdAt: Date.now() };
+    }
     setPending(attempt);
     try { sessionStorage.setItem(storageKey, JSON.stringify(attempt)); } catch { /* Best effort. */ }
     try {
@@ -100,31 +112,30 @@ export function ManualInvitationForm() {
       notify(summary);
       api.get<Preview>("/booking-invitations/manual")
         .then(setPreview).catch(() => setPreview(null));
+      try { await refresh(); } catch {
+        notify(`${summary}, but the latest settings could not load`, true);
+      }
     } catch (error) {
       notify(`Send status uncertain. Retry uses the same run and will not duplicate queued clients. ${
         error instanceof Error ? error.message : String(error)}`, true);
     }
   }
 
-  return <section className="card outreach-card">
-    <h3>Send invitations now</h3>
-    <p className="hint">Send one custom booking invitation to every eligible client in the saved
-      lookahead window. Manual sends have no repeat limit. Consent, opt-outs, verified numbers,
-      and confirmed appointments are checked again before delivery.</p>
-    <p className="hint">Custom-message delivery becomes available after the separate Twilio
-      campaign and live rollout are authorized.</p>
-    <label>Message
+  return <div className="form-stack">
+    <label>Invitation message
       <textarea value={message} maxLength={500} rows={5} disabled={pending !== null}
-        onChange={(event) => { edited.current = true; setMessage(event.target.value); }}
-        placeholder="Write a booking invitation with STOP opt-out instructions." />
+        onChange={(event) => onMessageChange(event.target.value)}
+        placeholder="Write an invitation message." />
     </label>
+    <p className="hint">This message is used for weekly invitations and Send Invitations Now.
+      Sending now saves changes first and has no repeat limit.</p>
     <p className="meta">{preview
       ? `${preview.eligible} of ${preview.examined} clients currently eligible`
       : "Save a lookahead window to preview eligible clients."}</p>
     {!preview?.delivery_enabled && <p className="hint">Manual delivery is not enabled yet.</p>}
-    <BusyButton className="primary" onClick={send} disabled={!preview?.delivery_enabled
-      || (!preview.eligible && !pending) || !message.trim()
-      || !message.toUpperCase().includes("STOP")}>{pending ? "Retry same send" : "Send invitations"}</BusyButton>
+    <div><BusyButton className="primary" onClick={send} disabled={
+      (!message.trim() && !pending) || (!lookaheadWeeks && !pending)
+      || preview?.delivery_enabled === false}>{pending ? "Retry same send" : "Send Invitations Now"}</BusyButton></div>
     {result && <p role="status">{result}</p>}
-  </section>;
+  </div>;
 }
