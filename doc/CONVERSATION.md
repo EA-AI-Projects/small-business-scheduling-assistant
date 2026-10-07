@@ -1,5 +1,18 @@
 # SMS conversation flow and command boundary
 
+## Recent message context (#270)
+
+For a verified client or owner, the application can assemble an ordered rolling
+24-hour transcript from its own inbound receipts and outbound provider-handoff
+records. Each entry carries the sender role, send or receive time, provider ID,
+and exact text. A client's history requires the same business, verified phone,
+and client ID; owner history requires the same business and owner phone. Draft
+outbox messages are absent until provider acceptance. The bound is 24 messages
+and 12,000 characters. Older whole messages are omitted, while the newest
+exchange and the latest booking invitation are preferred; an oversized message
+is omitted rather than shortened. The history builder does not itself call a
+model or authorize scheduling actions; the model loop arrives in #271.
+
 Clients and the owner can text in plain language. The model interprets the text; the calendar changes only when a reply matches something the system itself offered. Issue [#60](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/issues/60) recorded the owner decisions behind this flow. Everything below is exercised with fictional data, an in-memory calendar, and no Twilio, DynamoDB, or live SMS.
 
 ## Scheduled booking invitations (#249)

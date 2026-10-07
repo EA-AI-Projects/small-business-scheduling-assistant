@@ -7,6 +7,19 @@
 
 ## 1. Purpose
 
+### Application-owned SMS history (#270)
+
+The verified SMS receipt identifies one business, sender role, phone, and (for a
+client) client ID. A conversation-history read uses those fields to join inbound
+`SMS#` receipts with `SMS_OUT#` provider-handoff evidence. The sender writes the
+exact rendered outbound text to that evidence only after Twilio accepts the
+send. Queued, suppressed, and failed outbox drafts have no history entry. The
+read does not call Twilio's Messages list API. The resulting 24-hour view is
+limited to 24 whole messages and 12,000 text characters before model input.
+Outbound text follows the existing 90-day SMS-body retention and client erasure;
+logs continue to carry no raw message bodies. This read is prepared for the
+model loop in #271; it does not change the current SMS reply routing.
+
 This document makes the AWS deployment and technology choices for the SMS-first scheduling MVP. It uses the existing **NeuroSpineDx** project as a reference for the team's AWS/serverless patterns, but adapts the choices to a small, low-traffic scheduling workload and its most important correctness constraint: no overlapping appointments or active holds.
 
 The goal is low idle cost and low operational overhead—not a large-scale SaaS platform. External services such as SMS and the language-model API remain replaceable integrations. All application-owned compute, data, web hosting, identity, secrets, and logs are deployable on AWS.

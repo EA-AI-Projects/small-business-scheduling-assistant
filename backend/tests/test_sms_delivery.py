@@ -64,7 +64,8 @@ class Consent:
         self.reply_text: str | None = None
 
     def record_outbound(self, business_id: str, phone_e164: str,
-                        provider_id: str, sent_at: datetime) -> None:
+                        provider_id: str, sent_at: datetime, body: str,
+                        client_id: str | None = None, template: str = "") -> None:
         self.outbound.append((business_id, phone_e164, provider_id, sent_at))
 
     def read_consent(self, business_id: str, phone_e164: str) -> ConsentEvidence | None:
@@ -150,7 +151,8 @@ def test_client_send_claim_blocks_deletion_race_and_survives_uncertain_failure()
 
     sender, messages, consent, records = setup()
     def evidence_failed(_business_id: str, _phone_e164: str,
-                        _provider_id: str, _sent_at: datetime) -> None:
+                        _provider_id: str, _sent_at: datetime, _body: str,
+                        _client_id: str | None, _template: str) -> None:
         raise RuntimeError("evidence unavailable")
     consent.record_outbound = evidence_failed  # type: ignore[method-assign]
     with pytest.raises(RuntimeError, match="evidence unavailable"):

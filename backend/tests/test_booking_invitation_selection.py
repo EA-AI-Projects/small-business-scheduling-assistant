@@ -46,7 +46,8 @@ class Consent:
         return f"{business_id}:{phone_e164}" in self.stopped
 
     def record_outbound(self, business_id: str, phone_e164: str,
-                        provider_id: str, sent_at: datetime) -> None:
+                        provider_id: str, sent_at: datetime, body: str,
+                        client_id: str | None = None, template: str = "") -> None:
         self.outbound.append(provider_id)
 
 

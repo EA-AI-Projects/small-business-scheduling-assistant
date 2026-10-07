@@ -227,7 +227,7 @@ class TwilioSmsSender:
             raise PermanentDeliveryFailure("EVENT_SUPERSEDED")
         if self._consent.is_opted_out(record.business_id, to):
             raise PermanentDeliveryFailure("OPTED_OUT")
-        return self._send(record, to, WELCOME_TEXT)
+        return self._send(record, to, WELCOME_TEXT, profile.client_id)
 
     def _deliver_counteroffer(self, record: OutboxRecord) -> str:
         """Owner-confirmed offer text, sent only if everything still holds at send time."""
@@ -329,7 +329,8 @@ class TwilioSmsSender:
             provider_id = getattr(result, "sid", None)
             if not isinstance(provider_id, str) or not provider_id:
                 raise DeliveryFailure("PROVIDER_ID_MISSING")
-            self._consent.record_outbound(record.business_id, to, provider_id, self._clock())
+            self._consent.record_outbound(record.business_id, to, provider_id, self._clock(),
+                                          body, client_id, record.template)
             evidence_written = True
             return provider_id
         finally:

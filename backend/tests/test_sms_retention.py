@@ -87,6 +87,13 @@ class MemoryDynamo:
                 if update["UpdateExpression"] == "REMOVE body, reply_text":
                     items[key].pop("body", None)
                     items[key].pop("reply_text", None)
+                elif update["UpdateExpression"] == "REMOVE body":
+                    current = items[key]
+                    values = update["ExpressionAttributeValues"]
+                    if (current["body"] != values[":body"] or
+                            current["sent_at"]["S"] > values[":cutoff"]["S"]):
+                        raise RuntimeError("retention race")
+                    current.pop("body")
                 else:
                     current = items.setdefault(key, {"SK": {"S": key}})
                     set_part, _, remove_part = update["UpdateExpression"].partition(" REMOVE ")
@@ -220,6 +227,20 @@ def test_outbound_reply_extends_last_exchange_window() -> None:
     assert store.purge_expired_bodies("pilot", outbound + timedelta(days=90)) == 1
     assert "body" not in dynamo.items["SMS#SM-first"]
     assert dynamo.items["SMS_OUT#SM-out"]["recipient"]["S"] == "+14155550101"
+
+
+def test_outbound_body_is_retained_with_active_thread_then_erased() -> None:
+    dynamo = MemoryDynamo()
+    store = DynamoSmsIngressStore(dynamo, "synthetic")
+    sent = NOW - timedelta(days=100)
+    store.record_outbound("pilot", "+14155550101", "SM-out", sent,
+                          "Exact sent invitation", "client-1", "booking_invitation")
+    assert dynamo.items["SMS_OUT#SM-out"]["body"]["S"] == "Exact sent invitation"
+    store.put_received(_receipt("SM-new", NOW - timedelta(days=1)))
+    assert store.purge_expired_outbound_bodies("pilot", NOW, "+14155550100") == 0
+    assert store.purge_expired_outbound_bodies(
+        "pilot", NOW + timedelta(days=90), "+14155550100") == 1
+    assert "body" not in dynamo.items["SMS_OUT#SM-out"]
 
 
 def test_conversation_reply_is_atomic_idempotent_and_purged_with_sms_body() -> None:
@@ -481,6 +502,10 @@ def test_retention_handler_normalizes_owner_number_and_fails_closed(
 
         def purge_expired_bodies(self, _b: str, _n: datetime, owner: str | None) -> int:
             seen.append(owner)
+            return 0
+
+        def purge_expired_outbound_bodies(self, _b: str, _n: datetime,
+                                          owner: str) -> int:
             return 0
 
         def purge_expired_manual_invitation_bodies(self, _b: str, _n: datetime) -> int:
