@@ -1,6 +1,6 @@
 # Scheduling SMS policy site
 
-These static pages are prepared for GitHub Pages. They identify the Small Business Scheduling Assistant proof of concept and use the supplied support email. Confirm that the statements about data use, vendors, retention, and consent match the actual service before publishing. The pages intentionally do not name the person behind the registered Twilio brand; that may cause a brand mismatch during A2P review.
+These static pages are prepared for GitHub Pages. They identify the Smart Scheduling Assistant proof of concept and use the supplied support email. Confirm that the statements about data use, vendors, retention, and consent match the actual service before publishing. The pages intentionally do not name the person behind the registered Twilio brand; that may cause a brand mismatch during A2P review.
 
 GitHub Pages publishes these files from branch `main`, folder **/docs** (**Settings → Pages → Deploy from a branch**). Enrique authorized publication of these pages. Changes merged to `main` under `docs/` go live automatically. The expected direct links are:
 

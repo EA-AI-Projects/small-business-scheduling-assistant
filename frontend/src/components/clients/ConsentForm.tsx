@@ -9,8 +9,8 @@ import { useOwner } from "@/owner/OwnerContext";
  * The consent script the owner reads aloud. Keep in step with the "Script version" line in
  * docs/sms-consent/index.html (checked by ConsentScript.test.ts).
  */
-export const CONSENT_SCRIPT_VERSION = "1";
-export const CONSENT_SCRIPT_DATE = "September 27, 2026";
+export const CONSENT_SCRIPT_VERSION = "2";
+export const CONSENT_SCRIPT_DATE = "October 7, 2026";
 
 const CONSENT_PAGE = "https://ea-ai-projects.github.io/small-business-scheduling-assistant/sms-consent/";
 
