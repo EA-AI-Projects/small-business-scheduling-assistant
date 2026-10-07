@@ -7,7 +7,7 @@
 
 ## 1. Summary
 
-**Product identity (owner decision, 2026-10-05):** The official application name is **Smart Scheduling Assistant**. The approved logo direction is a clear black-and-white, nonhuman face icon with bookworm glasses and freckles, based on the owner's reference image. The final artwork and its placement in the owner app remain implementation work. Existing repository and public policy URLs remain stable during the name update.
+**Product identity (owner decision, 2026-10-05):** The official application name is **Smart Scheduling Assistant**. The approved logo direction is a clear black-and-white, nonhuman face icon with bookworm glasses and freckles, based on the owner's reference image. The final [primary logo](../frontend/public/brand/mark.svg) is for the owner app brand mark; the [simplified favicon](../frontend/public/favicon.svg) is for browser tabs and small icon surfaces. Existing repository and public policy URLs remain stable during the name update.
 
 Build an SMS-first scheduling assistant for a small home-cleaning business. Clients communicate by text to request, reschedule, or cancel cleaning visits. The owner manages availability and approves new booking requests primarily through text. A shared scheduling system is the source of truth, with a simple owner-facing calendar/admin view for visibility and corrections.
 
@@ -199,7 +199,7 @@ No numerical improvement target is set until the baseline and pilot cohort are k
 - The owner needs a defined method to add unavailable time; the minimal web view is the MVP fallback.
 - The owner confirmed replacement-first rescheduling and rejection of conflicting duration increases in issue #3; the original confirmed appointment remains unchanged in either failure case.
 - The SMS pilot is limited to senders and recipients in California, US. Use Twilio; a US number is bought and the A2P 10DLC brand and messaging campaign are approved (issue #91), but approval does not authorize live SMS, deployment, or real clients. Consent is obtained in person using the documented [pilot consent process](https://ea-ai-projects.github.io/small-business-scheduling-assistant/sms-consent/) and a private record of the participant's clear yes, method, timestamp, and script version. No initial automated enrollment text is sent before consent. Handle STOP/HELP before live messaging; until launch approval, a number may receive texts only after the owner records in-person consent for it in onboarding (which also verifies the phone), it has not opted out, and `SmsSendEnabled=authorized`; there is no separate deploy-time recipient list (#91). The sender also refuses fictional 555-0100 to 555-0199 numbers.
-- When a new client completes onboarding and the owner records in-person text consent, send the first enrollment text using the "Smart Scheduling Assistant" wording on the pilot consent page. Send it once for that client's initial enrollment; Twilio STOP/START re-subscription does not trigger another welcome text. The broader name update was approved on 2026-10-05 and is tracked as separate branding work.
+- When a new client completes onboarding and the owner records in-person text consent, send the first enrollment text using the "Smart Scheduling Assistant" wording on the pilot consent page. Send it once for that client's initial enrollment; Twilio STOP/START re-subscription does not trigger another welcome text.
 - Whether the wife needs access or notifications is deferred; initial owner communication goes to one phone.
 - Entry/access codes are excluded from the MVP.
 
