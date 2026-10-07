@@ -59,6 +59,9 @@ button.danger { color: var(--color-danger); border-color: var(--color-danger-bor
 .topbar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1rem clamp(1rem, 3vw, 3rem); background: var(--color-primary-dark); color: var(--color-on-primary); }
 .topbar h1 { margin: .1rem 0 0; font-size: 1.6rem; line-height: 1.1; }
 .topbar .eyebrow { color: var(--color-on-primary-dark-muted); }
+.signed-out-brand { display: flex; align-items: center; gap: .75rem; min-width: 0; }
+.brand-mark { display: block; flex: none; width: 2rem; height: 2rem; background: url("/brand/mark.svg") center / contain no-repeat; }
+.signed-out-brand .brand-mark { width: 2.75rem; height: 2.75rem; background-color: #fff; border-radius: 50%; }
 .top-actions { display: flex; align-items: center; gap: .8rem; font-size: .9rem; }
 main { max-width: 1300px; margin: auto; padding: 1.5rem clamp(1rem, 3vw, 3rem) 3rem; }
 h2, h3 { margin: 0 0 .8rem; line-height: 1.2; }
@@ -139,6 +142,7 @@ code { font-size: .9em; }
   .tab-panel { margin-top: .75rem; }
   .app-header { flex-wrap: nowrap; gap: .15rem; padding: .25rem .35rem; margin: 0 calc(-1 * clamp(1rem, 3vw, 3rem)); border-width: 0 0 1px; border-radius: 0; }
   .app-name { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .app-header .brand-mark { width: 1.5rem; height: 1.5rem; background-image: url("/favicon.svg"); }
   .app-header .icon-button { width: 2.25rem; height: 2.25rem; flex: none; }
   .app-header .avatar-button { width: 2.25rem; height: 2.25rem; }
   .app-header .avatar { width: 1.9rem; height: 1.9rem; }
@@ -247,6 +251,7 @@ code { font-size: .9em; }
 /* Narrowest phones (320px): tighter controls so the short Day title still shows in full. Buttons stay at 2rem or more. */
 @media (max-width: 360px) {
   .app-header { gap: 0; padding: .25rem .15rem; }
+  .app-header .brand-mark { display: none; }
   .calendar-controls { gap: 0; }
   .app-header .icon-button, .calendar-controls > .pill { width: 2rem; height: 2rem; }
   .app-header .avatar-button { width: 2rem; height: 2rem; }

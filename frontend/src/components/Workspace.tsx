@@ -37,7 +37,7 @@ export function Workspace({ onSignOut, account, notice }: {
   const current = SECTIONS.find((item) => item.id === tab);
   return (
     <div>
-      <AppHeader appName="Scheduling" current={tab} badgeTotal={pending}
+      <AppHeader appName="Smart Scheduling Assistant" current={tab} badgeTotal={pending}
         items={SECTIONS.map((item) => ({ ...item, badge: item.id === "requests" ? pending : undefined }))}
         onSelect={(id) => setTab(id as Tab)}
         trailing={<AccountMenu email={account.email} local={account.local} onSignOut={onSignOut} />}>

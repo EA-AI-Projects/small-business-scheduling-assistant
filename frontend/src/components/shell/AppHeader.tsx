@@ -90,6 +90,7 @@ export function AppHeader({ appName, items, current, onSelect, badgeTotal, trail
           ))}
         </nav>
       </div>
+      <span className="brand-mark" aria-hidden="true" />
       <h1 className="app-name">{appName}</h1>
       {children}
       {trailing}
