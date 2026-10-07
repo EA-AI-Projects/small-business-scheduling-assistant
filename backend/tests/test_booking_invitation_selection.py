@@ -447,7 +447,8 @@ def test_scheduled_invitation_uses_saved_custom_text_without_stop() -> None:
     assert InvitationPromoter(records, consent).run(BUSINESS, RUN) == {"promoted": 1}
 
     class Messages:
-        bodies: list[str] = []
+        def __init__(self) -> None:
+            self.bodies: list[str] = []
 
         def create(self, **kwargs: str) -> SimpleNamespace:
             self.bodies.append(kwargs["body"])
