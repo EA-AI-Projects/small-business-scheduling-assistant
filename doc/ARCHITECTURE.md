@@ -10,8 +10,12 @@
 ### Application-owned SMS history (#270)
 
 The verified SMS receipt identifies one business, sender role, phone, and (for a
-client) client ID. A conversation-history read uses those fields to join inbound
-`SMS#` receipts with `SMS_OUT#` provider-handoff evidence. The sender writes the
+client) client ID. Each persisted inbound text and accepted outbound text gets
+an `SMS_HISTORY#` pointer keyed by role, hashed phone, and timestamp. A history
+read queries only that actor's 24-hour key range, then reads the pointed-to
+`SMS#` receipt or `SMS_OUT#` provider-handoff evidence consistently. Pointer
+rows have no message body, and client erasure deletes their client-linked rows.
+The sender writes the
 exact rendered outbound text to that evidence only after Twilio accepts the
 send. Queued, suppressed, and failed outbox drafts have no history entry. The
 read does not call Twilio's Messages list API. The resulting 24-hour view is

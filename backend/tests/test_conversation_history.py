@@ -14,12 +14,24 @@ PHONE = "+15005550006"
 class Records:
     def __init__(self) -> None:
         self.items: list[dict[str, Any]] = []
+        self.pages = 0
 
     def query(self, **kwargs: Any) -> dict[str, Any]:
+        self.pages += 1
         values = kwargs["ExpressionAttributeValues"]
-        return {"Items": [item for item in self.items
-                          if item["PK"]["S"] == values[":pk"]["S"]
-                          and item["SK"]["S"].startswith(values[":prefix"]["S"])]}
+        rows = [item for item in self.items
+                if item["PK"]["S"] == values[":pk"]["S"]
+                and values[":from"]["S"] <= item["SK"]["S"]
+                <= values[":through"]["S"]]
+        rows.sort(key=lambda item: item["SK"]["S"], reverse=True)
+        start = kwargs.get("ExclusiveStartKey")
+        if start:
+            rows = rows[next(index + 1 for index, item in enumerate(rows)
+                             if item["SK"] == start["SK"]):]
+        page = rows[:3]
+        return {"Items": page, **({"LastEvaluatedKey": {"PK": page[-1]["PK"],
+                                                  "SK": page[-1]["SK"]}}
+                                  if len(rows) > 3 else {})}
 
     def get_item(self, **kwargs: Any) -> dict[str, Any]:
         key = kwargs["Key"]
@@ -46,6 +58,21 @@ def sent(provider_id: str, body: str, when: datetime, *, template: str = "conver
             "template": {"S": template}, "body": {"S": body}}
 
 
+def index_records(records: Records) -> None:
+    for item in list(records.items):
+        sk = item["SK"]["S"]
+        if not sk.startswith(("SMS#", "SMS_OUT#")):
+            continue
+        outbound = sk.startswith("SMS_OUT#")
+        phone = item["recipient" if outbound else "sender"]["S"]
+        role = "client" if "client_id" in item else "owner"
+        at = item["sent_at" if outbound else "received_at"]["S"]
+        records.items.append({"PK": item["PK"], "SK": {"S":
+            DynamoSmsIngressStore._history_key(role, phone, at, item["provider_id"]["S"])},
+            "record_sk": {"S": sk},
+            "direction": {"S": "outbound" if outbound else "inbound"}})
+
+
 def test_invitation_two_replies_failed_send_and_cross_midnight() -> None:
     records = Records()
     records.items = [
@@ -65,6 +92,7 @@ def test_invitation_two_replies_failed_send_and_cross_midnight() -> None:
     receipt = InboundReceipt("pilot", "second", PHONE, "+15005550000", "Oct 13",
                              NOW - timedelta(minutes=5), SenderRole.CLIENT,
                              "client-1", Keyword.OTHER, True)
+    index_records(records)
     history = DynamoSmsIngressStore(records, "table").read_conversation_history(receipt, NOW)
     assert [(item.role, item.text) for item in history] == [
         ("assistant", "Want to book?"), ("client", "Oct 13 at 1 pm"),
@@ -82,9 +110,25 @@ def test_bounds_keep_latest_and_invitation_without_shortening_text() -> None:
     receipt = InboundReceipt("pilot", "in-79", PHONE, "+15005550000", "x" * 400,
                              NOW - timedelta(minutes=1), SenderRole.CLIENT,
                              "client-1", Keyword.OTHER, True)
+    index_records(records)
     history = DynamoSmsIngressStore(records, "table").read_conversation_history(receipt, NOW)
     assert len(history) <= MAX_MESSAGES
     assert sum(len(item.text) for item in history) <= MAX_CHARACTERS
     assert history[0].text == "Invitation"
     assert history[-1].provider_id == "in-79"
     assert all(item.text == "Invitation" or item.text == "x" * 400 for item in history)
+    assert records.pages > 1
+
+
+def test_large_unrelated_history_never_enters_actor_range() -> None:
+    records = Records()
+    records.items = [inbound("current", "Current", NOW - timedelta(minutes=1))]
+    records.items += [inbound(f"other-{i}", "Unrelated", NOW - timedelta(minutes=2),
+                              phone="+15005550007", client_id="other") for i in range(1000)]
+    index_records(records)
+    receipt = InboundReceipt("pilot", "current", PHONE, "+15005550000", "Current",
+                             NOW - timedelta(minutes=1), SenderRole.CLIENT,
+                             "client-1", Keyword.OTHER, True)
+    history = DynamoSmsIngressStore(records, "table").read_conversation_history(receipt, NOW)
+    assert [message.text for message in history] == ["Current"]
+    assert records.pages == 1
