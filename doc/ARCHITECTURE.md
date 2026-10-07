@@ -12,9 +12,12 @@
 The verified SMS receipt identifies one business, sender role, phone, and (for a
 client) client ID. Each persisted inbound text and accepted outbound text gets
 an `SMS_HISTORY#` pointer keyed by role, hashed phone, and timestamp. A history
-read queries only that actor's 24-hour key range, then reads the pointed-to
+read queries at most 64 recent pointers in that actor's 24-hour key range, then reads the pointed-to
 `SMS#` receipt or `SMS_OUT#` provider-handoff evidence consistently. Pointer
 rows have no message body, and client erasure deletes their client-linked rows.
+An additional body-free `SMS_INVITATION#` pointer fetches the latest eligible
+booking invitation with one bounded query, even after a busy thread exceeds
+the recent-pointer budget.
 The sender writes the
 exact rendered outbound text to that evidence only after Twilio accepts the
 send. Queued, suppressed, and failed outbox drafts have no history entry. The

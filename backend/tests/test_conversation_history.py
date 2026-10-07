@@ -15,9 +15,11 @@ class Records:
     def __init__(self) -> None:
         self.items: list[dict[str, Any]] = []
         self.pages = 0
+        self.limits: list[int] = []
 
     def query(self, **kwargs: Any) -> dict[str, Any]:
         self.pages += 1
+        self.limits.append(kwargs["Limit"])
         values = kwargs["ExpressionAttributeValues"]
         rows = [item for item in self.items
                 if item["PK"]["S"] == values[":pk"]["S"]
@@ -28,10 +30,10 @@ class Records:
         if start:
             rows = rows[next(index + 1 for index, item in enumerate(rows)
                              if item["SK"] == start["SK"]):]
-        page = rows[:3]
+        page = rows[:min(3, kwargs["Limit"])]
         return {"Items": page, **({"LastEvaluatedKey": {"PK": page[-1]["PK"],
                                                   "SK": page[-1]["SK"]}}
-                                  if len(rows) > 3 else {})}
+                                  if len(rows) > len(page) else {})}
 
     def get_item(self, **kwargs: Any) -> dict[str, Any]:
         key = kwargs["Key"]
@@ -71,6 +73,10 @@ def index_records(records: Records) -> None:
             DynamoSmsIngressStore._history_key(role, phone, at, item["provider_id"]["S"])},
             "record_sk": {"S": sk},
             "direction": {"S": "outbound" if outbound else "inbound"}})
+        if outbound and item.get("template", {}).get("S") == "booking_invitation":
+            records.items.append({"PK": item["PK"], "SK": {"S":
+                DynamoSmsIngressStore._invitation_key(phone, at, item["provider_id"]["S"])},
+                "record_sk": {"S": sk}})
 
 
 def test_invitation_two_replies_failed_send_and_cross_midnight() -> None:
@@ -131,4 +137,20 @@ def test_large_unrelated_history_never_enters_actor_range() -> None:
                              "client-1", Keyword.OTHER, True)
     history = DynamoSmsIngressStore(records, "table").read_conversation_history(receipt, NOW)
     assert [message.text for message in history] == ["Current"]
-    assert records.pages == 1
+    assert records.pages == 2  # One bounded actor page and one invitation lookup.
+    assert records.limits == [64, 1]
+
+
+def test_actor_burst_stops_after_fixed_pointer_budget() -> None:
+    records = Records()
+    records.items = [inbound(f"in-{i:03}", f"Text {i}",
+                             NOW - timedelta(minutes=100 - i)) for i in range(100)]
+    index_records(records)
+    receipt = InboundReceipt("pilot", "in-099", PHONE, "+15005550000", "Text 99",
+                             NOW - timedelta(minutes=1), SenderRole.CLIENT,
+                             "client-1", Keyword.OTHER, True)
+    history = DynamoSmsIngressStore(records, "table").read_conversation_history(receipt, NOW)
+    assert history[-1].text == "Text 99"
+    assert all(message.text != "Text 0" for message in history)
+    assert records.pages == 23  # 64 pointers in pages of three, then one invitation query.
+    assert records.limits[-2:] == [1, 1]

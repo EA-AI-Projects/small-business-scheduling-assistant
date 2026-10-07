@@ -44,6 +44,8 @@ def _four_year_cutoff(now: datetime) -> str:
 
 
 class DynamoSmsIngressStore(SmsIngressStore):
+    _HISTORY_READ_LIMIT = 64
+
     def __init__(self, client: SmsDynamoClient, table_name: str) -> None:
         self._client = client
         self._table = table_name
@@ -57,6 +59,11 @@ class DynamoSmsIngressStore(SmsIngressStore):
         # Hash the actor so the key does not repeat a phone number in query traces.
         actor = sha256(phone.encode()).hexdigest()
         return f"SMS_HISTORY#{role}#{actor}#{at}#{provider_id}"
+
+    @staticmethod
+    def _invitation_key(phone: str, at: str, provider_id: str) -> str:
+        actor = sha256(phone.encode()).hexdigest()
+        return f"SMS_INVITATION#client#{actor}#{at}#{provider_id}"
 
     def _get(self, business_id: str, sort_key: str) -> dict[str, Any] | None:
         return self._client.get_item(TableName=self._table,
@@ -103,7 +110,8 @@ class DynamoSmsIngressStore(SmsIngressStore):
         start: dict[str, Any] | None = None
         messages: list[HistoryMessage] = []
         cutoff = _instant(now - timedelta(hours=24))
-        while True:
+        read = 0
+        while read < self._HISTORY_READ_LIMIT:
             arguments: dict[str, Any] = {
                 "TableName": self._table,
                 "KeyConditionExpression": "PK = :pk AND SK BETWEEN :from AND :through",
@@ -114,10 +122,12 @@ class DynamoSmsIngressStore(SmsIngressStore):
                 },
                 "ConsistentRead": True,
                 "ScanIndexForward": False,
+                "Limit": self._HISTORY_READ_LIMIT - read,
             }
             if start is not None:
                 arguments["ExclusiveStartKey"] = start
             page = self._client.query(**arguments)
+            read += len(page.get("Items", ()))
             for pointer in page.get("Items", ()):
                 item = self._get(receipt.business_id, pointer["record_sk"]["S"])
                 if item is None:
@@ -136,15 +146,32 @@ class DynamoSmsIngressStore(SmsIngressStore):
                         datetime.fromisoformat(item["sent_at" if outbound else "received_at"]["S"]),
                         body, outbound and item.get("template", {}).get("S")
                         == "booking_invitation"))
-            # At most 24 recent messages plus the latest invitation need materializing.
-            if len(messages) > 24:
-                invitation = next((m for m in messages if m.invitation), None)
-                messages = messages[:24]
-                if invitation is not None and invitation not in messages:
-                    messages.append(invitation)
             start = page.get("LastEvaluatedKey")
             if start is None:
                 break
+        if receipt.role == SenderRole.CLIENT:
+            invite_prefix = (f"SMS_INVITATION#client#"
+                             f"{sha256(receipt.sender.encode()).hexdigest()}#")
+            page = self._client.query(
+                TableName=self._table,
+                KeyConditionExpression="PK = :pk AND SK BETWEEN :from AND :through",
+                ExpressionAttributeValues={
+                    ":pk": {"S": f"BUSINESS#{receipt.business_id}"},
+                    ":from": {"S": invite_prefix + cutoff},
+                    ":through": {"S": invite_prefix + _instant(now) + "~"},
+                },
+                ConsistentRead=True, ScanIndexForward=False, Limit=1)
+            for pointer in page.get("Items", ()):
+                item = self._get(receipt.business_id, pointer["record_sk"]["S"])
+                if (item is not None and item.get("client_id", {}).get("S") == receipt.client_id
+                        and item.get("recipient", {}).get("S") == receipt.sender
+                        and item.get("body", {}).get("S")
+                        and len(item["body"]["S"]) <= MAX_CHARACTERS
+                        and all(m.provider_id != item["provider_id"]["S"] for m in messages)):
+                    messages.append(HistoryMessage(
+                        item["provider_id"]["S"], "assistant",
+                        datetime.fromisoformat(item["sent_at"]["S"]),
+                        item["body"]["S"], True))
         return bounded_history(messages, now, receipt.role)
 
     def purge_expired_outbound_bodies(self, business_id: str, now: datetime,
@@ -571,6 +598,15 @@ class DynamoSmsIngressStore(SmsIngressStore):
                         **({"client_id": {"S": client_id}} if client_id is not None else {})},
                     "ConditionExpression": "attribute_not_exists(PK)",
                 }})
+                if client_id is not None and template == "booking_invitation":
+                    writes.append({"Put": {
+                        "TableName": self._table,
+                        "Item": {**self._key(business_id, self._invitation_key(
+                            phone, sent, provider_id)),
+                            "record_sk": {"S": receipt_key},
+                            "client_id": {"S": client_id}},
+                        "ConditionExpression": "attribute_not_exists(PK)",
+                    }})
             thread = self._get(business_id, thread_key)
             fields = [field for field in ("last_exchange_at", "last_program_text_at")
                       if thread is None or thread.get(field, {}).get("S", "") < sent]
