@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { useOwner } from "@/owner/OwnerContext";
 
@@ -24,6 +24,12 @@ interface PendingAttempt {
   createdAt: number;
 }
 
+function approvedMessage(weeks: number): string {
+  const window = weeks === 1 ? "one week" : "two weeks";
+  return "Smart Scheduling Assistant: Would you like to book a cleaning visit in the next "
+    + `${window}? Reply with a day and time that works for you, or STOP to opt out.`;
+}
+
 function savedAttempt(storageKey: string): PendingAttempt | null {
   try {
     const value: unknown = JSON.parse(sessionStorage.getItem(storageKey) ?? "null");
@@ -44,10 +50,16 @@ function savedAttempt(storageKey: string): PendingAttempt | null {
 export function ManualInvitationForm() {
   const { api, data, notify } = useOwner();
   const storageKey = `manual-booking-invitation-pending:${api.businessId}`;
-  const [message, setMessage] = useState(() => savedAttempt(storageKey)?.message ?? "");
+  const [pending, setPending] = useState(() => savedAttempt(storageKey));
+  const edited = useRef(pending !== null);
+  const [message, setMessage] = useState(() => pending?.message ?? "");
   const [preview, setPreview] = useState<Preview | null>(null);
   const [result, setResult] = useState<string | null>(null);
-  const [pending, setPending] = useState(() => savedAttempt(storageKey));
+
+  useEffect(() => {
+    const weeks = data.outreach?.settings.lookahead_weeks;
+    if (!edited.current && weeks) setMessage(approvedMessage(weeks));
+  }, [data.outreach?.settings.lookahead_weeks]);
 
   useEffect(() => {
     let active = true;
@@ -103,8 +115,8 @@ export function ManualInvitationForm() {
       campaign and live rollout are authorized.</p>
     <label>Message
       <textarea value={message} maxLength={500} rows={5} disabled={pending !== null}
-        onChange={(event) => setMessage(event.target.value)}
-        placeholder="Smart Scheduling Assistant: Would you like to book a cleaning visit? Reply with a day and time, or STOP to opt out." />
+        onChange={(event) => { edited.current = true; setMessage(event.target.value); }}
+        placeholder="Write a booking invitation with STOP opt-out instructions." />
     </label>
     <p className="meta">{preview
       ? `${preview.eligible} of ${preview.examined} clients currently eligible`
