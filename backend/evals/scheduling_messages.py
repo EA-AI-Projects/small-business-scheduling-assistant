@@ -200,6 +200,11 @@ CASES = (
          lambda proposal: asks_for_day("2026-10-13", "13:00", "13:00")(proposal)
          and proposal["intent"] == "availability",
          history=(INVITE,), today=date(2026, 10, 12)),
+    # The tester's friction: a date-only reply straight to an invitation (no prompt kind).
+    Case("date-only-reply-to-invitation", "client", "Oct 13", (),
+         lambda proposal: proposal["intent"] == "availability"
+         and proposal["date_from"] == "2026-10-13" and not proposal["needs_clarification"],
+         history=(INVITE,), today=date(2026, 10, 12)),
     Case("date-only-after-unavailable-time", "client", "Oct 13", (),
          lambda proposal: proposal["intent"] == "availability"
          and proposal["date_from"] == "2026-10-13" and not proposal["needs_clarification"]
