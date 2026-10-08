@@ -863,13 +863,13 @@ def test_model_reads_a_free_form_no_and_keeps_the_visit() -> None:
     assert chat.status(visit) == CalendarStatus.CONFIRMED
 
 
-def test_false_kept_visit_draft_falls_back_to_authoritative_text() -> None:
+def test_wrong_reference_in_kept_visit_draft_falls_back_to_authoritative_text() -> None:
     model = DraftScript()
     chat = Harness(model)
     visit = cancel_asked(chat)
     model.drafts[KEEP] = (
-        f"Your Thu Oct 1 at 9:00 AM visit, ref {visit[:8]}, is not confirmed. "
-        "Keep it. Nothing was cancelled.")
+        "Your Thu Oct 1 at 9:00 AM visit, ref deadbeef, was kept. "
+        "Nothing was cancelled.")
     outcome = chat.text(KEEP)
     assert not outcome.committed
     assert outcome.text == "OK, I kept your Thu Oct 1 at 9:00 AM visit. Nothing was cancelled."
