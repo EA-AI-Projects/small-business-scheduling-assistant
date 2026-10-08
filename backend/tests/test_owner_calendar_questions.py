@@ -377,7 +377,8 @@ def status_of(chat: Chat, request: str) -> CalendarStatus:
 
 def decision(intent: OwnerReplyIntent, request: str | None,
              confidence: Confidence = Confidence.HIGH) -> OwnerReplyProposal:
-    return OwnerReplyProposal(intent, request[:8] if request else None, confidence)
+    return OwnerReplyProposal(intent, request[:8] if request else None, confidence,
+                              request_version=1 if request else None)
 
 
 def only_confirmed() -> OwnerReplyProposal:

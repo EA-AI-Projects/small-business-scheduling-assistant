@@ -189,7 +189,8 @@ class Plain:
         """A plain yes with exactly one request pending is a decision."""
         if body.lower() == "yes" and len(context.pending) == 1:
             return OwnerReplyProposal(OwnerReplyIntent.APPROVE_NAMED_REQUEST,
-                                      context.pending[0].ref, Confidence.HIGH)
+                                      context.pending[0].ref, Confidence.HIGH,
+                                      request_version=context.pending[0].version)
         return OwnerReplyProposal(OwnerReplyIntent.UNCLEAR, None, Confidence.HIGH)
 
 

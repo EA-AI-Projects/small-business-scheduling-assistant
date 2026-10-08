@@ -6,11 +6,16 @@ the assistant said, recent pending requests by first name, any open offer) and p
 one intent. It never approves, declines, or sends anything: the backend acts only after
 its own checks (see ``ConversationService._owner_answer``), and every failure, timeout,
 or low-confidence answer becomes a clarifying question that changes nothing.
+
+The owner tools (#274) are the same single typed call: ``show_requests`` reads scoped
+pending-request details, ``prepare_counteroffer`` names a request (reference and current
+version) with a local day and time and only drafts the text the owner must still confirm,
+and approve or decline quote the request reference and version, which must be current.
 """
 
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, time
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
@@ -35,6 +40,9 @@ class OwnerReplyIntent(StrEnum):
     CANCEL_OFFER = "cancel_offer"  # Drop that counteroffer.
     CALENDAR_QUESTION = "calendar_question"  # A calendar question that lacks a day or week.
     HOW_TO = "how_to"  # Asks how to approve, or what the assistant can do.
+    # Owner tools (#274). Both name a request by reference and current version.
+    SHOW_REQUESTS = "show_requests"  # Read: details of pending requests and any open offer.
+    PREPARE_COUNTEROFFER = "prepare_counteroffer"  # Draft an offer; the owner still confirms.
     UNCLEAR = "unclear"
 
 
@@ -49,6 +57,7 @@ class PendingRef:
     ref: str  # First eight characters of the request ID.
     client: str  # First name only.
     when: str  # Local date and time text.
+    version: int = 0  # The stored request version a decision or offer must quote.
 
 
 @dataclass(frozen=True)
@@ -75,6 +84,12 @@ class OwnerReplyProposal:
     statuses: frozenset[CalendarStatus] | None = None
     range_first: date | None = None
     range_last: date | None = None
+    # The request version the model read from its context; a decision or counteroffer
+    # acts only when it equals the stored version (#274).
+    request_version: int | None = None
+    # The local day and time of a proposed counteroffer (prepare_counteroffer only).
+    offer_date: date | None = None
+    offer_time: time | None = None
 
 
 @runtime_checkable

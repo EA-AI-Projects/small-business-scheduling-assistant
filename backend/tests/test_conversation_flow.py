@@ -64,7 +64,8 @@ class Script:
         self.classified.append(body)
         intent = self.owner.get(body, OwnerReplyIntent.UNCLEAR)
         reference = context.pending[0].ref if len(context.pending) == 1 else None
-        return OwnerReplyProposal(intent, reference, Confidence.HIGH)
+        version = context.pending[0].version if len(context.pending) == 1 else None
+        return OwnerReplyProposal(intent, reference, Confidence.HIGH, request_version=version)
 
     def draft_read_reply(self, body: str, context: MessageContext,
                          tool_name: str, tool_result: str) -> str:
