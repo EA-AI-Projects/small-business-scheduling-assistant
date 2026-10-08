@@ -27,7 +27,13 @@ from scheduling.adapters.openai_messages import (
     model_input,
 )
 from scheduling.domain.client_records import ACCESS_CODE_PATTERN
-from scheduling.domain.client_replies import ClientReplyFact, ClientReplyResult, valid_draft
+from scheduling.domain.client_replies import (
+    ClientReplyFact,
+    ClientReplyResult,
+    facts_from_text,
+    valid_draft,
+    valid_owner_draft,
+)
 from scheduling.domain.conversation import MessageContext
 from scheduling.domain.conversation_history import HistoryMessage
 from scheduling.domain.owner_reply_classification import (
@@ -340,6 +346,58 @@ def evaluate_draft(case: DraftCase, key: str) -> dict[str, Any]:
             "draft": draft}
 
 
+@dataclass(frozen=True)
+class OwnerDraftCase:
+    """A read-only owner result the model may reword (#285); the suffix stays fixed text."""
+
+    name: str
+    message: str
+    result: ClientReplyResult
+    history: tuple[tuple[str, str], ...] = ()
+
+
+def owner_result(kind: str, model_body: str, suffix: str) -> ClientReplyResult:
+    return ClientReplyResult(kind, "read_only", model_body + suffix,
+                             facts_from_text(model_body), None, model_body, suffix)
+
+
+OWNER_ASKED = ("owner", "what's waiting for me?")
+OWNER_ANSWERED = ("assistant", (
+    "2 requests are pending, so nothing changed: Avery Sample, Thu Oct 1 at 9:00 AM "
+    "(ref a101a101); Blake Example, Fri Oct 2 at 1:00 PM (ref b202b202). Reply APPROVE or "
+    "DECLINE with the reference."))
+
+OWNER_DRAFT_CASES = (
+    OwnerDraftCase("owner-calendar-day", "what does Thursday look like?", owner_result(
+        "owner_calendar",
+        "Thu Oct 1, 2026 (America/Los_Angeles): 1 pending request.\n"
+        "Thu Oct 1, 9:00 AM-11:00 AM: Avery (pending, ref a101a101)", "")),
+    OwnerDraftCase("owner-calendar-page-keeps-paging-line", "show me next week", owner_result(
+        "owner_calendar",
+        "Mon Oct 5 to Sun Oct 11, 2026 (America/Los_Angeles): 1 confirmed visit, "
+        "1 pending request.\nMon Oct 5, 9:00 AM-11:00 AM: Blake (confirmed)\n"
+        "Tue Oct 6, 1:00 PM-3:00 PM: Avery (pending, ref a101a101)",
+        "\nShowing 1-2 of 3. Reply MORE for the rest.")),
+    OwnerDraftCase("owner-pending-summary", "what is pending?", owner_result(
+        "owner_requests",
+        "2 requests are pending: Avery, Thu Oct 1 at 9:00 AM (ref a101a101); Blake, "
+        "Fri Oct 2 at 1:00 PM (ref b202b202).",
+        " Nothing has changed. Reply APPROVE or DECLINE with the reference.")),
+    OwnerDraftCase("owner-one-request-detail", "tell me about Avery's request", owner_result(
+        "owner_requests",
+        "Pending owner approval, not confirmed: Avery, Thu Oct 1 at 9:00 AM (ref a101a101), "
+        "120 minutes.",
+        " Reply APPROVE a101a101 or DECLINE a101a101 to decide it. Nothing has changed."),
+        (OWNER_ASKED, OWNER_ANSWERED)),
+    OwnerDraftCase("owner-how-to", "how do I approve something?", owner_result(
+        "owner_how_to", "One request is pending: Avery, Thu Oct 1 at 9:00 AM (ref a101a101).",
+        " To approve or decline a request, reply APPROVE or DECLINE with its reference.")),
+    OwnerDraftCase("owner-how-to-no-requests", "what can you do?", owner_result(
+        "owner_how_to", "No request is waiting for approval right now.",
+        " To approve or decline a request, reply APPROVE or DECLINE with its reference.")),
+)
+
+
 def owner_context(case: OwnerCase) -> OwnerReplyContext:
     return OwnerReplyContext(TODAY, TIMEZONE, case.last_kind, "none", None, None, (),
                              None, case.pending)
@@ -351,6 +409,18 @@ def evaluate_owner(case: OwnerCase, key: str) -> dict[str, Any]:
     return {"case": case.name, "passed": bool(case.expect(proposal)),
             "intent": proposal.intent.value, "request_reference": proposal.request_reference,
             "request_version": proposal.request_version, "confidence": proposal.confidence.value}
+
+
+def evaluate_owner_draft(case: OwnerDraftCase, key: str) -> dict[str, Any]:
+    at = datetime(2026, 10, 12, 17, tzinfo=ZoneInfo("UTC"))
+    history = tuple(HistoryMessage(f"m{number}", role, at, text)
+                    for number, (role, text) in enumerate(case.history))
+    context = MessageContext(SenderRole.OWNER, date(2026, 10, 12), TIMEZONE, (),
+                             history=history)
+    draft = OpenAIMessageInterpreter(key, 30).draft_owner_reply(
+        case.message, context, case.result)
+    return {"case": case.name, "passed": valid_owner_draft(draft, case.result),
+            "draft": draft, "sent_text": draft + case.result.suffix}
 
 
 def context_for(case: Case, today: date = TODAY) -> MessageContext:
@@ -459,6 +529,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="Preview synthetic messages without scheduling writes")
     parser.add_argument("--drafts", action="store_true",
                         help="Run synthetic client SMS draft cases (requires a separately authorized live run)")
+    parser.add_argument("--owner-drafts", action="store_true",
+                        help="Run synthetic owner SMS draft cases (requires a separately "
+                        "authorized live run)")
     args = parser.parse_args(argv)
     key = os.environ.get("OPENAI_API_KEY")
     if not key:
@@ -469,6 +542,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.drafts:
         results = [evaluate_draft(case, key) for case in DRAFT_CASES]
         print(json.dumps({"model": MODEL, "draft_results": results}, indent=2))
+        return 0 if all(item["passed"] for item in results) else 1
+    if args.owner_drafts:
+        results = [evaluate_owner_draft(case, key) for case in OWNER_DRAFT_CASES]
+        print(json.dumps({"model": MODEL, "owner_draft_results": results}, indent=2))
         return 0 if all(item["passed"] for item in results) else 1
     results = [evaluate(case, key) for case in CASES]
     results += [evaluate_owner(case, key) for case in OWNER_CASES]

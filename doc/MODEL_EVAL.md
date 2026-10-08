@@ -92,10 +92,14 @@ On 2026-10-08 the owner authorized live runs of these cases against `gpt-6-luna`
 - Final instruction wording: four runs passed 36/36 on the cases before the invitation case was added. With it (37 cases), two of four runs passed 37/37. The other two each missed one case: the lapsed-cancel-question case again, and the older "Approve a101a101 or b202b202" case (the model named the first reference). Neither miss can write: the backend has no stored prompt for the first, and a model-named decision with two pending requests only asks for the exact command.
 - Treat the eval as a sampling check, not a pass/fail certificate. The model is not deterministic; the lapsed-cancel miss appeared in 1 of 8 runs after the instruction change versus 1 of 2 before. A pass shows only that these synthetic texts were read as intended; the backend's stored-state checks still decide every write, and real conversations may differ. These runs evaluate the model's reading of the text, not its reply wording; client reply drafts are covered by the `--drafts` cases above (#283).
 
+### Owner reply drafts (#285)
+
+`backend/evals/scheduling_messages.py --owner-drafts` defines six synthetic cases for the three draftable owner results (a day's calendar answer, a calendar page whose paging line stays fixed, a pending summary, a single request detail with a prior transcript, and two how-to replies). It uses the production owner draft adapter and `valid_owner_draft`, and prints the text that would be sent (draft plus fixed suffix). **No live run has been made**: it needs Enrique's separate authorization, and `.env` was not read. Offline scripted conversations (`test_owner_reply_drafts.py`) cover valid drafts, invented dates, times, and references, false action claims, invented prompts, over-length and non-GSM text, timeouts, history failures, the preserved offer reminder and paging line, out-of-scope results never reaching the drafter, opt-out and non-owner senders, the 24-hour transcript reaching both owner model calls, and a duplicate inbound delivery.
+
 ### Cutover validation (#275)
 
 The model-led client path is the shipped path: #272 to #274 supply the typed tools, #282 their live evaluation, and #283 the validated reply drafts. #275 removed the superseded read-only drafter and added offline checks for opt-out (the model is not called) and an over-length draft. No new live model run was made for it. The live evidence is the 2026-10-08 runs above, so the open gaps are:
 - The minimal draft validator passed one live rerun (five of five); a single run is a sampling check, and status wording is not validated.
 - The 37-case tool run is a sampling check (two of four runs passed fully, with misses that cannot write).
-- Owner replies remain fixed backend text; only client replies are model-drafted (#283).
+- Owner replies are fixed backend text except the three read-only kinds drafted since #285 (calendar answer, pending-request summary, how-to); those have offline checks only and no live run.
 - No deployment, live SMS, or real conversation was used; the AWS handoff stays disabled until Enrique separately authorizes it.

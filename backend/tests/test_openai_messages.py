@@ -271,3 +271,40 @@ def test_owner_counteroffer_tool_arguments_are_typed(
     assert result.intent == OwnerReplyIntent.PREPARE_COUNTEROFFER
     assert (result.request_version, result.offer_date, result.offer_time) == (
         2, date(2026, 10, 9), time(14, 0))
+
+
+def test_owner_classifier_and_draft_receive_the_transcript_but_not_the_fallback_text(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list[dict[str, Any]] = []
+
+    def fake_urlopen(request: Request, timeout: int) -> BytesIO:
+        sent.append(json.loads(request.data or b"{}"))
+        if sent[-1]["tools"][0]["name"] == "draft_sms":
+            return BytesIO(json.dumps({"output": [{
+                "type": "function_call", "name": "draft_sms",
+                "arguments": json.dumps({"text": "Avery waits on Thu Oct 1."})}]}).encode())
+        return owner_reply_response()
+
+    monkeypatch.setattr("scheduling.adapters.openai_messages.urlopen", fake_urlopen)
+    at = datetime(2026, 10, 4, 15, tzinfo=UTC)
+    history = (HistoryMessage("SM-1", "owner", at, "synthetic owner question"),
+               HistoryMessage("SM-2", "assistant", at, "synthetic assistant answer"))
+    model = OpenAIMessageInterpreter("synthetic-key")
+    model.classify_owner_reply("what is pending", OwnerReplyContext(
+        date(2026, 10, 4), "America/Los_Angeles", "none", "none", None, None, (), None, (),
+        history=history))
+    assert '{"role": "owner", "text": "synthetic owner question"}' in sent[0]["input"]
+    assert "synthetic assistant answer" in sent[0]["input"]
+    result = ClientReplyResult(
+        "owner_requests", "read_only", "Reply APPROVE or DECLINE: Avery Sample, Thu Oct 1",
+        (ClientReplyFact("Thu Oct 1", None, "listed"),), None,
+        "One request is pending: Avery, Thu Oct 1.", " Nothing has changed.")
+    draft = model.draft_owner_reply("what is pending", MessageContext(
+        SenderRole.OWNER, date(2026, 10, 4), "America/Los_Angeles", (), history=history), result)
+    assert draft == "Avery waits on Thu Oct 1."
+    payload = sent[1]
+    assert payload["store"] is False and payload["tool_choice"]["name"] == "draft_sms"
+    assert "synthetic assistant answer" in payload["input"]
+    assert "Avery, Thu Oct 1" in payload["input"]
+    # Neither the full name nor the fixed suffix leaves the backend.
+    assert "Sample" not in payload["input"] and "Nothing has changed" not in payload["input"]

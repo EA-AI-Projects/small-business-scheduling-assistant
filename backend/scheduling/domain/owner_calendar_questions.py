@@ -53,6 +53,21 @@ RANGE_QUESTION = ("Which day or week do you mean? For example: tomorrow, Friday,
                   "this week, next week, or a date like 2026-10-09.")
 
 
+@dataclass(frozen=True)
+class CalendarAnswer:
+    """Reply text, plus the parts a model may reword when it is a rendered calendar page.
+
+    ``body`` is the rendered header and entries and ``footer`` the paging line that follows
+    it; ``text`` is exactly ``body + footer``. ``model_body`` is ``body`` with client first
+    names only. Questions and notices have no ``body`` and are never reworded.
+    """
+
+    text: str
+    body: str | None = None
+    footer: str = ""
+    model_body: str | None = None
+
+
 class View(StrEnum):
     SUMMARY = "summary"
     CLIENTS = "clients"
@@ -363,7 +378,7 @@ class OwnerCalendarQuestions:
 
     def apply_followup(self, business_id: str, sender: str, now: datetime, receipt_id: str,
                        statuses: frozenset[CalendarStatus] | None,
-                       first: date | None, last: date | None) -> str | None:
+                       first: date | None, last: date | None) -> CalendarAnswer | None:
         """Re-answer the open question with validated, model-proposed changes."""
         context = self.open_context(business_id, sender, now)
         if context is None or (first is None) != (last is None) or (
@@ -384,6 +399,12 @@ class OwnerCalendarQuestions:
     def answer(self, business_id: str, sender: str, body: str, now: datetime,
                receipt_id: str = "") -> str | None:
         """Reply text for a calendar question, or None if the text is not one."""
+        answered = self.answer_detailed(business_id, sender, body, now, receipt_id)
+        return answered.text if answered is not None else None
+
+    def answer_detailed(self, business_id: str, sender: str, body: str, now: datetime,
+                        receipt_id: str = "") -> CalendarAnswer | None:
+        """Like ``answer``, with the parts of a rendered page that may be reworded."""
         policy = self._repository.read_policy(business_id)
         zone = ZoneInfo(policy.timezone)
         today = now.astimezone(zone).date()
@@ -393,8 +414,9 @@ class OwnerCalendarQuestions:
         if parsed is None:
             return None
         if parsed.multiple_ranges:
-            return ("I can answer one day or one week at a time. Which do you want: "
-                    "tomorrow, a weekday like Friday, this week, next week, or a date?")
+            return CalendarAnswer(
+                "I can answer one day or one week at a time. Which do you want: "
+                "tomorrow, a weekday like Friday, this week, next week, or a date?")
         if parsed.more:
             assert context is not None
             if context.ask is not None or context.first is None or context.last is None:
@@ -402,8 +424,9 @@ class OwnerCalendarQuestions:
             # A redelivered MORE repeats its page instead of advancing past it.
             retry = bool(receipt_id) and context.receipt_id == receipt_id
             if context.skip == 0 and not retry:
-                return (f"That was everything for {_span_text(context.first, context.last)}; "
-                        "nothing more to show.")
+                return CalendarAnswer(
+                    f"That was everything for {_span_text(context.first, context.last)}; "
+                    "nothing more to show.")
             return self._reply(context, now, policy, zone,
                                context.page_start if retry else context.skip, receipt_id,
                                resume=True)
@@ -425,32 +448,35 @@ class OwnerCalendarQuestions:
         if first is None or last is None:
             self._contexts.put_context(replace(
                 draft, ask=Ask.RANGE, expires_at=now + ASK_LIFETIME, answered_at=now))
-            return RANGE_QUESTION
+            return CalendarAnswer(RANGE_QUESTION)
         if statuses is None:
             self._contexts.put_context(replace(
                 draft, ask=Ask.STATUS, expires_at=now + ASK_LIFETIME, answered_at=now))
-            return (f"For {_span_text(first, last)}, should I count confirmed visits only, "
-                    "pending requests only, or both? Reply confirmed, pending, or both.")
+            return CalendarAnswer(
+                f"For {_span_text(first, last)}, should I count confirmed visits only, "
+                "pending requests only, or both? Reply confirmed, pending, or both.")
         return self._reply(draft, now, policy, zone, 0, receipt_id)
 
     def _reply(self, context: QuestionContext, now: datetime, policy: AvailabilityPolicy,
-               zone: ZoneInfo, skip: int, receipt_id: str, resume: bool = False) -> str:
+               zone: ZoneInfo, skip: int, receipt_id: str,
+               resume: bool = False) -> CalendarAnswer:
         assert context.first is not None and context.last is not None
         days = _days(context.first, context.last)
         items = self._items(context.business_id, days, zone, now)
-        header, entries = _render(context, days, items, zone, policy.timezone)
+        header, entries, model_entries = _render(context, days, items, zone, policy.timezone)
         fingerprint = sha256("\n".join(entries).encode()).hexdigest()
         if resume and fingerprint != context.fingerprint:
             # Offsets into the old list could skip or repeat entries, so start over.
             skip = 0
             header = f"The calendar changed, so this is the updated list from the start. {header}"
-        text, shown = _page(header, entries, skip)
+        text, footer, shown = _page(header, entries, skip)
         following = skip + shown
         self._contexts.put_context(replace(
             context, skip=following if following < len(entries) else 0, ask=None,
             expires_at=now + QUESTION_LIFETIME, page_start=skip, receipt_id=receipt_id,
             fingerprint=fingerprint, answered_at=now))
-        return text
+        return CalendarAnswer(text + footer, text, footer,
+                              "\n".join([header, *model_entries[skip:skip + shown]]))
 
     def _items(self, business_id: str, days: list[date], zone: ZoneInfo,
                now: datetime) -> dict[date, list[_Item]]:
@@ -493,11 +519,13 @@ def _plural(count: int, status: CalendarStatus) -> str:
     return f"{count} {NOUNS[status][0 if count == 1 else 1]}"
 
 
-def _label(item: _Item) -> str:
+def _label(item: _Item, first_name_only: bool = False) -> str:
     event = item.event
     if event.status == BLOCK:
         return "unavailable block"
     name = item.name if item.name is not None else "client record not found"
+    if first_name_only and item.name is not None and item.name.split():
+        name = item.name.split()[0]  # What a model sees: no more than the owner context sends.
     if len(name) > MAX_NAME_LENGTH:
         name = name[:MAX_NAME_LENGTH - 3] + "..."
     if event.status == PENDING:
@@ -511,7 +539,7 @@ def _clock(instant: datetime, zone: ZoneInfo, tag: bool) -> str:
     return f"{text} {instant.astimezone(zone).strftime('%Z')}" if tag else text
 
 
-def _item_line(day: date, item: _Item, zone: ZoneInfo) -> str:
+def _item_line(day: date, item: _Item, zone: ZoneInfo, first_name_only: bool = False) -> str:
     event = item.event
     start, end = event.start_at.astimezone(zone), event.end_at.astimezone(zone)
     midnight = datetime.combine(day, time.min, tzinfo=zone)
@@ -524,7 +552,7 @@ def _item_line(day: date, item: _Item, zone: ZoneInfo) -> str:
                 f"{clock_text(event.end_at, zone)}")
     else:
         span = f"{_clock(event.start_at, zone, tag)}-{_clock(event.end_at, zone, tag)}"
-    return f"{day_text(day)}, {span}: {_label(item)}"
+    return f"{day_text(day)}, {span}: {_label(item, first_name_only)}"
 
 
 def _tally(items: list[_Item]) -> dict[CalendarStatus, int]:
@@ -533,7 +561,8 @@ def _tally(items: list[_Item]) -> dict[CalendarStatus, int]:
 
 
 def _render(context: QuestionContext, days: list[date], items: dict[date, list[_Item]],
-            zone: ZoneInfo, zone_name: str) -> tuple[str, list[str]]:
+            zone: ZoneInfo, zone_name: str) -> tuple[str, list[str], list[str]]:
+    """The header, the entries, and the same entries with first names only (parallel)."""
     assert context.first is not None and context.last is not None
     assert context.statuses is not None
     wanted = context.statuses
@@ -554,21 +583,27 @@ def _render(context: QuestionContext, days: list[date], items: dict[date, list[_
                 tally = _tally(items[day])
                 parts = ", ".join(_plural(tally[s], s) for s in ORDER if s in wanted)
                 entries.append(f"{day_text(day)}: {parts}")
-        return header, entries
+        return header, entries, list(entries)
     present = ", ".join(_plural(totals[s], s) for s in ORDER if s in wanted and totals[s])
     kinds = " or ".join(NOUNS[s][1] for s in ORDER if s in wanted)
     header = f"{span}: {present}." if present else f"{span}: no {kinds}."
+    model_entries: list[str] = []
     for day in days:
         shown = [item for item in items[day] if item.event.status in wanted]
         if shown:
             entries.extend(_item_line(day, item, zone) for item in shown)
+            model_entries.extend(_item_line(day, item, zone, True) for item in shown)
         elif len(days) > 1:
             entries.append(f"{day_text(day)}: nothing scheduled")
-    return header, entries
+            model_entries.append(entries[-1])
+    return header, entries, model_entries
 
 
-def _page(header: str, entries: list[str], skip: int) -> tuple[str, int]:
-    """Fit whole entries within the SMS limit and say what remains; never cut one."""
+def _page(header: str, entries: list[str], skip: int) -> tuple[str, str, int]:
+    """Fit whole entries within the SMS limit and say what remains; never cut one.
+
+    Returns the page, its paging footer (empty when everything fits), and the entries shown.
+    """
     text = header
     shown = 0
     for entry in entries[skip:]:
@@ -578,8 +613,9 @@ def _page(header: str, entries: list[str], skip: int) -> tuple[str, int]:
         text = candidate
         shown += 1
     last = skip + shown
+    footer = ""
     if entries and (last < len(entries) or skip):
-        text += f"\nShowing {skip + 1}-{last} of {len(entries)}."
+        footer = f"\nShowing {skip + 1}-{last} of {len(entries)}."
         if last < len(entries):
-            text += " Reply MORE for the rest."
-    return text, shown
+            footer += " Reply MORE for the rest."
+    return text, footer, shown

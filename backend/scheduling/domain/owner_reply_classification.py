@@ -20,6 +20,7 @@ from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
 from scheduling.domain.calendar import CalendarStatus
+from scheduling.domain.conversation_history import HistoryMessage
 
 MAX_FOLLOW_UP_DAYS = 31
 # A reply with one of these words is never answered as a plain calendar follow-up without the
@@ -74,6 +75,8 @@ class OwnerReplyContext:
     named: PendingRef | None
     pending: tuple[PendingRef, ...]
     offer: PendingRef | None = None  # The offer's request ref and client, with the new time.
+    # The owner's bounded 24-hour SMS thread (#285), the same sent-aware history clients get.
+    history: tuple[HistoryMessage, ...] = ()
 
 
 @dataclass(frozen=True)

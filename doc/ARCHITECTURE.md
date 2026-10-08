@@ -51,6 +51,16 @@ multiple visits; the owner chose freer wording with this fallback (#283, 2026-10
 This is the only reply-drafting call (#275 removed the earlier read-only drafter); the backend sentence is its fallback. The same draft check covers client write results; a valid
 draft can attach to the existing pending notification intent, while a sender
 that already claimed the intent sends its safe template.
+Owner replies (#285): the owner's rolling 24-hour thread (history keyed by owner
+phone) is passed to the owner classifier and drafter. A second drafting call
+covers only read-only owner results (a rendered calendar answer, a
+pending-request summary, a how-to). It runs after the backend result, receives
+client first names only, and is used only when dates, times, and references
+match the result and the text makes no action claim; the exact commands, paging
+line, and any open-offer reminder are appended as fixed text. Approvals,
+declines, offers, counteroffers, and failures are never drafted. The owner reply
+is stored by the existing receipt-based, idempotent path, so a duplicate inbound
+message replays the stored text.
 The first model call asks the client to retry later on failure. Each model call
 has an eight-second timeout and no internal retry, keeping the two-call path
 inside the worker's 30-second limit. Receipt leases, stable outbox intents,
