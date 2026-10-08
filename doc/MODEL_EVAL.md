@@ -58,6 +58,10 @@ On 2026-10-05 the owner ran all 20 cases against `gpt-6-luna` with the #245 inst
 
 ## Current result
 
+### Client reply drafts (#283)
+
+`backend/evals/scheduling_messages.py --drafts` now defines five synthetic result-and-transcript cases: an invitation followed by an offered time, pending request, taken slot, confirmed cancellation, and kept visit. It uses the production draft adapter and backend validator. No live draft run has been made; a separately authorized model call is required before results can be recorded here. Offline scripted conversation and outbox checks are the current evidence.
+
 On 2026-09-28, a project-scoped key was read from the owner's password manager into an ignored local `.env`; the key was never printed or committed. The seven synthetic cases were run against the OpenAI Responses API:
 
 | Run | Result | Finding |

@@ -27,6 +27,7 @@ from scheduling.adapters.openai_messages import (
     model_input,
 )
 from scheduling.domain.client_records import ACCESS_CODE_PATTERN
+from scheduling.domain.client_replies import ClientReplyResult, valid_draft
 from scheduling.domain.conversation import MessageContext
 from scheduling.domain.conversation_history import HistoryMessage
 from scheduling.domain.owner_reply_classification import (
@@ -285,6 +286,53 @@ OWNER_CASES = (
 )
 
 
+@dataclass(frozen=True)
+class DraftCase:
+    name: str
+    message: str
+    result: ClientReplyResult
+    history: tuple[tuple[str, str], ...] = ()
+
+
+DRAFT_CASES = (
+    DraftCase("offer-after-invitation", "Oct 13 at 1 pm",
+              ClientReplyResult.from_safe_text(
+                  "offer_made", "none",
+                  "Tue Oct 13 at 1:00 PM is open for your cleaning. Reply YES to request it. "
+                  "The owner approves every request."), (INVITE,)),
+    DraftCase("pending-after-acceptance", "yes please",
+              ClientReplyResult.from_safe_text(
+                  "request_created", "pending",
+                  "Requested Tue Oct 13 at 1:00 PM (ref a101a101). It's pending owner "
+                  "approval, not confirmed yet."), (INVITE, ASKED_1PM, OFFER_1PM)),
+    DraftCase("slot-taken", "yes please",
+              ClientReplyResult.from_safe_text(
+                  "request_failed", "none",
+                  "Sorry, Tue Oct 13 at 1:00 PM is no longer open, so nothing was booked. "
+                  "Tell me what day works."), (OFFER_1PM,)),
+    DraftCase("cancelled-visit", "yes, cancel it",
+              ClientReplyResult.from_safe_text(
+                  "cancelled", "cancelled",
+                  "Cancelled your Thu Oct 1 at 9:00 AM visit (ref b202b202)."),
+              (CANCEL_QUESTION,)),
+    DraftCase("kept-visit", "actually keep it",
+              ClientReplyResult.from_safe_text(
+                  "nothing_changed", "confirmed",
+                  "OK, I kept your Thu Oct 1 at 9:00 AM visit. Nothing was cancelled."),
+              (CANCEL_QUESTION,)),
+)
+
+
+def evaluate_draft(case: DraftCase, key: str) -> dict[str, Any]:
+    history_case = Case(case.name, "client", case.message, case.result.references,
+                        lambda _proposal: True, history=case.history,
+                        today=date(2026, 10, 12))
+    draft = OpenAIMessageInterpreter(key, 30).draft_client_reply(
+        case.message, context_for(history_case), case.result)
+    return {"case": case.name, "passed": valid_draft(draft, case.result),
+            "draft": draft}
+
+
 def owner_context(case: OwnerCase) -> OwnerReplyContext:
     return OwnerReplyContext(TODAY, TIMEZONE, case.last_kind, "none", None, None, (),
                              None, case.pending)
@@ -402,6 +450,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--interactive", action="store_true",
                         help="Preview synthetic messages without scheduling writes")
+    parser.add_argument("--drafts", action="store_true",
+                        help="Run synthetic client SMS draft cases (requires a separately authorized live run)")
     args = parser.parse_args(argv)
     key = os.environ.get("OPENAI_API_KEY")
     if not key:
@@ -409,6 +459,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.interactive:
         return interactive(key)
+    if args.drafts:
+        results = [evaluate_draft(case, key) for case in DRAFT_CASES]
+        print(json.dumps({"model": MODEL, "draft_results": results}, indent=2))
+        return 0 if all(item["passed"] for item in results) else 1
     results = [evaluate(case, key) for case in CASES]
     results += [evaluate_owner(case, key) for case in OWNER_CASES]
     print(json.dumps({"model": MODEL, "results": results}, indent=2))

@@ -46,6 +46,8 @@ class Reader:
         self.processing: dict[str, str] = {}
         self.processed: set[str] = set()
         self.opted_out = False
+        self.committed_drafts: list[tuple[str, str, str]] = []
+        self.accept_committed_draft = True
 
     def read_received(self, business_id: str, provider_id: str) -> InboundReceipt | None:
         return self.receipts.get((business_id, provider_id))
@@ -79,6 +81,15 @@ class Reader:
         self.processed.add(receipt.provider_id)
         return True
 
+    def put_committed_reply(self, receipt: InboundReceipt, outbox_id: str,
+                            text: str, token: str) -> bool:
+        assert self.processing[receipt.provider_id] == token
+        if not self.accept_committed_draft:
+            return False
+        self.committed_drafts.append((receipt.provider_id, outbox_id, text))
+        self.replies.append((receipt.provider_id, text))
+        return True
+
 
 class Conversation:
     def __init__(self) -> None:
@@ -87,6 +98,37 @@ class Conversation:
     def handle(self, receipt: object) -> ConversationOutcome:
         self.calls.append(receipt)
         return ConversationOutcome("safe reply")
+
+
+def test_committed_draft_overrides_one_existing_notification_or_falls_back() -> None:
+    receipt = InboundReceipt("pilot", "SM-commit", "+14155550101", "+14155550000",
+                             "YES", datetime(2026, 9, 29, tzinfo=UTC),
+                             SenderRole.CLIENT, "client-1", Keyword.OTHER, True)
+
+    class Booked(Conversation):
+        def handle(self, receipt: object) -> ConversationOutcome:
+            self.calls.append(receipt)
+            return ConversationOutcome("Pending owner approval. Ref a101a101.", True,
+                                       "a101a101", "a101a101#client")
+
+    for accepts in (True, False):
+        reader = Reader({("pilot", "SM-commit"): receipt})
+        reader.accept_committed_draft = accepts
+        conversation = Booked()
+        processor = ReceiptProcessor(reader, conversation, "pilot",  # type: ignore[arg-type]
+                                     lambda: datetime(2026, 9, 29, tzinfo=UTC))
+        assert processor.process("pilot", "SM-commit") is not None
+        assert len(reader.committed_drafts) == int(accepts)
+        assert processor.process("pilot", "SM-commit") is None
+        assert len(conversation.calls) == 1
+        assert len(reader.committed_drafts) == int(accepts)
+
+    reader = Reader({("pilot", "SM-commit"): receipt})
+    reader.opted_out = True
+    processor = ReceiptProcessor(reader, Booked(), "pilot",  # type: ignore[arg-type]
+                                 lambda: datetime(2026, 9, 29, tzinfo=UTC))
+    assert processor.process("pilot", "SM-commit") is not None
+    assert reader.committed_drafts == []
 
 
 def test_processor_reads_persisted_receipt_and_rejects_missing_or_wrong_scope() -> None:

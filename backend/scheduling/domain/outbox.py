@@ -52,6 +52,7 @@ class OutboxRecord:
     provider_id: str | None = None
     block_start_at: datetime | None = None
     block_end_at: datetime | None = None
+    reply_provider_id: str | None = None
 
 
 class OutboxStore(Protocol):

@@ -1613,6 +1613,7 @@ class DynamoDBCalendarRepository:
                 _appointment_from_payload(raw["replaced_appointment"])
                 if raw["replaced_appointment"] is not None else None
             ),
+            client_outbox_id=raw.get("client_outbox_id"),
         )
         return TransitionRecord(item["request_hash"]["S"], result)
 
@@ -1972,6 +1973,7 @@ class DynamoDBCalendarRepository:
             "replaced_appointment": (
                 _appointment_payload(replaced) if replaced is not None else None
             ),
+            "client_outbox_id": commit.result.client_outbox_id,
         }
         writes.append(fresh_put({
             **self._business_key(

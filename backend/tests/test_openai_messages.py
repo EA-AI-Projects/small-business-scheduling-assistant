@@ -9,6 +9,7 @@ from urllib.request import Request
 import pytest
 
 from scheduling.adapters.openai_messages import OpenAIMessageInterpreter
+from scheduling.domain.client_replies import ClientReplyResult
 from scheduling.domain.conversation import MessageContext
 from scheduling.domain.conversation_history import HistoryMessage
 from scheduling.domain.owner_reply_classification import (
@@ -18,6 +19,31 @@ from scheduling.domain.owner_reply_classification import (
     PendingRef,
 )
 from scheduling.domain.sms_ingress import SenderRole
+
+
+def test_client_reply_draft_uses_structured_result_and_rejects_malformed_output(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list[dict[str, Any]] = []
+
+    def reply(request: Request, timeout: int) -> BytesIO:
+        sent.append(json.loads(request.data or b"{}"))
+        return BytesIO(json.dumps({"output": [{"type": "function_call", "name": "draft_sms",
+                                       "arguments": json.dumps({"text": "Pending owner approval. Ref a101a101."})}]}).encode())
+
+    monkeypatch.setattr("scheduling.adapters.openai_messages.urlopen", reply)
+    model = OpenAIMessageInterpreter("synthetic-key")
+    context = MessageContext(SenderRole.CLIENT, date(2026, 10, 12),
+                             "America/Los_Angeles", ())
+    result = ClientReplyResult.from_safe_text(
+        "request_created", "pending", "Requested Tue Oct 13 at 1:00 PM "
+        "(ref a101a101). It's pending owner approval.")
+    assert model.draft_client_reply("yes", context, result).startswith("Pending")
+    assert '"status": "pending"' in sent[0]["input"]
+    assert '"references": ["a101a101"]' in sent[0]["input"]
+    monkeypatch.setattr("scheduling.adapters.openai_messages.urlopen",
+                        lambda *_args, **_kwargs: BytesIO(b'{"output":[]}'))
+    with pytest.raises(ValueError, match="one SMS draft"):
+        model.draft_client_reply("yes", context, result)
 
 
 def response(arguments: dict[str, Any]) -> BytesIO:

@@ -20,6 +20,8 @@ class ReceiptReader(Protocol):
     def mark_processed(self, receipt: InboundReceipt, token: str, now: datetime) -> None: ...
     def put_reply(self, receipt: InboundReceipt, text: str,
                   token: str, now: datetime) -> bool: ...
+    def put_committed_reply(self, receipt: InboundReceipt, outbox_id: str,
+                            text: str, token: str) -> bool: ...
 
 
 class ReceiptProcessor:
@@ -75,7 +77,13 @@ class ReceiptProcessor:
             retry_text = "The schedule changed while I handled that request. Please send it again."
             self._store.put_reply(receipt, retry_text, token, self._clock())
             return ConversationOutcome(retry_text)
-        if outcome.committed or self._store.is_opted_out(business_id, receipt.sender):
+        if outcome.committed:
+            if (outcome.client_outbox_id is not None
+                    and not self._store.is_opted_out(business_id, receipt.sender)):
+                self._store.put_committed_reply(receipt, outcome.client_outbox_id,
+                                                outcome.text, token)
+            self._store.mark_processed(receipt, token, self._clock())
+        elif self._store.is_opted_out(business_id, receipt.sender):
             self._store.mark_processed(receipt, token, self._clock())
         else:
             try:

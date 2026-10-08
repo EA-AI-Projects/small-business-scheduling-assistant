@@ -8,6 +8,7 @@ import pytest
 from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.domain.calendar import CalendarStatus
 from scheduling.domain.client_records import ClientProfile, HomeSize
+from scheduling.domain.client_replies import ClientReplyResult
 from scheduling.domain.conversation import (
     ConversationOutcome,
     ConversationService,
@@ -73,6 +74,21 @@ class Script:
         return tool_result
 
 
+class DraftScript(Script):
+    def __init__(self) -> None:
+        super().__init__()
+        self.drafts: dict[str, str | Exception] = {}
+        self.draft_calls: list[tuple[str, ClientReplyResult]] = []
+
+    def draft_client_reply(self, body: str, context: MessageContext,
+                           result: ClientReplyResult) -> str:
+        self.draft_calls.append((body, result))
+        draft = self.drafts.get(body, result.fallback)
+        if isinstance(draft, Exception):
+            raise draft
+        return draft
+
+
 class Consent:
     def is_opted_out(self, business_id: str, phone_e164: str) -> bool:
         return False
@@ -82,12 +98,12 @@ class Consent:
 
 
 class Harness:
-    def __init__(self) -> None:
+    def __init__(self, model: Script | None = None) -> None:
         self.store = InMemoryCalendarRepository()
         self.store.save_profile(ClientProfile(
             "pilot", "client-1", "Avery Example", "+14155550101", "1 Test Street",
             HomeSize.MEDIUM, 120, True, 1, NOW, NOW, NOW), 0, None)
-        self.model = Script()
+        self.model = model if model is not None else Script()
         self.states = InMemoryConversationStates()
         self.now = NOW
         self.service = ConversationService(
@@ -640,6 +656,56 @@ def test_model_reads_a_free_form_acceptance_and_requests_the_offered_time() -> N
     assert len(chat.calendar()) == 1
 
 
+def test_client_draft_uses_validated_offer_and_pending_request() -> None:
+    model = DraftScript()
+    chat = Harness(model)
+    invited(chat)
+    model.drafts["Oct 13 at 1 pm (availability)"] = (
+        "Tue Oct 13 at 1:00 PM is open. Reply YES to request it.")
+    offer = chat.text("Oct 13 at 1 pm (availability)")
+    assert offer.text == model.drafts["Oct 13 at 1 pm (availability)"]
+    assert model.draft_calls[-1][1].kind == "offer_made"
+    model.replies[ACCEPT] = ask("request_booking", "2026-10-13", "2026-10-13", "13:00", "13:00")
+    booked = chat.text(ACCEPT)
+    assert booked.committed and booked.client_outbox_id == f"{booked.appointment_id}#client"
+    assert model.draft_calls[-1][1].status == "pending"
+    # A generic fallback still carries the persisted request reference.
+    assert booked.appointment_id is not None and booked.appointment_id[:8] in booked.text
+
+
+def test_hostile_or_failed_draft_keeps_safe_result_without_another_write() -> None:
+    model = DraftScript()
+    chat = Harness(model)
+    offered(chat)
+    model.drafts[ACCEPT] = "Confirmed for Tue Oct 13 at 2:00 PM."
+    result = chat.text(ACCEPT)
+    assert result.committed and "pending owner approval" in result.text
+    assert len(chat.calendar()) == 1
+    assert model.draft_calls[-1][1].references == (result.appointment_id[:8],)
+    model.drafts["another day"] = TimeoutError("synthetic timeout")
+    model.replies["another day"] = ask("availability", "2026-10-14")
+    fallback = chat.text("another day")
+    assert not fallback.committed and fallback.text == model.draft_calls[-1][1].fallback
+    assert len(chat.calendar()) == 1
+
+
+@pytest.mark.parametrize("draft", [
+    "Confirmed for Tue Oct 13 at 1:00 PM.",
+    "Tue Oct 13 at 2:00 PM is pending owner approval.",
+    "Your request is pending owner approval.",
+    "Your request is pending owner approval. " + "x" * 160,
+])
+def test_unsafe_pending_draft_falls_back_to_the_committed_result(draft: str) -> None:
+    model = DraftScript()
+    chat = Harness(model)
+    offered(chat)
+    model.drafts[ACCEPT] = draft
+    booked = chat.text(ACCEPT)
+    assert booked.committed and booked.appointment_id is not None
+    assert booked.text == model.draft_calls[-1][1].fallback
+    assert len(chat.calendar()) == 1
+
+
 def test_model_cannot_request_a_time_that_was_not_offered() -> None:
     chat = Harness()
     offered(chat)
@@ -740,6 +806,17 @@ def test_model_reads_a_free_form_yes_and_cancels_the_asked_visit() -> None:
     assert len(chat.model.calls) == calls + 1  # The model, not the keyword matcher, decided.
     assert done.committed and done.text == (
         f"Cancelled your Thu Oct 1 at 9:00 AM visit (ref {visit[:8]}).")
+    assert chat.status(visit) == CalendarStatus.CANCELLED
+
+
+def test_valid_cancel_draft_uses_the_committed_visit_and_reference() -> None:
+    model = DraftScript()
+    chat = Harness(model)
+    visit = cancel_asked(chat)
+    model.drafts[DROP] = f"Your Thu Oct 1 at 9:00 AM visit was cancelled. Ref {visit[:8]}."
+    result = chat.text(DROP)
+    assert result.committed and result.text == model.drafts[DROP]
+    assert result.client_outbox_id is not None
     assert chat.status(visit) == CalendarStatus.CANCELLED
 
 
