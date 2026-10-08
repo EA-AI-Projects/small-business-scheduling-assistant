@@ -48,7 +48,7 @@ the result's dates, times, and references, then falls back to the backend answer
 on malformed output or timeout. The model instructions govern status wording.
 This minimal check cannot detect every contradictory claim or association among
 multiple visits; the owner chose freer wording with this fallback (#283, 2026-10-08).
-The same draft check covers client write results; a valid
+This is the only reply-drafting call (#275 removed the earlier read-only drafter); the backend sentence is its fallback. The same draft check covers client write results; a valid
 draft can attach to the existing pending notification intent, while a sender
 that already claimed the intent sends its safe template.
 The first model call asks the client to retry later on failure. Each model call
