@@ -350,8 +350,8 @@ class ConversationService:
             return self._cancel(receipt, proposal, targets)
         if exact:  # BOOK or RESCHEDULE syntax; _request rechecks the literal text.
             return self._request(receipt, proposal, targets, policy, now)
-        # From here on the proposal came from the model: it can lead to an offer or a
-        # question, or, for an exact time answering an invitation, to a validated request.
+        # From here on the proposal came from the model: it can only lead to an
+        # offer or a question, never directly to a write.
         if receipt.role != SenderRole.CLIENT:
             return ConversationOutcome(self._clarify(receipt.role, "clarify"))
         if proposal.intent in ("calendar_question", "clarify_booking"):
@@ -386,55 +386,12 @@ class ConversationService:
             original = (self._active_target(receipt, moving.appointment_id, targets)
                         if moving is not None else None)
             try:
-                direct = (self._request_invited_time(receipt, proposal, context, policy, now)
-                          if original is None and proposal.intent == "request_booking" else None)
-                if direct is not None:
-                    return direct  # Committed: the client gets the request notification.
                 outcome = self._offer_from_proposal(receipt, proposal, policy, now, original)
             except (OSError, ValueError, TypeError, KeyError, RuntimeError):
                 return ConversationOutcome(
                     "I can't check current openings right now. Please try again later.")
             return self._draft_read(receipt, context, "list_available_slots", outcome)
         return ConversationOutcome("Please describe the scheduling change you want.")
-
-    def _request_invited_time(self, receipt: InboundReceipt, proposal: MessageProposal,
-                              context: MessageContext, policy: AvailabilityPolicy,
-                              now: datetime) -> ConversationOutcome | None:
-        """Request an exact time sent in reply to a booking invitation (#272).
-
-        Returns None unless the verified history holds an invitation and the model
-        named one exact local date and time; the caller then offers times instead.
-        Availability, horizon, and conflicts are rechecked by the hold service, a
-        failure falls back to current openings, and the result is only ever pending.
-        """
-        if (receipt.client_id is None or not any(m.invitation for m in context.history)
-                or proposal.date_from is None or proposal.date_from != proposal.date_to
-                or proposal.time_from is None or proposal.time_from != proposal.time_to):
-            return None
-        profile = self._repository.read_profile(receipt.business_id, receipt.client_id)
-        if profile is None or not profile.active or profile.phone_verified_at is None:
-            return None
-        try:
-            wall = datetime.combine(date.fromisoformat(proposal.date_from),
-                                    time.fromisoformat(proposal.time_from))
-        except ValueError:
-            return None
-        zone = ZoneInfo(policy.timezone)
-        instants = {candidate.astimezone(UTC) for fold in (0, 1)
-                    if (candidate := wall.replace(tzinfo=zone, fold=fold))
-                    .astimezone(UTC).astimezone(zone).replace(tzinfo=None) == wall}
-        if len(instants) != 1:
-            return None
-        start = next(iter(instants))
-        try:
-            # The inbound receipt ID is the idempotency key, so a retried text replays.
-            result = self._holds.create(CreateHold(
-                receipt.business_id, receipt.client_id, receipt.client_id,
-                receipt.provider_id, start, profile.default_duration_minutes), now)
-        except (SlotConflict, InvalidReplacement, ReplacementPending, TooManyConflicts,
-                IdempotencyKeyReused, InvalidDuration, ValueError):
-            return None
-        return self._requested(receipt, None, start, result.hold_id, policy)
 
     def _draft_read(self, receipt: InboundReceipt, context: MessageContext,
                     tool_name: str, outcome: ConversationOutcome) -> ConversationOutcome:
@@ -450,7 +407,7 @@ class ConversationService:
                 receipt.body or "", context, tool_name, outcome.text)
         except (OSError, ValueError, TypeError, KeyError, RuntimeError):
             return outcome
-        return ConversationOutcome(text, outcome.committed, outcome.appointment_id)
+        return ConversationOutcome(text)
 
     def _targets(self, receipt: InboundReceipt, now: datetime) -> tuple[Appointment, ...]:
         if receipt.role == SenderRole.OWNER:
