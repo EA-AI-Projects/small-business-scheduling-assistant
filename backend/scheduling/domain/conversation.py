@@ -31,6 +31,7 @@ from scheduling.domain.client_calendar_questions import (
     statuses_from_proposal,
 )
 from scheduling.domain.client_calendar_questions import answer as answer_client_question
+from scheduling.domain.client_calendar_questions import compact_list as compact_client_list
 from scheduling.domain.client_records import ClientProfile
 from scheduling.domain.conversation_history import HistoryMessage
 from scheduling.domain.conversation_state import (
@@ -278,6 +279,9 @@ class ConversationService:
             )
             proposal = self._exact_command(receipt.body, context, targets)
         except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+            if receipt.role == SenderRole.CLIENT:
+                return ConversationOutcome(
+                    "I can't check the current schedule right now. Please try again later.")
             return ConversationOutcome("I couldn't understand that message. Please try again later.")
         if receipt.role == SenderRole.OWNER and self._counteroffers is not None:
             # Owner counteroffers (#175) run first so a YES that confirms an offer
@@ -394,7 +398,7 @@ class ConversationService:
         """Let the model phrase a read result; retain the authoritative answer on failure."""
         if len(outcome.text) > 500:
             return ConversationOutcome(
-                "That answer is too long for one text. Please ask about a single day.")
+                "I can't fit the current schedule in one text. Please ask about a shorter range.")
         if (receipt.role != SenderRole.CLIENT or self._history_reader is None
                 or not isinstance(self._interpreter, ReadReplyDrafter)):
             return outcome
@@ -690,10 +694,12 @@ class ConversationService:
             self._forget(prompt)  # An offer or confirmation is closed; the reply says so.
         zone = ZoneInfo(policy.timezone)
         text = answer_client_question(question, targets, now, zone)
+        closed_note = ""
         if (prompt is not None and not prompt.expired(now)
                 and prompt.kind != PromptKind.CALENDAR):
-            text += ("\nI closed my earlier question, so nothing was booked or cancelled. "
-                     "Ask again when you're ready.")
+            closed_note = ("\nI closed my earlier question, so nothing was booked or cancelled. "
+                           "Ask again when you're ready.")
+            text += closed_note
         today = now.astimezone(zone).date()
         answered = (not question.ambiguous_booking
                     and (question.first is None or question.last is None
@@ -710,7 +716,15 @@ class ConversationService:
         elif prompt is not None and prompt.kind == PromptKind.CALENDAR and prompt.expired(now):
             self._forget(prompt)
         # A question this answer only clarified leaves an open calendar conversation as it was.
-        return self._with_offer_note(receipt, now, ConversationOutcome(text))
+        outcome = self._with_offer_note(receipt, now, ConversationOutcome(text))
+        if len(outcome.text) > 500 and question.view == View.LIST and answered:
+            # Every current visit still fits when rendered with its local start and
+            # status, even if the detailed lines and safety notes do not.
+            compact_note = ("\nEarlier question closed; nothing was booked or cancelled."
+                            if closed_note else "")
+            outcome = self._with_offer_note(receipt, now, ConversationOutcome(
+                compact_client_list(question, targets, now, zone) + compact_note))
+        return outcome
 
     def _with_offer_note(self, receipt: InboundReceipt, now: datetime,
                          outcome: ConversationOutcome) -> ConversationOutcome:
