@@ -104,16 +104,28 @@ def valid_draft(draft: str, result: ClientReplyResult) -> bool:
     for fact, segment in zip(sorted(result.facts, key=lambda item: draft.lower().find(
             f"{item.date} at {item.time}".lower())), segments):
         if fact.status == "pending owner approval":
-            if (not PENDING.search(segment) or CONFIRMED.search(segment)
-                    or CANCELLED.search(segment) or NEGATIVE.search(segment)):
+            checked = re.sub(r"\bnot\s+confirmed(?:\s+yet)?\b", "", segment,
+                             flags=re.IGNORECASE)
+            if (not PENDING.search(segment) or CONFIRMED.search(checked)
+                    or CANCELLED.search(checked) or NEGATIVE.search(checked)):
                 return False
         elif fact.status == "confirmed":
-            if (not re.search(r"\bconfirmed\b", segment, re.IGNORECASE)
-                    or NEGATIVE.search(segment) or PENDING.search(segment)
-                    or CANCELLED.search(segment)):
+            truthful_status = (re.search(r"\bconfirmed\b", segment, re.IGNORECASE)
+                                or (result.kind == "cancel_kept" and re.search(
+                                    r"\b(?:kept|keep|stays(?:\s+booked)?)\b", draft,
+                                    re.IGNORECASE)))
+            checked = (re.sub(r"\bnothing was cancell?ed\b", "", segment,
+                              flags=re.IGNORECASE) if result.kind == "cancel_kept"
+                       else segment)
+            if (not truthful_status
+                    or NEGATIVE.search(checked) or PENDING.search(checked)
+                    or CANCELLED.search(checked)):
                 return False
         elif fact.status == "cancelled":
-            if not CANCELLED.search(segment) or NEGATIVE.search(segment):
+            claim = CANCELLED.search(segment) or (result.kind == "cancelled"
+                                                 and len(result.facts) == 1
+                                                 and CANCELLED.search(draft))
+            if not claim or NEGATIVE.search(segment):
                 return False
         elif fact.status == "open":
             if not re.search(r"\b(?:open|available|can offer)\b", segment,
@@ -130,13 +142,15 @@ def valid_draft(draft: str, result: ClientReplyResult) -> bool:
         return (not NEGATIVE.search(lead) and not CONFIRMED.search(draft)
                 and not CANCELLED.search(draft) and not NO_VISITS.search(draft))
     if result.kind in {"request_created", "move_requested"}:
+        without_pending_note = re.sub(r"\bnot\s+confirmed(?:\s+yet)?\b", "", draft,
+                                      flags=re.IGNORECASE)
         return (not re.search(r"\b(?:rejected|declined|cancelled|canceled|failed)\b", draft,
                               re.IGNORECASE) and not NEGATIVE.search(lead)
                 and not CONFIRMED.search(lead)
                 and (result.kind != "move_requested" or not re.search(
                     r"\b(?:booked|approved|accepted|reserved|scheduled|locked\s+in)\b",
                     draft, re.IGNORECASE))
-                and (not CONFIRMED.search(draft)
+                and (not CONFIRMED.search(without_pending_note)
                      if not any(fact.status == "confirmed" for fact in result.facts) else True)
                 and bool(PENDING.search(draft)))
     if result.kind == "cancelled":
@@ -155,6 +169,7 @@ def valid_draft(draft: str, result: ClientReplyResult) -> bool:
                            flags=re.IGNORECASE)
         return bool(re.search(r"\b(?:kept|keep|stays)\b", draft, re.IGNORECASE)
                     and re.search(r"\bnothing was cancell?ed\b", draft, re.IGNORECASE)
+                    and not NEGATIVE.search(lead)
                     and not CANCELLED.search(remainder))
     if result.kind == "cancel_question":
         return draft.count("?") == 1 and not re.search(r"\b(?:was|is) cancell?ed\b", draft,

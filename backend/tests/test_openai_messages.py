@@ -28,7 +28,7 @@ def test_client_reply_draft_uses_structured_result_and_rejects_malformed_output(
     def reply(request: Request, timeout: int) -> BytesIO:
         sent.append(json.loads(request.data or b"{}"))
         return BytesIO(json.dumps({"output": [{"type": "function_call", "name": "draft_sms",
-                                       "arguments": json.dumps({"text": "Pending owner approval. Ref a101a101."})}]}).encode())
+                                       "arguments": json.dumps({"text": "It’s pending owner approval. Ref a101a101."})}]}).encode())
 
     monkeypatch.setattr("scheduling.adapters.openai_messages.urlopen", reply)
     model = OpenAIMessageInterpreter("synthetic-key")
@@ -38,9 +38,10 @@ def test_client_reply_draft_uses_structured_result_and_rejects_malformed_output(
         "request_created", "pending", "Requested Tue Oct 13 at 1:00 PM "
         "(ref a101a101). It's pending owner approval.",
         (ClientReplyFact("Tue Oct 13", "1:00 PM", "pending owner approval", "a101a101"),))
-    assert model.draft_client_reply("yes", context, result).startswith("Pending")
+    assert model.draft_client_reply("yes", context, result).startswith("It's pending")
     assert '"status": "pending"' in sent[0]["input"]
     assert '"reference": "a101a101"' in sent[0]["input"]
+    assert '"safe_reply"' not in sent[0]["input"]
     monkeypatch.setattr("scheduling.adapters.openai_messages.urlopen",
                         lambda *_args, **_kwargs: BytesIO(b'{"output":[]}'))
     with pytest.raises(ValueError, match="one SMS draft"):

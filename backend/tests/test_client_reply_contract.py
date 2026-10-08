@@ -57,6 +57,12 @@ def test_false_or_swapped_claim_is_rejected(result: ClientReplyResult, draft: st
     (OFFER, "Tue Oct 13 at 1:00 PM is open. Which time works for you?"),
     (CALENDAR, "Tue Oct 13 at 9:00 AM confirmed ref a1b2c3d4; "
                + "Wed Oct 14 at 1:00 PM pending owner approval ref b1c2d3e4."),
+    (PENDING, "Requested Tue Oct 13 at 1:00 PM (ref a1b2c3d4). "
+              + "It's pending owner approval, not confirmed yet."),
+    (CANCELLED, "Cancelled your Thu Oct 1 at 9:00 AM visit (ref b1c2d3e4)."),
+    (ClientReplyResult("cancel_kept", "confirmed", "safe kept text",
+                       (ClientReplyFact("Thu Oct 1", "9:00 AM", "confirmed"),)),
+     "OK, I kept your Thu Oct 1 at 9:00 AM visit. Nothing was cancelled."),
 ])
 def test_natural_truthful_draft_is_accepted(result: ClientReplyResult, draft: str) -> None:
     assert valid_draft(draft, result)
