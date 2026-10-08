@@ -154,8 +154,11 @@ def valid_draft(draft: str, result: ClientReplyResult) -> bool:
                      if not any(fact.status == "confirmed" for fact in result.facts) else True)
                 and bool(PENDING.search(draft)))
     if result.kind == "cancelled":
-        return (bool(CANCELLED.search(draft)) and not NEGATIVE.search(lead)
-                and not PENDING.search(draft) and not CONFIRMED.search(draft))
+        contrary = re.search(
+            r"\b(?:kept|keep|active|stays|remains|scheduled|confirmed|pending|booked)\b",
+            draft, re.IGNORECASE)
+        return ("?" not in draft and bool(CANCELLED.search(draft))
+                and not NEGATIVE.search(lead) and not contrary)
     if result.kind == "calendar_list":
         if CONFIRMED.search(lead) or PENDING.search(lead) or CANCELLED.search(lead):
             return False

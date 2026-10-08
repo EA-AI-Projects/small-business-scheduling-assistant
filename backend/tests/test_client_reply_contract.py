@@ -34,6 +34,8 @@ CALENDAR = ClientReplyResult(
     (PENDING, "Your request is confirmed: Tue Oct 13 at 1:00 PM, ref a1b2c3d4, "
               + "pending owner approval."),
     (CANCELLED, "Your Thu Oct 1 at 9:00 AM visit, ref b1c2d3e4, was not cancelled."),
+    (CANCELLED, "Cancelled your visit? Thu Oct 1 at 9:00 AM ref b1c2d3e4 was kept."),
+    (CANCELLED, "Cancelled your Thu Oct 1 at 9:00 AM visit, ref b1c2d3e4; it remains active."),
     (OFFER, "No times are open for Tue Oct 13 at 1:00 PM."),
     (CALENDAR, "You have no visits. Tue Oct 13 at 9:00 AM confirmed ref a1b2c3d4; "
                + "Wed Oct 14 at 1:00 PM pending owner approval ref b1c2d3e4."),
