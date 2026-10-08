@@ -998,16 +998,16 @@ class ConversationService:
             reference = (proposal.request_reference or "").lower()
             chosen = [target for target in targets if len(reference) >= 8
                       and target.appointment_id.startswith(reference)]
-            if len(chosen) == 1 and (
-                    proposal.request_version is not None
-                    and proposal.request_version != chosen[0].version):
-                # The model quoted an old version of that request: stale, nothing changes.
-                return unsure("That request changed since you last saw it.")
+            if len(chosen) == 1 and proposal.request_version != chosen[0].version:
+                # A missing or different version means the model mis-copied or used an old
+                # snapshot. It is never a decision; nothing changes.
+                return unsure("I couldn't match that to a current request, so nothing changed.")
             if len(targets) > 1:
                 # Several are pending: a decision is never inferred from a short reply. If the
                 # model names exactly one current request and its current version, the owner
                 # is asked to confirm it with the exact command. Nothing changes.
-                if len(chosen) == 1 and proposal.request_version == chosen[0].version:
+                plain = supports_approval(body) if approving else supports_decline(body)
+                if len(chosen) == 1 and not plain:
                     return self._ask_decision(receipt, chosen[0], approving, now, True)
                 return unsure("I wasn't sure which request you meant.")
             candidate = named if gated else (targets[0] if len(targets) == 1 else None)

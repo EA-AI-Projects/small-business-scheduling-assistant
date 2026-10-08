@@ -169,13 +169,13 @@ def test_model_cannot_name_a_stale_or_invented_request(world: World) -> None:
     world.model.script["stale one"] = call(
         OwnerReplyIntent.PREPARE_COUNTEROFFER, second[:8], 7, FRIDAY, time(14, 0))
     stale = world.owner("stale one").text
-    assert "That request changed" in stale and "Nothing was sent" in stale
+    assert "couldn't match that to a current request" in stale and "nothing changed" in stale
     world.model.script["invented one"] = call(
         OwnerReplyIntent.PREPARE_COUNTEROFFER, "deadbeef", 1, FRIDAY, time(14, 0))
     assert "wasn't sure which request" in world.owner("invented one").text
     world.model.script["no version"] = call(
         OwnerReplyIntent.PREPARE_COUNTEROFFER, first[:8], None, FRIDAY, time(14, 0))
-    assert "That request changed" in world.owner("no version").text
+    assert "couldn't match that" in world.owner("no version").text
     world.model.script["no time"] = call(
         OwnerReplyIntent.PREPARE_COUNTEROFFER, first[:8], 1, FRIDAY, None)
     assert "wasn't sure which request or time" in world.owner("no time").text
@@ -276,7 +276,7 @@ def test_decision_with_an_old_version_or_unknown_reference_is_refused(world: Wor
     first, second = two_requests(world)
     world.model.script["go with Blake's"] = call(
         OwnerReplyIntent.DECLINE_NAMED_REQUEST, second[:8], 5)
-    assert "changed" in world.owner("go with Blake's").text
+    assert "couldn't match" in world.owner("go with Blake's").text
     world.model.script["the other one"] = call(
         OwnerReplyIntent.DECLINE_NAMED_REQUEST, "ffffffff", 1)
     assert "wasn't sure which request" in world.owner("the other one").text
@@ -294,8 +294,13 @@ def test_hedged_decision_for_the_single_request_still_only_asks(world: World) ->
     assert world.state(request) == (PENDING, 1)
     world.model.script["fine, that works for me"] = call(
         OwnerReplyIntent.APPROVE_NAMED_REQUEST, request[:8], 9)
-    assert "changed" in world.owner("fine, that works for me").text
+    assert "couldn't match" in world.owner("fine, that works for me").text
     assert world.state(request) == (PENDING, 1)
+    # A missing version never decides, even as a plain reply for the single pending request.
+    world.model.script["yes please"] = call(OwnerReplyIntent.APPROVE_NAMED_REQUEST, request[:8])
+    missing = world.owner("yes please")
+    assert "yes please" in world.model.calls and not missing.committed
+    assert "couldn't match" in missing.text and world.state(request) == (PENDING, 1)
 
 
 def test_a_model_decision_never_approves_while_an_offer_is_open(world: World) -> None:

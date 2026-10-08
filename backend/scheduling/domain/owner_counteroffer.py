@@ -454,7 +454,7 @@ class CounterofferService:
         request = named[0]
         if version != request.version:
             return ConversationOutcome(
-                "That request changed, so I did not prepare an offer. Nothing was sent. "
+                "I couldn't match that to a current request, so nothing changed or was sent. "
                 f"Pending: {self._line(request, zone)}. Tell me the time to offer again.")
         parsed = _Request(request, clock, day)
         if calendar_last and not EXPLICIT_OFFER.search(normalized(receipt.body or "")):

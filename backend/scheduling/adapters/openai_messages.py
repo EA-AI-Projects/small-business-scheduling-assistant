@@ -19,7 +19,6 @@ from scheduling.domain.owner_reply_classification import (
 MODEL = "gpt-6-luna"
 DATE_SHAPE = re.compile(r"\d{4}-\d{2}-\d{2}")
 TIME_SHAPE = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
-TIME_SHAPE = re.compile(r"\d{2}:\d{2}")
 URL = "https://api.openai.com/v1/responses"
 INSTRUCTIONS = (
     "Interpret one text message sent to a home-cleaning business. The text may be in any "
