@@ -104,3 +104,56 @@ def test_owner_draft_per_entry_and_year_checks() -> None:
     approve = ClientReplyResult("owner_approval", "approved", "safe", OWNER_RESULT.facts,
                                 None, BACKEND)
     assert not valid_owner_draft(GOOD, approve)
+
+
+PAIR = ("2 requests are pending: Avery, Thu Oct 1 at 9:00 AM (ref a1b2c3d4); "
+        "Blake, Fri Oct 2 at 1:00 PM (ref b2c3d4e5).")
+PAIR_RESULT = ClientReplyResult("owner_requests", "read_only", "safe",
+                                facts_from_text(PAIR), None, PAIR)
+
+
+@pytest.mark.parametrize("draft", [
+    ("Avery is on Thu Oct 1 at 9:00 AM (ref a1b2c3d4) and Blake on Fri Oct 2 at 1:00 PM "
+    "(ref b2c3d4e5)."),
+    ("Avery, Thu Oct 1 at 9:00 AM, ref a1b2c3d4, and Blake, Fri Oct 2 at 1:00 PM, "
+    "ref b2c3d4e5."),
+    ("Two are waiting. Avery (ref a1b2c3d4) is Thu Oct 1 at 9:00 AM. Blake (ref b2c3d4e5) "
+    "is Fri Oct 2 at 1:00 PM."),
+])
+def test_natural_two_entry_drafts_are_accepted(draft: str) -> None:
+    assert valid_owner_draft(draft, PAIR_RESULT)
+
+
+@pytest.mark.parametrize("draft", [
+    ("Avery is on Thu Oct 1 at 9:00 AM (ref b2c3d4e5) and Blake on Fri Oct 2 at 1:00 PM "
+    "(ref a1b2c3d4)."),
+    ("Avery, Thu Oct 1 at 9:00 AM, ref b2c3d4e5, and Blake, Fri Oct 2 at 1:00 PM, "
+    "ref a1b2c3d4."),
+    ("Avery is on Fri Oct 2 at 1:00 PM (ref a1b2c3d4) and Blake on Thu Oct 1 at 9:00 AM "
+    "(ref b2c3d4e5)."),
+    # Restated in a sentence that carries no reference.
+    ("Avery (ref a1b2c3d4) is Thu Oct 1 at 9:00 AM. Blake (ref b2c3d4e5) is Fri Oct 2 at "
+    "1:00 PM. Correction: Avery is at 1:00 PM on Fri Oct 2."),
+])
+def test_swapped_two_entry_drafts_are_refused(draft: str) -> None:
+    assert not valid_owner_draft(draft, PAIR_RESULT)
+
+
+@pytest.mark.parametrize("prompt", [
+    "YES approves it.", "A YES approves Avery's request.", "Approve it with a yes.",
+    "Y approves it.", "NO cancels nothing, YES approves.", "Want it sent? YES or NO",
+    "OK? Y/N", "Yes or no on the offer?", "**YES** sends it.", "Shoot me a yes.",
+    "MORE shows the rest.", "Respond YES.", "Approve it.", "decline it.",
+    "Avery needs you to APPROVE a1b2c3d4."])
+def test_verbless_prompts_and_instructions_are_refused(prompt: str) -> None:
+    good = ("Avery is on Thu Oct 1 at 9:00 AM (ref a1b2c3d4) and Blake on Fri Oct 2 at "
+            "1:00 PM (ref b2c3d4e5). ")
+    assert valid_owner_draft(good, PAIR_RESULT)
+    assert not valid_owner_draft(good + prompt, PAIR_RESULT)
+
+
+def test_ordinary_lowercase_no_and_more_are_allowed() -> None:
+    good = ("Avery is on Thu Oct 1 at 9:00 AM (ref a1b2c3d4) and Blake on Fri Oct 2 at "
+            "1:00 PM (ref b2c3d4e5). ")
+    assert valid_owner_draft(good + "There are no other pending requests, and a few more "
+                             "may follow.", PAIR_RESULT)

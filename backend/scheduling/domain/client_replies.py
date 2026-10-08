@@ -88,12 +88,11 @@ FORBIDDEN_OWNER_CLAIMS = re.compile(
     re.IGNORECASE)
 # ... nor write its own reply prompt: an open offer's YES is honored by the counteroffer
 # handler, and the backend's fixed suffix already carries every instruction the owner needs.
-_ANSWER = r"(?:yes|no|y|n|more)"
+# No verb is required: yes/y in any case, uppercase NO/N/MORE, y/n, and APPROVE/DECLINE as
+# whole words are refused (ordinary lowercase "no pending requests" and "a few more" are not).
 OWNER_PROMPTS = re.compile(
-    rf"\b(?:reply|respond|answer|text|type|say|send)\b[^.\n]{{0,24}}?\b{_ANSWER}\b"
-    rf"|[\"'\u201c\u2018]\s*{_ANSWER}\s*[\"'\u201d\u2019]"
-    r"|\b(?:reply|respond|text|send)\b[^.\n]{0,24}?\b(?:approve|decline)\b"
-    r"|\b(?:approve|decline)\s+[0-9a-f]{8}\b", re.IGNORECASE)
+    r"(?i:\b(?:yes|y|approve|decline)\b|\by\s*/\s*n\b)|\b(?:NO|N|MORE)\b")
+CLAUSES = re.compile(r"\b(?:and|while)\b", re.IGNORECASE)
 SEGMENTS = re.compile(r"[\n;]|(?<=[.!?])\s+")
 
 
@@ -132,12 +131,14 @@ def _entries(backend: str) -> list[tuple[set[str], set[str], str]]:
 def valid_owner_draft(draft: str, result: ClientReplyResult) -> bool:
     """Basic check of a free-wording owner draft; the backend then appends ``result.suffix``.
 
-    Like the client check: one GSM-7 budget (the draft plus the suffix within 480), every
-    explicit date, time, and reference is exactly one of the backend's and every backend one
-    appears. Per entry: a draft sentence, line, or clause naming a reference may carry only
-    the dates and times of the backend entries it names, and each entry's reference appears
-    with its own date and time, so two requests cannot swap. Prose is not otherwise checked
-    (owner decision on #285, 2026-10-08).
+    Like the client check: one GSM-7 budget (draft plus suffix within 480), and every explicit
+    date, time, and reference is exactly one of the backend's and every backend one appears.
+    Per entry: each reference-bearing entry appears with its own date and time in one sentence,
+    and within a sentence (split further at "and"/"while") each date and time must belong to
+    the nearest reference's own entry; dates and times in a clause with no reference are
+    refused unless the backend also writes them outside any such entry (a range header, a
+    confirmed visit, which has no reference). Names, statuses, and other prose are not
+    checked (owner decision on #285, 2026-10-08).
     """
     size, fixed = gsm_septets(draft, True), gsm_septets(result.suffix, True)
     if (result.kind not in DRAFTABLE_OWNER_KINDS or size is None or fixed is None
@@ -150,18 +151,54 @@ def valid_owner_draft(draft: str, result: ClientReplyResult) -> bool:
             and refs == allowed_refs):
         return False
     entries = _entries(result.detail or "")
-    segments = [_explicit(part) for part in SEGMENTS.split(draft)]
-    for entry_dates, entry_times, ref in entries:
-        cores = {_core(day) for day in entry_dates}
-        if not any(ref in seg_refs and cores <= {_core(day) for day in seg_dates}
-                   and entry_times <= seg_times
+    owned = {ref: ({_core(day) for day in entry_dates}, entry_times)
+             for entry_dates, entry_times, ref in entries}
+    segments = [_positioned(part) for part in SEGMENTS.split(draft)]
+    for ref, (entry_dates, entry_times) in owned.items():
+        if not any(ref in {r for _p, r in seg_refs}
+                   and entry_dates <= {_core(day) for _p, day in seg_dates}
+                   and entry_times <= {clock for _p, clock in seg_times}
                    for seg_dates, seg_times, seg_refs in segments):
             return False
-    owned = {ref: (entry_dates, entry_times) for entry_dates, entry_times, ref in entries}
-    for seg_dates, seg_times, seg_refs in segments:
-        if seg_refs:
-            ok_dates = {_core(day) for ref in seg_refs for day in owned.get(ref, (set(), set()))[0]}
-            ok_times = {clock for ref in seg_refs for clock in owned.get(ref, (set(), set()))[1]}
-            if ({_core(day) for day in seg_dates} - ok_dates or seg_times - ok_times):
+    if not owned:
+        return True
+    # Dates and times that the backend also writes outside any reference-bearing entry (a range
+    # header, a confirmed visit, which carries no reference) are not tied to a request.
+    loose = [_explicit(part) for part in SEGMENTS.split(result.detail or "")
+             if not _explicit(part)[2]]
+    loose_dates = {_core(day) for dates_, _t, _r in loose for day in dates_}
+    loose_times = {clock for _d, times_, _r in loose for clock in times_}
+    groups = [_positioned(group) for part in SEGMENTS.split(draft)
+              for group in CLAUSES.split(part)]
+    for seg_dates, seg_times, seg_refs in groups:
+        for span, day in seg_dates:
+            if _core(day) in loose_dates:
+                continue
+            owner = _nearest(span, seg_refs)
+            if owner is None or _core(day) not in owned.get(owner, (set(), set()))[0]:
+                return False
+        for span, clock in seg_times:
+            if clock in loose_times:
+                continue
+            owner = _nearest(span, seg_refs)
+            if owner is None or clock not in owned.get(owner, (set(), set()))[1]:
                 return False
     return True
+
+
+Span = tuple[int, int]
+
+
+def _positioned(part: str) -> tuple[list[tuple[Span, str]], list[tuple[Span, str]],
+                                    list[tuple[Span, str]]]:
+    return ([(m.span(), m.group().lower()) for m in DATE.finditer(part)],
+            [(m.span(), m.group().lower().replace(" ", "")) for m in TIME.finditer(part)],
+            [(m.span(), m.group().lower()) for m in REF.finditer(part)])
+
+
+def _nearest(span: Span, refs: list[tuple[Span, str]]) -> str | None:
+    """The reference with the smallest gap to ``span`` in the sentence (earlier on a tie)."""
+    if not refs:
+        return None
+    return min(refs, key=lambda item: (max(span[0] - item[0][1], item[0][0] - span[1], 0),
+                                       item[0][0]))[1]

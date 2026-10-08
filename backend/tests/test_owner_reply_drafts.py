@@ -448,7 +448,14 @@ def test_open_offer_cannot_get_a_model_written_yes_prompt(world: World) -> None:
     safe = fixed(world, ASK_CALENDAR)
     entry = f"Avery has a request on Thu Oct 1 from 9:00 AM to 11:00 AM (ref {request[:8]})."
     for prompt in ("Respond YES to approve.", 'Reply "YES" to approve.', "Reply yes.",
-                   "Reply APPROVE " + request[:8] + " to approve."):
+                   "Reply APPROVE " + request[:8] + " to approve.", "YES approves it.",
+                   "A YES approves Ana's request.", "Approve it with a yes.", "Y approves it.",
+                   "NO cancels nothing, YES approves.", "Want it sent? YES or NO", "OK? Y/N",
+                   "Yes or no on the offer?", "**YES** sends it.", "Shoot me a yes.",
+                   "MORE shows the rest.", "Approve it.", "Decline it."):
         world.model.drafts[ASK_CALENDAR] = f"For Thu Oct 1: {entry} {prompt}"
-        assert world.owner(ASK_CALENDAR).text == safe
+        assert world.owner(ASK_CALENDAR).text == safe, prompt
+    # Ordinary lowercase "no" and "more" are fine.
+    world.model.drafts[ASK_CALENDAR] = f"For Thu Oct 1: {entry} No other requests, a few more later."
+    assert "No other requests" in world.owner(ASK_CALENDAR).text
     assert world.store.read_active("pilot", OWNER) is not None and not world.store.outbox

@@ -56,13 +56,14 @@ phone) is passed to the owner classifier and drafter. A second drafting call
 covers only read-only owner results (a rendered calendar answer, a
 pending-request summary, a how-to). It runs after the backend result, receives
 client first names only, and is used only when every explicit date, time, and
-reference matches the result, each reference-bearing entry appears with its own
-date and time in the same sentence or line (so entries cannot be swapped), it
-makes none of a few action claims, and it writes no reply prompt of its own; the
+reference matches the result, each date and time in a sentence or clause belongs
+to the nearest reference's own entry (so requests cannot swap references, dates,
+or times in the usual phrasings), it makes none of a few action claims, and it
+contains no standalone yes/y, uppercase NO/N/MORE, y/n, or APPROVE/DECLINE; the
 exact commands, paging line, and any open-offer reminder are appended as fixed
 text. Enrique accepted the residual risk of model-written owner prose (decision
 on #285, 2026-10-08): statuses and names are not validated, and a contradiction
-remains possible. Any failure, including a history read error, keeps or restores
+remains possible; names are not checked and confirmed visits (which have no reference) are not tied to a time. Any failure, including a history read error, keeps or restores
 the backend text. Approvals,
 declines, offers, counteroffers, and failures are never drafted. The owner reply
 is stored by the existing receipt-based, idempotent path, so a duplicate inbound
