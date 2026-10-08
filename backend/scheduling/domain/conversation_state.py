@@ -152,7 +152,8 @@ def spread(starts: tuple[datetime, ...], zone: ZoneInfo,
 
 
 # Reply parsing is deliberately narrow: anything it does not recognize falls back
-# to the model, which can only produce a new offer or a question.
+# to the model, which can produce a new offer or a question, or request_booking for a
+# time in the sender's own stored offer (#272).
 NEGATION = re.compile(
     r"\b(?:no|not|nope|nah|never|none|neither|nor|don'?t|dont|can'?t|cant|cannot|"
     r"won'?t|wont|wouldn'?t|shouldn'?t|isn'?t|doesn'?t|stop|wait|hold)\b|n't\b")

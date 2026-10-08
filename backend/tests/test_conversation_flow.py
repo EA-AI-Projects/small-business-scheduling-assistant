@@ -533,3 +533,184 @@ def test_owner_has_no_offer_memory() -> None:
 def options(*local: tuple[int, int, int]) -> tuple[datetime, ...]:
     return tuple(datetime(2026, 9, day, hour, minute, tzinfo=ZONE).astimezone(UTC)
                  for day, hour, minute in local)
+
+
+def invited(chat: Harness) -> None:
+    class History:
+        def read_conversation_history(self, receipt: InboundReceipt,
+                                      now: datetime) -> tuple[HistoryMessage, ...]:
+            return (HistoryMessage("invite", "assistant", now - timedelta(minutes=20),
+                                   "Would you like a cleaning this week?", True),
+                    HistoryMessage(receipt.provider_id, "client", now, receipt.body or ""))
+
+    chat.now = datetime(2026, 10, 12, 17, tzinfo=UTC)
+    chat.service = ConversationService(
+        chat.store, chat.model, HoldService(chat.store),
+        LifecycleService(chat.store, lambda: chat.now), Consent(), lambda: chat.now,
+        "+14155559999", chat.states, history_reader=History())
+    for model_intent in ("availability", "request_booking"):
+        chat.model.replies[f"Oct 13 at 1 pm ({model_intent})"] = ask(
+            model_intent, "2026-10-13", "2026-10-13", "13:00", "13:00")
+
+
+@pytest.mark.parametrize("intent", ["availability", "request_booking"])
+def test_exact_time_after_invitation_is_offered_and_only_yes_requests_it(intent: str) -> None:
+    chat = Harness()
+    invited(chat)
+    offer = chat.text(f"Oct 13 at 1 pm ({intent})")
+    assert not offer.committed and "is open for your 2-hour cleaning. Reply YES" in offer.text
+    assert chat.calendar() == ()  # Offering writes nothing.
+    booked = chat.text("YES")
+    assert booked.committed and booked.appointment_id is not None
+    assert "pending owner approval" in booked.text and "not confirmed" in booked.text
+    assert chat.status(booked.appointment_id) == CalendarStatus.PENDING_APPROVAL
+
+
+def test_a_second_exact_time_is_a_second_offer_not_a_second_request() -> None:
+    chat = Harness()
+    invited(chat)
+    chat.text("Oct 13 at 1 pm (availability)")
+    chat.text("YES")
+    chat.model.replies["Oct 20 at 2 pm"] = ask(
+        "request_booking", "2026-10-20", "2026-10-20", "14:00", "14:00")
+    again = chat.text("Oct 20 at 2 pm")
+    assert not again.committed and "Reply YES" in again.text
+    assert len(chat.calendar()) == 1
+
+
+def test_retried_yes_does_not_create_a_second_hold() -> None:
+    chat = Harness()
+    invited(chat)
+    chat.text("Oct 13 at 1 pm (availability)")
+    chat.text("YES")
+    chat.text("YES")
+    assert len(chat.calendar()) == 1
+
+
+def test_conflicting_exact_time_offers_alternatives_and_creates_nothing() -> None:
+    chat = Harness()
+    invited(chat)
+    chat.hold(datetime(2026, 10, 13, 20, tzinfo=UTC), "busy-1pm")
+    reply = chat.text("Oct 13 at 1 pm (availability)")
+    assert not reply.committed and "That exact time isn't open" in reply.text
+    assert len(chat.calendar()) == 1
+
+
+def test_unavailable_exact_time_then_date_only_gets_openings_not_what_day() -> None:
+    chat = Harness()
+    invited(chat)
+    chat.hold(datetime(2026, 10, 13, 20, tzinfo=UTC), "busy-1pm")
+    chat.model.replies["Oct 13"] = ask("availability", "2026-10-13")
+    chat.text("Oct 13 at 1 pm (availability)")
+    followup = chat.text("Oct 13")
+    assert "Open times on Tue Oct 13" in followup.text and "What day" not in followup.text
+    assert len(chat.calendar()) == 1
+
+
+@pytest.mark.parametrize("day", ["2026-10-17", "2026-11-11", "2027-03-01"])
+def test_weekend_holiday_or_beyond_horizon_exact_time_creates_nothing(day: str) -> None:
+    chat = Harness()
+    invited(chat)
+    chat.model.replies["x"] = ask("request_booking", day, day, "13:00", "13:00")
+    reply = chat.text("x")
+    assert not reply.committed and "Reply YES to request it" not in reply.text
+    assert chat.calendar() == ()
+
+
+ACCEPT = "lovely, lets lock that in"  # No keyword the deterministic matcher knows.
+
+
+def offered(chat: Harness) -> None:
+    invited(chat)
+    chat.text("Oct 13 at 1 pm (availability)")
+    chat.model.replies[ACCEPT] = ask(
+        "request_booking", "2026-10-13", "2026-10-13", "13:00", "13:00")
+
+
+def test_model_reads_a_free_form_acceptance_and_requests_the_offered_time() -> None:
+    chat = Harness()
+    offered(chat)
+    calls = len(chat.model.calls)
+    booked = chat.text(ACCEPT)
+    assert len(chat.model.calls) == calls + 1  # The model, not the keyword matcher, decided.
+    assert booked.committed and booked.appointment_id is not None
+    assert "pending owner approval" in booked.text
+    assert chat.status(booked.appointment_id) == CalendarStatus.PENDING_APPROVAL
+    assert len(chat.calendar()) == 1
+
+
+def test_model_cannot_request_a_time_that_was_not_offered() -> None:
+    chat = Harness()
+    offered(chat)
+    chat.model.replies[ACCEPT] = ask(
+        "request_booking", "2026-10-13", "2026-10-13", "15:00", "15:00")
+    reply = chat.text(ACCEPT)
+    assert not reply.committed and chat.calendar() == ()
+
+
+def test_request_booking_without_an_open_offer_only_offers_times() -> None:
+    chat = Harness()
+    invited(chat)
+    chat.model.replies[ACCEPT] = ask(
+        "request_booking", "2026-10-13", "2026-10-13", "13:00", "13:00")
+    reply = chat.text(ACCEPT)
+    assert not reply.committed and "Reply YES" in reply.text
+    assert chat.calendar() == ()
+
+
+def test_request_booking_after_the_offer_expires_writes_nothing() -> None:
+    chat = Harness()
+    offered(chat)
+    chat.now += timedelta(minutes=31)
+    calls = len(chat.model.calls)
+    assert not chat.text(ACCEPT).committed
+    assert len(chat.model.calls) == calls + 1
+    assert chat.calendar() == ()
+
+
+def test_same_receipt_replayed_through_the_model_creates_one_hold() -> None:
+    chat = Harness()
+    offered(chat)
+    first = chat.text(ACCEPT)
+    chat.count -= 1  # The same inbound SM id is delivered again.
+    again = chat.text(ACCEPT)
+    assert first.committed and not again.committed  # The offer was consumed; no second write.
+    assert len(chat.calendar()) == 1
+
+
+def test_offer_taken_before_a_free_form_acceptance_writes_nothing() -> None:
+    chat = Harness()
+    offered(chat)
+    chat.hold(datetime(2026, 10, 13, 20, tzinfo=UTC), "taken")
+    reply = chat.text(ACCEPT)
+    assert not reply.committed and "no longer open" in reply.text
+    assert len(chat.calendar()) == 1
+
+
+def test_free_form_acceptance_of_a_move_offer_keeps_the_original_confirmed() -> None:
+    chat = Harness()
+    visit = chat.hold(THURSDAY, "visit", confirm=True)
+    chat.model.replies["Can I move Thursday to Friday morning?"] = ask(
+        "reschedule", "2026-10-02", "2026-10-02", "08:00", "12:00", "2026-10-01")
+    chat.text("Can I move Thursday to Friday morning?")
+    chat.model.replies[ACCEPT] = ask(
+        "request_booking", "2026-10-02", "2026-10-02", "08:00", "08:00")
+    moved = chat.text(ACCEPT)
+    assert moved.committed and moved.text.startswith("Requested a move to Fri Oct 2 at 8:00 AM")
+    assert chat.status(visit) == CalendarStatus.CONFIRMED
+    assert moved.appointment_id is not None
+    replacement = chat.store.read_appointment(moved.appointment_id)
+    assert replacement is not None and replacement.replaces_appointment_id == visit
+
+
+def test_another_client_on_the_same_phone_cannot_use_a_previous_clients_offer() -> None:
+    chat = Harness()
+    offered(chat)
+    state = chat.states.read_state("pilot", "+14155550101")
+    assert state is not None
+    chat.states.put_state(ConversationState(
+        state.business_id, state.sender, state.state_id, state.kind, state.created_at,
+        state.expires_at, state.options, state.appointment_id, state.appointment_version,
+        "client-other"))
+    reply = chat.text(ACCEPT)
+    assert not reply.committed and chat.calendar() == ()
