@@ -59,7 +59,8 @@ class NeverModel:
         if len(context.pending) != 1:
             return OwnerReplyProposal(OwnerReplyIntent.UNCLEAR, None, Confidence.HIGH)
         return OwnerReplyProposal(OwnerReplyIntent.APPROVE_NAMED_REQUEST,
-                                  context.pending[0].ref, Confidence.HIGH)
+                                  context.pending[0].ref, Confidence.HIGH,
+                                  request_version=context.pending[0].version)
 
 
 class Consent:

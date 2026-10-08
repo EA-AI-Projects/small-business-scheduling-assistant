@@ -1034,8 +1034,22 @@ class ConversationService:
                 # only an exact APPROVE <ref> does.
                 return unsure("That reply doesn't approve or decline the request.")
             approving = intent == OwnerReplyIntent.APPROVE_NAMED_REQUEST
-            candidate = named if gated else (targets[0] if len(targets) == 1 else None)
             reference = (proposal.request_reference or "").lower()
+            chosen = [target for target in targets if len(reference) >= 8
+                      and target.appointment_id.startswith(reference)]
+            if len(chosen) == 1 and proposal.request_version != chosen[0].version:
+                # A missing or different version means the model mis-copied or used an old
+                # snapshot. It is never a decision; nothing changes.
+                return unsure("I couldn't match that to a current request, so nothing changed.")
+            if len(targets) > 1:
+                # Several are pending: a decision is never inferred from a short reply. If the
+                # model names exactly one current request and its current version, the owner
+                # is asked to confirm it with the exact command. Nothing changes.
+                plain = supports_approval(body) if approving else supports_decline(body)
+                if len(chosen) == 1 and not plain:
+                    return self._ask_decision(receipt, chosen[0], approving, now, True)
+                return unsure("I wasn't sure which request you meant.")
+            candidate = named if gated else (targets[0] if len(targets) == 1 else None)
             if (candidate is not None and len(targets) == 1 and len(reference) >= 8
                     and candidate.appointment_id.startswith(reference)):
                 if supports_approval(body) if approving else supports_decline(body):
@@ -1046,6 +1060,21 @@ class ConversationService:
                 return self._ask_decision(receipt, candidate, approving, now)
             return unsure("That request may have changed." if was_named
                           else "I wasn't sure what you meant.")
+        if intent == OwnerReplyIntent.PREPARE_COUNTEROFFER:
+            if offers is None:
+                return unsure("I wasn't sure what you meant.")
+            # Owner tool (#274): drafts the offer text only; sending still needs the owner's YES.
+            try:
+                return offers.prepare_from_model(
+                    receipt, now, targets, proposal.request_reference, proposal.request_version,
+                    proposal.offer_date, proposal.offer_time, calendar_last)
+            except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+                return ConversationOutcome(
+                    "I couldn't prepare that offer right now, so nothing was sent. "
+                    "Please try again later.")
+        if intent == OwnerReplyIntent.SHOW_REQUESTS:
+            return self._show_requests(receipt.business_id, targets, proposal.request_reference,
+                                       view)
         if intent == OwnerReplyIntent.CONFIRM_OFFER:
             if (offers is not None and view is not None and live and kind == "offer_prompt"
                     and supports_offer_send(body)):
@@ -1073,14 +1102,35 @@ class ConversationService:
         return unsure("I wasn't sure what you meant.")
 
     def _ask_decision(self, receipt: InboundReceipt, target: Appointment, approving: bool,
-                      now: datetime) -> ConversationOutcome:
+                      now: datetime, exact: bool = False) -> ConversationOutcome:
+        """Ask for confirmation; ``exact`` names the full command because several are pending."""
         self._owner_questions.mark_clarified(
             receipt.business_id, receipt.sender, now, target.appointment_id, target.version,
             receipt.provider_id)
         verb, other = ("approve", "DECLINE") if approving else ("decline", "APPROVE")
+        ref = f" {target.appointment_id[:8]}" if exact else ""
         return ConversationOutcome(
             f"Do you want to {verb} {self._request_line(receipt.business_id, target)}? "
-            f"Reply {verb.upper()} to confirm, or {other}. Nothing has changed.")
+            f"Reply {verb.upper()}{ref} to confirm, or {other}{ref}. Nothing has changed.")
+
+    def _show_requests(self, business_id: str, targets: tuple[Appointment, ...],
+                       reference: str | None, view: "OfferView | None") -> ConversationOutcome:
+        """The show_requests owner tool (#274): scoped, read-only details of pending requests."""
+        ref = (reference or "").lower()
+        chosen = [target for target in targets
+                  if len(ref) >= 8 and target.appointment_id.startswith(ref)]
+        if len(chosen) == 1:
+            target = chosen[0]
+            short = target.appointment_id[:8]
+            text = (f"Pending owner approval, not confirmed: "
+                    f"{self._request_line(business_id, target)}, "
+                    f"{target.duration_minutes} minutes. Reply APPROVE {short} "
+                    f"or DECLINE {short} to decide it. Nothing has changed.")
+        else:
+            text = self._pending_summary(business_id, targets)
+        if view is not None and view.live and self._counteroffers is not None:
+            text = f"{text} {self._counteroffers.reminder(view.offer)}"
+        return ConversationOutcome(text)
 
     def _offer_ref(self, view: "OfferView") -> PendingRef:
         assert self._counteroffers is not None
@@ -1117,7 +1167,8 @@ class ConversationService:
     def _pending_ref(self, business_id: str, target: Appointment, zone: ZoneInfo) -> PendingRef:
         profile = self._repository.read_profile(business_id, target.client_id)
         name = profile.name.split()[0] if profile is not None and profile.name.split() else "client"
-        return PendingRef(target.appointment_id[:8], name, when_text(target.start_at, zone))
+        return PendingRef(target.appointment_id[:8], name, when_text(target.start_at, zone),
+                          target.version)
 
     def _ask_owner(self, receipt: InboundReceipt, targets: tuple[Appointment, ...],
                    now: datetime, lead: str) -> ConversationOutcome:

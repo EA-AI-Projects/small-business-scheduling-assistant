@@ -49,7 +49,8 @@ def local(month: int, day: int, hour: int, minute: int = 0) -> datetime:
 
 def proposal(intent: OwnerReplyIntent, request: str | None = None,
              confidence: Confidence = Confidence.HIGH) -> OwnerReplyProposal:
-    return OwnerReplyProposal(intent, request[:8] if request else None, confidence)
+    return OwnerReplyProposal(intent, request[:8] if request else None, confidence,
+                              request_version=1 if request else None)
 
 
 APPROVE = OwnerReplyIntent.APPROVE_NAMED_REQUEST
@@ -76,7 +77,8 @@ class Model:
             return self.script[body]
         if self.hostile and (context.named or context.pending):
             target = context.named or context.pending[0]
-            return OwnerReplyProposal(APPROVE, target.ref, Confidence.HIGH)
+            return OwnerReplyProposal(APPROVE, target.ref, Confidence.HIGH,
+                                      request_version=target.version)
         return UNCLEAR
 
 

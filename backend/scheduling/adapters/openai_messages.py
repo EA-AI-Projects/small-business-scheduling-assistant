@@ -2,7 +2,7 @@
 
 import json
 import re
-from datetime import date
+from datetime import date, time
 from typing import Any
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -18,7 +18,7 @@ from scheduling.domain.owner_reply_classification import (
 
 MODEL = "gpt-6-luna"
 DATE_SHAPE = re.compile(r"\d{4}-\d{2}-\d{2}")
-TIME_SHAPE = re.compile(r"\d{2}:\d{2}")
+TIME_SHAPE = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
 URL = "https://api.openai.com/v1/responses"
 INSTRUCTIONS = (
     "Interpret one text message sent to a home-cleaning business. The text may be in any "
@@ -149,7 +149,7 @@ OWNER_REPLY_INSTRUCTIONS = (
     "waits), offer_closed (an offer was cancelled, sent, or lapsed), or none. "
     "Intents: approve_named_request or decline_named_request only when the reply clearly "
     "decides the one request listed under Named request, or, when last message is none and "
-    "exactly one request is pending, that request; copy its ref exactly. A short yes right "
+    "exactly one request is pending, that request; copy its ref exactly. When several are pending and the reply clearly picks one, name that one (the backend then asks the owner to confirm it). A short yes right "
     "after a calendar answer, an offer, or a closed offer is not an approval: 'confirmed "
     "please', 'yes please', 'ok thanks', 'go ahead' are not approvals then. "
     "confirm_offer when the reply clearly tells the assistant to send the drafted offer; "
@@ -157,7 +157,14 @@ OWNER_REPLY_INSTRUCTIONS = (
     "the statuses or dates already shown (set statuses to confirmed, pending, unavailable "
     "and date_from/date_to only for a new range). calendar_question for a calendar "
     "question that lacks a day or week. how_to when the owner asks how to approve or "
-    "decline or what the assistant can do. Anything else, or any doubt: unclear. "
+    "decline or what the assistant can do. show_requests when the owner asks what is "
+    "pending or for details of a request (set request_reference when one is meant). "
+    "prepare_counteroffer when the owner asks to offer a pending request's client a different "
+    "time: copy that request's ref and version exactly from the pending list and set "
+    "offer_date and offer_time; it only drafts text the owner must still confirm. For "
+    "approve_named_request and decline_named_request also copy the version. Never invent a "
+    "ref, version, date, or time; the backend rejects any that is not current. "
+    "Anything else, or any doubt: unclear. "
     "Set confidence to high only when you are certain; when in doubt choose unclear or "
     "low. Always call classify_owner_reply exactly once."
 )
@@ -177,9 +184,12 @@ OWNER_REPLY_TOOL: dict[str, Any] = {
                                    "enum": ["confirmed", "pending", "unavailable"]}},
             "date_from": _DATE,
             "date_to": _DATE,
+            "request_version": {"type": ["integer", "null"]},
+            "offer_date": _DATE,
+            "offer_time": {"type": ["string", "null"], "description": "HH:MM, 24-hour, or null"},
         },
         "required": ["intent", "request_reference", "confidence", "statuses", "date_from",
-                     "date_to"],
+                     "date_to", "request_version", "offer_date", "offer_time"],
         "additionalProperties": False,
     },
 }
@@ -347,10 +357,12 @@ class OpenAIMessageInterpreter:
                               f"new time {context.offer.when}" if context.offer else "none"),
             "Range shown: " + (f"{context.range_first} to {context.range_last}"
                                if context.range_first and context.range_last else "none"),
-            "Named request: " + (f"ref {named.ref}, {named.client}, {named.when}"
+            "Named request: " + (f"ref {named.ref}, version {named.version}, "
+                                 f"{named.client}, {named.when}"
                                  if named else "none"),
             "Pending requests: " + ("; ".join(
-                f"ref {item.ref}, {item.client}, {item.when}" for item in context.pending)
+                f"ref {item.ref}, version {item.version}, {item.client}, {item.when}"
+                for item in context.pending)
                 or "none"),
             f"Owner reply: {body}",
         ]
@@ -392,10 +404,19 @@ class OpenAIMessageInterpreter:
                     isinstance(statuses, list) and all(item in STATUS_NAMES for item in statuses)))
                 or any(raw[name] is not None and not (
                     isinstance(raw[name], str) and DATE_SHAPE.fullmatch(raw[name]))
-                    for name in ("date_from", "date_to"))):
+                    for name in ("date_from", "date_to", "offer_date"))
+                or (raw["request_version"] is not None and (
+                    not isinstance(raw["request_version"], int)
+                    or isinstance(raw["request_version"], bool)))
+                or (raw["offer_time"] is not None and not (
+                    isinstance(raw["offer_time"], str)
+                    and TIME_SHAPE.fullmatch(raw["offer_time"])))):
             raise ValueError("Model classification values are invalid")
         return OwnerReplyProposal(
             OwnerReplyIntent(raw["intent"]), reference, Confidence(raw["confidence"]),
             frozenset(STATUS_NAMES[item] for item in statuses) if statuses else None,
             date.fromisoformat(raw["date_from"]) if raw["date_from"] else None,
-            date.fromisoformat(raw["date_to"]) if raw["date_to"] else None)
+            date.fromisoformat(raw["date_to"]) if raw["date_to"] else None,
+            raw["request_version"],
+            date.fromisoformat(raw["offer_date"]) if raw["offer_date"] else None,
+            time.fromisoformat(raw["offer_time"]) if raw["offer_time"] else None)
