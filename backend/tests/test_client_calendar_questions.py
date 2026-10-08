@@ -147,8 +147,7 @@ def test_long_single_day_calendar_answer_lists_every_visit_within_sms_limit() ->
 
 
 @pytest.mark.parametrize("failure", ["timeout", "malformed"])
-def test_failed_final_draft_puts_authoritative_read_answer_in_outbox(
-        monkeypatch: pytest.MonkeyPatch, failure: str) -> None:
+def test_failed_final_draft_puts_authoritative_read_answer_in_outbox(failure: str) -> None:
     body = "What times are open tomorrow?"
     baseline = Harness()
     baseline.model.replies[body] = ask("availability", "2026-09-30")
@@ -164,6 +163,7 @@ def test_failed_final_draft_puts_authoritative_read_answer_in_outbox(
     outbox = Reader({("pilot", "SM-draft"): receipt})
     processor = ReceiptProcessor(outbox, chat.service, "pilot", lambda: chat.now)
     assert processor.process("pilot", "SM-draft") == ConversationOutcome(expected)
+    assert [result.kind for _body, result in model.draft_calls] == ["offer_made"]
     assert outbox.replies == [("SM-draft", expected)]
     assert processor.process("pilot", "SM-draft") is None
     assert outbox.replies == [("SM-draft", expected)]

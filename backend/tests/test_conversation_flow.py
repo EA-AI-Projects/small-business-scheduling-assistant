@@ -618,6 +618,25 @@ def test_unavailable_exact_time_then_date_only_gets_openings_not_what_day() -> N
     assert len(chat.calendar()) == 1
 
 
+def test_invitation_sequence_drafts_each_reply_and_falls_back_on_a_bad_draft() -> None:
+    model = DraftScript()
+    chat = Harness(model)
+    invited(chat)
+    chat.hold(datetime(2026, 10, 13, 20, tzinfo=UTC), "busy-1pm")
+    model.replies["Oct 13 at 1 pm"] = ask(
+        "availability", "2026-10-13", "2026-10-13", "13:00", "13:00")
+    model.replies["Oct 13"] = ask("availability", "2026-10-13")
+    first = chat.text("Oct 13 at 1 pm")
+    assert "What day" not in first.text
+    followup = chat.text("Oct 13")
+    assert [result.kind for _body, result in model.draft_calls] == ["offer_made", "offer_made"]
+    assert followup.text == model.draft_calls[-1][1].fallback
+    model.drafts["Oct 13"] = "Tue Oct 13 at 4:00 AM is open. Reply YES."  # Not an offered time.
+    rejected = chat.text("Oct 13")
+    assert rejected.text == model.draft_calls[-1][1].fallback and "4:00 AM" not in rejected.text
+    assert len(chat.calendar()) == 1  # Only the preexisting conflict; nothing was booked.
+
+
 @pytest.mark.parametrize("day", ["2026-10-17", "2026-11-11", "2027-03-01"])
 def test_weekend_holiday_or_beyond_horizon_exact_time_creates_nothing(day: str) -> None:
     chat = Harness()

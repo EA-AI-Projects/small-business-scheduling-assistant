@@ -95,4 +95,5 @@ On 2026-10-08 the owner authorized live runs of these cases against `gpt-6-luna`
 The model-led client path is the shipped path: #272 to #274 supply the typed tools, #282 their live evaluation, and #283 the validated reply drafts. #275 removed the superseded read-only drafter and added offline checks for opt-out (the model is not called) and an over-length draft. No new live model run was made for it. The live evidence is the 2026-10-08 runs above, so the open gaps are:
 - The minimal draft validator was changed after the only live draft run (three of five drafts fell back safely) and has no live rerun.
 - The 37-case tool run is a sampling check (two of four runs passed fully, with misses that cannot write).
+- Owner replies remain fixed backend text; only client replies are model-drafted (#283).
 - No deployment, live SMS, or real conversation was used; the AWS handoff stays disabled until Enrique separately authorizes it.
