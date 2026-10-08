@@ -202,7 +202,8 @@ CASES = (
          history=(INVITE,), today=date(2026, 10, 12)),
     Case("date-only-after-unavailable-time", "client", "Oct 13", (),
          lambda proposal: proposal["intent"] == "availability"
-         and proposal["date_from"] == "2026-10-13" and not proposal["needs_clarification"],
+         and proposal["date_from"] == "2026-10-13" and not proposal["needs_clarification"]
+         and proposal["time_from"] != "13:00",  # The unavailable time is not carried forward.
          prompt_kind="offer", today=date(2026, 10, 12),
          history=(INVITE, ASKED_1PM, UNAVAILABLE_1PM)),
     Case("free-form-acceptance-books-offered-time", "client", "lovely, lets lock that in", (),
@@ -220,9 +221,10 @@ CASES = (
          (), lambda proposal: proposal["intent"] != "request_booking",
          prompt_kind="offer", today=date(2026, 10, 12),
          history=(OFFER_1PM,)),
+    # The offer lapsed (no open prompt) but is still in the transcript: nothing may book.
     Case("acceptance-with-no-open-offer-books-nothing", "client", "sounds good", (),
          lambda proposal: proposal["intent"] != "request_booking",
-         today=date(2026, 10, 12)),
+         history=(OFFER_1PM,), today=date(2026, 10, 12)),
     Case("free-form-yes-confirms-cancel", "client", "yes please, go ahead", TWO_REFS,
          lambda proposal: proposal["intent"] == "confirm_cancel",
          prompt_kind="confirm_cancel",
@@ -236,7 +238,8 @@ CASES = (
          and proposal["date_from"] == "2026-10-02", prompt_kind="confirm_cancel",
          history=(CANCEL_QUESTION,)),
     Case("confirm-cancel-with-no-question-open", "client", "yes please, go ahead", TWO_REFS,
-         lambda proposal: proposal["intent"] != "confirm_cancel"),
+         lambda proposal: proposal["intent"] != "confirm_cancel",
+         history=(CANCEL_QUESTION,)),  # The question lapsed; it is only in the transcript.
 )
 
 
