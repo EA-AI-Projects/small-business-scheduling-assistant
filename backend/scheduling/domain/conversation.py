@@ -186,12 +186,6 @@ class ConversationHistoryReader(Protocol):
 
 
 @runtime_checkable
-class ReadReplyDrafter(Protocol):
-    def draft_read_reply(self, body: str, context: MessageContext,
-                         tool_name: str, tool_result: str) -> str: ...
-
-
-@runtime_checkable
 class ClientReplyDrafter(Protocol):
     def draft_client_reply(self, body: str, context: MessageContext,
                            result: ClientReplyResult) -> str: ...
@@ -447,7 +441,7 @@ class ConversationService:
             except (OSError, ValueError, TypeError, KeyError, RuntimeError):
                 return ConversationOutcome(
                     "I can't check your current visits right now. Please try again later.")
-            return self._draft_read(receipt, context, "list_client_appointments", outcome)
+            return self._bounded_read(outcome)
         if proposal.intent in ("confirm_cancel", "keep_visit"):
             return self._answer_cancel_prompt(receipt, proposal, prompt, targets, policy, now)
         if proposal.intent == "cancel":
@@ -468,7 +462,7 @@ class ConversationService:
             except (OSError, ValueError, TypeError, KeyError, RuntimeError):
                 return ConversationOutcome(
                     "I can't check current openings right now. Please try again later.")
-            return self._draft_read(receipt, context, "list_available_slots", outcome)
+            return self._bounded_read(outcome)
         return ConversationOutcome("Please describe the scheduling change you want.")
 
     def _request_offered_time(self, receipt: InboundReceipt, proposal: MessageProposal,
@@ -554,23 +548,13 @@ class ConversationService:
                     if target is not None else outcome)
         return self._cancel_confirmed(receipt, prompt, targets, zone)
 
-    def _draft_read(self, receipt: InboundReceipt, context: MessageContext,
-                    tool_name: str, outcome: ConversationOutcome) -> ConversationOutcome:
-        """Let the model phrase a read result; retain the authoritative answer on failure."""
+    @staticmethod
+    def _bounded_read(outcome: ConversationOutcome) -> ConversationOutcome:
+        """A read answer must fit one text; the client reply contract drafts it afterward."""
         if len(outcome.text) > 500:
             return ConversationOutcome(
                 "I can't fit the current schedule in one text. Please ask about a shorter range.")
-        if isinstance(self._interpreter, ClientReplyDrafter):
-            return outcome  # The outer client reply contract drafts this once.
-        if (receipt.role != SenderRole.CLIENT or self._history_reader is None
-                or not isinstance(self._interpreter, ReadReplyDrafter)):
-            return outcome
-        try:
-            text = self._interpreter.draft_read_reply(
-                receipt.body or "", context, tool_name, outcome.text)
-        except (OSError, ValueError, TypeError, KeyError, RuntimeError):
-            return outcome
-        return ConversationOutcome(text)
+        return outcome
 
     def _targets(self, receipt: InboundReceipt, now: datetime) -> tuple[Appointment, ...]:
         if receipt.role == SenderRole.OWNER:

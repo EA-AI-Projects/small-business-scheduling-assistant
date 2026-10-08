@@ -10,14 +10,13 @@ a given wording or language that way is covered by the synthetic model evaluatio
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from test_conversation_flow import NOW, THURSDAY, ZONE, Consent, DraftScript, Harness, ask
+from test_conversation_flow import NOW, THURSDAY, ZONE, DraftScript, Harness, ask
 from test_sms_processing import Reader
 
 from evals.scheduling_messages import CASES
 from scheduling.domain.calendar import CalendarEvent, CalendarStatus
 from scheduling.domain.client_records import ClientProfile, HomeSize
-from scheduling.domain.conversation import ConversationOutcome, ConversationService, MessageProposal
-from scheduling.domain.conversation_history import HistoryMessage
+from scheduling.domain.conversation import ConversationOutcome, MessageProposal
 from scheduling.domain.conversation_state import PromptKind
 from scheduling.domain.holds import CreateHold, HoldService
 from scheduling.domain.lifecycle import Action, ActorRole, AppointmentCommand, LifecycleService
@@ -59,19 +58,6 @@ def unchanged(chat: Harness, before: tuple[tuple[str, str, int], ...]) -> None:
     state = chat.states.read_state("pilot", "+14155550101")
     assert state is None or (state.kind == PromptKind.CALENDAR and not state.options
                              and state.appointment_id is None)
-
-
-class EmptyHistory:
-    def read_conversation_history(self, receipt: InboundReceipt,
-                                  now: datetime) -> tuple[HistoryMessage, ...]:
-        return ()
-
-
-def with_read_draft(chat: Harness) -> None:
-    chat.service = ConversationService(
-        chat.store, chat.model, HoldService(chat.store),
-        LifecycleService(chat.store, lambda: chat.now), Consent(), lambda: chat.now,
-        "+14155559999", chat.states, history_reader=EmptyHistory())
 
 
 def test_bookings_this_week_lists_confirmed_and_pending_separately() -> None:
@@ -148,7 +134,6 @@ def test_long_single_day_calendar_answer_lists_every_visit_within_sms_limit() ->
         HoldService(chat.store).create(CreateHold(
             "pilot", "client-1", "client-1", f"same-day-{index}", start, 30), NOW)
 
-    with_read_draft(chat)
     chat.model.replies["Tomorrow?"] = ask("availability", "2026-09-30")
     chat.text("Tomorrow?")  # The calendar answer must also close this open offer.
     before = chat.calendar()
@@ -157,7 +142,6 @@ def test_long_single_day_calendar_answer_lists_every_visit_within_sms_limit() ->
     assert "pending = awaiting owner approval, not confirmed" in answer.text
     for start in starts:
         assert start.astimezone(ZONE).strftime("%Y-%m-%d %H:%M") in answer.text
-    assert chat.model.reads[-1] == ("list_client_appointments", answer.text)
     assert "nothing was booked or cancelled" in answer.text
     unchanged(chat, before)
 
@@ -170,16 +154,11 @@ def test_failed_final_draft_puts_authoritative_read_answer_in_outbox(
     baseline.model.replies[body] = ask("availability", "2026-09-30")
     expected = baseline.text(body).text
 
-    chat = Harness()
-    chat.model.replies[body] = ask("availability", "2026-09-30")
-    with_read_draft(chat)
-
-    def fail_draft(_body: str, _context: object, _tool: str, _result: str) -> str:
-        if failure == "timeout":
-            raise TimeoutError("synthetic timeout")
-        raise ValueError("synthetic malformed draft")
-
-    monkeypatch.setattr(chat.model, "draft_read_reply", fail_draft)
+    model = DraftScript()
+    model.replies[body] = ask("availability", "2026-09-30")
+    model.drafts[body] = (TimeoutError("synthetic timeout") if failure == "timeout"
+                          else ValueError("synthetic malformed draft"))
+    chat = Harness(model)
     receipt = InboundReceipt("pilot", "SM-draft", "+14155550101", "+14155550000",
                              body, chat.now, SenderRole.CLIENT, "client-1", Keyword.OTHER, True)
     outbox = Reader({("pilot", "SM-draft"): receipt})

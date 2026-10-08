@@ -55,7 +55,6 @@ class Script:
         self.contexts: list[MessageContext] = []
         self.owner: dict[str, OwnerReplyIntent] = {}  # Owner reply text to what the model says.
         self.classified: list[str] = []
-        self.reads: list[tuple[str, str]] = []
 
     def propose(self, body: str, context: MessageContext) -> MessageProposal:
         self.calls.append(body)
@@ -68,12 +67,6 @@ class Script:
         reference = context.pending[0].ref if len(context.pending) == 1 else None
         version = context.pending[0].version if len(context.pending) == 1 else None
         return OwnerReplyProposal(intent, reference, Confidence.HIGH, request_version=version)
-
-    def draft_read_reply(self, body: str, context: MessageContext,
-                         tool_name: str, tool_result: str) -> str:
-        self.reads.append((tool_name, tool_result))
-        return tool_result
-
 
 class DraftScript(Script):
     def __init__(self) -> None:
@@ -340,8 +333,6 @@ def test_date_only_followup_uses_invitation_context_and_current_availability() -
     assert "1:00 PM" not in followup.text
     assert chat.model.contexts[-1].history[0].invitation
     assert chat.model.contexts[-1].prompt_kind == "offer"
-    assert [name for name, _result in chat.model.reads] == [
-        "list_available_slots", "list_available_slots"]
     assert len(chat.calendar()) == 1  # The preexisting conflict is unchanged.
 
 
@@ -1130,3 +1121,33 @@ def test_free_form_move_acceptance_is_refused_when_the_original_was_cancelled() 
     moved = chat.text(MOVE_ACCEPT)
     assert not moved.committed and "has changed" in moved.text
     assert chat.calendar() == ()
+
+
+def test_opted_out_client_reaches_neither_the_interpreter_nor_the_drafter() -> None:
+    model = DraftScript()
+    chat = Harness(model)
+    model.replies["Oct 13 at 1 pm"] = ask("availability", "2026-10-13", "2026-10-13", "13:00", "13:00")
+
+    class OptedOut(Consent):
+        def is_opted_out(self, business_id: str, phone_e164: str) -> bool:
+            return True
+
+    chat.service = ConversationService(
+        chat.store, model, HoldService(chat.store),
+        LifecycleService(chat.store, lambda: chat.now), OptedOut(), lambda: chat.now,
+        "+14155559999", chat.states)
+    reply = chat.text("Oct 13 at 1 pm")
+    assert "opted out" in reply.text and not reply.committed
+    assert model.calls == [] and model.draft_calls == []
+    assert chat.calendar() == ()
+
+
+def test_overlong_model_draft_falls_back_to_the_one_segment_safe_reply() -> None:
+    model = DraftScript()
+    chat = Harness(model)
+    invited(chat)
+    body = "Oct 13 at 1 pm (availability)"
+    model.drafts[body] = "Tue Oct 13 at 1:00 PM is open. Reply YES to request it. " + "Thanks! " * 30
+    offer = chat.text(body)
+    assert offer.text == model.draft_calls[-1][1].fallback
+    assert len(chat.calendar()) == 0
