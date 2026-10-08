@@ -169,7 +169,7 @@ def test_calendar_answer_is_drafted_from_first_names_only(
     assert world.state(request) == (PENDING, 1)
 
 
-def test_pending_request_summary_is_drafted_and_the_decision_command_stays_fixed(
+def test_pending_summary_is_written_whole_by_the_model_with_its_own_instructions(
         world: World) -> None:
     first = world.pending(key="a")
     second = world.pending(THURSDAY_9AM + timedelta(days=1), "client-2", "b")
@@ -177,30 +177,31 @@ def test_pending_request_summary_is_drafted_and_the_decision_command_stays_fixed
     assert "2 requests are pending" in safe
     world.model.drafts[ASK_PENDING] = (
         f"Two requests wait for you: Avery on Thu Oct 1 at 9:00 AM (ref {first[:8]}) and "
-        f"Blake on Fri Oct 2 at 9:00 AM (ref {second[:8]}).")
+        f"Blake on Fri Oct 2 at 9:00 AM (ref {second[:8]}). Reply APPROVE {first[:8]} or "
+        f"DECLINE {second[:8]}. Nothing has changed.  ")
     reply = world.owner(ASK_PENDING)
-    assert reply.text.startswith("Two requests wait for you")
-    assert reply.text.endswith(" Nothing has changed. Reply APPROVE or DECLINE with the reference.")
+    # Trimmed, and the whole message: no backend text is appended.
+    assert reply.text.startswith("Two requests wait for you") and reply.text.endswith("changed.")
+    assert reply.text.count("Reply APPROVE") == 1
+    result = world.model.draft_calls[-1][2]
+    assert any("APPROVE <ref>" in item for item in result.instructions)
     assert world.state(first) == world.state(second) == (PENDING, 1)
 
 
-def test_how_to_is_drafted_and_the_exact_instruction_is_appended(world: World) -> None:
+def test_how_to_is_written_by_the_model_from_the_capability_facts(world: World) -> None:
     request = world.pending()
     world.model.drafts[ASK_HOW] = (
-        f"One request is pending: Avery, Thu Oct 1 at 9:00 AM (ref {request[:8]}). I can answer "
-        "calendar questions, draft an offer of another time, and handle approvals.")
+        f"One request is pending: Avery, Thu Oct 1 at 9:00 AM (ref {request[:8]}). Reply "
+        f"APPROVE {request[:8]} to approve it. I can also answer calendar questions.")
     reply = world.owner(ASK_HOW).text
-    assert reply.startswith("One request is pending: Avery")
-    assert reply.endswith(" To approve or decline a request, reply APPROVE or DECLINE with its "
-                          "reference.")
+    assert reply.startswith("One request is pending: Avery") and "I can also answer" in reply
+    assert "2:00 PM" not in " ".join(world.model.draft_calls[-1][2].instructions)
 
 
 @pytest.mark.parametrize("draft", [
     "On Fri Oct 2 Avery has a request, ref {ref}.",      # Invented day.
     "On Thu Oct 1, 3:00 PM Avery has a request, ref {ref}.",   # Invented time.
     "On Thu Oct 1 Avery has a request, ref deadbeef.",   # Invented reference.
-    "On Thu Oct 1 Avery has a request, ref {ref}. I approved it.",  # False claim.
-    "On Thu Oct 1 Avery has a request, ref {ref}. Reply YES to approve.",  # Invented prompt.
     "On Thu Oct 1 Avery has a request, ref {ref}. " + "Very long. " * 60,   # Too long.
     "On Thu Oct 1 Avery has a request — ref {ref}ç.",  # Not GSM-7 text.
     "",
@@ -231,7 +232,8 @@ def test_timeout_malformed_output_and_missing_history_fall_back(world: World) ->
     assert world.state(request) == (PENDING, 1)
 
 
-def test_open_offer_reminder_follows_the_draft_verbatim(world: World) -> None:
+def test_open_offer_is_in_the_facts_and_its_time_does_not_cause_a_refusal(
+        world: World) -> None:
     request = world.pending()
     world.model.script[ASK_THURSDAY_2PM] = call(
         OwnerReplyIntent.PREPARE_COUNTEROFFER, request[:8], 1, THURSDAY, time(14, 0))
@@ -239,18 +241,23 @@ def test_open_offer_reminder_follows_the_draft_verbatim(world: World) -> None:
     assert "Reply YES to send exactly this" in prepared.text
     assert not world.model.draft_calls  # Offer drafts are fixed text, never drafted.
     safe = fixed(world, ASK_CALENDAR)
-    world.model.drafts[ASK_CALENDAR] = (
-        f"Thu Oct 1: Avery's request (ref {request[:8]}) holds 9:00 AM to 11:00 AM.")
-    reply = world.owner(ASK_CALENDAR).text
-    assert reply.startswith("Thu Oct 1: Avery's request")
+    # The fallback is the backend text, unchanged by #285: page, then the exact reminder.
+    assert safe.endswith("is still waiting: reply YES to send it or NO to cancel it. "
+                         f"To approve the original request, reply APPROVE {request[:8]}.")
+    draft = (f"Thu Oct 1: Avery's request (ref {request[:8]}) holds 9:00 AM to 11:00 AM. "
+             "Your offer to Avery for Thu Oct 1 at 2:00 PM still waits: reply YES to send "
+             f"it or NO to cancel it, or APPROVE {request[:8]} for the original request.")
+    world.model.drafts[ASK_CALENDAR] = draft
+    assert world.owner(ASK_CALENDAR).text == draft
     result = world.model.draft_calls[-1][2]
-    assert result.suffix and reply.endswith(result.suffix)
-    assert "reply YES to send it" in reply and " NO " in reply
-    # The drafter cannot reword or drop the reminder: a draft that restates it is refused.
-    world.model.drafts[ASK_CALENDAR] = (
-        f"Thu Oct 1 9:00 AM ref {request[:8]}. Reply YES to send it.")
+    assert result.fallback == safe
+    assert any("YES sends exactly that offer" in item for item in result.instructions)
+    assert any("Thu Oct 1 at 2:00 PM" in item and "Avery" in item
+               for item in result.instructions)
+    # An offer time the backend did not give is refused, and nothing was sent or changed.
+    world.model.drafts[ASK_CALENDAR] = draft.replace("2:00 PM", "4:00 PM")
     assert world.owner(ASK_CALENDAR).text == safe
-    assert world.store.read_active("pilot", OWNER) is not None
+    assert world.store.read_active("pilot", OWNER) is not None and not world.store.outbox
 
 
 def test_approvals_declines_offers_and_counteroffers_never_reach_the_drafter(
@@ -357,7 +364,8 @@ def test_duplicate_inbound_delivery_stores_and_drafts_one_reply(world: World) ->
     assert world.state(request) == (PENDING, 1)
 
 
-def test_paging_footer_is_fixed_text_after_a_drafted_page(world: World) -> None:
+def test_paging_state_is_given_to_the_model_and_the_page_is_written_whole(
+        world: World) -> None:
     for number, offset in enumerate((4, 5, 6, 7, 8)):
         for hour in (0, 5):
             world.pending(THURSDAY_9AM + timedelta(days=offset, hours=hour),
@@ -365,15 +373,12 @@ def test_paging_footer_is_fixed_text_after_a_drafted_page(world: World) -> None:
     ask = "What does next week look like?"
     safe = fixed(world, ask)
     assert "Reply MORE for the rest." in safe
-    world.model.drafts[ask] = lambda result: result.detail or ""
+    world.model.drafts[ask] = lambda result: (result.detail or "") + " Reply MORE for more."
     reply = world.owner(ask).text
     result = world.model.draft_calls[-1][2]
-    assert result.suffix.startswith("\nShowing 1-") and result.suffix.endswith("for the rest.")
-    assert reply == (result.detail or "") + result.suffix
+    assert any(item.startswith("MORE shows the next page") for item in result.instructions)
+    assert reply == (result.detail or "") + " Reply MORE for more."
     assert "Sample" not in reply and "Example" not in reply  # First names only to the model.
-    # A draft that invents its own paging instruction is refused.
-    world.model.drafts[ask] = lambda result: (result.detail or "") + " Reply MORE."
-    assert world.owner(ask).text == safe
 
 
 def test_eval_cases_describe_only_valid_read_only_owner_results() -> None:
@@ -440,22 +445,11 @@ def test_wrong_year_is_refused_and_untouched_year_is_accepted(world: World) -> N
     assert world.owner(ASK_CALENDAR).text == "For Thu Oct 1, 2026: " + entry  # Trimmed.
 
 
-def test_open_offer_cannot_get_a_model_written_yes_prompt(world: World) -> None:
+def test_model_written_prompts_and_instructions_are_accepted(world: World) -> None:
     request = world.pending()
-    world.model.script[ASK_THURSDAY_2PM] = call(
-        OwnerReplyIntent.PREPARE_COUNTEROFFER, request[:8], 1, THURSDAY, time(14, 0))
-    world.owner(ASK_THURSDAY_2PM)
-    safe = fixed(world, ASK_CALENDAR)
+    world.owner(ASK_CALENDAR)
     entry = f"Avery has a request on Thu Oct 1 from 9:00 AM to 11:00 AM (ref {request[:8]})."
-    for prompt in ("Respond YES to approve.", 'Reply "YES" to approve.', "Reply yes.",
-                   "Reply APPROVE " + request[:8] + " to approve.", "YES approves it.",
-                   "A YES approves Ana's request.", "Approve it with a yes.", "Y approves it.",
-                   "NO cancels nothing, YES approves.", "Want it sent? YES or NO", "OK? Y/N",
-                   "Yes or no on the offer?", "**YES** sends it.", "Shoot me a yes.",
-                   "MORE shows the rest.", "Approve it.", "Decline it."):
+    for prompt in ("Reply YES to approve.", f"Reply APPROVE {request[:8]} or DECLINE.",
+                   "Reply MORE for the rest.", "Y/N?"):
         world.model.drafts[ASK_CALENDAR] = f"For Thu Oct 1: {entry} {prompt}"
-        assert world.owner(ASK_CALENDAR).text == safe, prompt
-    # Ordinary lowercase "no" and "more" are fine.
-    world.model.drafts[ASK_CALENDAR] = f"For Thu Oct 1: {entry} No other requests, a few more later."
-    assert "No other requests" in world.owner(ASK_CALENDAR).text
-    assert world.store.read_active("pilot", OWNER) is not None and not world.store.outbox
+        assert world.owner(ASK_CALENDAR).text.endswith(prompt)

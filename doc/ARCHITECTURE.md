@@ -52,22 +52,20 @@ This is the only reply-drafting call (#275 removed the earlier read-only drafter
 draft can attach to the existing pending notification intent, while a sender
 that already claimed the intent sends its safe template.
 Owner replies (#285): the owner's rolling 24-hour thread (history keyed by owner
-phone) is passed to the owner classifier and drafter. A second drafting call
-covers only read-only owner results (a rendered calendar answer, a
-pending-request summary, a how-to). It runs after the backend result, receives
-client first names only, and is used only when every explicit date, time, and
-reference matches the result, each date and time in a sentence or clause belongs
-to the nearest reference's own entry (so requests cannot swap references, dates,
-or times in the usual phrasings), it makes none of a few action claims, and it
-contains no standalone yes/y, uppercase NO/N/MORE, y/n, or APPROVE/DECLINE; the
-exact commands, paging line, and any open-offer reminder are appended as fixed
-text. Enrique accepted the residual risk of model-written owner prose (decision
-on #285, 2026-10-08): statuses and names are not validated, and a contradiction
-remains possible; names are not checked and confirmed visits (which have no reference) are not tied to a time. Any failure, including a history read error, keeps or restores
-the backend text. Approvals,
-declines, offers, counteroffers, and failures are never drafted. The owner reply
-is stored by the existing receipt-based, idempotent path, so a duplicate inbound
-message replays the stored text.
+phone) is passed to the owner classifier and drafter; an unreadable history means
+no transcript, never a failed record. A second model call covers only read-only
+owner results (a rendered calendar answer, a pending-request summary, a how-to)
+and, as for clients, writes the whole message from the backend's facts, the list
+of replies the backend will honor (including an open offer and a continuing
+page), and the backend's existing text as the fallback. It runs after the result
+and receives client first names only. Basic check: GSM-7 within 480 characters,
+exact dates, times, and references per entry (see CONVERSATION.md). Enrique
+chose this and accepted the residual risk (#285, 2026-10-08): names, statuses,
+counts, whether the offer reminder or paging line is included, command wording,
+and model-written YES/NO prompts are not checked. Approvals, declines, offers,
+counteroffers, and failures are never drafted. Any failure, including a history
+read error, sends the backend text, which the existing receipt-based path stores
+once, so a duplicate inbound message replays it.
 The first model call asks the client to retry later on failure. Each model call
 has an eight-second timeout and no internal retry, keeping the two-call path
 inside the worker's 30-second limit. Receipt leases, stable outbox intents,

@@ -80,7 +80,7 @@ BACKEND = ("Mon Oct 5 to Sun Oct 11, 2026: 2 pending requests.\n"
            "Tue Oct 6, 1:00 PM-3:00 PM: Blake (pending, ref b2c3d4e5)")
 OWNER_RESULT = ClientReplyResult(
     "owner_calendar", "read_only", "safe", facts_from_text(BACKEND), None, BACKEND,
-    suffix="\nShowing 1-2 of 3. Reply MORE for the rest.")
+    ("MORE shows the next page",))
 GOOD = ("From Mon Oct 5 to Sun Oct 11 there are two requests. Avery is on Mon Oct 5 from 9:00 AM to 11:00 AM "
         "(ref a1b2c3d4). Blake is on Tue Oct 6 from 1:00 PM to 3:00 PM (ref b2c3d4e5).")
 
@@ -96,9 +96,7 @@ def test_owner_draft_per_entry_and_year_checks() -> None:
             GOOD.replace("Sun Oct 11 there", "Sun Oct 11, 2027 there"),
             GOOD + " Also Wed Oct 7.", GOOD.replace("3:00 PM", "4:00 PM"),
             GOOD.replace(" (ref b2c3d4e5)", ""),
-            GOOD + ' Reply "YES" to approve.', GOOD + " Respond YES.",
-            GOOD + " Reply APPROVE a1b2c3d4 to approve it.",
-            GOOD + " Reply MORE.", GOOD + " Avery's visit was approved."):
+            ):
         assert not valid_owner_draft(bad, OWNER_RESULT), bad
     # Only read-only owner kinds are draftable.
     approve = ClientReplyResult("owner_approval", "approved", "safe", OWNER_RESULT.facts,
@@ -139,17 +137,26 @@ def test_swapped_two_entry_drafts_are_refused(draft: str) -> None:
     assert not valid_owner_draft(draft, PAIR_RESULT)
 
 
-@pytest.mark.parametrize("prompt", [
-    "YES approves it.", "A YES approves Avery's request.", "Approve it with a yes.",
-    "Y approves it.", "NO cancels nothing, YES approves.", "Want it sent? YES or NO",
-    "OK? Y/N", "Yes or no on the offer?", "**YES** sends it.", "Shoot me a yes.",
-    "MORE shows the rest.", "Respond YES.", "Approve it.", "decline it.",
-    "Avery needs you to APPROVE a1b2c3d4."])
-def test_verbless_prompts_and_instructions_are_refused(prompt: str) -> None:
+def test_instructions_and_prompts_are_not_filtered() -> None:
+    # Owner decision on #285: the model writes the instructions; only facts are checked.
     good = ("Avery is on Thu Oct 1 at 9:00 AM (ref a1b2c3d4) and Blake on Fri Oct 2 at "
             "1:00 PM (ref b2c3d4e5). ")
-    assert valid_owner_draft(good, PAIR_RESULT)
-    assert not valid_owner_draft(good + prompt, PAIR_RESULT)
+    for text in ("Reply APPROVE a1b2c3d4 or DECLINE a1b2c3d4. Reply YES to send the offer.",
+                 "Nothing was approved or sent. MORE shows the rest."):
+        assert valid_owner_draft(good + text, PAIR_RESULT)
+
+
+def test_open_offer_facts_may_be_mentioned_but_need_not_be() -> None:
+    offer = facts_from_text("Sat Oct 3 at 2:00 PM a1b2c3d4")
+    result = ClientReplyResult("owner_requests", "read_only", "safe", PAIR_RESULT.facts,
+                               None, PAIR, ("YES sends the open offer",), offer)
+    plain = ("Avery is on Thu Oct 1 at 9:00 AM (ref a1b2c3d4) and Blake on Fri Oct 2 at "
+             "1:00 PM (ref b2c3d4e5).")
+    assert valid_owner_draft(plain, result)
+    assert valid_owner_draft(plain + " Your offer for Sat Oct 3 at 2:00 PM still waits "
+                             "for YES or NO. Or APPROVE a1b2c3d4.", result)
+    assert not valid_owner_draft(plain + " Your offer for Sun Oct 4 at 2:00 PM waits.", result)
+    assert not valid_owner_draft(plain + " Your offer for Sat Oct 3 at 3:00 PM waits.", result)
 
 
 def test_ordinary_lowercase_no_and_more_are_allowed() -> None:

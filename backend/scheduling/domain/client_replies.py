@@ -47,9 +47,11 @@ class ClientReplyResult:
     facts: tuple[ClientReplyFact, ...] = ()
     reason: str | None = None
     detail: str | None = None
-    # Fixed backend text appended verbatim after an owner draft (#285): exact commands, paging
-    # footers, and the open-offer reminder are never left to the model. Client results use none.
-    suffix: str = ""
+    # Owner results (#285): the replies the backend will honor in this situation, as trusted
+    # data for the model to word (never text to copy), and dates, times, and references the
+    # draft may mention but need not (an open offer's time and request reference).
+    instructions: tuple[str, ...] = ()
+    extra_facts: tuple[ClientReplyFact, ...] = ()
 
     @property
     def references(self) -> tuple[str, ...]:
@@ -81,17 +83,6 @@ def valid_draft(draft: str, result: ClientReplyResult) -> bool:
 OWNER_REPLY_LIMIT = 480
 DRAFTABLE_OWNER_KINDS = frozenset({"owner_calendar", "owner_requests", "owner_how_to"})
 YEAR = re.compile(r",?\s+\d{4}$")
-# A draft may not claim a finished action (existing check, deliberately not widened) ...
-FORBIDDEN_OWNER_CLAIMS = re.compile(
-    r"\b(?:approved|declined|cancell?ed|booked)\b"
-    r"|\b(?:was|were|been|i|we|i've|we've)\s+sent\b|\bsent\s+(?:it|the|that|your)\b",
-    re.IGNORECASE)
-# ... nor write its own reply prompt: an open offer's YES is honored by the counteroffer
-# handler, and the backend's fixed suffix already carries every instruction the owner needs.
-# No verb is required: yes/y in any case, uppercase NO/N/MORE, y/n, and APPROVE/DECLINE as
-# whole words are refused (ordinary lowercase "no pending requests" and "a few more" are not).
-OWNER_PROMPTS = re.compile(
-    r"(?i:\b(?:yes|y|approve|decline)\b|\by\s*/\s*n\b)|\b(?:NO|N|MORE)\b")
 CLAUSES = re.compile(r"\b(?:and|while)\b", re.IGNORECASE)
 SEGMENTS = re.compile(r"[\n;]|(?<=[.!?])\s+")
 
@@ -110,12 +101,13 @@ def _core(day: str) -> str:
     return YEAR.sub("", day.lower())
 
 
-def _dates_ok(drafted: set[str], allowed: set[str]) -> bool:
-    """Every drafted date is a backend date (an explicit year must be the backend's own),
-    and every backend date appears (the year of a range header is optional)."""
-    return (all(day in allowed if YEAR.search(day) else _core(day) in {_core(a) for a in allowed}
+def _dates_ok(drafted: set[str], required: set[str], allowed: set[str]) -> bool:
+    """Every drafted date is an allowed one (an explicit year must be the backend's own), and
+    every required date appears (the year of a range header is optional)."""
+    allowed_cores = {_core(day) for day in allowed}
+    return (all(day in allowed if YEAR.search(day) else _core(day) in allowed_cores
                 for day in drafted)
-            and {_core(day) for day in allowed} == {_core(day) for day in drafted})
+            and {_core(day) for day in required} <= {_core(day) for day in drafted})
 
 
 def _entries(backend: str) -> list[tuple[set[str], set[str], str]]:
@@ -129,26 +121,30 @@ def _entries(backend: str) -> list[tuple[set[str], set[str], str]]:
 
 
 def valid_owner_draft(draft: str, result: ClientReplyResult) -> bool:
-    """Basic check of a free-wording owner draft; the backend then appends ``result.suffix``.
+    """Basic check of an owner reply the model wrote in full (#285), like the client check.
 
-    Like the client check: one GSM-7 budget (draft plus suffix within 480), and every explicit
-    date, time, and reference is exactly one of the backend's and every backend one appears.
-    Per entry: each reference-bearing entry appears with its own date and time in one sentence,
+    One GSM-7 budget within 480; every explicit date, time, and reference is one the backend
+    gave (the result's entries, or an open offer's extra facts) and every entry's appears. Per
+    entry: each reference-bearing entry appears with its own date and time in one sentence,
     and within a sentence (split further at "and"/"while") each date and time must belong to
     the nearest reference's own entry; dates and times in a clause with no reference are
     refused unless the backend also writes them outside any such entry (a range header, a
-    confirmed visit, which has no reference). Names, statuses, and other prose are not
-    checked (owner decision on #285, 2026-10-08).
+    confirmed visit) or they are an offer's. Not checked (owner decision on #285, 2026-10-08):
+    names, statuses, counts, whether the offer reminder, paging line, or command wording is
+    included or right, and any YES/NO prompt the model writes.
     """
-    size, fixed = gsm_septets(draft, True), gsm_septets(result.suffix, True)
-    if (result.kind not in DRAFTABLE_OWNER_KINDS or size is None or fixed is None
-            or not draft.strip() or size + fixed > OWNER_REPLY_LIMIT
-            or FORBIDDEN_OWNER_CLAIMS.search(draft) or OWNER_PROMPTS.search(draft)):
+    size = gsm_septets(draft, True)
+    if (result.kind not in DRAFTABLE_OWNER_KINDS or size is None or not draft.strip()
+            or size > OWNER_REPLY_LIMIT):
         return False
     dates, times, refs = _explicit(draft)
-    allowed_dates, allowed_times, allowed_refs = _authorized(result)
-    if not (_dates_ok(dates, allowed_dates) and times == allowed_times
-            and refs == allowed_refs):
+    required = _authorized(result)
+    extra = _authorized(ClientReplyResult("", "", "", result.extra_facts))
+    allowed_dates, allowed_times, allowed_refs = (
+        required[0] | extra[0], required[1] | extra[1], required[2] | extra[2])
+    if not (_dates_ok(dates, required[0], allowed_dates)
+            and times <= allowed_times and required[1] <= times
+            and refs <= allowed_refs and required[2] <= refs):
         return False
     entries = _entries(result.detail or "")
     owned = {ref: ({_core(day) for day in entry_dates}, entry_times)
@@ -166,8 +162,9 @@ def valid_owner_draft(draft: str, result: ClientReplyResult) -> bool:
     # header, a confirmed visit, which carries no reference) are not tied to a request.
     loose = [_explicit(part) for part in SEGMENTS.split(result.detail or "")
              if not _explicit(part)[2]]
-    loose_dates = {_core(day) for dates_, _t, _r in loose for day in dates_}
-    loose_times = {clock for _d, times_, _r in loose for clock in times_}
+    loose_dates = ({_core(day) for dates_, _t, _r in loose for day in dates_}
+                   | {_core(day) for day in extra[0]})
+    loose_times = {clock for _d, times_, _r in loose for clock in times_} | extra[1]
     groups = [_positioned(group) for part in SEGMENTS.split(draft)
               for group in CLAUSES.split(part)]
     for seg_dates, seg_times, seg_refs in groups:
