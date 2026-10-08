@@ -350,8 +350,8 @@ class ConversationService:
             return self._cancel(receipt, proposal, targets)
         if exact:  # BOOK or RESCHEDULE syntax; _request rechecks the literal text.
             return self._request(receipt, proposal, targets, policy, now)
-        # From here on the proposal came from the model: it can only lead to an
-        # offer or a question, never directly to a write.
+        # From here on the proposal came from the model: it can lead to an offer, a question,
+        # or request_booking for a time this client was just offered; nothing else writes.
         if receipt.role != SenderRole.CLIENT:
             return ConversationOutcome(self._clarify(receipt.role, "clarify"))
         if proposal.intent in ("calendar_question", "clarify_booking"):
@@ -386,12 +386,46 @@ class ConversationService:
             original = (self._active_target(receipt, moving.appointment_id, targets)
                         if moving is not None else None)
             try:
+                if proposal.intent == "request_booking":
+                    requested = self._request_offered_time(
+                        receipt, proposal, prompt, targets, policy, now)
+                    if requested is not None:
+                        # Committed: the client gets the request notification instead.
+                        return requested
                 outcome = self._offer_from_proposal(receipt, proposal, policy, now, original)
             except (OSError, ValueError, TypeError, KeyError, RuntimeError):
                 return ConversationOutcome(
                     "I can't check current openings right now. Please try again later.")
             return self._draft_read(receipt, context, "list_available_slots", outcome)
         return ConversationOutcome("Please describe the scheduling change you want.")
+
+    def _request_offered_time(self, receipt: InboundReceipt, proposal: MessageProposal,
+                              prompt: ConversationState | None,
+                              targets: tuple[Appointment, ...], policy: AvailabilityPolicy,
+                              now: datetime) -> ConversationOutcome | None:
+        """The request_booking tool (#272): book one time this client was just offered.
+
+        The model reads the client's acceptance in any wording and names the offered
+        local date and time. The backend writes only if that instant is in this
+        sender's own unexpired stored offer; anything else returns None and the caller
+        offers current times. The hold service rechecks availability and the receipt
+        ID makes a retried text replay. The result is pending owner approval.
+        """
+        if (prompt is None or prompt.kind != PromptKind.OFFER or prompt.expired(now)
+                or proposal.date_from is None or proposal.date_from != proposal.date_to
+                or proposal.time_from is None or proposal.time_from != proposal.time_to):
+            return None
+        try:
+            wall = datetime.combine(date.fromisoformat(proposal.date_from),
+                                    time.fromisoformat(proposal.time_from))
+        except ValueError:
+            return None
+        zone = ZoneInfo(policy.timezone)
+        matches = [option for option in prompt.options
+                   if option.astimezone(zone).replace(tzinfo=None) == wall]
+        if len(matches) != 1:
+            return None
+        return self._book_option(receipt, prompt, matches[0], targets, policy, now)
 
     def _draft_read(self, receipt: InboundReceipt, context: MessageContext,
                     tool_name: str, outcome: ConversationOutcome) -> ConversationOutcome:

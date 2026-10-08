@@ -615,3 +615,69 @@ def test_weekend_holiday_or_beyond_horizon_exact_time_creates_nothing(day: str) 
     reply = chat.text("x")
     assert not reply.committed and "Reply YES to request it" not in reply.text
     assert chat.calendar() == ()
+
+
+def offered(chat: Harness) -> None:
+    invited(chat)
+    chat.text("Oct 13 at 1 pm (availability)")
+
+
+def test_model_reads_a_free_form_acceptance_and_requests_the_offered_time() -> None:
+    chat = Harness()
+    offered(chat)
+    chat.model.replies["sure, that works"] = ask(
+        "request_booking", "2026-10-13", "2026-10-13", "13:00", "13:00")
+    booked = chat.text("sure, that works")
+    assert booked.committed and booked.appointment_id is not None
+    assert "pending owner approval" in booked.text
+    assert chat.status(booked.appointment_id) == CalendarStatus.PENDING_APPROVAL
+
+
+def test_model_cannot_request_a_time_that_was_not_offered() -> None:
+    chat = Harness()
+    offered(chat)
+    chat.model.replies["sure, how about 3"] = ask(
+        "request_booking", "2026-10-13", "2026-10-13", "15:00", "15:00")
+    reply = chat.text("sure, how about 3")
+    assert not reply.committed and chat.calendar() == ()
+
+
+def test_request_booking_without_an_open_offer_only_offers_times() -> None:
+    chat = Harness()
+    invited(chat)
+    chat.model.replies["sure"] = ask(
+        "request_booking", "2026-10-13", "2026-10-13", "13:00", "13:00")
+    reply = chat.text("sure")
+    assert not reply.committed and "Reply YES" in reply.text
+    assert chat.calendar() == ()
+
+
+def test_request_booking_after_the_offer_expires_writes_nothing() -> None:
+    chat = Harness()
+    offered(chat)
+    chat.now += timedelta(minutes=31)
+    chat.model.replies["sure, that works"] = ask(
+        "request_booking", "2026-10-13", "2026-10-13", "13:00", "13:00")
+    assert not chat.text("sure, that works").committed
+    assert chat.calendar() == ()
+
+
+def test_retried_free_form_acceptance_creates_one_hold() -> None:
+    chat = Harness()
+    offered(chat)
+    chat.model.replies["sure, that works"] = ask(
+        "request_booking", "2026-10-13", "2026-10-13", "13:00", "13:00")
+    chat.text("sure, that works")
+    chat.text("sure, that works")
+    assert len(chat.calendar()) == 1
+
+
+def test_offer_taken_by_someone_else_before_acceptance_writes_nothing() -> None:
+    chat = Harness()
+    offered(chat)
+    chat.hold(datetime(2026, 10, 13, 20, tzinfo=UTC), "taken")
+    chat.model.replies["sure, that works"] = ask(
+        "request_booking", "2026-10-13", "2026-10-13", "13:00", "13:00")
+    reply = chat.text("sure, that works")
+    assert not reply.committed and "no longer open" in reply.text
+    assert len(chat.calendar()) == 1
