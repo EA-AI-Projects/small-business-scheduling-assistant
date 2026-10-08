@@ -283,6 +283,12 @@ class ConversationService:
                                clock_text(start, zone), status, reference)
 
     @staticmethod
+    def _client_calendar_status(status: CalendarStatus) -> str:
+        return {CalendarStatus.CONFIRMED: "confirmed",
+                CalendarStatus.PENDING_APPROVAL: "pending owner approval"}.get(
+                    status, "unknown")
+
+    @staticmethod
     def _with_result(outcome: ConversationOutcome, kind: str, status: str,
                      facts: tuple[ClientReplyFact, ...] = (),
                      reason: str | None = None, detail: str | None = None
@@ -536,9 +542,10 @@ class ConversationService:
             target = self._active_target(receipt, prompt.appointment_id, targets)
             kept = f"your {when_text(target.start_at, zone)} visit" if target else "your visit"
             outcome = ConversationOutcome(f"OK, I kept {kept}. Nothing was cancelled.")
-            return (self._with_result(outcome, "cancel_kept", target.status.value,
+            return (self._with_result(outcome, "cancel_kept",
+                                      self._client_calendar_status(target.status),
                                       (self._client_fact(target.start_at, zone,
-                                                         target.status.value,
+                                                         self._client_calendar_status(target.status),
                                                          target.appointment_id[:8]),))
                     if target is not None else outcome)
         return self._cancel_confirmed(receipt, prompt, targets, zone)
@@ -816,9 +823,10 @@ class ConversationService:
                 target = self._active_target(receipt, prompt.appointment_id, targets)
                 kept = f"your {when_text(target.start_at, zone)} visit" if target else "your visit"
                 outcome = ConversationOutcome(f"OK, I kept {kept}. Nothing was cancelled.")
-                return (self._with_result(outcome, "cancel_kept", target.status.value,
+                return (self._with_result(outcome, "cancel_kept",
+                                          self._client_calendar_status(target.status),
                                           (self._client_fact(target.start_at, zone,
-                                                             target.status.value,
+                                                             self._client_calendar_status(target.status),
                                                              target.appointment_id[:8]),))
                         if target is not None else outcome)
             if not answered:
@@ -1430,9 +1438,10 @@ class ConversationService:
                 else "request (still pending approval)")
         outcome = ConversationOutcome(
             f"Cancel your {when_text(target.start_at, zone)} {what}? Reply YES to confirm.")
-        return self._with_result(outcome, "cancel_question", target.status.value,
+        return self._with_result(outcome, "cancel_question",
+                                 self._client_calendar_status(target.status),
                                  (self._client_fact(target.start_at, zone,
-                                                    target.status.value,
+                                                    self._client_calendar_status(target.status),
                                                     target.appointment_id[:8]),))
 
     def _ask_day(self, receipt: InboundReceipt, target: Appointment, zone: ZoneInfo,

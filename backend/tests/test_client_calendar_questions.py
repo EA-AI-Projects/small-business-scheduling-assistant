@@ -112,6 +112,16 @@ def test_drafted_calendar_result_keeps_each_visit_status_with_its_reference() ->
     assert confirmed_reply.text == model.drafts[only]
     assert model.draft_calls[-1][1].status == "confirmed"
 
+    filtered = "Show confirmed visits this week"
+    model.replies[filtered] = cal(*THIS_WEEK, statuses=("confirmed",))
+    model.drafts[filtered] = (
+        f"Thu Oct 1 at 9:00 AM confirmed ref {confirmed[:8]}; "
+        + f"Fri Oct 2 at 9:00 AM pending owner approval ref {pending[:8]}.")
+    filtered_reply = chat.text(filtered)
+    assert filtered_reply.text == model.drafts[filtered]
+    assert model.draft_calls[-1][1].status == "mixed"
+    assert "You also have 1 pending request" in model.draft_calls[-1][1].fallback
+
 
 def test_a_question_in_spanish_gets_the_same_grounded_answer() -> None:
     chat, confirmed, _ = week_with_visits()

@@ -2,6 +2,7 @@
 
 import re
 from dataclasses import dataclass
+from itertools import pairwise
 
 GSM_EXTENSION = frozenset("^{}\\[~]|")
 GSM_BASIC = frozenset(
@@ -68,16 +69,15 @@ def _fact_segments(draft: str, facts: tuple[ClientReplyFact, ...]) -> tuple[str,
             return None
         found.append((pair.start(), pair.end(), fact))
     found.sort(key=lambda item: item[0])
-    if any(first[1] > second[0] for first, second in zip(found, found[1:])):
+    if any(first[1] > second[0] for first, second in pairwise(found)):
         return None
     segments: list[str] = []
     for index, (_, start, fact) in enumerate(found):
         end = found[index + 1][0] if index + 1 < len(found) else len(draft)
         segment = draft[start:end]
-        if fact.reference is not None:
-            if not re.search(rf"\b{re.escape(fact.reference)}\b", segment,
-                             re.IGNORECASE):
-                return None
+        if fact.reference is not None and not re.search(
+                rf"\b{re.escape(fact.reference)}\b", segment, re.IGNORECASE):
+            return None
         segments.append(segment)
     return tuple(segments)
 
@@ -86,6 +86,9 @@ def valid_draft(draft: str, result: ClientReplyResult) -> bool:
     """Reject observed false claims; unrecognized prose falls back conservatively."""
     size = gsm_septets(draft)
     if size is None or size > 160 or draft.count("?") > 1 or not draft.strip():
+        return False
+    if any(fact.status not in {"pending owner approval", "confirmed", "cancelled",
+                               "open", "unavailable"} for fact in result.facts):
         return False
     dates = {match.group().lower() for match in DATE.finditer(draft)}
     times = {match.group().lower().replace(" ", "") for match in TIME.finditer(draft)}
@@ -116,11 +119,11 @@ def valid_draft(draft: str, result: ClientReplyResult) -> bool:
             if not re.search(r"\b(?:open|available|can offer)\b", segment,
                              re.IGNORECASE) or NEGATIVE.search(segment):
                 return False
-        elif fact.status == "unavailable":
-            if not re.search(r"\b(?:unavailable|no longer open|taken)\b", segment,
-                             re.IGNORECASE) or re.search(r"\b(?:is|now) open\b", segment,
-                                                       re.IGNORECASE):
-                return False
+        elif fact.status == "unavailable" and (
+                not re.search(r"\b(?:unavailable|no longer open|taken)\b", segment,
+                              re.IGNORECASE) or re.search(r"\b(?:is|now) open\b", segment,
+                                                        re.IGNORECASE)):
+            return False
     lead = draft[:min((draft.lower().find(f"{fact.date} at {fact.time}".lower())
                        for fact in result.facts), default=len(draft))]
     if result.kind == "offer_made":
@@ -135,7 +138,7 @@ def valid_draft(draft: str, result: ClientReplyResult) -> bool:
                     draft, re.IGNORECASE))
                 and (not CONFIRMED.search(draft)
                      if not any(fact.status == "confirmed" for fact in result.facts) else True)
-                and PENDING.search(draft))
+                and bool(PENDING.search(draft)))
     if result.kind == "cancelled":
         return (bool(CANCELLED.search(draft)) and not NEGATIVE.search(lead)
                 and not PENDING.search(draft) and not CONFIRMED.search(draft))
