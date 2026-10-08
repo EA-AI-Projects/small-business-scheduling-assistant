@@ -30,12 +30,11 @@ from scheduling.domain.client_records import ACCESS_CODE_PATTERN
 from scheduling.domain.client_replies import (
     ClientReplyFact,
     ClientReplyResult,
-    facts_from_text,
     valid_draft,
-    valid_owner_draft,
 )
 from scheduling.domain.conversation import MessageContext
 from scheduling.domain.conversation_history import HistoryMessage
+from scheduling.domain.owner_replies import framed
 from scheduling.domain.owner_reply_classification import (
     OwnerReplyContext,
     OwnerReplyIntent,
@@ -348,7 +347,7 @@ def evaluate_draft(case: DraftCase, key: str) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class OwnerDraftCase:
-    """A read-only owner result the model may reword (#285); the suffix stays fixed text."""
+    """A read-only owner result whose opening sentence the model may write (#285)."""
 
     name: str
     message: str
@@ -356,9 +355,8 @@ class OwnerDraftCase:
     history: tuple[tuple[str, str], ...] = ()
 
 
-def owner_result(kind: str, model_body: str, suffix: str) -> ClientReplyResult:
-    return ClientReplyResult(kind, "read_only", model_body + suffix,
-                             facts_from_text(model_body), None, model_body, suffix)
+def owner_result(kind: str, fallback: str, model_body: str) -> ClientReplyResult:
+    return ClientReplyResult(kind, "read_only", fallback, (), None, model_body)
 
 
 OWNER_ASKED = ("owner", "what's waiting for me?")
@@ -366,35 +364,47 @@ OWNER_ANSWERED = ("assistant", (
     "2 requests are pending, so nothing changed: Avery Sample, Thu Oct 1 at 9:00 AM "
     "(ref a101a101); Blake Example, Fri Oct 2 at 1:00 PM (ref b202b202). Reply APPROVE or "
     "DECLINE with the reference."))
+HOW_TO_TAIL = (" To approve or decline a request, reply APPROVE or DECLINE with its "
+               "reference.")
 
 OWNER_DRAFT_CASES = (
     OwnerDraftCase("owner-calendar-day", "what does Thursday look like?", owner_result(
         "owner_calendar",
         "Thu Oct 1, 2026 (America/Los_Angeles): 1 pending request.\n"
-        "Thu Oct 1, 9:00 AM-11:00 AM: Avery (pending, ref a101a101)", "")),
+        "Thu Oct 1, 9:00 AM-11:00 AM: Avery Sample (pending, ref a101a101)",
+        "Thu Oct 1, 2026 (America/Los_Angeles): 1 pending request.\n"
+        "Thu Oct 1, 9:00 AM-11:00 AM: Avery (pending, ref a101a101)")),
     OwnerDraftCase("owner-calendar-page-keeps-paging-line", "show me next week", owner_result(
         "owner_calendar",
         "Mon Oct 5 to Sun Oct 11, 2026 (America/Los_Angeles): 1 confirmed visit, "
-        "1 pending request.\nMon Oct 5, 9:00 AM-11:00 AM: Blake (confirmed)\n"
-        "Tue Oct 6, 1:00 PM-3:00 PM: Avery (pending, ref a101a101)",
-        "\nShowing 1-2 of 3. Reply MORE for the rest.")),
+        "1 pending request.\nMon Oct 5, 9:00 AM-11:00 AM: Blake Example (confirmed)\n"
+        "Tue Oct 6, 1:00 PM-3:00 PM: Avery Sample (pending, ref a101a101)\n"
+        "Showing 1-2 of 3. Reply MORE for the rest.",
+        "Mon Oct 5 to Sun Oct 11, 2026: 1 confirmed visit, 1 pending request.")),
     OwnerDraftCase("owner-pending-summary", "what is pending?", owner_result(
         "owner_requests",
+        "2 requests are pending, so nothing changed: Avery Sample, Thu Oct 1 at 9:00 AM "
+        "(ref a101a101); Blake Example, Fri Oct 2 at 1:00 PM (ref b202b202). Reply APPROVE "
+        "or DECLINE with the reference.",
         "2 requests are pending: Avery, Thu Oct 1 at 9:00 AM (ref a101a101); Blake, "
-        "Fri Oct 2 at 1:00 PM (ref b202b202).",
-        " Nothing has changed. Reply APPROVE or DECLINE with the reference.")),
+        "Fri Oct 2 at 1:00 PM (ref b202b202).")),
     OwnerDraftCase("owner-one-request-detail", "tell me about Avery's request", owner_result(
         "owner_requests",
-        "Pending owner approval, not confirmed: Avery, Thu Oct 1 at 9:00 AM (ref a101a101), "
-        "120 minutes.",
-        " Reply APPROVE a101a101 or DECLINE a101a101 to decide it. Nothing has changed."),
-        (OWNER_ASKED, OWNER_ANSWERED)),
+        "Pending owner approval, not confirmed: Avery Sample, Thu Oct 1 at 9:00 AM "
+        "(ref a101a101), 120 minutes. Reply APPROVE a101a101 or DECLINE a101a101 to decide "
+        "it. Nothing has changed.",
+        "Pending owner approval, not confirmed: Avery, Thu Oct 1 at 9:00 AM "
+        "(ref a101a101), 120 minutes."), (OWNER_ASKED, OWNER_ANSWERED)),
     OwnerDraftCase("owner-how-to", "how do I approve something?", owner_result(
-        "owner_how_to", "One request is pending: Avery, Thu Oct 1 at 9:00 AM (ref a101a101).",
-        " To approve or decline a request, reply APPROVE or DECLINE with its reference.")),
+        "owner_how_to",
+        "One request is pending: Avery Sample, Thu Oct 1 at 9:00 AM (ref a101a101)."
+        + HOW_TO_TAIL + " I can answer calendar questions.",
+        "One request is pending: Avery, Thu Oct 1 at 9:00 AM (ref a101a101).")),
     OwnerDraftCase("owner-how-to-no-requests", "what can you do?", owner_result(
-        "owner_how_to", "No request is waiting for approval right now.",
-        " To approve or decline a request, reply APPROVE or DECLINE with its reference.")),
+        "owner_how_to",
+        "No request is waiting for approval right now, so nothing changed." + HOW_TO_TAIL
+        + " I can answer calendar questions.",
+        "No request is waiting for approval right now.")),
 )
 
 
@@ -419,8 +429,9 @@ def evaluate_owner_draft(case: OwnerDraftCase, key: str) -> dict[str, Any]:
                              history=history)
     draft = OpenAIMessageInterpreter(key, 30).draft_owner_reply(
         case.message, context, case.result)
-    return {"case": case.name, "passed": valid_owner_draft(draft, case.result),
-            "draft": draft, "sent_text": draft + case.result.suffix}
+    reply = framed(draft, case.result.fallback)
+    return {"case": case.name, "passed": reply is not None, "draft": draft,
+            "sent_text": reply or case.result.fallback}
 
 
 def context_for(case: Case, today: date = TODAY) -> MessageContext:

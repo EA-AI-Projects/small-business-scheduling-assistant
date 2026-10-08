@@ -52,15 +52,15 @@ This is the only reply-drafting call (#275 removed the earlier read-only drafter
 draft can attach to the existing pending notification intent, while a sender
 that already claimed the intent sends its safe template.
 Owner replies (#285): the owner's rolling 24-hour thread (history keyed by owner
-phone) is passed to the owner classifier and drafter. A second drafting call
-covers only read-only owner results (a rendered calendar answer, a
-pending-request summary, a how-to). It runs after the backend result, receives
-client first names only, and is used only when dates, times, and references
-match the result and the text makes no action claim; the exact commands, paging
-line, and any open-offer reminder are appended as fixed text. Approvals,
-declines, offers, counteroffers, and failures are never drafted. The owner reply
-is stored by the existing receipt-based, idempotent path, so a duplicate inbound
-message replays the stored text.
+phone) is passed to the owner classifier and drafter; an unreadable history means
+no transcript, never a failed record. A second model call covers only read-only
+owner results (a rendered calendar answer, a pending-request summary, a how-to).
+Since the owner acts on exact references in these texts, the model writes one
+short opening sentence only, accepted by a strict vocabulary check (no digits,
+dates, names, statuses, actions, or commands). The backend's existing reply
+follows it unchanged and exactly once. Approvals, declines, offers,
+counteroffers, and failures are never drafted. The text is stored by the existing
+receipt-based path, so a duplicate inbound message replays the stored reply.
 The first model call asks the client to retry later on failure. Each model call
 has an eight-second timeout and no internal retry, keeping the two-call path
 inside the worker's 30-second limit. Receipt leases, stable outbox intents,

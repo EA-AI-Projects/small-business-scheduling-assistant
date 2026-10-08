@@ -71,28 +71,3 @@ def test_gsm_segment_budget_counts_extensions_and_rejects_nonprintable_text() ->
     assert valid_draft("^" * 80, result)
     assert not valid_draft("^" * 81, result)
     assert not valid_draft("`", result)
-
-
-OWNER_RESULT = ClientReplyResult(
-    "owner_calendar", "read_only", "safe", (
-        ClientReplyFact("Mon Oct 5, 2026", None, "listed"),
-        ClientReplyFact("Mon Oct 5", None, "listed"),
-        ClientReplyFact("", "9:00 AM", "listed"),
-        ClientReplyFact("", None, "listed", "a1b2c3d4")),
-    suffix="\nShowing 1-1 of 2. Reply MORE for the rest.")
-
-
-def test_owner_draft_keeps_dates_times_and_refs_but_may_drop_the_range_year() -> None:
-    from scheduling.domain.client_replies import valid_owner_draft
-    assert valid_owner_draft("Mon Oct 5: Avery, 9:00 AM, ref a1b2c3d4.", OWNER_RESULT)
-    assert valid_owner_draft("Mon Oct 5, 2026\nAvery 9:00 AM ref a1b2c3d4", OWNER_RESULT)
-    for bad in ("Tue Oct 5: Avery, 9:00 AM, ref a1b2c3d4.",
-                "Mon Oct 5: Avery, 10:00 AM, ref a1b2c3d4.",
-                "Mon Oct 5: Avery, 9:00 AM.",
-                "Mon Oct 5: Avery, 9:00 AM, ref a1b2c3d4. Reply MORE.",
-                "Mon Oct 5: Avery's visit was approved, ref a1b2c3d4, 9:00 AM.",
-                "x" * 460):
-        assert not valid_owner_draft(bad, OWNER_RESULT)
-    # Only read-only owner kinds are draftable.
-    approve = ClientReplyResult("owner_approval", "approved", "safe", OWNER_RESULT.facts)
-    assert not valid_owner_draft("Mon Oct 5: Avery, 9:00 AM, ref a1b2c3d4.", approve)

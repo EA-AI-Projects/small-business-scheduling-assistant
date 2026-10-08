@@ -33,14 +33,7 @@ from scheduling.domain.client_calendar_questions import (
 from scheduling.domain.client_calendar_questions import answer as answer_client_question
 from scheduling.domain.client_calendar_questions import compact_list as compact_client_list
 from scheduling.domain.client_records import ClientProfile
-from scheduling.domain.client_replies import (
-    DRAFTABLE_OWNER_KINDS,
-    ClientReplyFact,
-    ClientReplyResult,
-    facts_from_text,
-    valid_draft,
-    valid_owner_draft,
-)
+from scheduling.domain.client_replies import ClientReplyFact, ClientReplyResult, valid_draft
 from scheduling.domain.conversation_history import HistoryMessage
 from scheduling.domain.conversation_state import (
     MAX_OPTIONS,
@@ -84,6 +77,7 @@ from scheduling.domain.owner_calendar_questions import (
     ReplyLookup,
     last_answered_at,
 )
+from scheduling.domain.owner_replies import DRAFTABLE_OWNER_KINDS, framed
 from scheduling.domain.owner_reply_classification import (
     Confidence,
     OwnerReplyClassifier,
@@ -283,28 +277,28 @@ class ConversationService:
             draft = self._interpreter.draft_client_reply(receipt.body, context, result)
             if valid_draft(draft, result):
                 return replace(outcome, text=draft)
-        except (OSError, ValueError, TypeError, KeyError, RuntimeError):
-            pass
+        except Exception:  # noqa: BLE001 - the draft is optional; any failure keeps the safe text
+            return outcome
         return outcome
 
     def _draft_owner(self, receipt: InboundReceipt, outcome: ConversationOutcome
                      ) -> ConversationOutcome:
-        """Reword an owner calendar answer, request summary, or how-to (#285).
+        """Let the model open an owner calendar answer, request summary, or how-to (#285).
 
+        The owner acts on exact references from these texts, so the model writes one
+        opening sentence only, and it is used only if it carries no fact, count, status,
+        name, or instruction (``framed``). The backend's own text follows it byte for byte.
         Only read-only results carry a draftable kind; every approval, decline, offer, and
-        counteroffer text stays fixed. The model sees the owner's 24-hour thread, never writes,
-        and its text is used only if it keeps exactly the backend's dates, times, and
-        references. The backend's fixed suffix (commands, paging footer, open-offer reminder)
-        follows it verbatim. Any failure or mismatch sends the existing fallback text.
+        counteroffer text stays fixed. Any failure or rejection sends the existing text.
         """
         result = outcome.reply_result
         if (result is None or outcome.committed or receipt.body is None
+                or result.kind not in DRAFTABLE_OWNER_KINDS
                 or receipt.sender != self._owner_number
                 or not isinstance(self._interpreter, OwnerReplyDrafter)):
             return outcome
         try:
-            if (result.kind not in DRAFTABLE_OWNER_KINDS
-                    or self._consent.is_opted_out(receipt.business_id, receipt.sender)):
+            if self._consent.is_opted_out(receipt.business_id, receipt.sender):
                 return outcome
             now = self._clock()
             policy = self._repository.read_policy(receipt.business_id)
@@ -313,20 +307,20 @@ class ConversationService:
                 policy.timezone, (), policy.booking_horizon_days,
                 history=(self._history_reader.read_conversation_history(receipt, now)
                          if self._history_reader is not None else ()))
-            draft = self._interpreter.draft_owner_reply(receipt.body, context, result)
-            if valid_owner_draft(draft, result):
-                return replace(outcome, text=draft + result.suffix)
-        except (OSError, ValueError, TypeError, KeyError, RuntimeError):
-            pass
+            reply = framed(self._interpreter.draft_owner_reply(receipt.body, context, result),
+                           outcome.text)
+            if reply is not None:
+                return replace(outcome, text=reply)
+        except Exception:  # noqa: BLE001 - the draft is optional; any failure keeps the safe text
+            return outcome
         return outcome
 
     @staticmethod
-    def _owner_result(outcome: ConversationOutcome, kind: str, model_body: str,
-                      suffix: str) -> ConversationOutcome:
-        """Mark a read-only owner reply as draftable; its facts are those of ``model_body``."""
+    def _owner_result(outcome: ConversationOutcome, kind: str, model_body: str
+                      ) -> ConversationOutcome:
+        """Mark a read-only owner reply as draftable. ``model_body`` is what the model reads."""
         return replace(outcome, reply_result=ClientReplyResult(
-            kind, "read_only", outcome.text, facts_from_text(model_body), None, model_body,
-            suffix))
+            kind, "read_only", outcome.text, (), None, model_body))
 
     @staticmethod
     def _client_fact(start: datetime, zone: ZoneInfo, status: str,
@@ -1136,8 +1130,7 @@ class ConversationService:
         outcome = ConversationOutcome(f"{text} {note}" if note else text)
         if answer.model_body is None:
             return outcome
-        return self._owner_result(outcome, "owner_calendar", answer.model_body,
-                                  answer.footer + (f" {note}" if note else ""))
+        return self._owner_result(outcome, "owner_calendar", answer.model_body)
 
     def _route_with_model(self, receipt: InboundReceipt, targets: tuple[Appointment, ...],
                           now: datetime, view: "OfferView | None") -> ConversationOutcome:
@@ -1216,10 +1209,7 @@ class ConversationService:
                 tuple(self._pending_ref(receipt.business_id, target, zone)
                       for target in targets[:MAX_CONTEXT_APPOINTMENTS]),
                 self._offer_ref(view) if view is not None else None,
-                # The owner's 24-hour thread (#285). A read failure fails closed like any
-                # other model failure: the owner is asked, and nothing changes.
-                self._history_reader.read_conversation_history(receipt, now)
-                if self._history_reader is not None else ()))
+                self._owner_history(receipt, now)))
         except (OSError, ValueError, TypeError, KeyError, RuntimeError):
             return unsure("I couldn't tell what you meant.")
         if proposal.confidence != Confidence.HIGH:
@@ -1299,6 +1289,18 @@ class ConversationService:
                                  intent == OwnerReplyIntent.CALENDAR_QUESTION)
         return unsure("I wasn't sure what you meant.")
 
+    def _owner_history(self, receipt: InboundReceipt, now: datetime
+                       ) -> tuple[HistoryMessage, ...]:
+        """The owner's 24-hour thread (#285) for the classifier. It is optional context: any
+        read failure (a DynamoDB throttle included) means no transcript, as before #285. The
+        backend still validates everything the model proposes, so this can never cause a write."""
+        if self._history_reader is None:
+            return ()
+        try:
+            return self._history_reader.read_conversation_history(receipt, now)
+        except Exception:  # noqa: BLE001
+            return ()
+
     def _ask_decision(self, receipt: InboundReceipt, target: Appointment, approving: bool,
                       now: datetime, exact: bool = False) -> ConversationOutcome:
         """Ask for confirmation; ``exact`` names the full command because several are pending."""
@@ -1331,20 +1333,14 @@ class ConversationService:
             model_body = (f"Pending owner approval, not confirmed: "
                           f"{self._request_line(business_id, target, True)}, "
                           f"{target.duration_minutes} minutes.")
-            suffix = (f" Reply APPROVE {short} or DECLINE {short} to decide it. "
-                      "Nothing has changed.")
         else:
             text = self._pending_summary(business_id, targets)
             model_body = self._pending_summary(business_id, targets, False, True)
-            suffix = (" Nothing has changed." if not targets else
-                      " Nothing has changed. Reply APPROVE or DECLINE with "
-                      + ("its reference." if len(targets) == 1 else "the reference."))
         note = ""
         if view is not None and view.live and self._counteroffers is not None:
             note = f" {self._counteroffers.reminder(view.offer)}"
             text = f"{text}{note}"
-        return self._owner_result(ConversationOutcome(text), "owner_requests", model_body,
-                                  suffix + note)
+        return self._owner_result(ConversationOutcome(text), "owner_requests", model_body)
 
     def _offer_ref(self, view: "OfferView") -> PendingRef:
         assert self._counteroffers is not None
@@ -1376,9 +1372,7 @@ class ConversationService:
         if calendar_question:
             return outcome  # A question back to the owner is fixed text.
         pending = ("" if live else self._pending_summary(business_id, targets, False, True))
-        return self._owner_result(
-            outcome, "owner_how_to", pending,
-            f" To approve or decline a request, reply APPROVE or DECLINE with its reference.{note}")
+        return self._owner_result(outcome, "owner_how_to", pending)
 
     def _question_sent_at(self, receipt: InboundReceipt, asked_by: str) -> datetime | None:
         """When the saved reply to ``asked_by`` was sent; None unless it surely was."""

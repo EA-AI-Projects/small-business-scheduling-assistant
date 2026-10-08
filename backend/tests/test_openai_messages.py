@@ -297,14 +297,13 @@ def test_owner_classifier_and_draft_receive_the_transcript_but_not_the_fallback_
     assert "synthetic assistant answer" in sent[0]["input"]
     result = ClientReplyResult(
         "owner_requests", "read_only", "Reply APPROVE or DECLINE: Avery Sample, Thu Oct 1",
-        (ClientReplyFact("Thu Oct 1", None, "listed"),), None,
-        "One request is pending: Avery, Thu Oct 1.", " Nothing has changed.")
+        (), None, "One request is pending: Avery, Thu Oct 1.")
     draft = model.draft_owner_reply("what is pending", MessageContext(
         SenderRole.OWNER, date(2026, 10, 4), "America/Los_Angeles", (), history=history), result)
-    assert draft == "Avery waits on Thu Oct 1."
+    assert draft == "Avery waits on Thu Oct 1."  # Validated later by the backend.
     payload = sent[1]
     assert payload["store"] is False and payload["tool_choice"]["name"] == "draft_sms"
     assert "synthetic assistant answer" in payload["input"]
     assert "Avery, Thu Oct 1" in payload["input"]
-    # Neither the full name nor the fixed suffix leaves the backend.
-    assert "Sample" not in payload["input"] and "Nothing has changed" not in payload["input"]
+    # The full name and the backend's stored reply text never leave the backend.
+    assert "Sample" not in payload["input"] and "Reply APPROVE" not in payload["input"]
