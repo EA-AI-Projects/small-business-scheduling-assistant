@@ -422,6 +422,49 @@ class CounterofferService:
             return ConversationOutcome(parsed.question)
         return self._prepare(receipt, now, parsed)
 
+    def prepare_from_model(self, receipt: InboundReceipt, now: datetime,
+                           pending: tuple[Appointment, ...], reference: str | None,
+                           version: int | None, day: date | None, clock: time | None,
+                           calendar_last: bool) -> "ConversationOutcome":
+        """The prepare_counteroffer owner tool (#274): a model-named offer, drafted only.
+
+        The model reads the owner's wording and names a request (reference and version),
+        a local day, and a time. Everything it names is checked against stored state: the
+        reference must be exactly one current pending request and the version must be that
+        request's current version. The result is the same draft as the deterministic path:
+        the owner must still reply YES, and the request stays pending. After a calendar
+        answer an offer verb in the owner's own text is required, as for typed instructions.
+        """
+        from scheduling.domain.conversation import ConversationOutcome
+
+        requests = tuple(request for request in pending
+                         if request.replaces_appointment_id is None)
+        zone = ZoneInfo(self._repository.read_policy(receipt.business_id).timezone)
+        ref = (reference or "").lower()
+        named = ([request for request in requests if len(ref) >= 8
+                  and request.appointment_id.startswith(ref)]
+                 if requests else [])
+        if not requests:
+            return ConversationOutcome(
+                "No request is waiting for approval right now, so I have nothing to counter. "
+                "Nothing was sent.")
+        if len(named) != 1 or day is None or clock is None:
+            return ConversationOutcome(self._which(
+                requests, zone, "I wasn't sure which request or time you meant."))
+        request = named[0]
+        if version != request.version:
+            return ConversationOutcome(
+                "That request changed, so I did not prepare an offer. Nothing was sent. "
+                f"Pending: {self._line(request, zone)}. Tell me the time to offer again.")
+        parsed = _Request(request, clock, day)
+        if calendar_last and not EXPLICIT_OFFER.search(normalized(receipt.body or "")):
+            return ConversationOutcome(self._ambiguous_instead(parsed, receipt.business_id))
+        active = self._store.read_active(receipt.business_id, receipt.sender)
+        if active is not None and active.state == OfferState.PROPOSED:
+            self._store.discard(active)  # A revised instruction replaces the open draft.
+            self._store.clear_active(active.business_id, active.owner, active.offer_id)
+        return self._prepare(receipt, now, parsed)
+
     def _ambiguous_instead(self, parsed: "_Request", business_id: str) -> str:
         zone = ZoneInfo(self._repository.read_policy(business_id).timezone)
         request = parsed.request
