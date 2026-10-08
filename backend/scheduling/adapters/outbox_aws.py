@@ -103,6 +103,7 @@ class DynamoOutboxStore:
             ),
             recipient=item["recipient"]["S"],
             template=item["template"]["S"],
+            reply_provider_id=item.get("reply_provider_id", {}).get("S"),
             event_version=int(item["event_version"]["N"]),
             state=DeliveryState(item["delivery_state"]["S"]),
             created_at=datetime.fromisoformat(item["created_at"]["S"]),

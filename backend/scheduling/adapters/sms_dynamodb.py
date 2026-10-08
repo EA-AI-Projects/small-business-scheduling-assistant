@@ -7,6 +7,7 @@ from typing import Any, Protocol
 from scheduling.adapters.dynamodb import _command_sort_key, _record_transaction_conflict
 from scheduling.adapters.outbox_aws import due_keys
 from scheduling.domain.client_records import ClientProfile, RecordConflict
+from scheduling.domain.client_replies import gsm_septets
 from scheduling.domain.conversation_history import MAX_CHARACTERS, HistoryMessage, bounded_history
 from scheduling.domain.outbox import DeliveryState, OutboxRecord
 from scheduling.domain.sms_ingress import (
@@ -310,6 +311,49 @@ class DynamoSmsIngressStore(SmsIngressStore):
                 ":token": {"S": token}, ":now": {"S": _instant(now)},
             },
         )
+
+    def put_committed_reply(self, receipt: InboundReceipt, outbox_id: str,
+                            text: str, token: str) -> bool:
+        """Attach one draft to the committed intent before its sender claims it.
+
+        The original notification stays available if this loses the dispatch race or
+        the process crashes. No second outbox intent is created.
+        """
+        size = gsm_septets(text)
+        if (receipt.role != SenderRole.CLIENT or not receipt.client_id or not outbox_id
+                or size is None or size > 160):
+            return False
+        try:
+            self._client.transact_write_items(TransactItems=[
+                {"Update": {
+                    "TableName": self._table,
+                    "Key": self._key(receipt.business_id, f"SMS#{receipt.provider_id}"),
+                    "UpdateExpression": "SET reply_text = :text",
+                    "ConditionExpression": "processing_token = :token AND "
+                                           "attribute_not_exists(processed_at) AND "
+                                           "attribute_not_exists(reply_text)",
+                    "ExpressionAttributeValues": {
+                        ":token": {"S": token}, ":text": {"S": text},
+                    },
+                }},
+                {"Update": {
+                    "TableName": self._table,
+                    "Key": self._key(receipt.business_id, f"OUTBOX#{outbox_id}"),
+                    "UpdateExpression": "SET reply_provider_id = :provider",
+                    "ConditionExpression": "delivery_state = :pending AND recipient = :client "
+                                           "AND attribute_not_exists(reply_provider_id)",
+                    "ExpressionAttributeValues": {
+                        ":provider": {"S": receipt.provider_id},
+                        ":pending": {"S": "PENDING"}, ":client": {"S": "client"},
+                    },
+                }},
+                self._erasure_check(receipt.business_id, receipt.client_id),
+            ])
+            return True
+        except Exception as exc:
+            if getattr(exc, "response", {}).get("Error", {}).get("Code") == "TransactionCanceledException":
+                return False
+            raise
 
     def put_reply(self, receipt: InboundReceipt, text: str,
                   token: str, now: datetime) -> bool:

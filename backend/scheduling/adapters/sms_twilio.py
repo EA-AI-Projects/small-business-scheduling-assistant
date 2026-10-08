@@ -366,6 +366,11 @@ class TwilioSmsSender:
         if (record.template not in BLOCK_TEMPLATES and appointment is not None
                 and record.event_version != appointment.version):
             raise PermanentDeliveryFailure("EVENT_SUPERSEDED")
+        if record.reply_provider_id is not None and record.recipient == "client":
+            drafted = self._consent.read_reply_text(record.business_id,
+                                                    record.reply_provider_id)
+            if drafted is not None:
+                return drafted
         original = (self._records.read_appointment(appointment.replaces_appointment_id)
                     if appointment is not None and appointment.replaces_appointment_id
                     and record.template in COUNTEROFFER_TEMPLATES else None)

@@ -127,6 +127,18 @@ def test_client_destination_is_from_verified_profile_with_consent() -> None:
         sender.deliver(record())
 
 
+def test_committed_notification_uses_attached_draft_once_or_safe_template() -> None:
+    sender, messages, consent, _ = setup()
+    consent.reply_text = "Your request is pending owner approval. Ref a101a101."
+    attached = replace(record(), reply_provider_id="SM-in")
+    assert sender.deliver(attached) == "SM-synthetic"
+    assert messages.calls[-1]["body"] == consent.reply_text
+    consent.reply_text = None  # Draft vanished; the original intent still has safe wording.
+    assert sender.deliver(attached) == "SM-synthetic"
+    assert "pending owner approval" in messages.calls[-1]["body"]
+    assert len(messages.calls) == 2
+
+
 def test_client_send_claim_blocks_deletion_race_and_survives_uncertain_failure() -> None:
     sender, messages, _, records = setup()
     def erasing(_business_id: str, _client_id: str) -> str:

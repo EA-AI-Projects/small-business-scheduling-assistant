@@ -99,6 +99,7 @@ class TransitionResult:
     appointment: Appointment
     calendar_revision: int
     replaced_appointment: Appointment | None = None
+    client_outbox_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -245,7 +246,9 @@ class LifecycleService:
                     version=original.version + 1)
                 if original is not None else None
             )
-            result = TransitionResult(after, revision + 1, replaced)
+            result = TransitionResult(after, revision + 1, replaced,
+                                      f"{audit_id}#client" if command.actor_role == ActorRole.CLIENT
+                                      else None)
             decision_at = self._now()
             if command.operation == Action.APPROVE and (
                 before.hold_expires_at is None or before.hold_expires_at <= decision_at

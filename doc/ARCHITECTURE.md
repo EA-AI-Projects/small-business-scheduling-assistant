@@ -42,9 +42,15 @@ Its typed interpretation selects at most one `list_available_slots` or
 derives business and client identity exclusively from the verified receipt;
 model arguments cannot name another actor. Domain availability and client
 calendar code check the current schedule and produce the authoritative SMS
-answer. One final model draft can add only a short conversational wrapper around
-that verbatim answer. Validation rejects added dates, times, or scheduling
-claims and falls back to the backend answer on malformed output or timeout.
+answer. One final model call drafts the client SMS from a bounded result and
+transcript. Backend validation checks one GSM-7 segment and exact inclusion of
+the result's dates, times, and references, then falls back to the backend answer
+on malformed output or timeout. The model instructions govern status wording.
+This minimal check cannot detect every contradictory claim or association among
+multiple visits; the owner chose freer wording with this fallback (#283, 2026-10-08).
+The same draft check covers client write results; a valid
+draft can attach to the existing pending notification intent, while a sender
+that already claimed the intent sends its safe template.
 The first model call asks the client to retry later on failure. Each model call
 has an eight-second timeout and no internal retry, keeping the two-call path
 inside the worker's 30-second limit. Receipt leases, stable outbox intents,
