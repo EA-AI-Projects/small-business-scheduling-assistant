@@ -440,6 +440,11 @@ class ConversationService:
         _cancel_confirmed rechecks both and the receipt ID is the idempotency key.
         """
         zone = ZoneInfo(policy.timezone)
+        if proposal.intent == "keep_visit" and (
+                prompt is None or prompt.kind != PromptKind.CONFIRM_CANCEL
+                or prompt.expired(now)):
+            # Nothing is waiting to be cancelled, so there is nothing to ask about.
+            return ConversationOutcome("OK, nothing changed. Your visit stays booked.")
         if prompt is None or prompt.kind != PromptKind.CONFIRM_CANCEL:
             return ConversationOutcome(
                 "I don't have a cancellation waiting for your answer, so nothing was "

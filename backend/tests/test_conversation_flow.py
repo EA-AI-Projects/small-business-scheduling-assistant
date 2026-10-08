@@ -812,13 +812,44 @@ def test_model_confirmation_without_an_open_question_or_after_a_new_one_writes_n
 def test_repeated_model_confirmation_cancels_once() -> None:
     chat = Harness()
     visit = cancel_asked(chat)
+    saved = chat.states.read_state("pilot", "+14155550101")
+    assert saved is not None
     first = chat.text(DROP)
+    chat.states.put_state(saved)  # The same stored question is open when the SMS is redelivered.
     chat.count -= 1  # The same inbound SM id is delivered again.
     again = chat.text(DROP)
     assert first.committed and not again.committed
     assert chat.status(visit) == CalendarStatus.CANCELLED
     version = chat.store.read_appointment(visit)
-    assert version is not None and version.version == 3
+    assert version is not None and version.version == 3  # One cancellation, not two.
+
+
+@pytest.mark.parametrize("opener", ["move", "list"])
+def test_model_confirm_cancel_with_another_prompt_open_writes_nothing(opener: str) -> None:
+    chat = Harness()
+    if opener == "move":
+        visit = move_offered(chat)
+    else:
+        visit = chat.hold(THURSDAY, "visit", confirm=True)
+        chat.hold(THURSDAY + timedelta(days=1), "second", confirm=True)
+        chat.model.replies["cancel one"] = ask("cancel")
+        chat.text("cancel one")
+    chat.model.replies[DROP] = ask("confirm_cancel")
+    before = chat.calendar()
+    reply = chat.text(DROP)
+    assert not reply.committed and "nothing was cancelled" in reply.text
+    assert chat.status(visit) == CalendarStatus.CONFIRMED
+    assert chat.calendar() == before
+
+
+def test_keep_visit_while_a_move_offer_is_open_says_nothing_changed() -> None:
+    chat = Harness()
+    visit = move_offered(chat)
+    chat.model.replies["never mind, I'll keep Thursday"] = ask("keep_visit")
+    reply = chat.text("never mind, I'll keep Thursday")
+    assert reply.text == "OK, nothing changed. Your visit stays booked."
+    assert not reply.committed and chat.status(visit) == CalendarStatus.CONFIRMED
+    assert len(chat.calendar()) == 1
 
 
 def test_model_confirmation_cannot_use_another_clients_question_on_the_same_phone() -> None:
@@ -863,13 +894,19 @@ def move_offered(chat: Harness) -> str:
 def test_free_form_move_acceptance_binds_the_original_and_is_idempotent() -> None:
     chat = Harness()
     visit = move_offered(chat)
+    offer = chat.states.read_state("pilot", "+14155550101")
+    assert offer is not None
     calls = len(chat.model.calls)
     moved = chat.text(MOVE_ACCEPT)
     assert len(chat.model.calls) == calls + 1
     assert moved.committed and "remains confirmed" in moved.text
     assert chat.status(visit) == CalendarStatus.CONFIRMED
-    chat.count -= 1  # Redelivery.
-    assert not chat.text(MOVE_ACCEPT).committed
+    saved = chat.states.read_state("pilot", "+14155550101")
+    assert saved is None
+    chat.count -= 1  # Redelivery of the same inbound SM id with the offer still stored.
+    chat.states.put_state(offer)
+    again = chat.text(MOVE_ACCEPT)
+    assert again.committed and again.appointment_id == moved.appointment_id  # A replay.
     assert len(chat.calendar()) == 2  # The original and one replacement.
 
 
