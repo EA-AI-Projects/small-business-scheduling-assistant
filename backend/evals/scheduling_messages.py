@@ -19,9 +19,22 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
-from scheduling.adapters.openai_messages import INSTRUCTIONS, MODEL, TOOL, model_input
+from scheduling.adapters.openai_messages import (
+    INSTRUCTIONS,
+    MODEL,
+    TOOL,
+    OpenAIMessageInterpreter,
+    model_input,
+)
 from scheduling.domain.client_records import ACCESS_CODE_PATTERN
 from scheduling.domain.conversation import MessageContext
+from scheduling.domain.conversation_history import HistoryMessage
+from scheduling.domain.owner_reply_classification import (
+    OwnerReplyContext,
+    OwnerReplyIntent,
+    OwnerReplyProposal,
+    PendingRef,
+)
 from scheduling.domain.sms_ingress import SenderRole
 
 URL = "https://api.openai.com/v1/responses"
@@ -44,6 +57,9 @@ class Case:
     references: tuple[str, ...]
     expect: Callable[[dict[str, Any]], bool]
     calendar_answer: str | None = None  # The open calendar answer, for follow-ups.
+    prompt_kind: str = "none"  # The open prompt kind the service would send (#272, #273).
+    history: tuple[tuple[str, str], ...] = ()  # (role, text) transcript lines, oldest first.
+    today: date | None = None  # Overrides TODAY for cases about a later week.
 
 
 def clarifies(proposal: dict[str, Any]) -> bool:
@@ -101,6 +117,20 @@ def calendar(span: tuple[str, str] | None | str = "any", statuses: set[str] | No
 def this_week(proposal: dict[str, Any]) -> bool:
     """This week from Monday, or from today (the same day here)."""
     return calendar(THIS_WEEK)(proposal)
+
+
+INVITE = ("assistant", (
+    "Would you like to book a cleaning visit in the next two weeks? "
+    "Reply with a day and time that works for you."))
+ASKED_1PM = ("client", "Oct 13 at 1 pm")
+UNAVAILABLE_1PM = ("assistant", (
+    "That exact time isn't open. Open times on Tue Oct 13: "
+    "1) 10:00 AM, 2) 11:00 AM. Reply with the number or time you want."))
+OFFER_1PM = ("assistant", (
+    "Tue Oct 13 at 1:00 PM is open for your 2-hour cleaning. "
+    "Reply YES to request it. The owner approves every request."))
+CANCEL_QUESTION = ("assistant", (
+    "Cancel your Thu Oct 1 at 9:00 AM visit? Reply YES to cancel, or NO to keep it."))
 
 
 CASES = (
@@ -164,12 +194,109 @@ CASES = (
     Case("ambiguous-booking", "client", "Booking for Friday?", TWO_REFS,
          lambda proposal: proposal["intent"] in ("clarify_booking", "clarify")
          and no_reference(proposal)),
+    # Direct booking tools (#272, #273): the model books only a time the assistant offered.
+    # Monday 2026-10-12 is "today" for these; the backend still validates every write.
+    Case("invited-exact-time-is-offered-first", "client", "Oct 13 at 1 pm", (),
+         lambda proposal: asks_for_day("2026-10-13", "13:00", "13:00")(proposal)
+         and proposal["intent"] == "availability",
+         history=(INVITE,), today=date(2026, 10, 12)),
+    Case("date-only-after-unavailable-time", "client", "Oct 13", (),
+         lambda proposal: proposal["intent"] == "availability"
+         and proposal["date_from"] == "2026-10-13" and not proposal["needs_clarification"],
+         prompt_kind="offer", today=date(2026, 10, 12),
+         history=(INVITE, ASKED_1PM, UNAVAILABLE_1PM)),
+    Case("free-form-acceptance-books-offered-time", "client", "lovely, lets lock that in", (),
+         lambda proposal: proposal["intent"] == "request_booking"
+         and (proposal["date_from"], proposal["date_to"]) == ("2026-10-13", "2026-10-13")
+         and (proposal["time_from"], proposal["time_to"]) == ("13:00", "13:00"),
+         prompt_kind="offer", today=date(2026, 10, 12),
+         history=(INVITE, ASKED_1PM, OFFER_1PM)),
+    Case("counter-proposal-is-not-an-acceptance", "client", "can we do 3 pm instead?", (),
+         lambda proposal: proposal["intent"] == "availability"
+         and proposal["date_from"] == "2026-10-13" and proposal["time_from"] == "15:00",
+         prompt_kind="offer", today=date(2026, 10, 12),
+         history=(OFFER_1PM,)),
+    Case("question-about-offer-is-not-an-acceptance", "client", "is 1 pm the earliest you have?",
+         (), lambda proposal: proposal["intent"] != "request_booking",
+         prompt_kind="offer", today=date(2026, 10, 12),
+         history=(OFFER_1PM,)),
+    Case("acceptance-with-no-open-offer-books-nothing", "client", "sounds good", (),
+         lambda proposal: proposal["intent"] != "request_booking",
+         today=date(2026, 10, 12)),
+    Case("free-form-yes-confirms-cancel", "client", "yes please, go ahead", TWO_REFS,
+         lambda proposal: proposal["intent"] == "confirm_cancel",
+         prompt_kind="confirm_cancel",
+         history=(("client", "I can't make Thursday"), CANCEL_QUESTION)),
+    Case("free-form-keep-after-cancel-question", "client", "actually let's hold onto it",
+         TWO_REFS, lambda proposal: proposal["intent"] == "keep_visit",
+         prompt_kind="confirm_cancel",
+         history=(CANCEL_QUESTION,)),
+    Case("unrelated-question-does-not-confirm-cancel", "client", "what times are open Friday?",
+         TWO_REFS, lambda proposal: proposal["intent"] == "availability"
+         and proposal["date_from"] == "2026-10-02", prompt_kind="confirm_cancel",
+         history=(CANCEL_QUESTION,)),
+    Case("confirm-cancel-with-no-question-open", "client", "yes please, go ahead", TWO_REFS,
+         lambda proposal: proposal["intent"] != "confirm_cancel"),
 )
 
 
+@dataclass(frozen=True)
+class OwnerCase:
+    """An owner text read by the production owner classifier (#173, #274)."""
+
+    name: str
+    message: str
+    pending: tuple[PendingRef, ...]
+    expect: Callable[[OwnerReplyProposal], bool]
+    last_kind: str = "none"
+
+
+AVERY = PendingRef("a101a101", "Avery", "Thu Oct 1 at 9:00 AM", 1)
+BLAKE = PendingRef("b202b202", "Blake", "Fri Oct 2 at 1:00 PM", 3)
+
+OWNER_CASES = (
+    OwnerCase("owner-show-requests", "what's waiting for me?", (AVERY, BLAKE),
+              lambda p: p.intent == OwnerReplyIntent.SHOW_REQUESTS),
+    OwnerCase("owner-prepare-counteroffer", "offer Avery Friday at 2pm instead", (AVERY, BLAKE),
+              lambda p: p.intent == OwnerReplyIntent.PREPARE_COUNTEROFFER
+              and p.request_reference == "a101a101" and p.request_version == 1
+              and p.offer_date == date(2026, 10, 2) and str(p.offer_time) == "14:00:00"),
+    OwnerCase("owner-approve-by-name-quotes-version", "approve Blake's", (AVERY, BLAKE),
+              lambda p: p.intent == OwnerReplyIntent.APPROVE_NAMED_REQUEST
+              and p.request_reference == "b202b202" and p.request_version == 3),
+    OwnerCase("owner-approve-it-with-two-pending-names-no-request", "approve it", (AVERY, BLAKE),
+              lambda p: p.intent in (OwnerReplyIntent.UNCLEAR, OwnerReplyIntent.SHOW_REQUESTS)
+              or p.request_reference is None),
+    OwnerCase("owner-free-form-yes-after-calendar-is-not-approval", "yes please", (AVERY,),
+              lambda p: p.intent not in (OwnerReplyIntent.APPROVE_NAMED_REQUEST,
+                                         OwnerReplyIntent.DECLINE_NAMED_REQUEST),
+              last_kind="calendar_answer"),
+    OwnerCase("owner-single-pending-decline", "no, decline that one", (AVERY,),
+              lambda p: p.intent == OwnerReplyIntent.DECLINE_NAMED_REQUEST
+              and p.request_reference == "a101a101" and p.request_version == 1),
+)
+
+
+def owner_context(case: OwnerCase) -> OwnerReplyContext:
+    return OwnerReplyContext(TODAY, TIMEZONE, case.last_kind, "none", None, None, (),
+                             None, case.pending)
+
+
+def evaluate_owner(case: OwnerCase, key: str) -> dict[str, Any]:
+    proposal = OpenAIMessageInterpreter(key, 30).classify_owner_reply(
+        case.message, owner_context(case))
+    return {"case": case.name, "passed": bool(case.expect(proposal)),
+            "intent": proposal.intent.value, "request_reference": proposal.request_reference,
+            "request_version": proposal.request_version, "confidence": proposal.confidence.value}
+
+
 def context_for(case: Case, today: date = TODAY) -> MessageContext:
-    return MessageContext(SenderRole(case.actor), today, TIMEZONE, case.references,
-                          calendar_answer=case.calendar_answer)
+    at = datetime(2026, 10, 12, 17, tzinfo=ZoneInfo("UTC"))
+    history = tuple(HistoryMessage(f"m{number}", role, at, text)
+                    for number, (role, text) in enumerate(case.history))
+    return MessageContext(SenderRole(case.actor), case.today or today, TIMEZONE, case.references,
+                          calendar_answer=case.calendar_answer, history=history,
+                          prompt_kind=case.prompt_kind)
 
 
 def request_payload(case: Case, today: date = TODAY) -> dict[str, Any]:
@@ -275,6 +402,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.interactive:
         return interactive(key)
     results = [evaluate(case, key) for case in CASES]
+    results += [evaluate_owner(case, key) for case in OWNER_CASES]
     print(json.dumps({"model": MODEL, "results": results}, indent=2))
     return 0 if all(item["passed"] for item in results) else 1
 
