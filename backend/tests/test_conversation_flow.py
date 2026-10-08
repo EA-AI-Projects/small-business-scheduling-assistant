@@ -560,7 +560,7 @@ def test_exact_time_reply_to_invitation_creates_one_pending_request() -> None:
     assert reply.committed and reply.appointment_id is not None
     assert "pending owner approval" in reply.text and "not confirmed" in reply.text
     assert chat.status(reply.appointment_id) == CalendarStatus.PENDING_APPROVAL
-    assert chat.model.reads[-1][0] == "request_booking"
+    assert chat.model.reads == []  # The request notification, not a draft, reaches the client.
     assert [item[1] for item in chat.calendar()] == ["PENDING_APPROVAL"]
 
 
@@ -610,3 +610,24 @@ def test_exact_time_beyond_the_horizon_is_refused_with_no_request() -> None:
     reply = chat.text("Oct 13 at 1 pm")
     assert not reply.committed and "days ahead" in reply.text
     assert chat.calendar() == ()
+
+
+@pytest.mark.parametrize("day", ["2026-10-17", "2026-11-11"])  # Saturday; Veterans Day.
+def test_exact_time_outside_hours_or_on_a_holiday_creates_nothing(day: str) -> None:
+    chat = Harness()
+    invited(chat)
+    chat.model.replies["Oct 13 at 1 pm"] = ask("request_booking", day, day, "13:00", "13:00")
+    reply = chat.text("Oct 13 at 1 pm")
+    assert not reply.committed
+    assert chat.calendar() == ()
+
+
+def test_unavailable_exact_time_then_date_only_gets_openings_not_what_day() -> None:
+    chat = Harness()
+    invited(chat)
+    chat.hold(datetime(2026, 10, 13, 20, tzinfo=UTC), "busy-1pm")
+    chat.model.replies["Oct 13"] = ask("availability", "2026-10-13")
+    chat.text("Oct 13 at 1 pm")
+    followup = chat.text("Oct 13")
+    assert "Open times on Tue Oct 13" in followup.text and "What day" not in followup.text
+    assert len(chat.calendar()) == 1

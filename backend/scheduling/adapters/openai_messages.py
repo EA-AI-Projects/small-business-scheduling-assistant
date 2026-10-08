@@ -68,7 +68,7 @@ INSTRUCTIONS = (
     "Use clarify, with every other field null, when no usable day or intent can be found, or "
     "when a date is impossible, and put one short question in question. "
     "Use unsupported for messages unrelated to scheduling. "
-    "request_booking only when the client replies to a booking invitation or offer in the "
+    "request_booking only when the client replies to a booking invitation in the "
     "transcript with one definite date and time, such as Oct 13 at 1 pm: set date_from and "
     "date_to to that day and time_from and time_to to that time. A question about whether a "
     "time is open, or a day or range without one exact time, stays availability. The backend "
@@ -281,8 +281,7 @@ class OpenAIMessageInterpreter:
 
     def draft_read_reply(self, body: str, context: MessageContext,
                          tool_name: str, tool_result: str) -> str:
-        if (tool_name not in ("list_available_slots", "list_client_appointments",
-                               "request_booking")
+        if (tool_name not in ("list_available_slots", "list_client_appointments")
                 or not tool_result or len(tool_result) > 500):
             raise ValueError("Read result cannot be drafted safely")
         payload = {

@@ -350,8 +350,8 @@ class ConversationService:
             return self._cancel(receipt, proposal, targets)
         if exact:  # BOOK or RESCHEDULE syntax; _request rechecks the literal text.
             return self._request(receipt, proposal, targets, policy, now)
-        # From here on the proposal came from the model: it can only lead to an
-        # offer or a question, never directly to a write.
+        # From here on the proposal came from the model: it can lead to an offer or a
+        # question, or, for an exact time answering an invitation, to a validated request.
         if receipt.role != SenderRole.CLIENT:
             return ConversationOutcome(self._clarify(receipt.role, "clarify"))
         if proposal.intent in ("calendar_question", "clarify_booking"):
@@ -389,7 +389,7 @@ class ConversationService:
                 direct = (self._request_invited_time(receipt, proposal, context, policy, now)
                           if original is None and proposal.intent == "request_booking" else None)
                 if direct is not None:
-                    return self._draft_read(receipt, context, "request_booking", direct)
+                    return direct  # Committed: the client gets the request notification.
                 outcome = self._offer_from_proposal(receipt, proposal, policy, now, original)
             except (OSError, ValueError, TypeError, KeyError, RuntimeError):
                 return ConversationOutcome(
