@@ -378,6 +378,8 @@ class ConversationService:
                 return ConversationOutcome(
                     "I can't check your current visits right now. Please try again later.")
             return self._draft_read(receipt, context, "list_client_appointments", outcome)
+        if proposal.intent in ("confirm_cancel", "keep_visit"):
+            return self._answer_cancel_prompt(receipt, proposal, prompt, targets, policy, now)
         if proposal.intent == "cancel":
             return self._ask_cancel(receipt, proposal, targets, policy, now)
         if proposal.intent == "reschedule":
@@ -426,6 +428,43 @@ class ConversationService:
         if len(matches) != 1:
             return None
         return self._book_option(receipt, prompt, matches[0], targets, policy, now)
+
+    def _answer_cancel_prompt(self, receipt: InboundReceipt, proposal: MessageProposal,
+                              prompt: ConversationState | None,
+                              targets: tuple[Appointment, ...], policy: AvailabilityPolicy,
+                              now: datetime) -> ConversationOutcome:
+        """The confirm_cancel and keep_visit tools (#273): the model reads a yes or no.
+
+        The model names no visit. The backend acts only on this sender's own unexpired
+        stored cancel confirmation, which already binds one appointment and version;
+        _cancel_confirmed rechecks both and the receipt ID is the idempotency key.
+        """
+        zone = ZoneInfo(policy.timezone)
+        if proposal.intent == "keep_visit" and (
+                prompt is None or prompt.kind != PromptKind.CONFIRM_CANCEL
+                or prompt.expired(now)):
+            # Nothing is waiting to be cancelled, so there is nothing to ask about.
+            return ConversationOutcome("OK, nothing changed. Your visit stays booked.")
+        if prompt is None or prompt.kind != PromptKind.CONFIRM_CANCEL:
+            return ConversationOutcome(
+                "I don't have a cancellation waiting for your answer, so nothing was "
+                "cancelled. Tell me which visit you'd like to cancel.")
+        if prompt.expired(now):
+            self._forget(prompt)
+            return ConversationOutcome(
+                "That confirmation expired after 30 minutes, so nothing was cancelled. "
+                "Tell me which visit you'd like to cancel.")
+        if prompt.client_id != receipt.client_id:
+            self._forget(prompt)
+            return ConversationOutcome(
+                "I don't have a cancellation waiting for your answer, so nothing was "
+                "cancelled. Tell me which visit you'd like to cancel.")
+        if proposal.intent == "keep_visit":
+            self._forget(prompt)
+            target = self._active_target(receipt, prompt.appointment_id, targets)
+            kept = f"your {when_text(target.start_at, zone)} visit" if target else "your visit"
+            return ConversationOutcome(f"OK, I kept {kept}. Nothing was cancelled.")
+        return self._cancel_confirmed(receipt, prompt, targets, zone)
 
     def _draft_read(self, receipt: InboundReceipt, context: MessageContext,
                     tool_name: str, outcome: ConversationOutcome) -> ConversationOutcome:

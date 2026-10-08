@@ -76,6 +76,12 @@ INSTRUCTIONS = (
     "to a booking invitation, is availability so the assistant offers it and asks first; a "
     "question about a time or a range is also availability. The backend creates only a "
     "request pending owner approval, never a confirmed visit. "
+    "confirm_cancel only when Open prompt is confirm_cancel and the client's text agrees to "
+    "cancel the visit the assistant just asked about, in any wording or language; keep_visit "
+    "when that text says to keep it or not to cancel. Name no visit: the backend uses the "
+    "visit it asked about, only if the question is still open, and cancels nothing otherwise. "
+    "To cancel or move a visit, use cancel or reschedule; the backend asks the client to "
+    "confirm before cancelling and keeps the original visit until a replacement is approved. "
     "A date-only reply in an active booking conversation answers the earlier assistant or "
     "booking invitation. Interpret that date as availability, even when an earlier time "
     "was unavailable; do not ask the client to repeat the day. "
@@ -106,8 +112,8 @@ TOOL: dict[str, Any] = {
         "type": "object",
         "properties": {
             "intent": {"type": "string", "enum": [
-                "availability", "request_booking", "reschedule", "cancel", "calendar_question",
-                "clarify_booking", "owner_decision", "clarify", "unsupported",
+                "availability", "request_booking", "reschedule", "cancel", "confirm_cancel",
+                "keep_visit", "calendar_question", "clarify_booking", "owner_decision", "clarify", "unsupported",
             ]},
             "request_reference": {"type": ["string", "null"]},
             "date_text": {"type": ["string", "null"]},

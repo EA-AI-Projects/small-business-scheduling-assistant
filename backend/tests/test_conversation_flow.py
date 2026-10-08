@@ -715,3 +715,221 @@ def test_another_client_on_the_same_phone_cannot_use_a_previous_clients_offer() 
         "client-other"))
     reply = chat.text(ACCEPT)
     assert not reply.committed and chat.calendar() == ()
+
+
+# Client cancellation and rescheduling through the model (#273). These words are not
+# recognized by the keyword matcher, so every case below really goes through the model.
+DROP = "please go ahead and drop it"
+KEEP = "actually let's hold onto it"
+
+
+def cancel_asked(chat: Harness) -> str:
+    visit = chat.hold(THURSDAY, "visit", confirm=True)
+    chat.model.replies["I can't make Thursday"] = ask("cancel", target_date="2026-10-01")
+    chat.model.replies[DROP] = ask("confirm_cancel")
+    chat.model.replies[KEEP] = ask("keep_visit")
+    assert chat.text("I can't make Thursday").text.startswith("Cancel your Thu Oct 1")
+    return visit
+
+
+def test_model_reads_a_free_form_yes_and_cancels_the_asked_visit() -> None:
+    chat = Harness()
+    visit = cancel_asked(chat)
+    calls = len(chat.model.calls)
+    done = chat.text(DROP)
+    assert len(chat.model.calls) == calls + 1  # The model, not the keyword matcher, decided.
+    assert done.committed and done.text == (
+        f"Cancelled your Thu Oct 1 at 9:00 AM visit (ref {visit[:8]}).")
+    assert chat.status(visit) == CalendarStatus.CANCELLED
+
+
+def test_model_reads_a_free_form_no_and_keeps_the_visit() -> None:
+    chat = Harness()
+    visit = cancel_asked(chat)
+    calls = len(chat.model.calls)
+    kept = chat.text(KEEP)
+    assert len(chat.model.calls) == calls + 1
+    assert not kept.committed and "I kept your Thu Oct 1 at 9:00 AM visit" in kept.text
+    assert chat.status(visit) == CalendarStatus.CONFIRMED
+    assert not chat.text(DROP).committed  # The question is closed.
+    assert chat.status(visit) == CalendarStatus.CONFIRMED
+
+
+def test_ambiguous_target_is_listed_then_model_choice_still_needs_confirmation() -> None:
+    chat = Harness()
+    thursday = chat.hold(THURSDAY, "one", confirm=True)
+    friday = chat.hold(THURSDAY + timedelta(days=1), "two", confirm=True)
+    chat.model.replies["cancel one"] = ask("cancel")
+    chat.model.replies["whichever is later"] = ask("cancel", target_date="2026-10-02")
+    chat.model.replies[DROP] = ask("confirm_cancel")
+    assert "Which visit would you like to cancel?" in chat.text("cancel one").text
+    # An acceptance with nothing selected cancels nothing.
+    not_yet = chat.text(DROP)
+    assert not not_yet.committed and "nothing was cancelled" in not_yet.text
+    chat.text("cancel one")
+    asked = chat.text("whichever is later")
+    assert asked.text == "Cancel your Fri Oct 2 at 9:00 AM visit? Reply YES to confirm."
+    assert chat.status(friday) == CalendarStatus.CONFIRMED
+    assert chat.text(DROP).committed
+    assert chat.status(friday) == CalendarStatus.CANCELLED
+    assert chat.status(thursday) == CalendarStatus.CONFIRMED
+
+
+def test_model_confirmation_after_expiry_cancels_nothing() -> None:
+    chat = Harness()
+    visit = cancel_asked(chat)
+    chat.now += timedelta(minutes=31)
+    calls = len(chat.model.calls)
+    late = chat.text(DROP)
+    assert len(chat.model.calls) == calls + 1
+    assert not late.committed and "expired" in late.text
+    assert chat.status(visit) == CalendarStatus.CONFIRMED
+
+
+def test_model_confirmation_refuses_a_visit_changed_since_the_question() -> None:
+    chat = Harness()
+    visit = cancel_asked(chat)
+    LifecycleService(chat.store, lambda: NOW).apply(AppointmentCommand(
+        "pilot", visit, "owner", ActorRole.OWNER, Action.EDIT, "owner-edit", 2,
+        duration_minutes=90))
+    result = chat.text(DROP)
+    assert not result.committed and "changed since I asked" in result.text
+    assert chat.status(visit) == CalendarStatus.CONFIRMED
+
+
+def test_model_confirmation_without_an_open_question_or_after_a_new_one_writes_nothing() -> None:
+    chat = Harness()
+    visit = chat.hold(THURSDAY, "visit", confirm=True)
+    chat.model.replies[DROP] = ask("confirm_cancel")
+    assert not chat.text(DROP).committed  # Nothing was asked.
+    chat.model.replies["Anything Friday?"] = ask("availability", "2026-10-02")
+    chat.model.replies["I can't make Thursday"] = ask("cancel", target_date="2026-10-01")
+    chat.text("I can't make Thursday")
+    chat.text("Anything Friday?")  # A new request replaces the confirmation.
+    assert not chat.text(DROP).committed
+    assert chat.status(visit) == CalendarStatus.CONFIRMED
+
+
+def test_repeated_model_confirmation_cancels_once() -> None:
+    chat = Harness()
+    visit = cancel_asked(chat)
+    saved = chat.states.read_state("pilot", "+14155550101")
+    assert saved is not None
+    first = chat.text(DROP)
+    chat.states.put_state(saved)  # The same stored question is open when the SMS is redelivered.
+    chat.count -= 1  # The same inbound SM id is delivered again.
+    again = chat.text(DROP)
+    assert first.committed and not again.committed
+    assert chat.status(visit) == CalendarStatus.CANCELLED
+    version = chat.store.read_appointment(visit)
+    assert version is not None and version.version == 3  # One cancellation, not two.
+
+
+@pytest.mark.parametrize("opener", ["move", "list"])
+def test_model_confirm_cancel_with_another_prompt_open_writes_nothing(opener: str) -> None:
+    chat = Harness()
+    if opener == "move":
+        visit = move_offered(chat)
+    else:
+        visit = chat.hold(THURSDAY, "visit", confirm=True)
+        chat.hold(THURSDAY + timedelta(days=1), "second", confirm=True)
+        chat.model.replies["cancel one"] = ask("cancel")
+        chat.text("cancel one")
+    chat.model.replies[DROP] = ask("confirm_cancel")
+    before = chat.calendar()
+    reply = chat.text(DROP)
+    assert not reply.committed and "nothing was cancelled" in reply.text
+    assert chat.status(visit) == CalendarStatus.CONFIRMED
+    assert chat.calendar() == before
+
+
+def test_keep_visit_while_a_move_offer_is_open_says_nothing_changed() -> None:
+    chat = Harness()
+    visit = move_offered(chat)
+    chat.model.replies["never mind, I'll keep Thursday"] = ask("keep_visit")
+    reply = chat.text("never mind, I'll keep Thursday")
+    assert reply.text == "OK, nothing changed. Your visit stays booked."
+    assert not reply.committed and chat.status(visit) == CalendarStatus.CONFIRMED
+    assert len(chat.calendar()) == 1
+
+
+def test_model_confirmation_cannot_use_another_clients_question_on_the_same_phone() -> None:
+    chat = Harness()
+    visit = cancel_asked(chat)
+    state = chat.states.read_state("pilot", "+14155550101")
+    assert state is not None
+    chat.states.put_state(ConversationState(
+        state.business_id, state.sender, state.state_id, state.kind, state.created_at,
+        state.expires_at, state.options, state.appointment_id, state.appointment_version,
+        "client-other"))
+    assert not chat.text(DROP).committed
+    assert chat.status(visit) == CalendarStatus.CONFIRMED
+
+
+def test_model_cannot_cancel_another_clients_visit_by_name() -> None:
+    chat = Harness()
+    other = HoldService(chat.store).create(CreateHold(
+        "pilot", "client-2", "client-2", "other", THURSDAY, 120), NOW).hold_id
+    chat.model.replies["cancel theirs"] = MessageProposal(
+        "cancel", other[:8], None, None, False, target_date="2026-10-01")
+    chat.model.replies[DROP] = ask("confirm_cancel")
+    reply = chat.text("cancel theirs")
+    assert "don't see" in reply.text
+    assert not chat.text(DROP).committed
+    assert chat.status(other) == CalendarStatus.PENDING_APPROVAL
+
+
+MOVE_ACCEPT = "wonderful, put me down for it"
+
+
+def move_offered(chat: Harness) -> str:
+    visit = chat.hold(THURSDAY, "visit", confirm=True)
+    chat.model.replies["Can I move Thursday to Friday morning?"] = ask(
+        "reschedule", "2026-10-02", "2026-10-02", "08:00", "12:00", "2026-10-01")
+    chat.model.replies[MOVE_ACCEPT] = ask(
+        "request_booking", "2026-10-02", "2026-10-02", "08:00", "08:00")
+    chat.text("Can I move Thursday to Friday morning?")
+    return visit
+
+
+def test_free_form_move_acceptance_binds_the_original_and_is_idempotent() -> None:
+    chat = Harness()
+    visit = move_offered(chat)
+    offer = chat.states.read_state("pilot", "+14155550101")
+    assert offer is not None
+    calls = len(chat.model.calls)
+    moved = chat.text(MOVE_ACCEPT)
+    assert len(chat.model.calls) == calls + 1
+    assert moved.committed and "remains confirmed" in moved.text
+    assert chat.status(visit) == CalendarStatus.CONFIRMED
+    saved = chat.states.read_state("pilot", "+14155550101")
+    assert saved is None
+    chat.count -= 1  # Redelivery of the same inbound SM id with the offer still stored.
+    chat.states.put_state(offer)
+    again = chat.text(MOVE_ACCEPT)
+    assert again.committed and again.appointment_id == moved.appointment_id  # A replay.
+    assert len(chat.calendar()) == 2  # The original and one replacement.
+
+
+def test_free_form_move_acceptance_after_expiry_or_conflict_changes_nothing() -> None:
+    chat = Harness()
+    visit = move_offered(chat)
+    chat.hold(datetime(2026, 10, 2, 8, tzinfo=ZONE).astimezone(UTC), "taken")
+    conflict = chat.text(MOVE_ACCEPT)
+    assert not conflict.committed and "no longer open" in conflict.text
+    assert chat.status(visit) == CalendarStatus.CONFIRMED
+    other = Harness()
+    move_offered(other)
+    other.now += timedelta(minutes=31)
+    assert not other.text(MOVE_ACCEPT).committed
+    assert len(other.calendar()) == 1
+
+
+def test_free_form_move_acceptance_is_refused_when_the_original_was_cancelled() -> None:
+    chat = Harness()
+    visit = move_offered(chat)
+    LifecycleService(chat.store, lambda: NOW).apply(AppointmentCommand(
+        "pilot", visit, "owner", ActorRole.OWNER, Action.CANCEL, "owner-cancel", 2))
+    moved = chat.text(MOVE_ACCEPT)
+    assert not moved.committed and "has changed" in moved.text
+    assert chat.calendar() == ()
