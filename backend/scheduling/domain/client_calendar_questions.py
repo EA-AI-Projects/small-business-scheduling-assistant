@@ -162,6 +162,27 @@ def answer(question: ClientQuestion, visits: tuple[Appointment, ...], now: datet
     return text
 
 
+def compact_list(question: ClientQuestion, visits: tuple[Appointment, ...],
+                 now: datetime, zone: ZoneInfo) -> str:
+    """List every matching current visit when the detailed answer exceeds one SMS.
+
+    The conversation service has already limited this client to eight current
+    visits. The compact form drops end times and references, not dates, start
+    times, or status. A pending request is explicitly not confirmed.
+    """
+    today = now.astimezone(zone).date()
+    shown = tuple(visit for visit in visits
+                  if (question.first is None or question.last is None
+                      or max(question.first, today) <= visit.start_at.astimezone(zone).date()
+                      <= question.last))
+    lines = [f"Visits ({zone.key}; pending = awaiting owner approval, not confirmed):"]
+    for visit in shown:
+        start = visit.start_at.astimezone(zone)
+        status = "confirmed" if visit.status == CONFIRMED else "pending"
+        lines.append(f"- {start:%Y-%m-%d %H:%M} {status}")
+    return "\n".join(lines)
+
+
 def range_from_proposal(date_from: str | None, date_to: str | None
                         ) -> tuple[date | None, date | None] | None:
     """The model's day range for a calendar question; None when it is unusable."""
@@ -173,4 +194,3 @@ def range_from_proposal(date_from: str | None, date_to: str | None
     except ValueError:
         return None
     return first, last
-

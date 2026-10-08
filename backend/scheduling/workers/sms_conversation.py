@@ -40,7 +40,7 @@ def handler(event: dict[str, Any], _context: object) -> dict[str, list[dict[str,
     states = DynamoConversationStates(dynamo, table)
     clock = lambda: datetime.now(UTC)
     interpreter = OpenAIMessageInterpreter(_openai_key(
-        boto3.client("ssm"), os.environ["OPENAI_API_KEY_PARAM"]))
+        boto3.client("ssm"), os.environ["OPENAI_API_KEY_PARAM"]), timeout_seconds=8)
 
     def conversation_for(receipt: InboundReceipt) -> ConversationService:
         # A separate repository per receipt adds STOP conditions to each
@@ -58,6 +58,7 @@ def handler(event: dict[str, Any], _context: object) -> dict[str, list[dict[str,
             counteroffer_acceptance=CounterofferAcceptance(
                 calendar, store, DynamoCounterofferStore(dynamo, table),
                 HoldService(calendar)),
+            history_reader=store,
         )
 
     processor = ReceiptProcessor(store, None, business_id, clock,

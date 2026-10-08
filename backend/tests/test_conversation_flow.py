@@ -14,6 +14,7 @@ from scheduling.domain.conversation import (
     MessageContext,
     MessageProposal,
 )
+from scheduling.domain.conversation_history import HistoryMessage
 from scheduling.domain.conversation_state import (
     ConversationState,
     InMemoryConversationStates,
@@ -52,6 +53,7 @@ class Script:
         self.contexts: list[MessageContext] = []
         self.owner: dict[str, OwnerReplyIntent] = {}  # Owner reply text to what the model says.
         self.classified: list[str] = []
+        self.reads: list[tuple[str, str]] = []
 
     def propose(self, body: str, context: MessageContext) -> MessageProposal:
         self.calls.append(body)
@@ -63,6 +65,11 @@ class Script:
         intent = self.owner.get(body, OwnerReplyIntent.UNCLEAR)
         reference = context.pending[0].ref if len(context.pending) == 1 else None
         return OwnerReplyProposal(intent, reference, Confidence.HIGH)
+
+    def draft_read_reply(self, body: str, context: MessageContext,
+                         tool_name: str, tool_result: str) -> str:
+        self.reads.append((tool_name, tool_result))
+        return tool_result
 
 
 class Consent:
@@ -279,6 +286,43 @@ def test_relative_dates_are_checked_against_horizon_holidays_and_the_past() -> N
     assert "which day you meant" in chat.text("February 30?").text
     assert chat.states.read_state("pilot", "+14155550101") is None
     assert chat.calendar() == ()
+
+
+def test_date_only_followup_uses_invitation_context_and_current_availability() -> None:
+    chat = Harness()
+    chat.now = datetime(2026, 10, 12, 17, tzinfo=UTC)
+    chat.hold(datetime(2026, 10, 13, 20, tzinfo=UTC), "busy-1pm")
+    chat.model.replies["Oct 13 at 1 pm"] = ask(
+        "availability", "2026-10-13", "2026-10-13", "13:00", "13:00")
+    chat.model.replies["Oct 13"] = ask("availability", "2026-10-13")
+
+    class History:
+        def read_conversation_history(self, receipt: InboundReceipt,
+                                      now: datetime) -> tuple[HistoryMessage, ...]:
+            return (
+                HistoryMessage("invite", "assistant", now - timedelta(minutes=20),
+                               "Would you like a cleaning this week?", True),
+                HistoryMessage("first", "client", now - timedelta(minutes=15),
+                               "Oct 13 at 1 pm"),
+                HistoryMessage("answer", "assistant", now - timedelta(minutes=14),
+                               "That exact time isn't open. Here are other times."),
+                HistoryMessage(receipt.provider_id, "client", now, receipt.body or ""),
+            )
+
+    chat.service = ConversationService(
+        chat.store, chat.model, HoldService(chat.store),
+        LifecycleService(chat.store, lambda: chat.now), Consent(), lambda: chat.now,
+        "+14155559999", chat.states, history_reader=History())
+    first = chat.text("Oct 13 at 1 pm")
+    assert "That exact time isn't open" in first.text
+    followup = chat.text("Oct 13")
+    assert "Open times on Tue Oct 13" in followup.text
+    assert "1:00 PM" not in followup.text
+    assert chat.model.contexts[-1].history[0].invitation
+    assert chat.model.contexts[-1].prompt_kind == "offer"
+    assert [name for name, _result in chat.model.reads] == [
+        "list_available_slots", "list_available_slots"]
+    assert len(chat.calendar()) == 1  # The preexisting conflict is unchanged.
 
 
 def test_week_long_range_spreads_five_options_across_days() -> None:

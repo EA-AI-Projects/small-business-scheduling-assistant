@@ -9,16 +9,20 @@ a given wording or language that way is covered by the synthetic model evaluatio
 
 from datetime import UTC, datetime, timedelta
 
-from test_conversation_flow import NOW, THURSDAY, Harness, ask
+import pytest
+from test_conversation_flow import NOW, THURSDAY, ZONE, Consent, Harness, ask
+from test_sms_processing import Reader
 
 from evals.scheduling_messages import CASES
 from scheduling.domain.calendar import CalendarEvent, CalendarStatus
 from scheduling.domain.client_records import ClientProfile, HomeSize
-from scheduling.domain.conversation import ConversationOutcome, MessageProposal
+from scheduling.domain.conversation import ConversationOutcome, ConversationService, MessageProposal
+from scheduling.domain.conversation_history import HistoryMessage
 from scheduling.domain.conversation_state import PromptKind
 from scheduling.domain.holds import CreateHold, HoldService
 from scheduling.domain.lifecycle import Action, ActorRole, AppointmentCommand, LifecycleService
 from scheduling.domain.sms_ingress import InboundReceipt, Keyword, SenderRole
+from scheduling.domain.sms_processing import ReceiptProcessor
 
 FRIDAY = THURSDAY + timedelta(days=1)  # Fri Oct 2, 9:00 AM local.
 NEXT_TUESDAY = THURSDAY + timedelta(days=5)  # Tue Oct 6, 9:00 AM local.
@@ -57,6 +61,19 @@ def unchanged(chat: Harness, before: tuple[tuple[str, str, int], ...]) -> None:
                              and state.appointment_id is None)
 
 
+class EmptyHistory:
+    def read_conversation_history(self, receipt: InboundReceipt,
+                                  now: datetime) -> tuple[HistoryMessage, ...]:
+        return ()
+
+
+def with_read_draft(chat: Harness) -> None:
+    chat.service = ConversationService(
+        chat.store, chat.model, HoldService(chat.store),
+        LifecycleService(chat.store, lambda: chat.now), Consent(), lambda: chat.now,
+        "+14155559999", chat.states, history_reader=EmptyHistory())
+
+
 def test_bookings_this_week_lists_confirmed_and_pending_separately() -> None:
     chat, confirmed, pending = week_with_visits()
     before = chat.calendar()
@@ -85,6 +102,84 @@ def test_no_range_lists_every_upcoming_visit() -> None:
     reply = asked(chat, "When are the cleaners coming?", cal())
     assert reply.text.startswith("You have 2 confirmed visits, 1 pending request coming up:")
     assert confirmed[:8] in reply.text and later[:8] in reply.text
+
+
+def test_long_single_day_calendar_answer_lists_every_visit_within_sms_limit() -> None:
+    chat = Harness()
+    starts = [THURSDAY - timedelta(hours=1) + timedelta(hours=i)
+              for i in range(8)]
+    for index, start in enumerate(starts):
+        HoldService(chat.store).create(CreateHold(
+            "pilot", "client-1", "client-1", f"same-day-{index}", start, 30), NOW)
+
+    with_read_draft(chat)
+    chat.model.replies["Tomorrow?"] = ask("availability", "2026-09-30")
+    chat.text("Tomorrow?")  # The calendar answer must also close this open offer.
+    before = chat.calendar()
+    answer = asked(chat, "What visits do I have Thursday?", cal("2026-10-01"))
+    assert len(answer.text) <= 500
+    assert "pending = awaiting owner approval, not confirmed" in answer.text
+    for start in starts:
+        assert start.astimezone(ZONE).strftime("%Y-%m-%d %H:%M") in answer.text
+    assert chat.model.reads[-1] == ("list_client_appointments", answer.text)
+    assert "nothing was booked or cancelled" in answer.text
+    unchanged(chat, before)
+
+
+@pytest.mark.parametrize("failure", ["timeout", "malformed"])
+def test_failed_final_draft_puts_authoritative_read_answer_in_outbox(
+        monkeypatch: pytest.MonkeyPatch, failure: str) -> None:
+    body = "What times are open tomorrow?"
+    baseline = Harness()
+    baseline.model.replies[body] = ask("availability", "2026-09-30")
+    expected = baseline.text(body).text
+
+    chat = Harness()
+    chat.model.replies[body] = ask("availability", "2026-09-30")
+    with_read_draft(chat)
+
+    def fail_draft(_body: str, _context: object, _tool: str, _result: str) -> str:
+        if failure == "timeout":
+            raise TimeoutError("synthetic timeout")
+        raise ValueError("synthetic malformed draft")
+
+    monkeypatch.setattr(chat.model, "draft_read_reply", fail_draft)
+    receipt = InboundReceipt("pilot", "SM-draft", "+14155550101", "+14155550000",
+                             body, chat.now, SenderRole.CLIENT, "client-1", Keyword.OTHER, True)
+    outbox = Reader({("pilot", "SM-draft"): receipt})
+    processor = ReceiptProcessor(outbox, chat.service, "pilot", lambda: chat.now)
+    assert processor.process("pilot", "SM-draft") == ConversationOutcome(expected)
+    assert outbox.replies == [("SM-draft", expected)]
+    assert processor.process("pilot", "SM-draft") is None
+    assert outbox.replies == [("SM-draft", expected)]
+    assert chat.calendar() == ()
+
+
+@pytest.mark.parametrize("kind", ["availability", "calendar"])
+def test_failed_current_read_sends_retry_without_inventing_calendar_facts(
+        monkeypatch: pytest.MonkeyPatch, kind: str) -> None:
+    chat = Harness()
+    body = "What times are open tomorrow?" if kind == "availability" else "My visits?"
+    chat.model.replies[body] = (ask("availability", "2026-09-30")
+                                if kind == "availability" else cal())
+    before = chat.calendar()
+    read_calendar = chat.store.read_calendar
+    calls = 0
+
+    def fail_read(business_id: str) -> object:
+        nonlocal calls
+        calls += 1
+        if kind == "calendar" or calls > 1:
+            raise OSError("synthetic calendar read failure")
+        return read_calendar(business_id)
+
+    monkeypatch.setattr(chat.store, "read_calendar", fail_read)
+    reply = chat.text(body)
+    assert "try again later" in reply.text
+    assert "open times" not in reply.text.lower()
+    assert "confirmed visit" not in reply.text.lower()
+    monkeypatch.setattr(chat.store, "read_calendar", read_calendar)
+    assert chat.calendar() == before
 
 
 def test_ambiguous_booking_asks_whether_to_check_or_request() -> None:
