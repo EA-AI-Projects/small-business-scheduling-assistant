@@ -412,7 +412,7 @@ class ConversationService:
         ID makes a retried text replay. The result is pending owner approval.
         """
         if (prompt is None or prompt.kind != PromptKind.OFFER or prompt.expired(now)
-                or proposal.date_from is None or proposal.date_from != proposal.date_to
+                or prompt.client_id != receipt.client_id or proposal.date_from is None or proposal.date_from != proposal.date_to
                 or proposal.time_from is None or proposal.time_from != proposal.time_to):
             return None
         try:
