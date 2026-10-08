@@ -53,6 +53,15 @@ def test_fact_free_clarification_has_no_required_date_time_or_reference() -> Non
     assert not valid_draft("How about Fri Oct 16 at 2:00 PM?", result)
 
 
+def test_date_only_result_rejects_an_invented_time_or_different_day() -> None:
+    result = ClientReplyResult(
+        "request_failed", "none", "No openings on Sat Oct 10.",
+        (ClientReplyFact("Sat Oct 10", None, "no openings"),))
+    assert valid_draft("No openings on Sat Oct 10. Another day?", result)
+    assert not valid_draft("No openings on Sat Oct 10 at 9:00 AM.", result)
+    assert not valid_draft("No openings on Sun Oct 11.", result)
+
+
 def test_gsm_segment_budget_counts_extensions_and_rejects_nonprintable_text() -> None:
     assert gsm_septets("^" * 80) == 160
     assert gsm_septets("^" * 81) == 162

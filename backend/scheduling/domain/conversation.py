@@ -283,6 +283,10 @@ class ConversationService:
                                clock_text(start, zone), status, reference)
 
     @staticmethod
+    def _client_date_fact(day: date, status: str) -> ClientReplyFact:
+        return ClientReplyFact(day_text(day), None, status)
+
+    @staticmethod
     def _client_calendar_status(status: CalendarStatus) -> str:
         return {CalendarStatus.CONFIRMED: "confirmed",
                 CalendarStatus.PENDING_APPROVAL: "pending owner approval"}.get(
@@ -1428,7 +1432,12 @@ class ConversationService:
             receipt, proposal, targets, zone, "cancel",
             (CalendarStatus.CONFIRMED, CalendarStatus.PENDING_APPROVAL), now)
         if target is None:
-            return ConversationOutcome(question or "Which visit would you like to cancel?")
+            outcome = ConversationOutcome(question or "Which visit would you like to cancel?")
+            facts = tuple(self._client_fact(item.start_at, zone,
+                                            self._client_calendar_status(item.status))
+                          for item in targets)
+            return self._with_result(outcome, "cancel_clarification", "none", facts,
+                                     reason="visit_not_resolved")
         return self._confirm_cancel(receipt, target, zone, now)
 
     def _confirm_cancel(self, receipt: InboundReceipt, target: Appointment, zone: ZoneInfo,
@@ -1447,9 +1456,12 @@ class ConversationService:
     def _ask_day(self, receipt: InboundReceipt, target: Appointment, zone: ZoneInfo,
                  now: datetime) -> ConversationOutcome:
         self._remember(receipt, PromptKind.RESCHEDULE_DAY, now, appointment=target)
-        return ConversationOutcome(
+        outcome = ConversationOutcome(
             f"What day would you like instead of your {when_text(target.start_at, zone)} "
             "visit? It stays booked until the owner approves a new time.")
+        return self._with_result(outcome, "reschedule_day_question", "confirmed",
+                                 (self._client_fact(target.start_at, zone, "confirmed",
+                                                    target.appointment_id[:8]),))
 
     def _ask_reschedule(self, receipt: InboundReceipt, proposal: MessageProposal,
                         targets: tuple[Appointment, ...], policy: AvailabilityPolicy,
@@ -1460,10 +1472,16 @@ class ConversationService:
         if target is None:
             if any(item.status == CalendarStatus.PENDING_APPROVAL for item in targets) and \
                     not any(item.status == CalendarStatus.CONFIRMED for item in targets):
-                return ConversationOutcome(
+                outcome = ConversationOutcome(
                     "Your request is still pending owner approval. Rescheduling needs a "
                     "confirmed visit; you can cancel the request and ask for another time.")
-            return ConversationOutcome(question or "Which visit would you like to move?")
+                return self._with_result(outcome, "reschedule_clarification", "pending",
+                                         reason="no_confirmed_visit")
+            outcome = ConversationOutcome(question or "Which visit would you like to move?")
+            facts = tuple(self._client_fact(item.start_at, zone, "confirmed")
+                          for item in targets if item.status == CalendarStatus.CONFIRMED)
+            return self._with_result(outcome, "reschedule_clarification", "none", facts,
+                                     reason="visit_not_resolved")
         if proposal.date_from is None:
             return self._ask_day(receipt, target, zone, now)
         return self._offer_from_proposal(receipt, proposal, policy, now, target)
@@ -1479,7 +1497,12 @@ class ConversationService:
         if proposal.date_from is None:
             if original is not None:
                 self._remember(receipt, PromptKind.RESCHEDULE_DAY, now, appointment=original)
-            return ConversationOutcome(self._clarify(SenderRole.CLIENT, "clarify"))
+            outcome = ConversationOutcome(self._clarify(SenderRole.CLIENT, "clarify"))
+            facts = ((self._client_fact(original.start_at, ZoneInfo(policy.timezone),
+                                        "confirmed", original.appointment_id[:8]),)
+                     if original is not None else ())
+            return self._with_result(outcome, "date_clarification", "none", facts,
+                                     reason="missing_day")
         try:
             first = date.fromisoformat(proposal.date_from)
             last = date.fromisoformat(proposal.date_to or proposal.date_from)
@@ -1488,9 +1511,15 @@ class ConversationService:
             if (earliest is None) != (latest is None):  # "After 2" or "before noon".
                 earliest, latest = earliest or time(0), latest or time(23, 59)
         except ValueError:
-            return ConversationOutcome("I couldn't tell which day you meant. What date works for you?")
+            outcome = ConversationOutcome(
+                "I couldn't tell which day you meant. What date works for you?")
+            return self._with_result(outcome, "date_clarification", "none",
+                                     reason="invalid_day")
         if last < first or (earliest is not None and latest is not None and latest < earliest):
-            return ConversationOutcome("I couldn't tell which day you meant. What date works for you?")
+            outcome = ConversationOutcome(
+                "I couldn't tell which day you meant. What date works for you?")
+            return self._with_result(outcome, "date_clarification", "none",
+                                     reason="invalid_range")
         return self._offer(receipt, profile, policy, now, first, last, earliest, latest, original)
 
     def _offer(self, receipt: InboundReceipt, profile: ClientProfile, policy: AvailabilityPolicy,
@@ -1501,11 +1530,16 @@ class ConversationService:
         today = now.astimezone(zone).date()
         horizon = today + timedelta(days=policy.booking_horizon_days)
         if last < today:
-            return ConversationOutcome("That date has passed. What day works for you?")
+            outcome = ConversationOutcome("That date has passed. What day works for you?")
+            return self._with_result(outcome, "date_clarification", "none",
+                                     reason="date_in_past")
         if first > horizon:
-            return ConversationOutcome(
+            outcome = ConversationOutcome(
                 f"I can book up to {policy.booking_horizon_days} days ahead, through "
                 f"{day_text(horizon)}. What day in that range works for you?")
+            return self._with_result(outcome, "date_clarification", "none",
+                                     (self._client_date_fact(horizon, "booking horizon"),),
+                                     reason="outside_horizon")
         first, last = max(first, today), min(last, horizon)
         events = None
         if original is not None:
@@ -1521,13 +1555,18 @@ class ConversationService:
                     if events is None else
                     available_starts(policy, day, profile.default_duration_minutes, events, now))
         except (InvalidDuration, InvalidPolicy, ValueError):
-            return ConversationOutcome("Please contact the owner to schedule this visit.")
+            outcome = ConversationOutcome("Please contact the owner to schedule this visit.")
+            return self._with_result(outcome, "request_failed", "none",
+                                     reason="invalid_availability_policy")
         span = (f"on {day_text(first)}" if first == last
                 else f"between {day_text(first)} and {day_text(last)}")
         if not starts:
             outcome = ConversationOutcome(
                 f"I don't have any openings {span}. Would another day work?")
+            dates = (first,) if first == last else (first, last)
             return self._with_result(outcome, "request_failed", "none",
+                                     tuple(self._client_date_fact(day, "no openings")
+                                           for day in dates),
                                      reason="no_openings", detail=span)
         note = ""
         chosen: tuple[datetime, ...]

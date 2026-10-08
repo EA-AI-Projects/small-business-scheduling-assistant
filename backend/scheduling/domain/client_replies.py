@@ -28,10 +28,10 @@ def gsm_septets(text: str) -> int | None:
 
 @dataclass(frozen=True)
 class ClientReplyFact:
-    """One inseparable local time, reference, and state from an authorized result."""
+    """An authorized local date, optional time/reference, and state."""
 
     date: str
-    time: str
+    time: str | None
     status: str
     reference: str | None = None
 
@@ -59,5 +59,6 @@ def valid_draft(draft: str, result: ClientReplyResult) -> bool:
     times = {match.group().lower().replace(" ", "") for match in TIME.finditer(draft)}
     refs = {match.group().lower() for match in REF.finditer(draft)}
     return (dates == {fact.date.lower() for fact in result.facts}
-            and times == {fact.time.lower().replace(" ", "") for fact in result.facts}
+            and times == {fact.time.lower().replace(" ", "") for fact in result.facts
+                          if fact.time is not None}
             and refs == {ref.lower() for ref in result.references})

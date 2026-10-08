@@ -737,6 +737,67 @@ def test_expired_offer_draft_has_no_write_and_reports_expiry() -> None:
     assert chat.calendar() == ()
 
 
+def test_model_drafts_client_cancel_and_move_questions_without_changing_visits() -> None:
+    model = DraftScript()
+    chat = Harness(model)
+    visit = chat.hold(THURSDAY, "visit", confirm=True)
+    model.replies["Cancel my visit"] = ask("cancel")
+    model.drafts["Cancel my visit"] = lambda result: (
+        f"Cancel Thu Oct 1 at 9:00 AM, ref {result.references[0]}? Reply YES to confirm.")
+    asked = chat.text("Cancel my visit")
+    assert not asked.committed and asked.text == model.drafts["Cancel my visit"](
+        model.draft_calls[-1][1])
+    assert model.draft_calls[-1][1].kind == "cancel_question"
+    assert chat.status(visit) == CalendarStatus.CONFIRMED
+
+    model.replies["Move my visit"] = ask("reschedule")
+    model.drafts["Move my visit"] = lambda result: (
+        f"What day works instead of Thu Oct 1 at 9:00 AM, ref {result.references[0]}? ")
+    move = chat.text("Move my visit")
+    assert not move.committed and move.text == model.drafts["Move my visit"](
+        model.draft_calls[-1][1])
+    assert model.draft_calls[-1][1].kind == "reschedule_day_question"
+    assert chat.status(visit) == CalendarStatus.CONFIRMED
+
+
+def test_model_drafts_unresolved_visit_and_date_questions_with_safe_fallback() -> None:
+    model = DraftScript()
+    chat = Harness(model)
+    first = chat.hold(THURSDAY, "first", confirm=True)
+    second = chat.hold(datetime(2026, 10, 2, 16, tzinfo=UTC), "second", confirm=True)
+    model.replies["Cancel one"] = ask("cancel")
+    model.drafts["Cancel one"] = (
+        "Which visit: Thu Oct 1 at 9:00 AM or Fri Oct 2 at 9:00 AM? Reply 1 or 2.")
+    choice = chat.text("Cancel one")
+    assert choice.text == model.drafts["Cancel one"]
+    assert model.draft_calls[-1][1].kind == "cancel_clarification"
+    assert chat.status(first) == chat.status(second) == CalendarStatus.CONFIRMED
+
+    model.replies["Book a day"] = ask("availability")
+    model.drafts["Book a day"] = "What day works for you?"
+    day = chat.text("Book a day")
+    assert day.text == model.drafts["Book a day"]
+    assert model.draft_calls[-1][1].reason == "missing_day"
+    model.replies["Book far ahead"] = ask("availability", "2027-03-01")
+    model.drafts["Book far ahead"] = lambda result: (
+        f"I can book through {result.facts[0].date}. Which day works for you?")
+    horizon = chat.text("Book far ahead")
+    assert horizon.text == model.drafts["Book far ahead"](model.draft_calls[-1][1])
+    assert model.draft_calls[-1][1].reason == "outside_horizon"
+    model.replies["Far wrong"] = ask("availability", "2027-03-01")
+    model.drafts["Far wrong"] = "I can book through Fri Oct 30. Which day works?"
+    wrong_day = chat.text("Far wrong")
+    assert wrong_day.text == model.draft_calls[-1][1].fallback
+    assert model.draft_calls[-1][1].reason == "outside_horizon"
+    model.replies["Saturday"] = ask("availability", "2026-10-10")
+    model.drafts["Saturday"] = lambda result: (
+        f"No openings on {result.facts[0].date}. Would another day work?")
+    no_openings = chat.text("Saturday")
+    assert no_openings.text == model.drafts["Saturday"](model.draft_calls[-1][1])
+    assert model.draft_calls[-1][1].reason == "no_openings"
+    assert chat.status(first) == chat.status(second) == CalendarStatus.CONFIRMED
+
+
 def test_model_cannot_request_a_time_that_was_not_offered() -> None:
     chat = Harness()
     offered(chat)
