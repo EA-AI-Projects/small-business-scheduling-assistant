@@ -5,8 +5,10 @@ import pytest
 from scheduling.domain.client_replies import (
     ClientReplyFact,
     ClientReplyResult,
+    facts_from_text,
     gsm_septets,
     valid_draft,
+    valid_owner_draft,
 )
 
 PENDING = ClientReplyResult(
@@ -71,3 +73,34 @@ def test_gsm_segment_budget_counts_extensions_and_rejects_nonprintable_text() ->
     assert valid_draft("^" * 80, result)
     assert not valid_draft("^" * 81, result)
     assert not valid_draft("`", result)
+
+
+BACKEND = ("Mon Oct 5 to Sun Oct 11, 2026: 2 pending requests.\n"
+           "Mon Oct 5, 9:00 AM-11:00 AM: Avery (pending, ref a1b2c3d4)\n"
+           "Tue Oct 6, 1:00 PM-3:00 PM: Blake (pending, ref b2c3d4e5)")
+OWNER_RESULT = ClientReplyResult(
+    "owner_calendar", "read_only", "safe", facts_from_text(BACKEND), None, BACKEND,
+    suffix="\nShowing 1-2 of 3. Reply MORE for the rest.")
+GOOD = ("From Mon Oct 5 to Sun Oct 11 there are two requests. Avery is on Mon Oct 5 from 9:00 AM to 11:00 AM "
+        "(ref a1b2c3d4). Blake is on Tue Oct 6 from 1:00 PM to 3:00 PM (ref b2c3d4e5).")
+
+
+def test_owner_draft_per_entry_and_year_checks() -> None:
+    assert valid_owner_draft(GOOD, OWNER_RESULT)
+    assert valid_owner_draft(GOOD.replace("Sun Oct 11 there", "Sun Oct 11, 2026 there"),
+                             OWNER_RESULT)
+    for bad in (
+            GOOD.replace("ref a1b2c3d4", "ref TMP").replace("ref b2c3d4e5", "ref a1b2c3d4")
+            .replace("ref TMP", "ref b2c3d4e5"),                       # Refs swapped.
+            GOOD.replace("Avery is on Mon Oct 5", "Avery is on Tue Oct 6"),  # Dates swapped.
+            GOOD.replace("Sun Oct 11 there", "Sun Oct 11, 2027 there"),
+            GOOD + " Also Wed Oct 7.", GOOD.replace("3:00 PM", "4:00 PM"),
+            GOOD.replace(" (ref b2c3d4e5)", ""),
+            GOOD + ' Reply "YES" to approve.', GOOD + " Respond YES.",
+            GOOD + " Reply APPROVE a1b2c3d4 to approve it.",
+            GOOD + " Reply MORE.", GOOD + " Avery's visit was approved."):
+        assert not valid_owner_draft(bad, OWNER_RESULT), bad
+    # Only read-only owner kinds are draftable.
+    approve = ClientReplyResult("owner_approval", "approved", "safe", OWNER_RESULT.facts,
+                                None, BACKEND)
+    assert not valid_owner_draft(GOOD, approve)
