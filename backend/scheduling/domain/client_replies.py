@@ -1,4 +1,4 @@
-"""Bounded client SMS drafting from backend-owned scheduling facts."""
+"""Bounded SMS drafting from backend-owned scheduling facts (client replies, owner answers)."""
 
 import re
 from dataclasses import dataclass
@@ -13,11 +13,14 @@ TIME = re.compile(r"\b(?:\d{1,2}:\d{2}\s*(?:AM|PM)?|\d{1,2}\s*(?:AM|PM))\b", re.
 REF = re.compile(r"\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b|\b[0-9a-f]{8}\b", re.IGNORECASE)
 
 
-def gsm_septets(text: str) -> int | None:
-    """Return encoded length for printable GSM-7, or None for unsupported text."""
+def gsm_septets(text: str, line_breaks: bool = False) -> int | None:
+    """Return encoded length for printable GSM-7, or None for unsupported text.
+
+    Client drafts are one line; owner pages (``line_breaks``) are multi-line.
+    """
     total = 0
     for char in text:
-        if char in GSM_BASIC:
+        if char in GSM_BASIC or (line_breaks and char == "\n"):
             total += 1
         elif char in GSM_EXTENSION:
             total += 2
@@ -44,10 +47,28 @@ class ClientReplyResult:
     facts: tuple[ClientReplyFact, ...] = ()
     reason: str | None = None
     detail: str | None = None
+    # Owner results (#285): the replies the backend will honor in this situation, as trusted
+    # data for the model to word (never text to copy), and dates, times, and references the
+    # draft may mention but need not (an open offer's time and request reference).
+    instructions: tuple[str, ...] = ()
+    extra_facts: tuple[ClientReplyFact, ...] = ()
 
     @property
     def references(self) -> tuple[str, ...]:
         return tuple(fact.reference for fact in self.facts if fact.reference is not None)
+
+
+def _explicit(draft: str) -> tuple[set[str], set[str], set[str]]:
+    return ({match.group().lower() for match in DATE.finditer(draft)},
+            {match.group().lower().replace(" ", "") for match in TIME.finditer(draft)},
+            {match.group().lower() for match in REF.finditer(draft)})
+
+
+def _authorized(result: ClientReplyResult) -> tuple[set[str], set[str], set[str]]:
+    return ({fact.date.lower() for fact in result.facts if fact.date},
+            {fact.time.lower().replace(" ", "") for fact in result.facts
+             if fact.time is not None},
+            {ref.lower() for ref in result.references})
 
 
 def valid_draft(draft: str, result: ClientReplyResult) -> bool:
@@ -55,10 +76,126 @@ def valid_draft(draft: str, result: ClientReplyResult) -> bool:
     size = gsm_septets(draft)
     if size is None or size > 160 or not draft.strip():
         return False
-    dates = {match.group().lower() for match in DATE.finditer(draft)}
-    times = {match.group().lower().replace(" ", "") for match in TIME.finditer(draft)}
-    refs = {match.group().lower() for match in REF.finditer(draft)}
-    return (dates == {fact.date.lower() for fact in result.facts}
-            and times == {fact.time.lower().replace(" ", "") for fact in result.facts
-                          if fact.time is not None}
-            and refs == {ref.lower() for ref in result.references})
+    return _explicit(draft) == _authorized(result)
+
+
+# Owner answers may use the three-segment cap the owner thread already uses for calendar pages.
+OWNER_REPLY_LIMIT = 480
+DRAFTABLE_OWNER_KINDS = frozenset({"owner_calendar", "owner_requests", "owner_how_to"})
+YEAR = re.compile(r",?\s+\d{4}$")
+CLAUSES = re.compile(r"\b(?:and|while)\b", re.IGNORECASE)
+SEGMENTS = re.compile(r"[\n;]|(?<=[.!?])\s+")
+
+
+def facts_from_text(text: str, status: str = "listed") -> tuple[ClientReplyFact, ...]:
+    """The explicit dates, times, and references of backend-built text, as authorized facts."""
+    dates, times, refs = (list(dict.fromkeys(
+        match.group() for match in pattern.finditer(text)))
+        for pattern in (DATE, TIME, REF))
+    return (tuple(ClientReplyFact(day, None, status) for day in dates)
+            + tuple(ClientReplyFact("", clock, status) for clock in times)
+            + tuple(ClientReplyFact("", None, status, ref) for ref in refs))
+
+
+def _core(day: str) -> str:
+    return YEAR.sub("", day.lower())
+
+
+def _dates_ok(drafted: set[str], required: set[str], allowed: set[str]) -> bool:
+    """Every drafted date is an allowed one (an explicit year must be the backend's own), and
+    every required date appears (the year of a range header is optional)."""
+    allowed_cores = {_core(day) for day in allowed}
+    return (all(day in allowed if YEAR.search(day) else _core(day) in allowed_cores
+                for day in drafted)
+            and {_core(day) for day in required} <= {_core(day) for day in drafted})
+
+
+def _entries(backend: str) -> list[tuple[set[str], set[str], str]]:
+    """Each backend line or clause that names a request reference: its dates, times, ref."""
+    found = []
+    for part in SEGMENTS.split(backend):
+        dates, times, refs = _explicit(part)
+        if len(refs) == 1:
+            found.append((dates, times, next(iter(refs))))
+    return found
+
+
+def valid_owner_draft(draft: str, result: ClientReplyResult) -> bool:
+    """Basic check of an owner reply the model wrote in full (#285), like the client check.
+
+    One GSM-7 budget within 480; every explicit date, time, and reference is one the backend
+    gave (the result's entries, or an open offer's extra facts) and every entry's appears. Per
+    entry: each reference-bearing entry appears with its own date and time in one sentence,
+    and within a sentence (split further at "and"/"while") each date and time must belong to
+    the nearest reference's own entry; dates and times in a clause with no reference are
+    refused unless the backend also writes them outside any such entry (a range header, a
+    confirmed visit) or they are an offer's. Not checked (owner decision on #285, 2026-10-08):
+    names, statuses, counts, whether the offer reminder, paging line, or command wording is
+    included or right, and any YES/NO prompt the model writes.
+    """
+    size = gsm_septets(draft, True)
+    if (result.kind not in DRAFTABLE_OWNER_KINDS or size is None or not draft.strip()
+            or size > OWNER_REPLY_LIMIT):
+        return False
+    dates, times, refs = _explicit(draft)
+    required = _authorized(result)
+    extra = _authorized(ClientReplyResult("", "", "", result.extra_facts))
+    allowed_dates, allowed_times, allowed_refs = (
+        required[0] | extra[0], required[1] | extra[1], required[2] | extra[2])
+    if not (_dates_ok(dates, required[0], allowed_dates)
+            and times <= allowed_times and required[1] <= times
+            and refs <= allowed_refs and required[2] <= refs):
+        return False
+    entries = _entries(result.detail or "")
+    owned = {ref: ({_core(day) for day in entry_dates}, entry_times)
+             for entry_dates, entry_times, ref in entries}
+    segments = [_positioned(part) for part in SEGMENTS.split(draft)]
+    for ref, (entry_dates, entry_times) in owned.items():
+        if not any(ref in {r for _p, r in seg_refs}
+                   and entry_dates <= {_core(day) for _p, day in seg_dates}
+                   and entry_times <= {clock for _p, clock in seg_times}
+                   for seg_dates, seg_times, seg_refs in segments):
+            return False
+    if not owned:
+        return True
+    # Dates and times that the backend also writes outside any reference-bearing entry (a range
+    # header, a confirmed visit, which carries no reference) are not tied to a request.
+    loose = [_explicit(part) for part in SEGMENTS.split(result.detail or "")
+             if not _explicit(part)[2]]
+    loose_dates = ({_core(day) for dates_, _t, _r in loose for day in dates_}
+                   | {_core(day) for day in extra[0]})
+    loose_times = {clock for _d, times_, _r in loose for clock in times_} | extra[1]
+    groups = [_positioned(group) for part in SEGMENTS.split(draft)
+              for group in CLAUSES.split(part)]
+    for seg_dates, seg_times, seg_refs in groups:
+        for span, day in seg_dates:
+            if _core(day) in loose_dates:
+                continue
+            owner = _nearest(span, seg_refs)
+            if owner is None or _core(day) not in owned.get(owner, (set(), set()))[0]:
+                return False
+        for span, clock in seg_times:
+            if clock in loose_times:
+                continue
+            owner = _nearest(span, seg_refs)
+            if owner is None or clock not in owned.get(owner, (set(), set()))[1]:
+                return False
+    return True
+
+
+Span = tuple[int, int]
+
+
+def _positioned(part: str) -> tuple[list[tuple[Span, str]], list[tuple[Span, str]],
+                                    list[tuple[Span, str]]]:
+    return ([(m.span(), m.group().lower()) for m in DATE.finditer(part)],
+            [(m.span(), m.group().lower().replace(" ", "")) for m in TIME.finditer(part)],
+            [(m.span(), m.group().lower()) for m in REF.finditer(part)])
+
+
+def _nearest(span: Span, refs: list[tuple[Span, str]]) -> str | None:
+    """The reference with the smallest gap to ``span`` in the sentence (earlier on a tie)."""
+    if not refs:
+        return None
+    return min(refs, key=lambda item: (max(span[0] - item[0][1], item[0][0] - span[1], 0),
+                                       item[0][0]))[1]
