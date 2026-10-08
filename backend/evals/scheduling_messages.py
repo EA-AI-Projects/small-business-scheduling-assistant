@@ -27,7 +27,7 @@ from scheduling.adapters.openai_messages import (
     model_input,
 )
 from scheduling.domain.client_records import ACCESS_CODE_PATTERN
-from scheduling.domain.client_replies import ClientReplyResult, valid_draft
+from scheduling.domain.client_replies import ClientReplyFact, ClientReplyResult, valid_draft
 from scheduling.domain.conversation import MessageContext
 from scheduling.domain.conversation_history import HistoryMessage
 from scheduling.domain.owner_reply_classification import (
@@ -296,29 +296,36 @@ class DraftCase:
 
 DRAFT_CASES = (
     DraftCase("offer-after-invitation", "Oct 13 at 1 pm",
-              ClientReplyResult.from_safe_text(
+              ClientReplyResult(
                   "offer_made", "none",
                   "Tue Oct 13 at 1:00 PM is open for your cleaning. Reply YES to request it. "
-                  "The owner approves every request."), (INVITE,)),
+                  "The owner approves every request.",
+                  (ClientReplyFact("Tue Oct 13", "1:00 PM", "open"),)), (INVITE,)),
     DraftCase("pending-after-acceptance", "yes please",
-              ClientReplyResult.from_safe_text(
+              ClientReplyResult(
                   "request_created", "pending",
                   "Requested Tue Oct 13 at 1:00 PM (ref a101a101). It's pending owner "
-                  "approval, not confirmed yet."), (INVITE, ASKED_1PM, OFFER_1PM)),
+                  "approval, not confirmed yet.",
+                  (ClientReplyFact("Tue Oct 13", "1:00 PM", "pending owner approval",
+                                   "a101a101"),)), (INVITE, ASKED_1PM, OFFER_1PM)),
     DraftCase("slot-taken", "yes please",
-              ClientReplyResult.from_safe_text(
+              ClientReplyResult(
                   "request_failed", "none",
                   "Sorry, Tue Oct 13 at 1:00 PM is no longer open, so nothing was booked. "
-                  "Tell me what day works."), (OFFER_1PM,)),
+                  "Tell me what day works.",
+                  (ClientReplyFact("Tue Oct 13", "1:00 PM", "unavailable"),),
+                  "slot_taken"), (OFFER_1PM,)),
     DraftCase("cancelled-visit", "yes, cancel it",
-              ClientReplyResult.from_safe_text(
+              ClientReplyResult(
                   "cancelled", "cancelled",
-                  "Cancelled your Thu Oct 1 at 9:00 AM visit (ref b202b202)."),
+                  "Cancelled your Thu Oct 1 at 9:00 AM visit (ref b202b202).",
+                  (ClientReplyFact("Thu Oct 1", "9:00 AM", "cancelled", "b202b202"),)),
               (CANCEL_QUESTION,)),
     DraftCase("kept-visit", "actually keep it",
-              ClientReplyResult.from_safe_text(
-                  "nothing_changed", "confirmed",
-                  "OK, I kept your Thu Oct 1 at 9:00 AM visit. Nothing was cancelled."),
+              ClientReplyResult(
+                  "cancel_kept", "confirmed",
+                  "OK, I kept your Thu Oct 1 at 9:00 AM visit. Nothing was cancelled.",
+                  (ClientReplyFact("Thu Oct 1", "9:00 AM", "confirmed"),)),
               (CANCEL_QUESTION,)),
 )
 

@@ -1,5 +1,6 @@
 """Plain-language texts write only when a reply maps to one current offer or prompt."""
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -77,7 +78,7 @@ class Script:
 class DraftScript(Script):
     def __init__(self) -> None:
         super().__init__()
-        self.drafts: dict[str, str | Exception] = {}
+        self.drafts: dict[str, str | Exception | Callable[[ClientReplyResult], str]] = {}
         self.draft_calls: list[tuple[str, ClientReplyResult]] = []
 
     def draft_client_reply(self, body: str, context: MessageContext,
@@ -86,6 +87,8 @@ class DraftScript(Script):
         draft = self.drafts.get(body, result.fallback)
         if isinstance(draft, Exception):
             raise draft
+        if callable(draft):
+            return draft(result)
         return draft
 
 
@@ -666,11 +669,13 @@ def test_client_draft_uses_validated_offer_and_pending_request() -> None:
     assert offer.text == model.drafts["Oct 13 at 1 pm (availability)"]
     assert model.draft_calls[-1][1].kind == "offer_made"
     model.replies[ACCEPT] = ask("request_booking", "2026-10-13", "2026-10-13", "13:00", "13:00")
+    model.drafts[ACCEPT] = lambda result: (
+        f"Tue Oct 13 at 1:00 PM, ref {result.references[0]}, is pending owner approval.")
     booked = chat.text(ACCEPT)
     assert booked.committed and booked.client_outbox_id == f"{booked.appointment_id}#client"
     assert model.draft_calls[-1][1].status == "pending"
-    # A generic fallback still carries the persisted request reference.
     assert booked.appointment_id is not None and booked.appointment_id[:8] in booked.text
+    assert booked.text != model.draft_calls[-1][1].fallback
 
 
 def test_hostile_or_failed_draft_keeps_safe_result_without_another_write() -> None:
@@ -704,6 +709,32 @@ def test_unsafe_pending_draft_falls_back_to_the_committed_result(draft: str) -> 
     assert booked.committed and booked.appointment_id is not None
     assert booked.text == model.draft_calls[-1][1].fallback
     assert len(chat.calendar()) == 1
+
+
+def test_taken_slot_draft_reports_no_booking_and_keeps_the_calendar() -> None:
+    model = DraftScript()
+    chat = Harness(model)
+    offered(chat)
+    chat.hold(datetime(2026, 10, 13, 13, tzinfo=ZONE).astimezone(UTC), "taken")
+    before = chat.calendar()
+    model.drafts[ACCEPT] = "Tue Oct 13 at 1:00 PM is unavailable, so nothing was booked."
+    failed = chat.text(ACCEPT)
+    assert not failed.committed and failed.text == model.drafts[ACCEPT]
+    assert model.draft_calls[-1][1].kind == "request_failed"
+    assert model.draft_calls[-1][1].reason == "slot_taken"
+    assert chat.calendar() == before
+
+
+def test_expired_offer_draft_has_no_write_and_reports_expiry() -> None:
+    model = DraftScript()
+    chat = Harness(model)
+    offered(chat)
+    chat.now += timedelta(minutes=31)
+    model.drafts["YES"] = "That offer expired; nothing was booked. What day works instead?"
+    late = chat.text("YES")
+    assert not late.committed and late.text == model.drafts["YES"]
+    assert model.draft_calls[-1][1].kind == "expired"
+    assert chat.calendar() == ()
 
 
 def test_model_cannot_request_a_time_that_was_not_offered() -> None:
@@ -986,6 +1017,21 @@ def test_free_form_move_acceptance_binds_the_original_and_is_idempotent() -> Non
     again = chat.text(MOVE_ACCEPT)
     assert again.committed and again.appointment_id == moved.appointment_id  # A replay.
     assert len(chat.calendar()) == 2  # The original and one replacement.
+
+
+def test_drafted_move_request_keeps_original_confirmation_separate() -> None:
+    model = DraftScript()
+    chat = Harness(model)
+    original = move_offered(chat)
+    model.drafts[MOVE_ACCEPT] = lambda result: (
+        f"Fri Oct 2 at 8:00 AM, ref {result.facts[0].reference}, is pending owner approval; "
+        f"Thu Oct 1 at 9:00 AM, ref {result.facts[1].reference}, remains confirmed.")
+    moved = chat.text(MOVE_ACCEPT)
+    assert moved.committed and moved.text != model.draft_calls[-1][1].fallback
+    assert model.draft_calls[-1][1].kind == "move_requested"
+    assert moved.appointment_id is not None and moved.appointment_id[:8] in moved.text
+    assert original[:8] in moved.text
+    assert chat.status(original) == CalendarStatus.CONFIRMED
 
 
 def test_free_form_move_acceptance_after_expiry_or_conflict_changes_nothing() -> None:

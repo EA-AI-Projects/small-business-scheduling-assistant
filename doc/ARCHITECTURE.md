@@ -43,9 +43,11 @@ derives business and client identity exclusively from the verified receipt;
 model arguments cannot name another actor. Domain availability and client
 calendar code check the current schedule and produce the authoritative SMS
 answer. One final model call drafts the client SMS from a bounded result and
-transcript. Backend validation rejects unsupported dates, times, references,
-status or action claims and falls back to the backend answer on malformed
-output or timeout. The same draft check covers client write results; a valid
+transcript. Backend validation checks paired dates, times, references and statuses,
+rejects known contradictory action claims, and falls back to the backend answer
+on malformed output or timeout. This lexical check cannot guarantee every
+possible natural-language meaning; the owner chose freer wording with this
+fallback (#283, 2026-10-08). The same draft check covers client write results; a valid
 draft can attach to the existing pending notification intent, while a sender
 that already claimed the intent sends its safe template.
 The first model call asks the client to retry later on failure. Each model call

@@ -34,4 +34,6 @@ def test_draft_attach_is_conditional_on_pending_original_outbox() -> None:
     assert "attribute_not_exists(reply_provider_id)" in condition
     assert erasure_check["ConditionCheck"]["Key"]["SK"]["S"].startswith("ERASURE#")
     assert not store.put_committed_reply(receipt, "hold-1#client", "x" * 161, "lease")
+    assert not store.put_committed_reply(receipt, "hold-1#client", "^" * 81, "lease")
+    assert not store.put_committed_reply(receipt, "hold-1#client", "hello`", "lease")
     assert len(client.writes) == 1

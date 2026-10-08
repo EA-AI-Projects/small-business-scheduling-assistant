@@ -7,6 +7,7 @@ from typing import Any, Protocol
 from scheduling.adapters.dynamodb import _command_sort_key, _record_transaction_conflict
 from scheduling.adapters.outbox_aws import due_keys
 from scheduling.domain.client_records import ClientProfile, RecordConflict
+from scheduling.domain.client_replies import gsm_septets
 from scheduling.domain.conversation_history import MAX_CHARACTERS, HistoryMessage, bounded_history
 from scheduling.domain.outbox import DeliveryState, OutboxRecord
 from scheduling.domain.sms_ingress import (
@@ -318,8 +319,9 @@ class DynamoSmsIngressStore(SmsIngressStore):
         The original notification stays available if this loses the dispatch race or
         the process crashes. No second outbox intent is created.
         """
+        size = gsm_septets(text)
         if (receipt.role != SenderRole.CLIENT or not receipt.client_id or not outbox_id
-                or not text or len(text) > 160 or not text.isascii()):
+                or size is None or size > 160):
             return False
         try:
             self._client.transact_write_items(TransactItems=[

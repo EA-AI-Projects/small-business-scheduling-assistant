@@ -10,7 +10,7 @@ a given wording or language that way is covered by the synthetic model evaluatio
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from test_conversation_flow import NOW, THURSDAY, ZONE, Consent, Harness, ask
+from test_conversation_flow import NOW, THURSDAY, ZONE, Consent, DraftScript, Harness, ask
 from test_sms_processing import Reader
 
 from evals.scheduling_messages import CASES
@@ -85,6 +85,32 @@ def test_bookings_this_week_lists_confirmed_and_pending_separately() -> None:
         f"- Fri Oct 2 at 9:00 AM-11:00 AM PDT, pending owner approval, not confirmed yet "
         f"(ref {pending[:8]})")
     unchanged(chat, before)
+
+
+def test_drafted_calendar_result_keeps_each_visit_status_with_its_reference() -> None:
+    model = DraftScript()
+    chat = Harness(model)
+    confirmed = chat.hold(THURSDAY, "thu", confirm=True)
+    pending = chat.hold(FRIDAY, "fri")
+    message = "Show my visits this week"
+    model.replies[message] = cal(*THIS_WEEK)
+    model.drafts[message] = (
+        f"Thu Oct 1 at 9:00 AM confirmed ref {confirmed[:8]}; "
+        f"Fri Oct 2 at 9:00 AM pending owner approval ref {pending[:8]}.")
+    reply = chat.text(message)
+    assert reply.text == model.drafts[message]
+    result = model.draft_calls[-1][1]
+    assert result.kind == "calendar_list" and result.status == "mixed"
+    assert tuple(fact.status for fact in result.facts) == ("confirmed", "pending owner approval")
+    assert chat.status(confirmed) == CalendarStatus.CONFIRMED
+    assert chat.status(pending) == CalendarStatus.PENDING_APPROVAL
+
+    only = "Show confirmed visits tomorrow"
+    model.replies[only] = cal("2026-10-01", statuses=("confirmed",))
+    model.drafts[only] = f"Thu Oct 1 at 9:00 AM confirmed ref {confirmed[:8]}."
+    confirmed_reply = chat.text(only)
+    assert confirmed_reply.text == model.drafts[only]
+    assert model.draft_calls[-1][1].status == "confirmed"
 
 
 def test_a_question_in_spanish_gets_the_same_grounded_answer() -> None:

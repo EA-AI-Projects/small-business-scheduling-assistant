@@ -9,7 +9,7 @@ from urllib.request import Request
 import pytest
 
 from scheduling.adapters.openai_messages import OpenAIMessageInterpreter
-from scheduling.domain.client_replies import ClientReplyResult
+from scheduling.domain.client_replies import ClientReplyFact, ClientReplyResult
 from scheduling.domain.conversation import MessageContext
 from scheduling.domain.conversation_history import HistoryMessage
 from scheduling.domain.owner_reply_classification import (
@@ -34,12 +34,13 @@ def test_client_reply_draft_uses_structured_result_and_rejects_malformed_output(
     model = OpenAIMessageInterpreter("synthetic-key")
     context = MessageContext(SenderRole.CLIENT, date(2026, 10, 12),
                              "America/Los_Angeles", ())
-    result = ClientReplyResult.from_safe_text(
+    result = ClientReplyResult(
         "request_created", "pending", "Requested Tue Oct 13 at 1:00 PM "
-        "(ref a101a101). It's pending owner approval.")
+        "(ref a101a101). It's pending owner approval.",
+        (ClientReplyFact("Tue Oct 13", "1:00 PM", "pending owner approval", "a101a101"),))
     assert model.draft_client_reply("yes", context, result).startswith("Pending")
     assert '"status": "pending"' in sent[0]["input"]
-    assert '"references": ["a101a101"]' in sent[0]["input"]
+    assert '"reference": "a101a101"' in sent[0]["input"]
     monkeypatch.setattr("scheduling.adapters.openai_messages.urlopen",
                         lambda *_args, **_kwargs: BytesIO(b'{"output":[]}'))
     with pytest.raises(ValueError, match="one SMS draft"):

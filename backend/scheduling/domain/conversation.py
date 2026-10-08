@@ -6,7 +6,7 @@ current state, and policy before calling the existing transactional services.
 
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from zoneinfo import ZoneInfo
@@ -33,7 +33,7 @@ from scheduling.domain.client_calendar_questions import (
 from scheduling.domain.client_calendar_questions import answer as answer_client_question
 from scheduling.domain.client_calendar_questions import compact_list as compact_client_list
 from scheduling.domain.client_records import ClientProfile
-from scheduling.domain.client_replies import ClientReplyResult, valid_draft
+from scheduling.domain.client_replies import ClientReplyFact, ClientReplyResult, valid_draft
 from scheduling.domain.conversation_history import HistoryMessage
 from scheduling.domain.conversation_state import (
     MAX_OPTIONS,
@@ -173,6 +173,7 @@ class ConversationOutcome:
     committed: bool = False
     appointment_id: str | None = None
     client_outbox_id: str | None = None
+    reply_result: ClientReplyResult | None = field(default=None, compare=False)
 
 
 class MessageInterpreter(Protocol):
@@ -246,6 +247,7 @@ class ConversationService:
         if (receipt.role != SenderRole.CLIENT or not receipt.authorized_for_commands
                 or receipt.body is None or receipt.keyword != Keyword.OTHER
                 or (outcome.committed and outcome.client_outbox_id is None)
+                or outcome.reply_result is None
                 or not isinstance(self._interpreter, ClientReplyDrafter)):
             return outcome
         try:
@@ -265,43 +267,28 @@ class ConversationService:
                 history=(self._history_reader.read_conversation_history(receipt, now)
                          if self._history_reader is not None else ()),
             )
-            result = self._client_result(outcome)
+            result = outcome.reply_result
             draft = self._interpreter.draft_client_reply(receipt.body, context, result)
             if valid_draft(draft, result):
-                return ConversationOutcome(draft, outcome.committed, outcome.appointment_id,
-                                           outcome.client_outbox_id)
+                return replace(outcome, text=draft)
         except (OSError, ValueError, TypeError, KeyError, RuntimeError):
             pass
         return outcome
 
-    def _client_result(self, outcome: ConversationOutcome) -> ClientReplyResult:
-        text = outcome.text
-        lower = text.lower()
-        saved = (self._repository.read_appointment(outcome.appointment_id)
-                 if outcome.committed and outcome.appointment_id is not None else None)
-        if outcome.committed and saved is not None and saved.status == CalendarStatus.CANCELLED:
-            kind, status, reason = "cancelled", "cancelled", None
-        elif (outcome.committed and saved is not None
-              and saved.status == CalendarStatus.PENDING_APPROVAL):
-            kind = "move_requested" if saved.replaces_appointment_id else "request_created"
-            status, reason = "pending", None
-        elif outcome.committed:
-            kind, status, reason = "nothing_changed", "none", "state_changed_before_draft"
-        elif "nothing was booked" in lower or "nothing was cancelled" in lower:
-            kind = "cancel_kept" if "kept" in lower else "nothing_changed"
-            status, reason = "none", "validation_failed"
-        elif "expired" in lower or "no longer open" in lower:
-            kind, status, reason = ("expired" if "expired" in lower else "request_failed",
-                                    "none", "expired" if "expired" in lower else "slot_taken")
-        elif "pending owner approval" in lower:
-            kind, status, reason = "calendar_list", "pending", None
-        elif "open times" in lower or "is open for" in lower:
-            kind, status, reason = "offer_made", "none", None
-        elif "cancel" in lower and "reply" in lower:
-            kind, status, reason = "cancel_question", "none", None
-        else:
-            kind, status, reason = "clarification", "none", "needs_clarification"
-        return ClientReplyResult.from_safe_text(kind, status, text, reason)
+
+    @staticmethod
+    def _client_fact(start: datetime, zone: ZoneInfo, status: str,
+                     reference: str | None = None) -> ClientReplyFact:
+        return ClientReplyFact(day_text(start.astimezone(zone).date()),
+                               clock_text(start, zone), status, reference)
+
+    @staticmethod
+    def _with_result(outcome: ConversationOutcome, kind: str, status: str,
+                     facts: tuple[ClientReplyFact, ...] = (),
+                     reason: str | None = None, detail: str | None = None
+                     ) -> ConversationOutcome:
+        return replace(outcome, reply_result=ClientReplyResult(
+            kind, status, outcome.text, facts, reason, detail))
 
     def _handle(self, receipt: InboundReceipt) -> ConversationOutcome:
         if (not receipt.authorized_for_commands or receipt.body is None
@@ -408,8 +395,11 @@ class ConversationService:
                 and proposal.intent in ("calendar_question", "clarify_booking")):
             self._forget(prompt)  # A calendar answer below replaces the prompt itself.
         if unclear:
-            return ConversationOutcome(self._clarify(
+            outcome = ConversationOutcome(self._clarify(
                 receipt.role, proposal.intent, receipt.body or "", targets))
+            return (self._with_result(outcome, "clarification", "none",
+                                      reason="needs_clarification", detail=outcome.text)
+                    if receipt.role == SenderRole.CLIENT else outcome)
         if (receipt.role == SenderRole.CLIENT and self._acceptance is not None
                 and proposal.intent in ("request_booking", "availability", "reschedule",
                                         "cancel")):
@@ -514,26 +504,43 @@ class ConversationService:
                 prompt is None or prompt.kind != PromptKind.CONFIRM_CANCEL
                 or prompt.expired(now)):
             # Nothing is waiting to be cancelled, so there is nothing to ask about.
-            return ConversationOutcome("OK, nothing changed. Your visit stays booked.")
+            outcome = ConversationOutcome("OK, nothing changed. Your visit stays booked.")
+            return self._with_result(outcome, "nothing_changed", "none",
+                                     reason="no_open_confirmation",
+                                     detail="No cancellation was waiting.")
         if prompt is None or prompt.kind != PromptKind.CONFIRM_CANCEL:
-            return ConversationOutcome(
+            outcome = ConversationOutcome(
                 "I don't have a cancellation waiting for your answer, so nothing was "
                 "cancelled. Tell me which visit you'd like to cancel.")
+            return self._with_result(outcome, "nothing_changed", "none",
+                                     reason="no_open_confirmation",
+                                     detail="No cancellation was waiting.")
         if prompt.expired(now):
             self._forget(prompt)
-            return ConversationOutcome(
+            outcome = ConversationOutcome(
                 "That confirmation expired after 30 minutes, so nothing was cancelled. "
                 "Tell me which visit you'd like to cancel.")
+            return self._with_result(outcome, "nothing_changed", "none",
+                                     reason="confirmation_expired",
+                                     detail="The cancellation question expired.")
         if prompt.client_id != receipt.client_id:
             self._forget(prompt)
-            return ConversationOutcome(
+            outcome = ConversationOutcome(
                 "I don't have a cancellation waiting for your answer, so nothing was "
                 "cancelled. Tell me which visit you'd like to cancel.")
+            return self._with_result(outcome, "nothing_changed", "none",
+                                     reason="wrong_client_prompt",
+                                     detail="No cancellation was waiting.")
         if proposal.intent == "keep_visit":
             self._forget(prompt)
             target = self._active_target(receipt, prompt.appointment_id, targets)
             kept = f"your {when_text(target.start_at, zone)} visit" if target else "your visit"
-            return ConversationOutcome(f"OK, I kept {kept}. Nothing was cancelled.")
+            outcome = ConversationOutcome(f"OK, I kept {kept}. Nothing was cancelled.")
+            return (self._with_result(outcome, "cancel_kept", target.status.value,
+                                      (self._client_fact(target.start_at, zone,
+                                                         target.status.value,
+                                                         target.appointment_id[:8]),))
+                    if target is not None else outcome)
         return self._cancel_confirmed(receipt, prompt, targets, zone)
 
     def _draft_read(self, receipt: InboundReceipt, context: MessageContext,
@@ -684,9 +691,15 @@ class ConversationService:
         except (InvalidTransition, StaleVersion, ReplacementPending,
                 TooManyConflicts, IdempotencyKeyReused):
             return ConversationOutcome("That appointment changed. Please review it before retrying.")
-        return ConversationOutcome(f"Appointment {target.appointment_id[:8]} cancelled.", True,
-                                   result.appointment.appointment_id,
-                                   result.client_outbox_id)
+        outcome = ConversationOutcome(f"Appointment {target.appointment_id[:8]} cancelled.", True,
+                                      result.appointment.appointment_id,
+                                      result.client_outbox_id)
+        if receipt.role == SenderRole.CLIENT:
+            zone = ZoneInfo(self._repository.read_policy(receipt.business_id).timezone)
+            return self._with_result(outcome, "cancelled", "cancelled",
+                                     (self._client_fact(result.appointment.start_at, zone,
+                                                        "cancelled", target.appointment_id[:8]),))
+        return outcome
 
     def _request(self, receipt: InboundReceipt, proposal: MessageProposal,
                  targets: tuple[Appointment, ...], policy: AvailabilityPolicy,
@@ -790,15 +803,24 @@ class ConversationService:
             self._forget(prompt)
             if not answered:
                 return None
-            return ConversationOutcome(
+            outcome = ConversationOutcome(
                 "That offer expired after 30 minutes, so nothing changed. Tell me what day "
                 "works and I'll send the current open times.")
+            return self._with_result(outcome,
+                                     "nothing_changed" if prompt.kind == PromptKind.CONFIRM_CANCEL
+                                     else "expired", "none", reason="prompt_expired",
+                                     detail="The earlier prompt expired.")
         if prompt.kind == PromptKind.CONFIRM_CANCEL:
             if is_negative(body):
                 self._forget(prompt)
                 target = self._active_target(receipt, prompt.appointment_id, targets)
                 kept = f"your {when_text(target.start_at, zone)} visit" if target else "your visit"
-                return ConversationOutcome(f"OK, I kept {kept}. Nothing was cancelled.")
+                outcome = ConversationOutcome(f"OK, I kept {kept}. Nothing was cancelled.")
+                return (self._with_result(outcome, "cancel_kept", target.status.value,
+                                          (self._client_fact(target.start_at, zone,
+                                                             target.status.value,
+                                                             target.appointment_id[:8]),))
+                        if target is not None else outcome)
             if not answered:
                 return None
             return self._cancel_confirmed(receipt, prompt, targets, zone)
@@ -870,6 +892,20 @@ class ConversationService:
                             if closed_note else "")
             outcome = self._with_offer_note(receipt, now, ConversationOutcome(
                 compact_client_list(question, targets, now, zone) + compact_note))
+        if (answered and question.view == View.LIST and not closed_note
+                and outcome.text == text):
+            shown = tuple(target for target in targets
+                          if (question.first is None or question.last is None
+                              or max(question.first, today)
+                              <= target.start_at.astimezone(zone).date() <= question.last))
+            facts = tuple(self._client_fact(target.start_at, zone,
+                                           "confirmed" if target.status == CalendarStatus.CONFIRMED
+                                           else "pending owner approval",
+                                           target.appointment_id[:8]) for target in shown)
+            statuses = {fact.status for fact in facts}
+            status = next(iter(statuses)) if len(statuses) == 1 else "mixed" if statuses else "none"
+            return self._with_result(outcome, "calendar_list", status, facts,
+                                     detail="No upcoming visits in this range." if not facts else None)
         return outcome
 
     def _with_offer_note(self, receipt: InboundReceipt, now: datetime,
@@ -915,9 +951,11 @@ class ConversationService:
             original = self._active_target(receipt, prompt.appointment_id, targets)
             if original is None or original.status != CalendarStatus.CONFIRMED:
                 self._forget(prompt)
-                return ConversationOutcome(
+                outcome = ConversationOutcome(
                     "The visit you wanted to move has changed, so nothing was booked. "
                     "Please tell me which visit to move.")
+                return self._with_result(outcome, "nothing_changed", "none",
+                                         reason="original_changed")
         try:
             result = self._holds.create(CreateHold(
                 receipt.business_id, receipt.client_id, receipt.client_id, receipt.provider_id,
@@ -926,9 +964,12 @@ class ConversationService:
         except (SlotConflict, InvalidReplacement, ReplacementPending, TooManyConflicts,
                 IdempotencyKeyReused, InvalidDuration, ValueError):
             self._forget(prompt)
-            return ConversationOutcome(
+            outcome = ConversationOutcome(
                 f"Sorry, {when_text(start, zone)} is no longer open, so nothing was booked. "
                 "Tell me what day works and I'll send the current open times.")
+            return self._with_result(outcome, "request_failed", "none",
+                                     (self._client_fact(start, zone, "unavailable"),),
+                                     "slot_taken")
         self._forget(prompt)
         return self._requested(receipt, original, start, result.hold_id, policy)
 
@@ -944,7 +985,14 @@ class ConversationService:
         else:
             text = (f"Requested {when} (ref {hold_id[:8]}). It's pending owner approval, "
                     "not confirmed yet.")
-        return ConversationOutcome(text, True, hold_id, f"{hold_id}#client")
+        facts = [ConversationService._client_fact(start, zone, "pending owner approval",
+                                                   hold_id[:8])]
+        if original is not None:
+            facts.append(ConversationService._client_fact(original.start_at, zone,
+                                                           "confirmed", original.appointment_id[:8]))
+        kind = "move_requested" if original is not None else "request_created"
+        return ConversationOutcome(text, True, hold_id, f"{hold_id}#client",
+                                   ClientReplyResult(kind, "pending", text, tuple(facts)))
 
     def _cancel_confirmed(self, receipt: InboundReceipt, prompt: ConversationState,
                           targets: tuple[Appointment, ...], zone: ZoneInfo) -> ConversationOutcome:
@@ -952,21 +1000,29 @@ class ConversationService:
         target = self._active_target(receipt, prompt.appointment_id, targets)
         if (target is None or target.version != prompt.appointment_version
                 or receipt.client_id is None):
-            return ConversationOutcome(
+            outcome = ConversationOutcome(
                 "That visit changed since I asked, so nothing was cancelled. "
                 "Please tell me again which visit to cancel.")
+            return self._with_result(outcome, "nothing_changed", "none",
+                                     reason="visit_changed")
         try:
             result = self._lifecycle.apply(AppointmentCommand(
                 receipt.business_id, target.appointment_id, receipt.client_id,
                 ActorRole.CLIENT, Action.CANCEL, receipt.provider_id, target.version))
         except (InvalidTransition, StaleVersion, ReplacementPending,
                 TooManyConflicts, IdempotencyKeyReused):
-            return ConversationOutcome("That appointment changed. Please review it before retrying.")
+            outcome = ConversationOutcome(
+                "That appointment changed. Please review it before retrying.")
+            return self._with_result(outcome, "nothing_changed", "none",
+                                     reason="stale_or_uncertain")
         what = "visit" if target.status == CalendarStatus.CONFIRMED else "request"
-        return ConversationOutcome(
+        outcome = ConversationOutcome(
             f"Cancelled your {when_text(target.start_at, zone)} {what} "
             f"(ref {target.appointment_id[:8]}).", True, result.appointment.appointment_id,
             result.client_outbox_id)
+        return self._with_result(outcome, "cancelled", "cancelled",
+                                 (self._client_fact(result.appointment.start_at, zone,
+                                                    "cancelled", target.appointment_id[:8]),))
 
     def _calendar_last(self, receipt: InboundReceipt, targets: tuple[Appointment, ...],
                        now: datetime) -> bool:
@@ -1372,8 +1428,12 @@ class ConversationService:
         self._remember(receipt, PromptKind.CONFIRM_CANCEL, now, appointment=target)
         what = ("visit" if target.status == CalendarStatus.CONFIRMED
                 else "request (still pending approval)")
-        return ConversationOutcome(
+        outcome = ConversationOutcome(
             f"Cancel your {when_text(target.start_at, zone)} {what}? Reply YES to confirm.")
+        return self._with_result(outcome, "cancel_question", target.status.value,
+                                 (self._client_fact(target.start_at, zone,
+                                                    target.status.value,
+                                                    target.appointment_id[:8]),))
 
     def _ask_day(self, receipt: InboundReceipt, target: Appointment, zone: ZoneInfo,
                  now: datetime) -> ConversationOutcome:
@@ -1456,7 +1516,10 @@ class ConversationService:
         span = (f"on {day_text(first)}" if first == last
                 else f"between {day_text(first)} and {day_text(last)}")
         if not starts:
-            return ConversationOutcome(f"I don't have any openings {span}. Would another day work?")
+            outcome = ConversationOutcome(
+                f"I don't have any openings {span}. Would another day work?")
+            return self._with_result(outcome, "request_failed", "none",
+                                     reason="no_openings", detail=span)
         note = ""
         chosen: tuple[datetime, ...]
         if earliest is not None and latest is not None:
@@ -1498,6 +1561,12 @@ class ConversationService:
                 body = f"Open times for your {length} cleaning: {listed}."
             body += " Reply with the number or time you want."
         keeps = " Your current visit stays booked until then." if original is not None else ""
-        return ConversationOutcome(
+        outcome = ConversationOutcome(
             f"{note}{lead}{body} The owner approves every request.{keeps} "
             "This offer is good for 30 minutes.")
+        facts = tuple(self._client_fact(start, zone, "open") for start in chosen)
+        if original is not None:
+            facts += (self._client_fact(original.start_at, zone, "confirmed",
+                                        original.appointment_id[:8]),)
+        return self._with_result(outcome, "offer_made", "none", facts,
+                                 "requested_time_unavailable" if note else None)
