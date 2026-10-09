@@ -1,0 +1,113 @@
+import { useEffect, useRef, useState } from "react";
+
+import type { CalendarEvent } from "@/api/types";
+import { addMonths, monthGrid } from "@/lib/monthGrid";
+import { addDays, localInput, todayKey } from "@/lib/time";
+
+const WEEKDAYS = [["M", "Monday"], ["T", "Tuesday"], ["W", "Wednesday"], ["T", "Thursday"],
+  ["F", "Friday"], ["S", "Saturday"], ["S", "Sunday"]] as const;
+
+function longName(date: string): string {
+  return new Date(`${date}T12:00:00Z`).toLocaleDateString("en-US", {
+    weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC",
+  });
+}
+
+/** Twelve Monday-first mini calendars backed by the owner calendar snapshot. */
+export function YearGrid({ date, events, zone, onNavigate, onDay }: {
+  date: string;
+  events: CalendarEvent[];
+  zone: string;
+  onNavigate: (date: string) => void;
+  onDay: (date: string) => void;
+}) {
+  const year = date.slice(0, 4);
+  const [focus, setFocus] = useState(date);
+  const [now, setNow] = useState(() => new Date());
+  const grid = useRef<HTMLDivElement>(null);
+  const moveFocus = useRef(false);
+  const active = focus.startsWith(year) ? focus : date;
+  const today = todayKey(zone, now);
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(new Date()), 60_000);
+    return () => clearInterval(timer);
+  }, []);
+  useEffect(() => {
+    if (!moveFocus.current) return;
+    const target = grid.current?.querySelector<HTMLElement>(`[data-date="${focus}"]`);
+    if (target) {
+      moveFocus.current = false;
+      target.focus({ preventScroll: true });
+    }
+  });
+
+  const move = (event: React.KeyboardEvent, current: string) => {
+    const weekday = (new Date(`${current}T12:00:00Z`).getUTCDay() + 6) % 7;
+    const next = ({
+      ArrowLeft: addDays(current, -1), ArrowRight: addDays(current, 1),
+      ArrowUp: addDays(current, -7), ArrowDown: addDays(current, 7),
+      Home: addDays(current, -weekday), End: addDays(current, 6 - weekday),
+      PageUp: addMonths(current, -1), PageDown: addMonths(current, 1),
+    } as Record<string, string>)[event.key];
+    if (!next) return;
+    event.preventDefault();
+    moveFocus.current = true;
+    setFocus(next);
+    if (!next.startsWith(year)) onNavigate(next);
+  };
+
+  const months = Array.from({ length: 12 }, (_, index) => `${year}-${String(index + 1).padStart(2, "0")}-01`);
+  // The owner snapshot covers the whole calendar. An item spanning midnight appears on both
+  // dates, while one ending exactly at midnight does not appear on the next date.
+  const counts = new Map<string, number>();
+  for (const item of events) {
+    const start = localInput(item.start_at, zone);
+    const end = localInput(item.end_at, zone);
+    const last = end.endsWith("T00:00") ? addDays(end.slice(0, 10), -1) : end.slice(0, 10);
+    for (let day = start.slice(0, 10); day <= last; day = addDays(day, 1)) {
+      if (day.startsWith(year)) counts.set(day, (counts.get(day) ?? 0) + 1);
+    }
+  }
+
+  return (
+    <div className="year-calendar" role="region" tabIndex={-1} data-calendar-scroll="" data-popover-clip=""
+      aria-label={`Calendar, ${year}`} ref={grid}>
+      {months.map((month) => {
+        const heading = new Date(`${month}T12:00:00Z`).toLocaleDateString("en-US", {
+          month: "long", year: "numeric", timeZone: "UTC",
+        });
+        return (
+          <section className="year-month" key={month} aria-label={heading}>
+            <h3>{heading}</h3>
+            <div role="grid" aria-label={heading} className="mini-cal-grid">
+              <div role="row" className="mini-cal-row">
+                {WEEKDAYS.map(([initial, name]) => (
+                  <span key={name} role="columnheader" aria-label={name} className="mini-cal-weekday">{initial}</span>
+                ))}
+              </div>
+              {monthGrid(month).map((week) => (
+                <div role="row" className="mini-cal-row" key={week[0]?.date}>
+                  {week.map((day) => {
+                    if (!day.inMonth) return <span key={day.date} aria-hidden="true" className="year-outside" />;
+                    const count = counts.get(day.date) ?? 0;
+                    return (
+                      <button key={day.date} type="button" role="gridcell" data-date={day.date}
+                        tabIndex={day.date === active ? 0 : -1}
+                        className={`mini-cal-day year-day${day.date === today ? " today" : ""}${count ? " has-items" : ""}`}
+                        aria-current={day.date === today ? "date" : undefined}
+                        aria-label={`${longName(day.date)}, ${count} ${count === 1 ? "item" : "items"}, open Day view`}
+                        onKeyDown={(event) => move(event, day.date)} onClick={() => onDay(day.date)}>
+                        <span aria-hidden="true">{day.day}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          </section>
+        );
+      })}
+    </div>
+  );
+}

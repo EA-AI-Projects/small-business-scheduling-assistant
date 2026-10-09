@@ -24,7 +24,7 @@ export function CalendarControls({ title, shortTitle, announcement = title, view
   /** A day chosen in the date picker. */
   onPick: (date: string) => void;
 }) {
-  const unit = view === "month" ? "month" : view === "week" ? "week" : view === "schedule" ? `${scheduleDays ?? 30} days` : "day";
+  const unit = view === "year" ? "year" : view === "month" ? "month" : view === "week" ? "week" : view === "schedule" ? `${scheduleDays ?? 30} days` : "day";
   const [picking, setPicking] = useState(false);
   const titleButton = useRef<HTMLButtonElement>(null);
   const getAnchor = useCallback(() => titleButton.current, []);
@@ -72,6 +72,7 @@ export function CalendarControls({ title, shortTitle, announcement = title, view
           <option value="week">Week</option>
           <option value="month">Month</option>
           <option value="schedule">Schedule</option>
+          <option value="year">Year</option>
         </select>
       </label>
     </div>

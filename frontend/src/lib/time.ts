@@ -1,6 +1,6 @@
 /** Business-timezone display helpers. Instants are ISO strings from the API. */
 
-export type CalendarView = "day" | "week" | "month" | "schedule";
+export type CalendarView = "day" | "week" | "month" | "schedule" | "year";
 
 function parts(instant: string, zone: string, options: Intl.DateTimeFormatOptions): Record<string, string> {
   return Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: zone, ...options })
@@ -58,6 +58,12 @@ export function addDays(date: string, days: number): string {
 
 /** Previous (-1) or next (1) day or week for the selected view. */
 export function stepDate(date: string, view: CalendarView, direction: -1 | 1, scheduleDays = 30): string {
+  if (view === "year") {
+    const year = Number(date.slice(0, 4)) + direction;
+    const month = Number(date.slice(5, 7));
+    const last = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    return `${String(year).padStart(4, "0")}-${date.slice(5, 7)}-${String(Math.min(Number(date.slice(8, 10)), last)).padStart(2, "0")}`;
+  }
   if (view === "month") {
     const index = Number(date.slice(0, 4)) * 12 + Number(date.slice(5, 7)) - 1 + direction;
     const year = Math.floor(index / 12);
@@ -74,6 +80,7 @@ export function rangeTitle(date: string, view: CalendarView, scheduleDays = 30):
     new Date(`${value}T12:00:00Z`).toLocaleDateString("en-US", { timeZone: "UTC", ...options });
   if (view === "day") return format(date, { month: "long", day: "numeric", year: "numeric" });
   if (view === "month") return format(date, { month: "long", year: "numeric" });
+  if (view === "year") return date.slice(0, 4);
   if (view === "schedule") return `${format(date, { month: "short", day: "numeric" })} – ${format(addDays(date, scheduleDays - 1), { month: "short", day: "numeric", year: "numeric" })}`;
   const days = datesForView(date, "week");
   const first = days[0] ?? date;
