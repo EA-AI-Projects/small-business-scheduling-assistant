@@ -160,6 +160,24 @@ code { font-size: .9em; }
 /* Day and Week time grids. */
 .calendar-pane { min-width: 0; }
 .month-calendar { width: 100%; min-width: 0; max-height: min(72vh, 760px); overflow-y: auto; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 12px; }
+.schedule-list { width: 100%; max-height: min(72vh, 760px); overflow-y: auto; padding: .4rem 1rem 1rem; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 12px; }
+.schedule-day { padding: .6rem 0; border-bottom: 1px solid var(--color-border-soft); }
+.schedule-day h3 { margin: 0 0 .55rem; color: var(--color-text-subtle); font-size: .9rem; font-weight: 600; }
+.schedule-day-items { display: grid; gap: .4rem; }
+.schedule-item { display: grid; grid-template-columns: minmax(5.5rem, auto) minmax(0, 1fr) auto; align-items: center; gap: .75rem; width: 100%; min-height: 3rem; padding: .55rem .75rem; border: 1px solid var(--color-border-soft); border-left: 4px solid; border-radius: 8px; text-align: left; }
+.schedule-item.confirmed { background: var(--color-confirmed-bg); border-left-color: var(--color-confirmed-edge); color: var(--color-confirmed-ink); }
+.schedule-item.pending { background: var(--color-pending-bg); border-left-color: var(--color-pending-edge); color: var(--color-pending-ink); }
+.schedule-item-client { min-width: 0; overflow-wrap: anywhere; font-weight: 600; }
+.schedule-item-status { text-transform: capitalize; }
+.schedule-item.selected, .schedule-item:focus-visible, .schedule-load-more:focus-visible { outline: 3px solid var(--color-focus); outline-offset: 2px; }
+.schedule-load-more { display: block; margin: 1rem auto 0; }
+@media (max-width: 520px) {
+  .schedule-list { padding: .3rem .7rem .8rem; }
+  .schedule-item { grid-template-columns: minmax(0, 1fr) auto; gap: .2rem .5rem; }
+  .schedule-item-time { grid-column: 1; }
+  .schedule-item-client { grid-column: 1; }
+  .schedule-item-status { grid-column: 2; grid-row: 1 / span 2; font-size: .78rem; }
+}
 .month-weekdays, .month-week { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); }
 .month-weekdays { position: sticky; top: 0; z-index: 2; background: var(--color-surface); border-bottom: 1px solid var(--color-border); }
 .month-weekdays span { padding: .45rem .3rem; text-align: center; color: var(--color-text-subtle); font-size: .75rem; }

@@ -10,13 +10,14 @@ import { SectionHeading } from "../Workspace";
 import { CalendarGrid } from "./CalendarGrid";
 import { EventCard } from "./EventCard";
 import { MonthGrid } from "./MonthGrid";
+import { ScheduleList } from "./ScheduleList";
 import { SlotCard } from "./SlotCard";
 
 /** The open "block time" card. `key` changes with each opening so the form restarts from its prefill. */
 interface Slot { range: SlotRange; key: number; anchor: CardAnchor; opener: HTMLElement | null }
 
 export function ScheduleTab() {
-  const { data, stamp, refresh, notify, date, view, setView, goToDate } = useOwner();
+  const { data, stamp, refresh, notify, date, view, setView, goToDate, scheduleDays, loadMoreSchedule } = useOwner();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [handledStamp, setHandledStamp] = useState(stamp.version);
   const [handledRange, setHandledRange] = useState(`${date}|${view}`);
@@ -67,7 +68,7 @@ export function ScheduleTab() {
     if (id) select(id, element); else close();
   };
 
-  const days = view === "month" ? [] : datesForView(date, view);
+  const days = view === "day" || view === "week" ? datesForView(date, view) : [];
 
   // Open the block-time card on a slot, replacing any open card.
   const openSlot = (range: SlotRange, anchor: CardAnchor, opener: HTMLElement | null) => {
@@ -129,11 +130,14 @@ export function ScheduleTab() {
             {view === "month" ? (
               <MonthGrid date={date} events={events} zone={data.zone} selectedId={selectedId}
                 onSelect={select} onDay={(day) => { goToDate(day); setView("day"); }} />
+            ) : view === "schedule" ? (
+              <ScheduleList date={date} days={scheduleDays} events={events} zone={data.zone}
+                selectedId={selectedId} onSelect={select} onLoadMore={loadMoreSchedule} />
             ) : (
               <CalendarGrid days={days} events={events} policy={data.policy?.record.policy} zone={data.zone}
                 selectedId={selectedId} onSelect={select} onSlotPress={pressSlot} />
             )}
-            {view !== "month" && !days.some((day) => layoutDay(events, day, data.zone).length > 0) && (
+            {(view === "day" || view === "week") && !days.some((day) => layoutDay(events, day, data.zone).length > 0) && (
               <p className="empty" role="status">No scheduled items in this {view === "week" ? "week" : "day"}.</p>
             )}
           </>

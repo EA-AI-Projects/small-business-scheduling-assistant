@@ -5,7 +5,7 @@ import { PopoverCard } from "../PopoverCard";
 import { MiniCalendar } from "./MiniCalendar";
 
 /** Today, previous/next, range title (opens a date picker) and view selector. State lives with the caller. */
-export function CalendarControls({ title, shortTitle, announcement = title, view, date, today, disabled = false, onToday, onStep, onView, onPick }: {
+export function CalendarControls({ title, shortTitle, announcement = title, view, date, today, scheduleDays, disabled = false, onToday, onStep, onView, onPick }: {
   title: string;
   /** Spoken date range; can be fuller than the compact visible title. */
   announcement?: string;
@@ -17,13 +17,14 @@ export function CalendarControls({ title, shortTitle, announcement = title, view
   /** Selected date and today's date (YYYY-MM-DD, business timezone). */
   date: string;
   today: string;
+  scheduleDays?: number;
   onToday: () => void;
   onStep: (direction: -1 | 1) => void;
   onView: (view: CalendarView) => void;
   /** A day chosen in the date picker. */
   onPick: (date: string) => void;
 }) {
-  const unit = view === "month" ? "month" : view === "week" ? "week" : "day";
+  const unit = view === "month" ? "month" : view === "week" ? "week" : view === "schedule" ? `${scheduleDays ?? 30} days` : "day";
   const [picking, setPicking] = useState(false);
   const titleButton = useRef<HTMLButtonElement>(null);
   const getAnchor = useCallback(() => titleButton.current, []);
@@ -70,6 +71,7 @@ export function CalendarControls({ title, shortTitle, announcement = title, view
           <option value="day">Day</option>
           <option value="week">Week</option>
           <option value="month">Month</option>
+          <option value="schedule">Schedule</option>
         </select>
       </label>
     </div>

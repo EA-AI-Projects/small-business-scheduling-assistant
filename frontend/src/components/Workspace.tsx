@@ -24,7 +24,7 @@ export function Workspace({ onSignOut, account, notice }: {
   account: { email: string | null; local: boolean };
   notice?: ReactNode;
 }) {
-  const { tab, setTab, notify, data, loaded, date, view, setView, goToday, goToDate, stepRange } = useOwner();
+  const { tab, setTab, notify, data, loaded, date, view, setView, scheduleDays, goToday, goToDate, stepRange } = useOwner();
   const pending = data.requests.length;
   // A section opened from deep in another (e.g. "Open client" below the calendar) starts at its top.
   // The previous section's result message is cleared too.
@@ -42,10 +42,11 @@ export function Workspace({ onSignOut, account, notice }: {
         onSelect={(id) => setTab(id as Tab)}
         trailing={<AccountMenu email={account.email} local={account.local} onSignOut={onSignOut} />}>
         {tab === "schedule" ? (
-          <CalendarControls title={loaded ? rangeTitle(date, view) : "Loading…"}
-            announcement={loaded ? rangeAnnouncement(date, view) : "Loading…"}
-            shortTitle={loaded ? rangeTitleShort(date, view) : undefined} view={view} disabled={!loaded} onToday={goToday}
-            date={date} today={loaded ? todayKey(data.zone) : ""} onPick={goToDate} onStep={stepRange} onView={setView} />
+          <CalendarControls title={loaded ? rangeTitle(date, view, scheduleDays) : "Loading…"}
+            announcement={loaded ? rangeAnnouncement(date, view, scheduleDays) : "Loading…"}
+            shortTitle={loaded ? rangeTitleShort(date, view, scheduleDays) : undefined} view={view} disabled={!loaded} onToday={goToday}
+            date={date} today={loaded ? todayKey(data.zone) : ""} scheduleDays={scheduleDays}
+            onPick={goToDate} onStep={stepRange} onView={setView} />
         ) : (
           <span className="range-title">{current?.label}</span>
         )}

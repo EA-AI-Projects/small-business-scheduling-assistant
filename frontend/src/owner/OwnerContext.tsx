@@ -47,6 +47,8 @@ interface OwnerContextValue {
   date: string;
   view: CalendarView;
   setView: (view: CalendarView) => void;
+  scheduleDays: number;
+  loadMoreSchedule: () => void;
   goToday: () => void;
   /** Jump to a calendar date (YYYY-MM-DD, business timezone); the view shows it or its week. */
   goToDate: (date: string) => void;
@@ -81,6 +83,7 @@ export function OwnerProvider({ api, notify, children }: {
   const [tab, setTab] = useState<Tab>("schedule");
   const [pickedDate, setPickedDate] = useState<string | null>(null);
   const [view, setView] = useState<CalendarView>("day");
+  const [scheduleDays, setScheduleDays] = useState(30);
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
   const [noteAppointmentId, setNoteAppointmentId] = useState<string | null>(null);
   const [notesRequest, setNotesRequest] = useState<string | null>(null);
@@ -152,12 +155,14 @@ export function OwnerProvider({ api, notify, children }: {
   // Until the owner navigates, the date is today in the business timezone. Before the first
   // load the zone is unknown, so there is no date ("") and navigation does nothing.
   const date = pickedDate ?? (loaded ? todayKey(data.zone) : "");
-  const goToday = useCallback(() => setPickedDate(null), []);
-  const goToDate = useCallback((next: string) => { if (loaded) setPickedDate(next); }, [loaded]);
+  const changeView = useCallback((next: CalendarView) => { setView(next); setScheduleDays(30); }, []);
+  const goToday = useCallback(() => { setPickedDate(null); setScheduleDays(30); }, []);
+  const goToDate = useCallback((next: string) => { if (loaded) { setPickedDate(next); setScheduleDays(30); } }, [loaded]);
   const stepRange = useCallback((direction: -1 | 1) => {
     if (!loaded) return;
-    setPickedDate(stepDate(pickedDate ?? todayKey(data.zone), view, direction));
-  }, [loaded, pickedDate, data.zone, view]);
+    setPickedDate(stepDate(pickedDate ?? todayKey(data.zone), view, direction, scheduleDays));
+  }, [loaded, pickedDate, data.zone, view, scheduleDays]);
+  const loadMoreSchedule = useCallback(() => setScheduleDays((days) => days + 30), []);
 
   const resolveLocal = useCallback(async (value: string) => {
     safeNotify(""); // first step of a save: clear the previous result
@@ -185,11 +190,11 @@ export function OwnerProvider({ api, notify, children }: {
 
   const value = useMemo<OwnerContextValue>(() => ({
     api, data, loaded, stamp, refresh, change, resolveLocal, notify: safeNotify, tab, setTab,
-    date, view, setView, goToday, goToDate, stepRange,
+    date, view, setView: changeView, scheduleDays, loadMoreSchedule, goToday, goToDate, stepRange,
     selectedClientId, selectClient, noteAppointmentId,
     openClientNotes, notesRequest, clearNotesRequest,
   }), [api, data, loaded, stamp, refresh, change, resolveLocal, safeNotify, tab,
-    date, view, goToday, goToDate, stepRange, selectedClientId, selectClient, noteAppointmentId,
+    date, view, changeView, scheduleDays, loadMoreSchedule, goToday, goToDate, stepRange, selectedClientId, selectClient, noteAppointmentId,
     openClientNotes, notesRequest, clearNotesRequest]);
 
   return <OwnerContext.Provider value={value}>{children}</OwnerContext.Provider>;
