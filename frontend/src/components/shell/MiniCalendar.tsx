@@ -34,7 +34,7 @@ export function MiniCalendar({ date, today, view, onPick }: {
   const [announcement, setAnnouncement] = useState("");
   const moveFocus = useRef(true); // focus the active cell on open and after keyboard moves
   const grid = useRef<HTMLDivElement>(null);
-  const selected = new Set(view === "month" ? [] : datesForView(date, view));
+  const selected = new Set(view === "month" ? [] : datesForView(date, view === "week" ? "week" : "day"));
   const days = monthGrid(month);
   const inShown = (value: string) => value.startsWith(month.slice(0, 7));
   const active = focus && inShown(focus) ? focus : [date, today].find(inShown) ?? month;

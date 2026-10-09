@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { rangeAnnouncement, rangeTitle, stepDate, todayKey } from "./time";
+import { rangeAnnouncement, rangeTitle, rangeTitleShort, stepDate, todayKey } from "./time";
 
 // Boundary: the calendar header's date state. Not covered: rendering, menu focus, layout.
 describe("calendar navigation dates", () => {
@@ -30,6 +30,13 @@ describe("calendar navigation dates", () => {
     expect(stepDate("2026-10-31", "day", 1)).toBe("2026-11-01");
     expect(stepDate("2026-01-01", "day", -1)).toBe("2025-12-31");
     expect(stepDate("2026-11-01", "week", -1)).toBe("2026-10-25");
+  });
+
+  it("steps by the loaded Schedule range and gives it a compact phone title", () => {
+    expect(stepDate("2026-10-08", "schedule", 1, 60)).toBe("2026-12-07");
+    expect(stepDate("2026-12-07", "schedule", -1, 60)).toBe("2026-10-08");
+    expect(rangeTitle("2026-10-08", "schedule")).toBe("Oct 8 – Nov 6, 2026");
+    expect(rangeTitleShort("2026-10-08", "schedule")).toBe("Oct 8–Nov 6");
   });
 
   it("titles a day and a week range", () => {
