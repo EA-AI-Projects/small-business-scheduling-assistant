@@ -12,6 +12,7 @@ import { EventCard } from "./EventCard";
 import { MonthGrid } from "./MonthGrid";
 import { ScheduleList } from "./ScheduleList";
 import { SlotCard } from "./SlotCard";
+import { YearGrid } from "./YearGrid";
 
 /** The open "block time" card. `key` changes with each opening so the form restarts from its prefill. */
 interface Slot { range: SlotRange; key: number; anchor: CardAnchor; opener: HTMLElement | null }
@@ -133,6 +134,10 @@ export function ScheduleTab() {
             ) : view === "schedule" ? (
               <ScheduleList date={date} days={scheduleDays} events={events} zone={data.zone}
                 selectedId={selectedId} onSelect={select} onLoadMore={loadMoreSchedule} />
+            ) : view === "year" ? (
+              <YearGrid date={date} events={events} zone={data.zone} selectedId={selectedId}
+                onSelect={select} onDismiss={close} onNavigate={goToDate}
+                onDay={(day) => { goToDate(day); setView("day"); }} />
             ) : (
               <CalendarGrid days={days} events={events} policy={data.policy?.record.policy} zone={data.zone}
                 selectedId={selectedId} onSelect={select} onSlotPress={pressSlot} />
