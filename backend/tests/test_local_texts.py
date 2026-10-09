@@ -1,6 +1,6 @@
 """The local text simulator shares the synthetic owner API's calendar."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
 
@@ -62,6 +62,54 @@ def test_page_is_public_but_state_and_sending_need_the_local_token() -> None:
     # One text at a time: Send stays disabled until the reply arrives.
     assert "if (sending) return;" in page.text
     assert 'id="send-button"' in page.text
+
+
+def test_model_sees_only_its_own_recent_simulated_texts() -> None:
+    class Reading(Unsafe):
+        def __init__(self) -> None:
+            super().__init__()
+            self.client_histories: list[list[str]] = []
+            self.owner_histories: list[list[str]] = []
+
+        def propose(self, body: str, context: MessageContext) -> MessageProposal:
+            self.client_histories.append([message.text for message in context.history])
+            return MessageProposal("clarify", None, None, None, True)
+
+        def classify_owner_reply(self, body: str,
+                                 context: OwnerReplyContext) -> OwnerReplyProposal:
+            self.owner_histories.append([message.text for message in context.history])
+            return OwnerReplyProposal(OwnerReplyIntent.UNCLEAR, None, Confidence.HIGH)
+
+    model = Reading()
+    current = [NOW]
+    client = TestClient(create_local_owner_app(TOKEN, interpreter=model,
+                                               clock=lambda: current[0]))
+    text(client, "client-1", "Could you come Monday morning?")
+    assert model.client_histories[0][0] == "Could you come Monday morning?"
+    first_reply = bodies(client.get("/local/texts/state", headers=AUTH).json()["messages"],
+                         "reply")[0]
+    current[0] += timedelta(seconds=1)
+    text(client, "client-2", "Could you come Tuesday afternoon?")
+    current[0] += timedelta(seconds=1)
+    text(client, "client-1", "What about Tuesday?")
+    assert model.client_histories[-1] == [
+        "Could you come Monday morning?", first_reply, "What about Tuesday?"]
+    current[0] += timedelta(hours=25)
+    text(client, "client-1", "What about Wednesday?")
+    assert model.client_histories[-1] == ["What about Wednesday?"]
+    current[0] += timedelta(seconds=1)
+    text(client, "owner", "What is waiting for me?")
+    assert model.owner_histories[-1] == ["What is waiting for me?"]
+    current[0] += timedelta(seconds=1)
+    booked = text(client, "client-1", "Book 2026-10-05 09:00")
+    client_notice = next(message["body"] for message in booked
+                         if message["kind"] == "notification" and message["party"] == "client-1")
+    owner_notice = next(message["body"] for message in booked
+                        if message["kind"] == "notification" and message["party"] == "owner")
+    current[0] += timedelta(seconds=1)
+    text(client, "client-1", "What about Thursday?")
+    assert client_notice in model.client_histories[-1]
+    assert owner_notice not in model.client_histories[-1]
 
 
 def test_text_booking_appears_in_owner_api_and_owner_app_approval_notifies_client() -> None:

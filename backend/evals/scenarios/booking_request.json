@@ -1,0 +1,37 @@
+{
+  "name": "Client requests a booking and owner approves it",
+  "start_at": "2026-09-29T17:00:00+00:00",
+  "steps": [
+    {
+      "party": "client-1",
+      "body": "Could you come tomorrow morning?",
+      "expect": {
+        "out_contains": ["10:00 AM"],
+        "pending_for": {"client-1": 0},
+        "calendar_statuses": {"CONFIRMED": 1, "PENDING_APPROVAL": 1}
+      }
+    },
+    {
+      "party": "client-1",
+      "body": "10:00 AM works",
+      "expect": {
+        "pending_for": {"client-1": 1},
+        "calendar_statuses": {"CONFIRMED": 1, "PENDING_APPROVAL": 2}
+      }
+    },
+    {
+      "party": "Owner",
+      "body": "Approve",
+      "expect": {
+        "calendar_statuses": {"CONFIRMED": 1, "PENDING_APPROVAL": 2}
+      }
+    },
+    {
+      "party": "Owner",
+      "body": "Approve {{pending_ref:client-1}}",
+      "expect": {
+        "calendar_statuses": {"CONFIRMED": 2, "PENDING_APPROVAL": 1}
+      }
+    }
+  ]
+}

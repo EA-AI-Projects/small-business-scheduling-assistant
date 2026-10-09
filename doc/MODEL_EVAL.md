@@ -25,6 +25,44 @@ addresses, access codes, or customer messages. The preview rejects recognizable
 phone numbers and access-code phrases before an API call, but this filter cannot
 detect every kind of private information.
 
+### Manual multi-step conversation scenarios
+
+For an issue that needs a whole conversation, copy and edit
+[`booking_request.json`](../backend/evals/scenarios/booking_request.json). Each run starts
+with a fresh fictional local calendar and the scenario's fixed `start_at` time.
+Each step sends one text as `owner` or `client-1` to `client-3`; party names are
+case insensitive. To name a request created during the run, use
+`"Approve {{pending_ref:client-1}}"` in an owner step. The runner replaces that
+placeholder with the one pending request reference for that client; it fails
+before sending if there are zero or several. Optional
+`advance_minutes` moves the clock before that text. Optional `expect` checks
+outbound text fragments with `out_contains` and active request counts with
+`pending_for`, and calendar event counts with `calendar_statuses`. The runner
+prints every displayed reply, notification, note, pending-request count, and
+calendar status count, then exits with a failure code if a check fails.
+Use only fictional text; the local simulator rejects recognizable phone numbers
+and access codes, but cannot detect every private detail.
+
+From the repository root, manually run one scenario with the production OpenAI
+interpreter and the local simulator:
+
+```sh
+(
+  set -a
+  source .env
+  set +a
+  backend/.venv/bin/python backend/evals/conversation_scenarios.py \
+    backend/evals/scenarios/booking_request.json --live
+)
+```
+
+This script is outside pytest and CI. It requires both `--live` and
+`OPENAI_API_KEY`, so an ordinary test run never calls OpenAI. A live run uses
+OpenAI API calls and may incur charges, but sends no SMS and uses no AWS service.
+Checks should focus on calendar outcomes rather than exact model wording, since
+the model can phrase valid replies differently between runs. The scenario file
+allows at most 20 steps per run; use a short focused reproduction for each issue.
+
 For local tests, a password manager can supply the value when creating `.env`; no secret value or vault item reference belongs in this repository. Add future local-only variables to the ignored file as their test harnesses need them. The deployed Twilio integration uses an environment-scoped SSM SecureString and has separate SMS authorization gates; a local `.env` does not configure or authorize live messaging.
 
 The script sends synthetic texts (nine from #24 and #60, plus the #241 calendar cases below) with no real people, phones, addresses, or access codes, using the production instructions, tool schema, and model input from `scheduling.adapters.openai_messages`. "Today" is fixed at Monday 2026-09-28. Since #60, the model resolves relative dates instead of refusing them, so the checks are:

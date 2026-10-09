@@ -6,6 +6,10 @@ repository the owner web app uses, so a change from either side is visible to
 the other. Nothing reaches Twilio, DynamoDB, or any cloud service except the
 optional OpenAI interpreter when ``OPENAI_API_KEY`` is set.
 
+The model sees each actor's displayed inbound and outbound texts under the same
+24-hour, 24-message, 12,000-character limits as the production history reader.
+The log is in memory and resets with the local server.
+
 Intake mirrors the signed Twilio ingress: only the owner number or an active,
 phone-verified client with consent reaches the conversation service. Local
 consent is implied by a verified profile, because the in-person consent record
@@ -21,7 +25,6 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Annotated, Any
-from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -31,6 +34,7 @@ from starlette.concurrency import run_in_threadpool
 
 from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.adapters.sms_twilio import render_notification
+from scheduling.domain.booking_invitations import INVITATION_TEMPLATE
 from scheduling.domain.client_records import ACCESS_CODE_PATTERN
 from scheduling.domain.conversation import (
     MAX_MESSAGE_LENGTH,
@@ -39,6 +43,7 @@ from scheduling.domain.conversation import (
     MessageInterpreter,
     MessageProposal,
 )
+from scheduling.domain.conversation_history import HistoryMessage, bounded_history
 from scheduling.domain.conversation_state import InMemoryConversationStates
 from scheduling.domain.holds import HoldService, OutboxIntent
 from scheduling.domain.lifecycle import LifecycleService
@@ -130,9 +135,10 @@ class TextSimulator:
         self._service = ConversationService(
             repository, interpreter, HoldService(repository),
             LifecycleService(repository, clock), LocalConsent(repository), clock, OWNER_PHONE,
-            InMemoryConversationStates())
+            InMemoryConversationStates(), history_reader=self)
         self._lock = threading.RLock()
         self._log: list[SimulatedText] = []
+        self._history: list[tuple[str, str, str | None, HistoryMessage]] = []
         # Seeded history predates the simulator; show only later notifications.
         self._seen = {intent.outbox_id for intent in repository.list_outbox_intents()}
 
@@ -183,8 +189,11 @@ class TextSimulator:
                              "consent, so production ignores the text. Nothing changed.")
             else:
                 receipt = InboundReceipt(
-                    self._business_id, f"local-{uuid4()}", phone, BUSINESS_PHONE, text,
+                    self._business_id, f"local-{len(self._log):09d}", phone, BUSINESS_PHONE, text,
                     self._clock(), role, client_id, Keyword.OTHER, True)
+                self._history.append((self._business_id, phone, client_id,
+                                      HistoryMessage(receipt.provider_id, role.value,
+                                                     receipt.received_at, text)))
                 if self._offline is not None:
                     self._offline.consulted = False
                 outcome = self._service.handle(receipt)
@@ -223,7 +232,7 @@ class TextSimulator:
                 profile = self._repository.read_profile(outbox.business_id, stored.intent.client_id)
                 if profile is not None:
                     self._append(profile.client_id, profile.name, "out", "notification",
-                                 stored.intent.manual_message)
+                                 stored.intent.manual_message, invitation=True)
 
     def _capture(self, intent: OutboxIntent, zone: ZoneInfo) -> None:
         appointment = self._repository.read_appointment(intent.hold_id)
@@ -253,13 +262,37 @@ class TextSimulator:
                          "Not sent: this client has no verified phone with consent. "
                          f"The text would have said: {body}")
             return
-        self._append(party, label, "out", "notification", body)
+        self._append(party, label, "out", "notification", body,
+                     invitation=intent.template == INVITATION_TEMPLATE)
 
-    def _append(self, party: str, label: str, direction: str, kind: str, body: str) -> None:
+    def read_conversation_history(self, receipt: InboundReceipt,
+                                  now: datetime) -> tuple[HistoryMessage, ...]:
+        """Give the model this actor's displayed exchanges under production's bounds."""
+        if (not receipt.authorized_for_commands or receipt.body is None
+                or receipt.role not in (SenderRole.CLIENT, SenderRole.OWNER)
+                or receipt.role == SenderRole.CLIENT and receipt.client_id is None):
+            raise ValueError("History requires a verified sender")
         with self._lock:
+            messages = [message for business, phone, client_id, message in self._history
+                        if business == receipt.business_id and phone == receipt.sender
+                        and (receipt.role == SenderRole.OWNER or client_id == receipt.client_id)]
+            return bounded_history(messages, now, receipt.role)
+
+    def _append(self, party: str, label: str, direction: str, kind: str, body: str,
+                *, invitation: bool = False) -> None:
+        with self._lock:
+            sequence = len(self._log) + 1
+            at = self._clock()
             self._log.append(SimulatedText(
-                len(self._log) + 1, self._clock().isoformat(), party, label,
-                direction, kind, body))
+                sequence, at.isoformat(), party, label, direction, kind, body))
+            if direction == "out" and kind in ("reply", "notification"):
+                profile = (self._repository.read_profile(self._business_id, party)
+                           if party != OWNER else None)
+                phone = profile.phone_e164 if profile is not None else OWNER_PHONE
+                client_id = party if profile is not None else None
+                self._history.append((self._business_id, phone, client_id,
+                                      HistoryMessage(f"local-{sequence:09d}", "assistant",
+                                                     at, body, invitation)))
 
 
 class SendText(StrictModel):

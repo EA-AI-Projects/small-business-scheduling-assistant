@@ -65,13 +65,15 @@ npm run dev
 
 Open `http://127.0.0.1:3000` (owner calendar) and `http://127.0.0.1:8000/local/texts` (text simulator), and paste the printed token into each.
 
-- **Client texts:** choose Avery Example or Blake Sample and ask in plain language, for example "Do you have availability for tomorrow?". The reply offers 3–5 open times and writes nothing. Answer with one of them ("10 works", "option 2", or "yes" when one time was offered) within 30 minutes to create a pending request. Refresh the owner calendar to see it. See the [conversation flow](doc/CONVERSATION.md) for what counts as a pick.
+- **Client texts:** choose Avery Example or Blake Sample and ask in plain language, for example "Do you have availability for tomorrow?". The reply offers 3–5 open times and writes nothing. Answer with one of them ("10 works", "option 2", or "yes" when one time was offered) within 30 minutes to create a pending request. Refresh the owner calendar to see it. The model sees that client's recent inbound texts and displayed replies under the production 24-hour history bounds. See the [conversation flow](doc/CONVERSATION.md) for what counts as a pick.
 - **Owner decisions:** text `yes` or `decline` as the owner when exactly one request is pending; the seeded data starts with one. With several pending, the reply lists them and asks for `Approve REF` or `Decline REF`. You can also decide in the owner app. The simulator shows the notification texts each side would receive, rendered with the production templates. After a text changes the calendar, the assistant's own reply appears as a grey "Not texted" note, because production sends only the notifications for a change.
 - **Cancel and reschedule:** as a client, text "I can't make Thursday" and confirm with `yes`, or "Can I move my Thursday visit to Friday?" and pick a replacement time. Rescheduling needs a confirmed visit; the original stays booked until the owner approves the replacement.
 - **Exact commands** still work: `Book YYYY-MM-DD`, `Book YYYY-MM-DD HH:MM`, `Cancel REF`, `Reschedule REF to YYYY-MM-DD HH:MM`, `Approve REF`, and `Decline REF`.
 - **Unverified senders:** Casey Demo is deliberately unverified. Their texts get no reply, as in production; the simulator shows a note explaining why.
 
 Everything resets when Terminal A stops. Hold expiry and other scheduled workers do not run locally. STOP/HELP keywords are handled by Twilio in production and are not simulated.
+
+To replay a fictional multi-text issue with live OpenAI interpretation and a fresh local calendar, use the [manual conversation scenario runner](doc/MODEL_EVAL.md#manual-multi-step-conversation-scenarios). It runs only when explicitly invoked and is separate from the normal tests.
 
 ## Deploy to dev
 
