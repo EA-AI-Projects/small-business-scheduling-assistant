@@ -25,12 +25,15 @@ export function YearGrid({ date, events, zone, selectedId, onSelect, onDismiss, 
   onDay: (date: string) => void;
 }) {
   const year = date.slice(0, 4);
-  const [focus, setFocus] = useState(date);
+  // Keyboard movement may focus a date other than the selected one. A header or date-picker
+  // change takes precedence, including when it stays within the same year.
+  const [keyboardFocus, setKeyboardFocus] = useState({ selectedDate: date, date });
   const [expanded, setExpanded] = useState<string | null>(null);
   const [now, setNow] = useState(() => new Date());
   const grid = useRef<HTMLDivElement>(null);
   const moveFocus = useRef(false);
-  const active = focus.startsWith(year) ? focus : date;
+  const active = keyboardFocus.selectedDate === date && keyboardFocus.date.startsWith(year)
+    ? keyboardFocus.date : date;
   const today = todayKey(zone, now);
 
   useEffect(() => {
@@ -39,7 +42,7 @@ export function YearGrid({ date, events, zone, selectedId, onSelect, onDismiss, 
   }, []);
   useEffect(() => {
     if (!moveFocus.current) return;
-    const target = grid.current?.querySelector<HTMLElement>(`[data-date="${focus}"]`);
+    const target = grid.current?.querySelector<HTMLElement>(`[data-date="${keyboardFocus.date}"]`);
     if (target) {
       moveFocus.current = false;
       target.focus({ preventScroll: true });
@@ -57,7 +60,7 @@ export function YearGrid({ date, events, zone, selectedId, onSelect, onDismiss, 
     if (!next) return;
     event.preventDefault();
     moveFocus.current = true;
-    setFocus(next);
+    setKeyboardFocus({ selectedDate: next.startsWith(year) ? date : next, date: next });
     if (!next.startsWith(year)) onNavigate(next);
   };
 

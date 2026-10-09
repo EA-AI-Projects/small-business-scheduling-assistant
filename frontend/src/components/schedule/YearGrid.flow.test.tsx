@@ -69,6 +69,25 @@ describe("Year calendar owner flow", () => {
     expect(rangeTitle("2028-02-29", "year")).toBe("2028");
   });
 
+  it("moves the keyboard tab stop when the selected date changes within the year", async () => {
+    const onDay = vi.fn();
+    const render = (date: string) => root.render(<YearGrid date={date} zone="UTC" events={[]}
+      selectedId={null} onSelect={() => undefined} onDismiss={() => undefined}
+      onNavigate={() => undefined} onDay={onDay} />);
+    await act(async () => render("2028-02-29"));
+    const leap = host.querySelector<HTMLButtonElement>('[data-date="2028-02-29"]')!;
+    await act(async () => leap.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true })));
+    expect(host.querySelector<HTMLButtonElement>('[data-date="2028-03-01"]')?.tabIndex).toBe(0);
+    // Header title and mini picker both call goToDate while Year remains selected.
+    await act(async () => render("2028-08-15"));
+    const chosen = host.querySelector<HTMLButtonElement>('[data-date="2028-08-15"]')!;
+    expect(chosen.tabIndex).toBe(0);
+    expect(host.querySelector<HTMLButtonElement>('[data-date="2028-03-01"]')?.tabIndex).toBe(-1);
+    chosen.focus();
+    await act(async () => chosen.click());
+    expect(onDay).toHaveBeenCalledWith("2028-08-15");
+  });
+
   it("uses the loaded owner snapshot when navigating to another year", async () => {
     const get = vi.fn(async (path: string) => {
       if (path === "/calendar") return { business_id: "pilot", revision: 1, events: [
