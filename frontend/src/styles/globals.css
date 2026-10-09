@@ -183,6 +183,7 @@ code { font-size: .9em; }
   .month-day { min-height: 5rem; padding: .12rem; }
   .month-date { width: 1.5rem; height: 1.5rem; font-size: .8rem; }
   .month-item { padding: .1rem; font-size: .6rem; }
+  .month-item span, .month-item strong { white-space: normal; overflow-wrap: anywhere; }
   .month-item.month-extra, .month-more-wide { display: none; }
   .month-more-narrow { display: block; font-size: .6rem; white-space: nowrap; }
 }
