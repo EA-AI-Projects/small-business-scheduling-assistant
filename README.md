@@ -37,6 +37,8 @@ The backend exposes a health endpoint and read-only calendar and availability AP
 ## Try the app locally
 
 One backend process and the owner web app share a single fictional, in-memory calendar. Nothing reaches Twilio, AWS, or real phones.
+Install the backend dependencies first using the commands in [Local backend](#local-backend).
+The text simulator needs only Terminal A; start Terminal B if you also want to use the owner web app.
 
 | Process | Start it with | Connects to |
 | --- | --- | --- |
@@ -44,11 +46,11 @@ One backend process and the owner web app share a single fictional, in-memory ca
 | Owner web app, port 3000 | Terminal B, below | Calls the backend on port 8000. |
 | Text simulator page | Served by the backend at `http://127.0.0.1:8000/local/texts` | The same backend and calendar. |
 
-Terminal A, from the repository root. `.env` supplies `OPENAI_API_KEY`. Without that file, `source` prints an error and the backend starts without OpenAI: exact commands and replies to an offer still work, and plain-language texts get a question and a note explaining the missing key.
+Terminal A, from the repository root. If the ignored `.env` file supplies `OPENAI_API_KEY`, plain-language texts use OpenAI. Without a key, exact commands and replies to an offer still work; other texts receive a clarification and a note explaining the missing key.
 
 ```sh
 (
-  set -a; source .env; set +a
+  if [ -f .env ]; then set -a; source .env; set +a; fi
   export LOCAL_OWNER_TOKEN="$(openssl rand -hex 16)"; echo "$LOCAL_OWNER_TOKEN"
   backend/.venv/bin/uvicorn scheduling.local_owner:app --app-dir backend --host 127.0.0.1 --port 8000
 )
@@ -63,7 +65,7 @@ npm ci                       # first time only
 npm run dev
 ```
 
-Open `http://127.0.0.1:3000` (owner calendar) and `http://127.0.0.1:8000/local/texts` (text simulator), and paste the printed token into each.
+Open `http://127.0.0.1:8000/local/texts` and paste the token printed by Terminal A. If you started Terminal B, open `http://127.0.0.1:3000` for the owner calendar and use the same token there. Both pages share the same in-memory calendar.
 
 - **Client texts:** choose Avery Example or Blake Sample and ask in plain language, for example "Do you have availability for tomorrow?". The reply offers 3–5 open times and writes nothing. Answer with one of them ("10 works", "option 2", or "yes" when one time was offered) within 30 minutes to create a pending request. Refresh the owner calendar to see it. The model sees that client's recent inbound texts and displayed replies under the production 24-hour history bounds. See the [conversation flow](doc/CONVERSATION.md) for what counts as a pick.
 - **Owner decisions:** text `yes` or `decline` as the owner when exactly one request is pending; the seeded data starts with one. With several pending, the reply lists them and asks for `Approve REF` or `Decline REF`. You can also decide in the owner app. The simulator shows the notification texts each side would receive, rendered with the production templates. After a text changes the calendar, the assistant's own reply appears as a grey "Not texted" note, because production sends only the notifications for a change.
@@ -73,7 +75,23 @@ Open `http://127.0.0.1:3000` (owner calendar) and `http://127.0.0.1:8000/local/t
 
 Everything resets when Terminal A stops. Hold expiry and other scheduled workers do not run locally. STOP/HELP keywords are handled by Twilio in production and are not simulated.
 
-To replay a fictional multi-text issue with live OpenAI interpretation and a fresh local calendar, use the [manual conversation scenario runner](doc/MODEL_EVAL.md#manual-multi-step-conversation-scenarios). It runs only when explicitly invoked and is separate from the normal tests.
+### Replay a conversation as a manual test
+
+The [sample scenario](backend/evals/scenarios/booking_request.json) sends several fictional texts through the same simulator logic, starting with a fresh calendar at its fixed `start_at` time. Copy and edit the JSON file to reproduce an issue. Each step gives a `party` (`owner` or `client-1` to `client-3`) and `body`; `expect` can check outbound text with `out_contains`, pending requests with `pending_for`, and event counts with `calendar_statuses`. Party names are case insensitive. Use `{{pending_ref:client-1}}` in an owner text to insert that client's one current pending request reference; a bare `approve` cannot choose between multiple pending requests. The runner prints replies, notifications, notes, and calendar counts after every step.
+
+To run one scenario manually with OpenAI, from the repository root:
+
+```sh
+(
+  set -a
+  source .env
+  set +a
+  backend/.venv/bin/python backend/evals/conversation_scenarios.py \
+    backend/evals/scenarios/booking_request.json --live
+)
+```
+
+This requires `OPENAI_API_KEY` in the ignored `.env` file and the explicit `--live` flag. It is separate from pytest and CI, makes billable OpenAI calls, and sends no SMS or AWS requests. A failure prints the actual exchange so you can inspect where it diverged. See [manual multi-step conversation scenarios](doc/MODEL_EVAL.md#manual-multi-step-conversation-scenarios) for the full scenario format. Use fictional data only.
 
 ## Deploy to dev
 
