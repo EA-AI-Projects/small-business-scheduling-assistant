@@ -130,7 +130,7 @@ The owner may also trigger a one-off run from the same Settings card. It saves a
 ### 6.7 Calendar/admin view
 
 Minimal authenticated owner interface:
-- The owner UI redesign starts with Day and Week calendar views. Use a modern, calendar-first layout with date navigation and a compact menu for owner sections. Evaluate these two views with the owner before planning Month, Schedule, or Year views. A client-facing view is outside this redesign; keep the owner UI structure extensible for one later. The Week view starts on Monday.
+- The owner UI redesign starts with Day and Week calendar views, followed by Month, Schedule, then Year (#169). Use a modern, calendar-first layout with date navigation and a compact menu for owner sections. Schedule lists confirmed visits and pending requests from the selected date, initially covering 30 days with a Load more action. A client-facing view is outside this redesign; keep the owner UI structure extensible for one later. The Week view starts on Monday.
 - The owner UI uses shades of blue and white, not green and white (owner decision, 2026-10-02, #140).
 - Clicking a calendar item opens a pop-up card with its details and actions, as in Google Calendar. Clicking an empty slot opens a card to mark that time unavailable. These cards replace the side "Selected item" and "Block unavailable time" panels (owner decision, 2026-10-02, #140).
 - On a phone, the header is a single row that stays at the top of the screen (owner decision, 2026-10-02, #140).

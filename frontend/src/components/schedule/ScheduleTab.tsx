@@ -9,13 +9,14 @@ import type { CardAnchor } from "../PopoverCard";
 import { SectionHeading } from "../Workspace";
 import { CalendarGrid } from "./CalendarGrid";
 import { EventCard } from "./EventCard";
+import { MonthGrid } from "./MonthGrid";
 import { SlotCard } from "./SlotCard";
 
 /** The open "block time" card. `key` changes with each opening so the form restarts from its prefill. */
 interface Slot { range: SlotRange; key: number; anchor: CardAnchor; opener: HTMLElement | null }
 
 export function ScheduleTab() {
-  const { data, stamp, refresh, notify, date, view } = useOwner();
+  const { data, stamp, refresh, notify, date, view, setView, goToDate } = useOwner();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [handledStamp, setHandledStamp] = useState(stamp.version);
   const [handledRange, setHandledRange] = useState(`${date}|${view}`);
@@ -66,7 +67,7 @@ export function ScheduleTab() {
     if (id) select(id, element); else close();
   };
 
-  const days = datesForView(date, view);
+  const days = view === "month" ? [] : datesForView(date, view);
 
   // Open the block-time card on a slot, replacing any open card.
   const openSlot = (range: SlotRange, anchor: CardAnchor, opener: HTMLElement | null) => {
@@ -125,9 +126,14 @@ export function ScheduleTab() {
           <p className="empty" role="status">Calendar not loaded yet. If it does not appear, use Refresh.</p>
         ) : (
           <>
-            <CalendarGrid days={days} events={events} policy={data.policy?.record.policy} zone={data.zone}
-              selectedId={selectedId} onSelect={select} onSlotPress={pressSlot} />
-            {!days.some((day) => layoutDay(events, day, data.zone).length > 0) && (
+            {view === "month" ? (
+              <MonthGrid date={date} events={events} zone={data.zone} selectedId={selectedId}
+                onSelect={select} onDay={(day) => { goToDate(day); setView("day"); }} />
+            ) : (
+              <CalendarGrid days={days} events={events} policy={data.policy?.record.policy} zone={data.zone}
+                selectedId={selectedId} onSelect={select} onSlotPress={pressSlot} />
+            )}
+            {view !== "month" && !days.some((day) => layoutDay(events, day, data.zone).length > 0) && (
               <p className="empty" role="status">No scheduled items in this {view === "week" ? "week" : "day"}.</p>
             )}
           </>

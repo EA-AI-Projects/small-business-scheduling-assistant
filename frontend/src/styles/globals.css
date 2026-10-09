@@ -159,6 +159,34 @@ code { font-size: .9em; }
 }
 /* Day and Week time grids. */
 .calendar-pane { min-width: 0; }
+.month-calendar { width: 100%; min-width: 0; max-height: min(72vh, 760px); overflow-y: auto; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 12px; }
+.month-weekdays, .month-week { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); }
+.month-weekdays { position: sticky; top: 0; z-index: 2; background: var(--color-surface); border-bottom: 1px solid var(--color-border); }
+.month-weekdays span { padding: .45rem .3rem; text-align: center; color: var(--color-text-subtle); font-size: .75rem; }
+.month-day { min-width: 0; min-height: 7rem; padding: .25rem; border-right: 1px solid var(--color-border-soft); border-bottom: 1px solid var(--color-border-soft); }
+.month-day.outside { background: var(--color-surface-subtle); }
+.month-date { display: grid; place-items: center; width: 1.8rem; height: 1.8rem; margin: 0 0 .2rem auto; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--color-text); font: inherit; cursor: pointer; }
+.month-day.outside .month-date { color: var(--color-text-subtle); }
+.month-date.today { background: var(--color-primary); color: var(--color-on-primary); }
+.month-items { display: grid; gap: .15rem; }
+.month-item { display: grid; min-width: 0; padding: .2rem .3rem; border: 0; border-left: 3px solid; border-radius: 4px; text-align: left; font: inherit; font-size: .7rem; line-height: 1.2; cursor: pointer; }
+.month-item span, .month-item strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.month-item strong { font-weight: 600; text-transform: capitalize; }
+.month-item.confirmed { background: var(--color-confirmed-bg); border-color: var(--color-confirmed-edge); color: var(--color-confirmed-ink); }
+.month-item.pending { background: var(--color-pending-bg); border-color: var(--color-pending-edge); color: var(--color-pending-ink); }
+.month-item.unavailable { background: var(--color-unavailable-a); border-color: var(--color-unavailable-edge); color: var(--color-unavailable-ink); }
+.month-item.cancelled, .month-item.expired, .month-item.declined { background: var(--color-inactive-bg); border-color: var(--color-inactive-edge); color: var(--color-inactive-ink); text-decoration: line-through; }
+.month-item.selected, .month-item:focus-visible, .month-date:focus-visible, .month-more:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
+.month-more { min-width: 0; padding: .1rem .2rem; border: 0; background: transparent; color: var(--color-primary); font: inherit; font-size: .72rem; text-align: left; cursor: pointer; }
+.month-more-narrow { display: none; }
+@media (max-width: 600px) {
+  .month-day { min-height: 5rem; padding: .12rem; }
+  .month-date { width: 1.5rem; height: 1.5rem; font-size: .8rem; }
+  .month-item { padding: .1rem; font-size: .6rem; }
+  .month-item span, .month-item strong { white-space: normal; overflow-wrap: anywhere; }
+  .month-item.month-extra, .month-more-wide { display: none; }
+  .month-more-narrow { display: block; font-size: .6rem; white-space: nowrap; }
+}
 .cal-scroll { max-height: min(72vh, 760px); overflow: auto; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 12px; }
 .cal-grid { --gutter: 3.4rem; min-width: 100%; }
 .cal-grid.week { min-width: 44rem; }

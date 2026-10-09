@@ -1,6 +1,6 @@
 /** Business-timezone display helpers. Instants are ISO strings from the API. */
 
-export type CalendarView = "day" | "week";
+export type CalendarView = "day" | "week" | "month";
 
 function parts(instant: string, zone: string, options: Intl.DateTimeFormatOptions): Record<string, string> {
   return Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: zone, ...options })
@@ -58,6 +58,13 @@ export function addDays(date: string, days: number): string {
 
 /** Previous (-1) or next (1) day or week for the selected view. */
 export function stepDate(date: string, view: CalendarView, direction: -1 | 1): string {
+  if (view === "month") {
+    const index = Number(date.slice(0, 4)) * 12 + Number(date.slice(5, 7)) - 1 + direction;
+    const year = Math.floor(index / 12);
+    const month = index - year * 12 + 1;
+    const last = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(Math.min(Number(date.slice(8, 10)), last)).padStart(2, "0")}`;
+  }
   return addDays(date, direction * (view === "week" ? 7 : 1));
 }
 
@@ -66,6 +73,7 @@ export function rangeTitle(date: string, view: CalendarView): string {
   const format = (value: string, options: Intl.DateTimeFormatOptions) =>
     new Date(`${value}T12:00:00Z`).toLocaleDateString("en-US", { timeZone: "UTC", ...options });
   if (view === "day") return format(date, { month: "long", day: "numeric", year: "numeric" });
+  if (view === "month") return format(date, { month: "long", year: "numeric" });
   const days = datesForView(date, "week");
   const first = days[0] ?? date;
   const last = days[days.length - 1] ?? date;
@@ -79,7 +87,7 @@ export function rangeTitle(date: string, view: CalendarView): string {
 
 /** Spoken range for the selected business-local week; Day view keeps its existing title. */
 export function rangeAnnouncement(date: string, view: CalendarView): string {
-  if (view === "day") return rangeTitle(date, view);
+  if (view !== "week") return rangeTitle(date, view);
   const days = datesForView(date, "week");
   const first = days[0] ?? date;
   const last = days[days.length - 1] ?? date;
@@ -98,7 +106,7 @@ export function rangeAnnouncement(date: string, view: CalendarView): string {
 
 /** Compact header title for narrow screens: "Fri, Oct 2" for a day; the week title is already short. */
 export function rangeTitleShort(date: string, view: CalendarView): string {
-  if (view === "week") return rangeTitle(date, view);
+  if (view !== "day") return rangeTitle(date, view);
   return new Date(`${date}T12:00:00Z`).toLocaleDateString("en-US", {
     weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
 }

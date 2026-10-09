@@ -37,3 +37,9 @@ export function monthGrid(date: string): GridDay[][] {
     return { date: key, day: Number(key.slice(8, 10)), inMonth: key.startsWith(month) };
   }));
 }
+
+/** Full-size month grid: at least five weeks, with a sixth when the month needs it. */
+export function monthWeeks(date: string): GridDay[][] {
+  const weeks = monthGrid(date);
+  return weeks[5]?.some((day) => day.inMonth) ? weeks : weeks.slice(0, 5);
+}
