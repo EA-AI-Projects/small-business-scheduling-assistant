@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 
 import type { CalendarEvent } from "@/api/types";
-import { monthEvents } from "@/lib/monthEvents";
+import { monthChipTime, monthEvents } from "@/lib/monthEvents";
 import { monthWeeks } from "@/lib/monthGrid";
-import { dayTitle, localTime, statusLabel, todayKey } from "@/lib/time";
+import { dayTitle, statusLabel, todayKey } from "@/lib/time";
 
 const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
@@ -42,13 +42,14 @@ export function MonthGrid({ date, events, zone, selectedId, onSelect, onDay }: {
                     {day.day}
                   </button>
                   <div className="month-items">
-                    {visible.map((event, index) => (
-                      <button key={event.event_id} type="button" data-event-id={event.event_id}
-                        data-popover-anchor="" aria-haspopup="dialog" aria-current={event.event_id === selectedId ? "true" : undefined}
-                        aria-label={`${localTime(event.start_at, zone)}, ${statusLabel(event.status)}, ${dayTitle(day.date)}`}
-                        className={`month-item ${event.status.toLowerCase().split("_")[0]}${event.event_id === selectedId ? " selected" : ""}${index > 0 && expanded !== day.date ? " month-extra" : ""}`}
-                        onClick={(click) => onSelect(event.event_id, click.currentTarget)}>
-                        <span>{localTime(event.start_at, zone)}</span><strong>{statusLabel(event.status)}</strong>
+                    {visible.map((placed, index) => (
+                      <button key={placed.event.event_id} type="button" data-event-id={placed.event.event_id}
+                        data-popover-anchor="" aria-haspopup="dialog" aria-current={placed.event.event_id === selectedId ? "true" : undefined}
+                        aria-label={`${monthChipTime(placed, zone)}${placed.continuesBefore ? ", continues from previous day" : ""}, ${statusLabel(placed.event.status)}, ${dayTitle(day.date)}`}
+                        className={`month-item ${placed.event.status.toLowerCase().split("_")[0]}${placed.event.event_id === selectedId ? " selected" : ""}${index > 0 && expanded !== day.date ? " month-extra" : ""}`}
+                        onClick={(click) => onSelect(placed.event.event_id, click.currentTarget)}>
+                        <span>{monthChipTime(placed, zone)}{placed.continuesBefore ? " · continues" : ""}</span>
+                        <strong>{statusLabel(placed.event.status)}</strong>
                       </button>
                     ))}
                     {expanded !== day.date && list.length > 2 && (

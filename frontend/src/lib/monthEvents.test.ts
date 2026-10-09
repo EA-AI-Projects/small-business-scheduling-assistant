@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { CalendarEvent } from "@/api/types";
 
-import { monthEvents } from "./monthEvents";
+import { monthChipTime, monthEvents } from "./monthEvents";
 import { monthWeeks } from "./monthGrid";
 import { rangeTitle, stepDate } from "./time";
 
@@ -32,12 +32,24 @@ describe("Month calendar range and placement", () => {
       event("outside", "2026-12-15T18:00:00Z", "2026-12-15T19:00:00Z"),
     ];
     const october = monthEvents(events, "2026-10-09", zone);
-    expect(october.get("2026-09-28")?.map((item) => item.event_id)).toEqual(["prev"]);
-    expect(october.get("2026-11-01")?.map((item) => item.event_id)).toEqual(["fall"]);
-    expect([...october.values()].flat().some((item) => item.event_id === "outside")).toBe(false);
-    expect(monthEvents(events, "2026-03-09", zone).get("2026-03-08")?.map((item) => item.event_id))
+    expect(october.get("2026-09-28")?.map((item) => item.event.event_id)).toEqual(["prev"]);
+    expect(october.get("2026-11-01")?.map((item) => item.event.event_id)).toEqual(["fall"]);
+    expect([...october.values()].flat().some((item) => item.event.event_id === "outside")).toBe(false);
+    expect(monthEvents(events, "2026-03-09", zone).get("2026-03-08")?.map((item) => item.event.event_id))
       .toEqual(["spring"]);
-    expect(monthEvents(events, "2026-11-09", zone).get("2026-11-02")?.map((item) => item.event_id))
+    expect(monthEvents(events, "2026-11-09", zone).get("2026-11-02")?.map((item) => item.event.event_id))
       .toEqual(["next"]);
+  });
+
+  it("shows midnight and a continuation on the second day of an overnight event", () => {
+    const zone = "America/Los_Angeles";
+    const overnight = event("overnight", "2026-11-02T07:00:00Z", "2026-11-02T09:00:00Z");
+    const days = monthEvents([overnight], "2026-11-02", zone);
+    const first = days.get("2026-11-01")?.[0];
+    const next = days.get("2026-11-02")?.[0];
+    expect(first && monthChipTime(first, zone)).toBe("11:00 PM");
+    expect(first?.continuesAfter).toBe(true);
+    expect(next && monthChipTime(next, zone)).toBe("12:00 AM");
+    expect(next?.continuesBefore).toBe(true);
   });
 });
