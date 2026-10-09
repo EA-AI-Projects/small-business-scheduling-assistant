@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import type { CalendarEvent } from "@/api/types";
 import { addMonths, monthGrid } from "@/lib/monthGrid";
-import { addDays, localInput, todayKey } from "@/lib/time";
+import { addDays, localInput, localTime, statusLabel, todayKey } from "@/lib/time";
 
 const WEEKDAYS = [["M", "Monday"], ["T", "Tuesday"], ["W", "Wednesday"], ["T", "Thursday"],
   ["F", "Friday"], ["S", "Saturday"], ["S", "Sunday"]] as const;
@@ -14,15 +14,19 @@ function longName(date: string): string {
 }
 
 /** Twelve Monday-first mini calendars backed by the owner calendar snapshot. */
-export function YearGrid({ date, events, zone, onNavigate, onDay }: {
+export function YearGrid({ date, events, zone, selectedId, onSelect, onDismiss, onNavigate, onDay }: {
   date: string;
   events: CalendarEvent[];
   zone: string;
+  selectedId: string | null;
+  onSelect: (id: string, element: HTMLElement) => void;
+  onDismiss: () => void;
   onNavigate: (date: string) => void;
   onDay: (date: string) => void;
 }) {
   const year = date.slice(0, 4);
   const [focus, setFocus] = useState(date);
+  const [expanded, setExpanded] = useState<string | null>(null);
   const [now, setNow] = useState(() => new Date());
   const grid = useRef<HTMLDivElement>(null);
   const moveFocus = useRef(false);
@@ -60,13 +64,13 @@ export function YearGrid({ date, events, zone, onNavigate, onDay }: {
   const months = Array.from({ length: 12 }, (_, index) => `${year}-${String(index + 1).padStart(2, "0")}-01`);
   // The owner snapshot covers the whole calendar. An item spanning midnight appears on both
   // dates, while one ending exactly at midnight does not appear on the next date.
-  const counts = new Map<string, number>();
+  const byDay = new Map<string, CalendarEvent[]>();
   for (const item of events) {
     const start = localInput(item.start_at, zone);
     const end = localInput(item.end_at, zone);
     const last = end.endsWith("T00:00") ? addDays(end.slice(0, 10), -1) : end.slice(0, 10);
     for (let day = start.slice(0, 10); day <= last; day = addDays(day, 1)) {
-      if (day.startsWith(year)) counts.set(day, (counts.get(day) ?? 0) + 1);
+      if (day.startsWith(year)) byDay.set(day, [...(byDay.get(day) ?? []), item]);
     }
   }
 
@@ -89,22 +93,44 @@ export function YearGrid({ date, events, zone, onNavigate, onDay }: {
               {monthGrid(month).map((week) => (
                 <div role="row" className="mini-cal-row" key={week[0]?.date}>
                   {week.map((day) => {
-                    if (!day.inMonth) return <span key={day.date} aria-hidden="true" className="year-outside" />;
-                    const count = counts.get(day.date) ?? 0;
+                    if (!day.inMonth) return <span key={day.date} role="gridcell" aria-hidden="true" className="year-outside" />;
+                    const count = byDay.get(day.date)?.length ?? 0;
                     return (
-                      <button key={day.date} type="button" role="gridcell" data-date={day.date}
-                        tabIndex={day.date === active ? 0 : -1}
-                        className={`mini-cal-day year-day${day.date === today ? " today" : ""}${count ? " has-items" : ""}`}
-                        aria-current={day.date === today ? "date" : undefined}
-                        aria-label={`${longName(day.date)}, ${count} ${count === 1 ? "item" : "items"}, open Day view`}
-                        onKeyDown={(event) => move(event, day.date)} onClick={() => onDay(day.date)}>
-                        <span aria-hidden="true">{day.day}</span>
-                      </button>
+                      <div key={day.date} role="gridcell" className="year-day-cell">
+                        <button type="button" data-date={day.date} tabIndex={day.date === active ? 0 : -1}
+                          className={`mini-cal-day year-day${day.date === today ? " today" : ""}`}
+                          aria-current={day.date === today ? "date" : undefined}
+                          aria-label={`${longName(day.date)}, ${count} ${count === 1 ? "item" : "items"}, open Day view`}
+                          onKeyDown={(event) => move(event, day.date)} onClick={() => onDay(day.date)}>
+                          <span aria-hidden="true">{day.day}</span>
+                        </button>
+                        {count > 0 && <button type="button" className="year-count"
+                          aria-label={`${expanded === day.date ? "Hide" : "Show"} ${count} ${count === 1 ? "item" : "items"} for ${longName(day.date)}`}
+                          aria-expanded={expanded === day.date} onClick={() => {
+                            onDismiss();
+                            setExpanded(expanded === day.date ? null : day.date);
+                          }}>{count}</button>}
+                      </div>
                     );
                   })}
                 </div>
               ))}
             </div>
+            {expanded?.startsWith(month.slice(0, 7)) && (
+              <div className="year-day-detail" role="region" aria-label={`Items for ${longName(expanded)}`}>
+                <strong>{longName(expanded)}</strong>
+                {(byDay.get(expanded) ?? []).map((item) => (
+                  <button type="button" key={item.event_id} data-event-id={item.event_id}
+                    data-popover-anchor="" aria-haspopup="dialog"
+                    aria-current={item.event_id === selectedId ? "true" : undefined}
+                    className={`year-item ${item.status.toLowerCase().split("_")[0]}${item.event_id === selectedId ? " selected" : ""}`}
+                    onClick={(click) => onSelect(item.event_id, click.currentTarget)}>
+                    <span>{localInput(item.start_at, zone).slice(0, 10) < expanded ? "Continues" : localTime(item.start_at, zone)}</span>
+                    <strong>{statusLabel(item.status)}</strong>
+                  </button>
+                ))}
+              </div>
+            )}
           </section>
         );
       })}

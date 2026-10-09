@@ -10,8 +10,8 @@ import { OwnerProvider, useOwner } from "@/owner/OwnerContext";
 import { ScheduleTab } from "./ScheduleTab";
 import { YearGrid } from "./YearGrid";
 
-const event = (id: string, start_at: string, end_at: string): CalendarEvent => ({
-  event_id: id, start_at, end_at, status: "CONFIRMED", hold_expires_at: null,
+const event = (id: string, start_at: string, end_at: string, status: CalendarEvent["status"] = "CONFIRMED"): CalendarEvent => ({
+  event_id: id, start_at, end_at, status, hold_expires_at: null,
   buffer_minutes: 0, duration_minutes: 60,
 });
 
@@ -28,17 +28,26 @@ describe("Year calendar owner flow", () => {
 
   it("shows all months, counts local-day items, and opens the chosen day", async () => {
     const onDay = vi.fn();
+    const onSelect = vi.fn();
     await act(async () => root.render(<YearGrid date="2028-01-01" zone="America/Los_Angeles"
       events={[
         event("leap", "2028-02-29T18:00:00Z", "2028-02-29T19:00:00Z"),
-        event("second", "2028-02-29T20:00:00Z", "2028-02-29T21:00:00Z"),
+        event("second", "2028-02-29T20:00:00Z", "2028-02-29T21:00:00Z", "PENDING_APPROVAL"),
+        event("block", "2028-02-29T22:00:00Z", "2028-02-29T23:00:00Z", "UNAVAILABLE"),
         event("year-end", "2029-01-01T07:00:00Z", "2029-01-01T09:00:00Z"),
-      ]} onNavigate={() => undefined} onDay={onDay} />));
+      ]} selectedId={null} onSelect={onSelect} onDismiss={() => undefined}
+      onNavigate={() => undefined} onDay={onDay} />));
     expect(host.querySelectorAll(".year-month")).toHaveLength(12);
     expect(host.querySelectorAll(".year-month [role='grid']")).toHaveLength(12);
-    expect(host.querySelector('[data-date="2028-02-29"]')?.getAttribute("aria-label")).toContain("2 items");
+    expect(host.querySelector('[data-date="2028-02-29"]')?.getAttribute("aria-label")).toContain("3 items");
     expect(host.querySelector('[data-date="2028-12-31"]')?.getAttribute("aria-label")).toContain("1 item");
     expect(host.querySelector('[data-date="2028-01-01"]')?.getAttribute("aria-label")).toContain("0 items");
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Show 3 items for Tuesday, February 29, 2028"]')!.click());
+    expect(host.querySelector(".year-day-detail")?.textContent).toContain("CONFIRMED");
+    expect(host.querySelector(".year-day-detail")?.textContent).toContain("PENDING APPROVAL");
+    expect(host.querySelector(".year-day-detail")?.textContent).toContain("UNAVAILABLE");
+    await act(async () => host.querySelector<HTMLButtonElement>('[data-event-id="second"]')!.click());
+    expect(onSelect).toHaveBeenCalledWith("second", expect.any(HTMLElement));
     await act(async () => host.querySelector<HTMLButtonElement>('[data-date="2028-02-29"]')!.click());
     expect(onDay).toHaveBeenCalledWith("2028-02-29");
   });
@@ -46,6 +55,7 @@ describe("Year calendar owner flow", () => {
   it("moves focus across months and navigates across the year boundary", async () => {
     const onNavigate = vi.fn();
     const render = (date: string) => root.render(<YearGrid date={date} zone="UTC" events={[]}
+      selectedId={null} onSelect={() => undefined} onDismiss={() => undefined}
       onNavigate={onNavigate} onDay={() => undefined} />);
     await act(async () => render("2028-12-31"));
     const last = host.querySelector<HTMLButtonElement>('[data-date="2028-12-31"]')!;
@@ -68,6 +78,11 @@ describe("Year calendar owner flow", () => {
       if (path === "/requests" || path === "/clients") return [];
       if (path === "/policy") return { record: { policy: { timezone: "America/Los_Angeles" } } };
       if (path === "/booking-outreach") return {};
+      if (path === "/appointments/leap") return {
+        appointment_id: "leap", client_id: "synthetic-client", status: "CONFIRMED",
+        start_at: "2028-02-29T18:00:00Z", end_at: "2028-02-29T19:00:00Z",
+        duration_minutes: 60, version: 1,
+      };
       throw new Error(`Unexpected path: ${path}`);
     });
     function Controls() {
@@ -82,6 +97,11 @@ describe("Year calendar owner flow", () => {
     </OwnerProvider>));
     await act(async () => host.querySelector<HTMLButtonElement>("button")!.click());
     expect(host.querySelector('[data-date="2028-02-29"]')?.getAttribute("aria-label")).toContain("1 item");
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Show 1 item for Tuesday, February 29, 2028"]')!.click());
+    expect(host.querySelector(".year-day-detail")?.textContent).toContain("CONFIRMED");
+    await act(async () => host.querySelector<HTMLButtonElement>('[data-event-id="leap"]')!.click());
+    expect(document.querySelector("[role='dialog']")?.textContent).toContain("Appointment");
+    expect(get).toHaveBeenCalledWith("/appointments/leap");
     await act(async () => host.querySelectorAll<HTMLButtonElement>("button")[1]!.click());
     expect(host.querySelector('[data-date="2029-03-01"]')?.getAttribute("aria-label")).toContain("1 item");
     expect(get.mock.calls.filter(([path]) => path === "/calendar")).toHaveLength(1);

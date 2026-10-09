@@ -135,7 +135,8 @@ export function ScheduleTab() {
               <ScheduleList date={date} days={scheduleDays} events={events} zone={data.zone}
                 selectedId={selectedId} onSelect={select} onLoadMore={loadMoreSchedule} />
             ) : view === "year" ? (
-              <YearGrid date={date} events={events} zone={data.zone} onNavigate={goToDate}
+              <YearGrid date={date} events={events} zone={data.zone} selectedId={selectedId}
+                onSelect={select} onDismiss={close} onNavigate={goToDate}
                 onDay={(day) => { goToDate(day); setView("day"); }} />
             ) : (
               <CalendarGrid days={days} events={events} policy={data.policy?.record.policy} zone={data.zone}
