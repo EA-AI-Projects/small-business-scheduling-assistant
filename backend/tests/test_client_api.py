@@ -7,9 +7,11 @@ from fastapi.testclient import TestClient
 
 from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.client_api import add_client_session_route
+from scheduling.domain.availability import AvailabilityPolicy
 from scheduling.domain.calendar import CalendarStatus
 from scheduling.domain.holds import CreateHold, HoldService
 from scheduling.domain.lifecycle import Action, ActorRole, AppointmentCommand, LifecycleService
+from scheduling.domain.owner_policy import PolicyNotConfigured
 from scheduling.identity_links import IdentityLink, LinkRole, LinkState
 from scheduling.owner_api import OwnerPrincipal, create_owner_app
 
@@ -149,7 +151,9 @@ def test_bookings_list_only_the_callers_pending_and_confirmed_visits() -> None:
     ids = {item["appointment_id"] for item in mine}
     assert not ids & {other, other_business, declined}
 
-    theirs = api.get("/v1/client/bookings?client_id=client-a", headers=auth("b")).json()
+    assert api.get("/v1/client/bookings?client_id=client-a",
+                   headers=auth("b")).status_code == 422
+    theirs = api.get("/v1/client/bookings", headers=auth("b")).json()
     assert [item["appointment_id"] for item in theirs["bookings"]] == [other]
 
 
@@ -170,3 +174,18 @@ def test_bookings_drop_cancelled_and_expired_visits(closing: str) -> None:
             "bookings": []}
         return
     assert api.get("/v1/client/bookings", headers=auth("a")).json() == {"bookings": []}
+
+
+def test_missing_policy_returns_503_without_detail() -> None:
+    class NoPolicy(InMemoryCalendarRepository):
+        def read_policy(self, business_id: str) -> AvailabilityPolicy:
+            raise PolicyNotConfigured("Persist the pilot policy before booking")
+
+    repository = NoPolicy()
+    app = create_owner_app(repository, lambda _t: OwnerPrincipal("o", "business-1"),
+                           lambda: NOW)
+    add_client_session_route(app, verify, repository, lambda: NOW)
+    response = TestClient(app).get(
+        f"/v1/client/availability?day={DAY}&duration_minutes=60", headers=auth("a"))
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Booking is unavailable"}

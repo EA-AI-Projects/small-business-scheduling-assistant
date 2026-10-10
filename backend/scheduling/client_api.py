@@ -55,6 +55,10 @@ class ClientBooking(BaseModel):
     requested_at: datetime | None
 
 
+class ClientBookingsQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
 class ClientBookings(BaseModel):
     bookings: list[ClientBooking]
 
@@ -115,7 +119,9 @@ def add_client_session_route(
     @app.get("/v1/client/bookings", response_model=ClientBookings)
     def client_bookings(
         session: Annotated[ClientSession, Depends(linked_client)],
+        query: Annotated[ClientBookingsQuery, Query()],
     ) -> ClientBookings:
+        del query
         return ClientBookings(bookings=[
             ClientBooking(
                 appointment_id=item.appointment_id, status=item.status,
