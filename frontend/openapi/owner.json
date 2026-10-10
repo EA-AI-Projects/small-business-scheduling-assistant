@@ -106,6 +106,29 @@
         "title": "ClientProfileBody",
         "type": "object"
       },
+      "ClientSession": {
+        "properties": {
+          "business_id": {
+            "title": "Business Id",
+            "type": "string"
+          },
+          "client_id": {
+            "title": "Client Id",
+            "type": "string"
+          },
+          "role": {
+            "default": "client",
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "business_id",
+          "client_id"
+        ],
+        "title": "ClientSession",
+        "type": "object"
+      },
       "DecisionBody": {
         "additionalProperties": false,
         "properties": {
@@ -679,6 +702,29 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/v1/client/session": {
+      "get": {
+        "operationId": "client_session_v1_client_session_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientSession"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Client Session"
+      }
+    },
     "/v1/owner/businesses/{business_id}/appointments": {
       "post": {
         "operationId": "create_appointment_v1_owner_businesses__business_id__appointments_post",

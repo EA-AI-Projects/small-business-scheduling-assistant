@@ -345,6 +345,13 @@ Resources:
             Path: /v1/owner/{proxy+}
             Method: DELETE
             Auth: {Authorizer: OwnerJwt}
+        ClientSessionGet:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OwnerHttpApi
+            Path: /v1/client/session
+            Method: GET
+            Auth: {Authorizer: OwnerJwt}
   OwnerApiLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
