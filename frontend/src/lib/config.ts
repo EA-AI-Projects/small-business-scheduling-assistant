@@ -53,6 +53,9 @@ export function parseConfig(raw: RawConfig): OwnerConfig {
   }
   const local = authMode === "local";
   const apiBaseUrl = parseUrl("NEXT_PUBLIC_API_BASE_URL", raw.apiBaseUrl, local);
+  if (local && !LOOPBACK.has(new URL(apiBaseUrl).hostname)) {
+    throw new ConfigError("NEXT_PUBLIC_API_BASE_URL must be a loopback address (127.0.0.1 or localhost) in local mode");
+  }
   if (!raw.businessId || !BUSINESS_ID.test(raw.businessId)) {
     throw new ConfigError("NEXT_PUBLIC_BUSINESS_ID must be letters, digits, _ or -");
   }

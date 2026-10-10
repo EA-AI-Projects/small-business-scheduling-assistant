@@ -63,4 +63,59 @@ describe("client account entry", () => {
     await act(async () => recovery.click());
     expect(auth.authorizeUrl).toHaveBeenCalledWith(config, window.location.origin, sessionStorage, "/client/", true);
   });
+
+  describe("local mode", () => {
+    const local = parseConfig({ authMode: "local", apiBaseUrl: "http://127.0.0.1:8000", businessId: "pilot" });
+    const submit = async (value: string) => {
+      const input = host.querySelector<HTMLInputElement>('input[name="token"]');
+      const form = host.querySelector("form");
+      expect(input).not.toBeNull();
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+        setter?.call(input, value);
+        input?.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await act(async () => { form?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); });
+    };
+
+    it("signs in with a pasted token, never touches Cognito or storage, and shows the client home", async () => {
+      const fetcher = vi.fn().mockImplementation(async (url: string) => new Response(
+        url.endsWith("/session") ? '{"role":"client","business_id":"pilot","client_id":"client-1","timezone":"America/Los_Angeles"}'
+          : url.includes("availability") ? '{"starts_at":[]}' : '{"bookings":[]}', { status: 200 }));
+      vi.stubGlobal("fetch", fetcher);
+      // Node's own localStorage is unavailable here; a recording stand-in catches any write to it.
+      const store = new Map<string, string>();
+      vi.stubGlobal("localStorage", { setItem: (k: string, v: string) => store.set(k, v), getItem: (k: string) => store.get(k) ?? null,
+        removeItem: (k: string) => store.delete(k), clear: () => store.clear() });
+      await act(async () => root.render(<ClientAccess config={local} />));
+      expect(host.textContent).toContain("Local client sign-in");
+      await submit("pasted-local-client-token");
+      expect(host.textContent).toContain("Welcome, local test client");
+      expect(fetcher.mock.calls[0]?.[0]).toBe("http://127.0.0.1:8000/v1/client/session");
+      expect(fetcher.mock.calls[0]?.[1]?.headers).toEqual({ Authorization: "Bearer pasted-local-client-token" });
+      expect(fetcher.mock.calls.every(([url]) => !String(url).includes("/v1/account/"))).toBe(true);
+      expect(auth.completeSignIn).not.toHaveBeenCalled();
+      expect(auth.authorizeUrl).not.toHaveBeenCalled();
+      const secret = "pasted-local-client-token";
+      expect(JSON.stringify({ ...sessionStorage })).not.toContain(secret);
+      expect(JSON.stringify([...store])).not.toContain(secret);
+      expect(window.location.href).not.toContain(secret);
+    });
+
+    it("shows a denial and no client content for a rejected token", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("{}", { status: 401 })));
+      await act(async () => root.render(<ClientAccess config={local} />));
+      await submit("wrong-token");
+      expect(host.textContent).toContain("cannot access the client area");
+      expect(host.textContent).not.toContain("Welcome, local test client");
+    });
+  });
+
+  it("keeps Cognito mode on the hosted sign-in, not the local form", async () => {
+    auth.completeSignIn.mockResolvedValue(null);
+    await act(async () => root.render(<ClientAccess config={config} />));
+    expect(host.textContent).toContain("Sign in or accept invitation");
+    expect(host.textContent).not.toContain("Local client sign-in");
+    expect(host.querySelector('input[name="token"]')).toBeNull();
+  });
 });

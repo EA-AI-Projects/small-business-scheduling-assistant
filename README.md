@@ -43,8 +43,10 @@ The text simulator needs only Terminal A; start Terminal B if you also want to u
 | Process | Start it with | Connects to |
 | --- | --- | --- |
 | Synthetic owner backend, port 8000 | Terminal A, below | Holds the one in-memory calendar. Calls OpenAI to interpret plain-language texts when a key is set. |
-| Owner web app, port 3000 | Terminal B, below | Calls the backend on port 8000. |
+| Owner web app and client page, port 3000 | Terminal B, below | Call the backend on port 8000. The owner app is at `/`, the fictional client page at `/client/`. |
 | Text simulator page | Served by the backend at `http://127.0.0.1:8000/local/texts` | The same backend and calendar. |
+
+Terminal A starts the backend and prints the owner token first, then one sign-in token for each verified fictional client (Avery Example and Blake Sample). Casey Demo is unverified and has no client sign-in. The client tokens are random, exist only in that process, and are accepted only by the client routes; the owner token works only for owner routes and the text simulator.
 
 Terminal A, from the repository root. If the ignored `.env` file supplies `OPENAI_API_KEY`, plain-language texts use OpenAI. Without a key, exact commands and replies to an offer still work; other texts receive a clarification and a note explaining the missing key.
 
@@ -65,7 +67,19 @@ npm ci                       # first time only
 npm run dev
 ```
 
-Open `http://127.0.0.1:8000/local/texts` and paste the token printed by Terminal A. If you started Terminal B, open `http://127.0.0.1:3000` for the owner calendar and use the same token there. Both pages share the same in-memory calendar.
+Open `http://127.0.0.1:8000/local/texts` and paste the owner token printed by Terminal A. If you started Terminal B, open `http://127.0.0.1:3000` for the owner calendar and use the same owner token there. All pages share the same in-memory calendar.
+
+#### Try the client portal as a fictional client
+
+1. Terminal B must run in local mode (`.env.example` already sets `NEXT_PUBLIC_AUTH_MODE=local`, `NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000`; local mode is refused for any non-loopback API URL).
+2. Open `http://127.0.0.1:3000/client/` and paste one client token from Terminal A, for example the line `Avery Example (client-1): <token>`. The token stays in page memory only; reloading signs you out.
+3. Pick a day to see the open times offered for that client's visit length, choose one, and send the request. It is pending and holds nothing as booked until the owner approves.
+4. Open `http://127.0.0.1:3000` in another tab, sign in with the owner token, and approve or decline the request under pending requests. Or, in the text simulator, text as the owner `Approve REF` (or `yes` when it is the only pending request). Reload `/client/` (sign in again) to see the status.
+5. As the client, cancel a visit, or move a confirmed one (the original stays confirmed until the owner approves the replacement). Avery starts with one confirmed visit and Blake with one pending request.
+
+Known limit: revoking a client in the local owner app does not stop that client's local token; the local verifier always returns an active link. Everything resets when Terminal A stops.
+
+Use a private window or sign out to try the other client; each token reaches only its own client's bookings. The client page and the text simulator use the same backend rules.
 
 - **Client texts:** choose Avery Example or Blake Sample and ask in plain language, for example "Do you have availability for tomorrow?". The reply offers 3–5 open times and writes nothing. Answer with one of them ("10 works", "option 2", or "yes" when one time was offered) within 30 minutes to create a pending request. Refresh the owner calendar to see it. The model sees that client's recent inbound texts and displayed replies under the production 24-hour history bounds. See the [conversation flow](doc/CONVERSATION.md) for what counts as a pick.
 - **Owner decisions:** text `yes` or `decline` as the owner when exactly one request is pending; the seeded data starts with one. With several pending, the reply lists them and asks for `Approve REF` or `Decline REF`. You can also decide in the owner app. The simulator shows the notification texts each side would receive, rendered with the production templates. After a text changes the calendar, the assistant's own reply appears as a grey "Not texted" note, because production sends only the notifications for a change.
@@ -144,7 +158,7 @@ Owner routes are under `/v1/owner/businesses/{business_id}`. They list pending r
 
 The owner web app is a separate static Next.js app on AWS Amplify, so the API is called cross-origin. `create_cognito_linked_app(..., cors_origins=(...,))` allows only the listed exact origins (`https://host[:port]`, no path, no wildcard) with the route methods and the `Authorization`, `Content-Type`, and `Idempotency-Key` headers; credentials are not allowed. The deployed Lambda reads the one allowed origin from `OWNER_APP_ORIGIN`, set from the `OwnerAppOrigin` stack parameter, which also configures the HTTP API CORS policy.
 
-For frontend development, run a synthetic, in-memory owner API on loopback. It seeds the pilot policy and a few fictional records, mounts no SMS routes, accepts only the bearer token in `LOCAL_OWNER_TOKEN` (at least 16 characters), and allows CORS only from `http://localhost:3000` and `http://127.0.0.1:3000`. It is not for deployment.
+For frontend development, run a synthetic, in-memory owner API on loopback. It seeds the pilot policy and a few fictional records, mounts no SMS routes, accepts only the bearer token in `LOCAL_OWNER_TOKEN` (at least 16 characters), and allows CORS only from `http://localhost:3000` and `http://127.0.0.1:3000`. The same process also mounts the real client routes for the verified synthetic clients, each behind its own generated token that is printed at startup (local-only; nothing like it exists in the deployed app). It is not for deployment.
 
 ```sh
 LOCAL_OWNER_TOKEN="$(openssl rand -hex 16)" backend/.venv/bin/uvicorn scheduling.local_owner:app --app-dir backend --host 127.0.0.1 --port 8000

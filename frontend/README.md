@@ -23,11 +23,14 @@ Requires Node 22 (see `.nvmrc`).
    npm run dev                  # http://127.0.0.1:3000
    ```
 
-3. Paste the token into the local sign-in form. It is kept in page memory only.
+3. Paste the owner token into the local sign-in form. It is kept in page memory only.
+4. To try the client portal, open `http://127.0.0.1:3000/client/` and paste one of the client tokens the backend printed at startup (one per verified fictional client). It is also kept in page memory only. Requests you make there appear for approval in the owner app on the same calendar.
 
 The same backend serves a text simulator at `http://127.0.0.1:8000/local/texts` that shares this calendar. Unless `OPENAI_API_KEY` is set in your shell, it accepts only exact commands; see [Try the app locally](../README.md#try-the-app-locally).
 
-Local mode exists only for the synthetic local API. Amplify deployments use Cognito mode.
+Revoking a client in the local owner app does not stop that client's local token (local verifier always returns an active link).
+
+Local mode exists only for the synthetic local API and requires a loopback `NEXT_PUBLIC_API_BASE_URL`. It shows the local sign-in on both `/` and `/client/`; Amplify deployments use Cognito mode, where `/client/` signs in through the hosted UI.
 
 ## Configuration
 
