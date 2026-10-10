@@ -125,7 +125,8 @@ describe("client calendar and bookings", () => {
       : json({ bookings: [booking("p", "PENDING_APPROVAL", 5, new Date(Date.now() - 1000).toISOString()),
         booking("x", "SOMETHING_NEW", 6), booking("d", "DECLINED", 7), booking("c", "CANCELLED", 8)] })));
     await render();
-    expect(host.textContent).toContain("Expired");
+    expect(host.textContent).toContain("Checking status");
+    expect(host.textContent).not.toContain("Expired");
     expect(host.textContent).toContain("Status unavailable");
     expect(host.textContent).toContain("Declined");
     expect(host.textContent).toContain("Cancelled");
@@ -140,10 +141,26 @@ describe("client calendar and bookings", () => {
     expect(ended).toHaveBeenCalled();
   });
 
+  it("retries a limited number of times while the server still says pending, then shows Expired only if told", async () => {
+    vi.useRealTimers();
+    vi.useFakeTimers({ now: new Date("2026-10-10T00:00:00Z") });
+    const stale = { bookings: [booking("a", "PENDING_APPROVAL", 30, new Date(Date.now() - 60_000).toISOString())] };
+    const fetcher = vi.fn(async (url: string) => url.includes("availability") ? json({ starts_at: [] }) : json(stale));
+    vi.stubGlobal("fetch", fetcher);
+    const bookingReads = () => fetcher.mock.calls.filter(([url]) => url.includes("bookings")).length;
+    await render();
+    expect(bookingReads()).toBe(1);
+    for (let step = 0; step < 6; step += 1) await act(async () => { await vi.advanceTimersByTimeAsync(40_000); });
+    expect(bookingReads()).toBe(5); // initial read plus four retries, then it stops
+    expect(host.textContent).toContain("Checking status");
+    expect(host.textContent).not.toContain("Expired");
+  });
+
   it("classifies states without a pending hold becoming confirmed", () => {
     const pending = booking("a", "PENDING_APPROVAL", 1, new Date(Date.now() + 60_000).toISOString());
     expect(bookingState(pending, Date.now()).tone).toBe("pending");
-    expect(bookingState(pending, Date.now() + 120_000).label).toBe("Expired");
+    expect(bookingState(pending, Date.now() + 120_000).label).toBe("Checking status…");
+    expect(bookingState(pending, Date.now() + 120_000).tone).toBe("pending");
     expect(bookingState({ ...pending, status: "EXPIRED" }, 0).tone).toBe("ended");
   });
 });

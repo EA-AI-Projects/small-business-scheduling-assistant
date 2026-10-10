@@ -31,7 +31,9 @@ export function bookingState(booking: ClientBooking, nowMs: number): BookingStat
   }
   if (booking.status === "PENDING_APPROVAL") {
     const holdEnd = booking.hold_expires_at ? Date.parse(booking.hold_expires_at) : Number.NaN;
-    if (!Number.isNaN(holdEnd) && holdEnd <= nowMs) return { ...ENDED.EXPIRED, tone: "ended" };
+    // The server decides expiry: a fast device clock must not label a still-pending request Expired.
+    if (!Number.isNaN(holdEnd) && holdEnd <= nowMs) return { label: "Checking status…", tone: "pending",
+      detail: "Not confirmed. Checking with the business for the latest status; use Refresh to check again." };
     return { label: "Waiting for approval", tone: "pending",
       detail: "Not confirmed yet. This time is held for you while the owner decides; it is not an appointment until approved." };
   }
@@ -59,6 +61,12 @@ export function parseAvailability(data: unknown): ClientAvailability {
     starts: body.starts_at.filter((item): item is string => typeof item === "string" && !Number.isNaN(Date.parse(item))),
     durationMinutes: typeof body.duration_minutes === "number" ? body.duration_minutes : null,
   };
+}
+
+/** Whether the server still lists a pending booking whose hold the device clock says has passed. */
+export function hasStalePending(bookings: ClientBooking[], nowMs: number): boolean {
+  return bookings.some((booking) => booking.status === "PENDING_APPROVAL" && booking.hold_expires_at
+    && Date.parse(booking.hold_expires_at) <= nowMs);
 }
 
 /** Earliest future pending-hold expiry, so the page can re-read bookings when it passes. */

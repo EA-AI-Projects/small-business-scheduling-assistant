@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { MiniCalendar } from "@/components/shell/MiniCalendar";
-import { bookingState, nextHoldExpiry, parseAvailability, parseBookings, type ClientBooking } from "@/lib/clientBookings";
+import { bookingState, hasStalePending, nextHoldExpiry, parseAvailability, parseBookings, type ClientBooking } from "@/lib/clientBookings";
 import type { OwnerConfig } from "@/lib/config";
 import { dayKey, localStamp, localTime, todayKey } from "@/lib/time";
+
+export const RETRY_BASE_MS = 2000;
+const MAX_RETRIES = 4;
 
 class Unauthorized extends Error {}
 
@@ -62,10 +65,24 @@ function ClientCalendar({ config, token, zone, onSessionEnded }: {
     return () => window.clearInterval(timer);
   }, []);
   // Re-read when a pending hold passes so the list reflects the server, not only the device clock.
+  // If the server still says pending after the device clock passes the hold, keep asking a few times
+  // with backoff; only the server can say the request expired.
+  const retries = useRef(0);
   useEffect(() => {
-    const expiry = bookings ? nextHoldExpiry(bookings, Date.now()) : null;
-    if (expiry === null) return;
-    const timer = window.setTimeout(() => setRefresh((count) => count + 1), expiry - Date.now() + 250);
+    if (!bookings) return;
+    const now = Date.now();
+    let delay: number;
+    if (hasStalePending(bookings, now)) {
+      if (retries.current >= MAX_RETRIES) return;
+      delay = RETRY_BASE_MS * 2 ** retries.current;
+      retries.current += 1;
+    } else {
+      retries.current = 0;
+      const expiry = nextHoldExpiry(bookings, now);
+      if (expiry === null) return;
+      delay = expiry - now + 250;
+    }
+    const timer = window.setTimeout(() => setRefresh((count) => count + 1), delay);
     return () => window.clearTimeout(timer);
   }, [bookings]);
 
