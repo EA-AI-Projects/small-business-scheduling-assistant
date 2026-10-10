@@ -3,9 +3,9 @@
 import re
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import yaml
-from unittest.mock import MagicMock
 
 from scheduling.linked_auth import create_cognito_linked_app
 
