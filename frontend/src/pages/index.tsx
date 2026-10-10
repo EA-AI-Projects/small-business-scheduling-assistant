@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 
 import { Workspace } from "@/components/Workspace";
 import { OwnerApi } from "@/lib/api";
@@ -50,6 +51,7 @@ export function OwnerSession({ config }: { config: OwnerConfig }) {
   const [session, setSession] = useState(0);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [completing, setCompleting] = useState(true);
+  const [verified, setVerified] = useState(false);
   // A rejected session owns the notice until a new sign-in. Late request handlers can
   // run before their provider unmounts, so the guard must take effect synchronously.
   const sessionGuard = useMemo(() => new SessionNoticeGate(), []);
@@ -63,6 +65,7 @@ export function OwnerSession({ config }: { config: OwnerConfig }) {
   const endSession = useCallback((message: string | null) => {
     setToken(null);
     setEmail(null);
+    setVerified(false);
     setSession((value) => value + 1);
     clearPendingSignIn();
     setNotice(message ? { id: ++noticeCount, message, error: true } : null);
@@ -98,7 +101,7 @@ export function OwnerSession({ config }: { config: OwnerConfig }) {
   // and return here; the next Sign in then asks for credentials.
   const rejectSession = useCallback((generation: number) => {
     if (!sessionGuard.reject(generation)) return;
-    const message = "Your session ended. Sign in again.";
+    const message = "Your session ended or this account cannot access the owner workspace. Sign in with an approved owner account.";
     endSession(message);
     const url = logoutUrl(config, window.location.origin);
     if (url) {
@@ -120,6 +123,21 @@ export function OwnerSession({ config }: { config: OwnerConfig }) {
     });
   }, [config, token, rejectSession, sessionGuard]);
 
+  // Do not mount the owner workspace until an owner-only server read confirms the link.
+  useEffect(() => {
+    if (!api) return;
+    let current = true;
+    api.get("/calendar").then(() => { if (current) setVerified(true); }).catch((error: unknown) => {
+      if (!current || sessionGuard.isRejected()) return;
+      if (error instanceof Error && "status" in error && error.status === 403) {
+        endSession("This account cannot access the owner workspace. Contact the administrator if you need access.");
+      } else if (error instanceof Error && "status" in error && error.status === 401) {
+        return;
+      } else notify("Could not confirm owner access. Please try signing in again.", true);
+    });
+    return () => { current = false; };
+  }, [api, endSession, notify, sessionGuard]);
+
   const signIn = useCallback(() => {
     authorizeUrl(config, window.location.origin)
       .then((url) => window.location.assign(url))
@@ -134,16 +152,19 @@ export function OwnerSession({ config }: { config: OwnerConfig }) {
 
   const signInLocally = useCallback((value: string) => {
     sessionGuard.reset();
+    setVerified(false);
     setToken(value);
   }, [sessionGuard]);
 
   // Signed in, the notice renders right under the sticky header (inside Workspace); signed out there is no header.
   const noticeBar = <NoticeBar notice={notice} onDismiss={() => setNotice(null)} />;
   return (
-    <Shell announcement={notice} signedIn={api !== null} onAuth={api ? signOut : config.authMode === "cognito" ? signIn : null}>
-      {!api && noticeBar}
-      {api ? (
+    <Shell announcement={notice} signedIn={api !== null && verified} onAuth={api && verified ? signOut : config.authMode === "cognito" ? signIn : null}>
+      {!(api && verified) && noticeBar}
+      {api && verified ? (
         <OwnerProvider key={session} api={api} notify={notify}><Workspace onSignOut={signOut} account={{ email, local: config.authMode === "local" }} notice={noticeBar} /></OwnerProvider>
+      ) : api ? (
+        <p className="muted">Confirming owner access…</p>
       ) : completing ? (
         <p className="muted">Checking sign-in…</p>
       ) : config.authMode === "local" ? (
@@ -153,6 +174,12 @@ export function OwnerSession({ config }: { config: OwnerConfig }) {
           <h2>Your schedule, in one place.</h2>
           <p>Sign in to review requests, manage appointments and unavailable time, and update client details.</p>
           <button className="primary" type="button" onClick={signIn}>Sign in</button>
+          <p><button className="text-button" type="button" onClick={() => {
+            authorizeUrl(config, window.location.origin, sessionStorage, "/", true)
+              .then((url) => window.location.assign(url))
+              .catch((error: unknown) => notify(errorMessage(error), true));
+          }}>Forgot your password?</button></p>
+          <p>Invited client? <Link href="/client/">Use client sign-in</Link>.</p>
         </section>
       )}
     </Shell>

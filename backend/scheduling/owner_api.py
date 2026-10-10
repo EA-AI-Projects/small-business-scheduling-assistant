@@ -436,6 +436,23 @@ def create_owner_app(
             raise _error("INVITATION_DENIED", "Invitation is unavailable", 403) from exc
         return {"activated": True}
 
+    @app.post("/v1/account/invitations/activate")
+    def activate_pending_client_account(credentials: Annotated[
+            HTTPAuthorizationCredentials | None, Depends(security)]) -> object:
+        if account_invitations is None or verify_account is None:
+            raise _error("UNAVAILABLE", "Account activation is unavailable", 503)
+        if credentials is None:
+            raise _error("UNAUTHORIZED", "Verified account is required", 401)
+        try:
+            account = verify_account(credentials.credentials)
+        except Exception as exc:
+            raise _error("UNAUTHORIZED", "Verified account is required", 401) from exc
+        try:
+            account_invitations.activate_pending(account, now())
+        except InvitationDenied as exc:
+            raise _error("INVITATION_DENIED", "Invitation is unavailable", 403) from exc
+        return {"activated": True}
+
     def run(operation: Callable[[], object], current: Callable[[], object | None] | None = None) -> object:
         try:
             return operation()

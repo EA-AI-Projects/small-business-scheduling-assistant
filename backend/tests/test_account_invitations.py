@@ -140,7 +140,7 @@ def test_owner_invite_activation_and_rejected_claims() -> None:
                                        account_invitations=service,
                                        verify_account=verify_account))
     invite_url = "/v1/owner/businesses/pilot/clients/client-a/account-invitation"
-    activate_url = "/v1/account/invitations/pilot/client-a/activate"
+    activate_url = "/v1/account/invitations/activate"
     owner = {"Authorization": "Bearer owner-token"}
     assert api.post(invite_url, json={"email": "client@example.test"}).status_code == 401
     assert api.post(invite_url.replace("/pilot/", "/other/"),
@@ -184,7 +184,7 @@ def test_expired_deleted_and_changed_email_invitations_fail_closed() -> None:
     service.invite("pilot", "client-a", "first@example.test", "owner-sub", NOW)
     old = VerifiedAccount("sub-1", "first@example.test", True)
     try:
-        service.activate("pilot", "client-a", old, NOW + timedelta(hours=24))
+        service.activate_pending(old, NOW + timedelta(hours=24))
     except InvitationDenied:
         pass
     else:
@@ -194,14 +194,14 @@ def test_expired_deleted_and_changed_email_invitations_fail_closed() -> None:
                    NOW + timedelta(hours=24, minutes=1))
     assert links.resolve("sub-1") is None
     try:
-        service.activate("pilot", "client-a", old, NOW + timedelta(hours=24, minutes=1))
+        service.activate_pending(old, NOW + timedelta(hours=24, minutes=1))
     except InvitationDenied:
         pass
     else:
         raise AssertionError("Old address activated")
     records.deleted.add(("pilot", "client-a"))
     try:
-        service.activate("pilot", "client-a", VerifiedAccount("sub-2", "new@example.test", True),
+        service.activate_pending(VerifiedAccount("sub-2", "new@example.test", True),
                          NOW + timedelta(hours=24, minutes=2))
     except InvitationDenied:
         pass

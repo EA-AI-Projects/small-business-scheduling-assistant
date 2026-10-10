@@ -4,14 +4,14 @@
  * Only the one-time PKCE verifier and OAuth state, and the fixed "session ended" notice text
  * left by a 401 (which ends the hosted UI session like Sign out), are kept in sessionStorage,
  * and only across a redirect. The access token is returned to the caller and must stay in memory.
- * The ID token is read once for the signed-in email (display only) and then dropped; it is never
- * stored, logged, put in a URL, or sent to the API.
+ * The ID token is returned only in memory for a one-time client invitation activation.
  */
 import type { OwnerConfig } from "./config";
 
 const VERIFIER_KEY = "owner-pkce-verifier";
 const STATE_KEY = "owner-oauth-state";
 const ENDED_KEY = "owner-session-ended";
+const RETURN_KEY = "account-oauth-return";
 
 export class SignInError extends Error {}
 
@@ -25,8 +25,8 @@ function randomString(length: number): string {
   return b64url(crypto.getRandomValues(new Uint8Array(length)));
 }
 
-export function redirectUri(origin: string): string {
-  return `${origin}/`;
+export function redirectUri(origin: string, path = "/"): string {
+  return `${origin}${path}`;
 }
 
 async function challengeFor(verifier: string): Promise<string> {
@@ -42,27 +42,29 @@ function cognito(config: OwnerConfig): { domain: string; clientId: string } {
 }
 
 export async function authorizeUrl(config: OwnerConfig, origin: string,
-  storage: Storage = sessionStorage): Promise<string> {
+  storage: Storage = sessionStorage, path = "/", recovery = false): Promise<string> {
   const { domain, clientId } = cognito(config);
   if (!globalThis.crypto?.subtle) throw new SignInError("A secure browser context is required to sign in");
   const verifier = randomString(32);
   const state = randomString(24);
   storage.setItem(VERIFIER_KEY, verifier);
   storage.setItem(STATE_KEY, state);
-  const url = new URL("/oauth2/authorize", domain);
+  storage.setItem(RETURN_KEY, path);
+  const url = new URL(recovery ? "/forgotPassword" : "/oauth2/authorize", domain);
   url.search = new URLSearchParams({
-    response_type: "code", client_id: clientId, redirect_uri: redirectUri(origin),
+    response_type: "code", client_id: clientId, redirect_uri: redirectUri(origin, path),
     scope: "openid", state, code_challenge_method: "S256", code_challenge: await challengeFor(verifier),
   }).toString();
   return url.toString();
 }
 
 /** What a finished sign-in hands back: the access token (memory only) and the email to display, if any. */
-export interface SignInResult { accessToken: string; email: string | null }
+export interface SignInResult { accessToken: string; email: string | null; idToken: string | null }
 
 export function clearPendingSignIn(storage: Storage = sessionStorage): void {
   storage.removeItem(VERIFIER_KEY);
   storage.removeItem(STATE_KEY);
+  storage.removeItem(RETURN_KEY);
 }
 
 /**
@@ -77,9 +79,10 @@ export async function completeSignIn(config: OwnerConfig, location: URL,
   if (!code && !oauthError) return null;
   const verifier = storage.getItem(VERIFIER_KEY);
   const expectedState = storage.getItem(STATE_KEY);
+  const expectedPath = storage.getItem(RETURN_KEY) ?? "/";
   clearPendingSignIn(storage);
   if (oauthError) throw new SignInError(`Sign-in failed: ${oauthError}`);
-  if (!verifier || !expectedState || expectedState !== returnedState) {
+  if (!verifier || !expectedState || expectedState !== returnedState || expectedPath !== location.pathname) {
     throw new SignInError("Sign-in response did not match this browser session");
   }
   const { domain, clientId } = cognito(config);
@@ -88,7 +91,7 @@ export async function completeSignIn(config: OwnerConfig, location: URL,
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       grant_type: "authorization_code", client_id: clientId, code: code ?? "",
-      redirect_uri: redirectUri(location.origin), code_verifier: verifier,
+      redirect_uri: redirectUri(location.origin, expectedPath), code_verifier: verifier,
     }),
   });
   const tokens: unknown = await response.json().catch(() => null);
@@ -98,7 +101,8 @@ export async function completeSignIn(config: OwnerConfig, location: URL,
   if (!response.ok || typeof accessToken !== "string" || !accessToken) {
     throw new SignInError("Could not complete sign-in");
   }
-  return { accessToken, email: typeof fields.id_token === "string" ? emailFromIdToken(fields.id_token) : null };
+  const idToken = typeof fields.id_token === "string" ? fields.id_token : null;
+  return { accessToken, email: idToken ? emailFromIdToken(idToken) : null, idToken };
 }
 
 /** Decode a base64url JSON segment (padding optional), or null if it is not valid. */
@@ -144,10 +148,10 @@ export function tokenExpiry(token: string): number | null {
 }
 
 /** Hosted UI logout ends the Cognito session so the next sign-in asks for credentials. */
-export function logoutUrl(config: OwnerConfig, origin: string): string | null {
+export function logoutUrl(config: OwnerConfig, origin: string, path = "/"): string | null {
   if (config.authMode !== "cognito" || !config.cognitoDomain || !config.clientId) return null;
   const url = new URL("/logout", config.cognitoDomain);
-  url.search = new URLSearchParams({ client_id: config.clientId, logout_uri: redirectUri(origin) }).toString();
+  url.search = new URLSearchParams({ client_id: config.clientId, logout_uri: redirectUri(origin, path) }).toString();
   return url.toString();
 }
 
