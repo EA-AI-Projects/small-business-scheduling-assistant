@@ -47,7 +47,7 @@ function Page({ horizon = 14 }: { horizon?: number | null }) {
 // Boundary: the client Calendar page over a stubbed client API. Not covered: sign-in, the real
 // header, popover placement, or the request/move/cancel writes (see ClientHome.flow.test.tsx).
 // These tests step through many views with the DOM re-rendering each time; the default 5s is tight on a busy machine.
-const SLOW = 30_000;
+const SLOW = 15_000;
 
 describe("client calendar views", () => {
   let host: HTMLDivElement;

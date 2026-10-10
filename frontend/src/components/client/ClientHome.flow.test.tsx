@@ -27,7 +27,7 @@ function booking(id: string, status: string, hours: number, hold: string | null 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 
 const ended = vi.fn();
-/** Both client pages over one shell state, as the real shell shares them; `nav-*` buttons stand in for the menu. */
+/** Both client pages over one shell state, as the real shell shares them; `nav-*` buttons stand in for the menu. This test shell has no booking horizon; the real menu and session carry-over are covered in `src/lib/client.flow.test.tsx`. */
 function Shell({ start }: { start: "calendar" | "appointments" }) {
   const [page, setPage] = useState(start);
   const calendar = useCalendarState({ ready: true, zone: ZONE, maxDate: null });
