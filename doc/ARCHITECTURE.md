@@ -100,15 +100,18 @@ evaluation or SMS was run for #299. See [CONVERSATION.md](CONVERSATION.md#owner-
 
 Counteroffers (#300) use the same loop. The model reads the owner's transcript
 to select a current request, prepare a proposed local date and time with
-client-facing `client_text`, or interpret
-an open draft's confirmation or cancellation. The draft tool checks the request
+client-facing `client_text`, or interpret an open draft's confirmation or
+cancellation. The draft tool checks the request
 reference and version, active verified client and consent, opt-out, time,
 availability, and expiry before it stores the model's exact `client_text` in a
-30-minute proposal; it sends
-nothing. A revision replaces the stored draft. Only the send tool may move
+30-minute proposal; it sends nothing. A revision replaces the stored draft.
+Only the send tool may move
 that owner's current unexpired draft to confirmed and queue the exact stored
-model-written client text in the transactional outbox, after rechecking request version and
-pending state, eligibility, availability, and any newer request. The cancel
+model-written client text in the transactional outbox. Before that write it
+requires trusted sent-history evidence that an owner preview containing that
+exact text was sent after the draft was created; missing evidence returns
+`owner_preview_missing` and queues nothing. The send also rechecks request
+version and pending state, eligibility, availability, and any newer request. The cancel
 tool discards the draft without a send. Stable outbox IDs and receipt replay
 prevent a duplicate client message. The deterministic owner YES/NO offer hook,
 typed offer parser, closed-offer reminder logic, and fixed owner counteroffer
@@ -116,7 +119,9 @@ sentences are removed. The model writes the final owner reply, subject to the
 GSM-7/480-septet delivery check; the backend does not check its meaning or
 client draft wording. A model misunderstanding can choose the wrong tool, but
 the backend still enforces the stored-draft and send guards. No live SMS is
-authorized by this change. See [SCHEDULING_CONTRACTS.md](SCHEDULING_CONTRACTS.md#owner-counteroffer-confirmation-175).
+authorized by this change. If a queued client send later fails its final check,
+the existing fixed owner delivery-failure notice remains as an exception to
+model-written conversation replies. See [SCHEDULING_CONTRACTS.md](SCHEDULING_CONTRACTS.md#owner-counteroffer-confirmation-175).
 
 This document makes the AWS deployment and technology choices for the SMS-first scheduling MVP. It uses the existing **NeuroSpineDx** project as a reference for the team's AWS/serverless patterns, but adapts the choices to a small, low-traffic scheduling workload and its most important correctness constraint: no overlapping appointments or active holds.
 

@@ -90,11 +90,17 @@ class World:
         self.store = InMemoryCounterofferStore()
         self.model = Model()
         self.now = NOW
+        self.history: list[HistoryMessage] = []
         self.service = ConversationService(
             self.repository, self.model, HoldService(self.repository),
             LifecycleService(self.repository, lambda: self.now), self.consent,
             lambda: self.now, OWNER,
-            counteroffers=CounterofferService(self.repository, self.consent, self.store, OWNER))
+            counteroffers=CounterofferService(self.repository, self.consent, self.store, OWNER),
+            history_reader=self)
+
+    def read_conversation_history(self, receipt: InboundReceipt,
+                                  now: datetime) -> tuple[HistoryMessage, ...]:
+        return tuple(self.history)
 
     def pending(self, key: str = "first", client: str = "client-1",
                 start: datetime = THURSDAY_9AM) -> str:
@@ -104,7 +110,9 @@ class World:
     def owner(self, body: str, provider_id: str) -> str:
         receipt = InboundReceipt("pilot", provider_id, OWNER, "+14155550000", body,
                                  self.now, SenderRole.OWNER, None, Keyword.OTHER, True)
-        return self.service.handle(receipt).text
+        reply = self.service.handle(receipt).text
+        self.history.append(HistoryMessage(f"reply#{provider_id}", "assistant", self.now, reply))
+        return reply
 
 
 def draft(tool: Callable[[str, dict[str, Any]], dict[str, Any]],
@@ -117,11 +125,15 @@ def draft(tool: Callable[[str, dict[str, Any]], dict[str, Any]],
                                        "time": clock, "client_text": client_text})
 
 
+def preview(tool: Callable[[str, dict[str, Any]], dict[str, Any]]) -> str:
+    result = draft(tool)
+    return f"Text I would send: {result['client_text']} Reply YES to send exactly this."
+
+
 def test_draft_then_plain_yes_queues_exact_model_text_once() -> None:
     world = World()
     request = world.pending()
-    world.model.actions["Offer 2 PM"] = lambda tool: (
-        "Drafted; please confirm this exact client text: " + draft(tool)["client_text"])
+    world.model.actions["Offer 2 PM"] = preview
     assert CLIENT_TEXT in world.owner("Offer 2 PM", "SM-draft")
     proposed = world.store.read_active("pilot", OWNER)
     assert proposed is not None and proposed.state == OfferState.PROPOSED
@@ -149,13 +161,14 @@ def test_draft_then_plain_yes_queues_exact_model_text_once() -> None:
 def test_cancel_and_revised_instruction_change_draft_without_client_send() -> None:
     world = World()
     world.pending()
-    world.model.actions["first"] = lambda tool: "Drafted." if draft(tool)["ok"] else "Failed."
+    world.model.actions["first"] = preview
     world.owner("first", "SM-first")
     first = world.store.read_active("pilot", OWNER)
     assert first is not None
     revised = "Would Thu Oct 1 at 3:00 PM work? Reply YES to request it."
     world.model.actions["revise"] = lambda tool: (
-        "Revised." if draft(tool, revised, clock="15:00")["ok"] else "Failed.")
+        f"Text I would send: {draft(tool, revised, clock='15:00')['client_text']} "
+        "Reply YES to send exactly this.")
     world.owner("revise", "SM-revise")
     second = world.store.read_active("pilot", OWNER)
     assert second is not None and second.offer_id != first.offer_id
@@ -176,7 +189,7 @@ def test_cancel_and_revised_instruction_change_draft_without_client_send() -> No
 def test_owner_approval_can_supersede_open_draft_without_sending_it() -> None:
     world = World()
     request = world.pending()
-    world.model.actions["draft"] = lambda tool: "Drafted." if draft(tool)["ok"] else "Failed."
+    world.model.actions["draft"] = preview
     world.owner("draft", "SM-draft")
     offer = world.store.read_active("pilot", OWNER)
     assert offer is not None
@@ -198,7 +211,7 @@ def test_owner_approval_can_supersede_open_draft_without_sending_it() -> None:
 def test_send_reply_failure_and_receipt_redelivery_never_queue_second_client_text() -> None:
     world = World()
     world.pending()
-    world.model.actions["draft"] = lambda tool: "Drafted." if draft(tool)["ok"] else "Failed."
+    world.model.actions["draft"] = preview
     world.owner("draft", "SM-draft")
     offer = world.store.read_active("pilot", OWNER)
     assert offer is not None
@@ -253,10 +266,42 @@ def test_unreviewed_draft_is_discarded_if_owner_final_reply_fails(failure: str) 
     assert not world.store.outbox
 
 
+def test_unseen_draft_cannot_send_while_failed_cleanup_awaits_retry() -> None:
+    world = World()
+    world.pending()
+
+    def draft_then_fail(tool: Callable[[str, dict[str, Any]], dict[str, Any]]) -> str:
+        assert draft(tool)["ok"]
+        raise RuntimeError("model final turn failed")
+
+    world.model.actions["draft"] = draft_then_fail
+    original_discard = world.store.discard
+
+    def failed_discard(_offer: Any) -> None:
+        raise RuntimeError("storage unavailable")
+
+    world.store.discard = failed_discard  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="Undelivered owner draft could not be discarded"):
+        world.owner("draft", "SM-draft")
+    world.store.discard = original_discard  # type: ignore[method-assign]
+    unseen = world.store.read_active("pilot", OWNER)
+    assert unseen is not None and unseen.state == OfferState.PROPOSED
+    assert not world.history  # No owner preview was ever sent.
+
+    def concurrent_yes(tool: Callable[[str, dict[str, Any]], dict[str, Any]]) -> str:
+        attempt = tool("send_counteroffer", {"draft_id": unseen.offer_id})
+        assert attempt == {"ok": False, "error": "owner_preview_missing"}
+        return "I cannot send that offer until you review its text."
+
+    world.model.actions["yes"] = concurrent_yes
+    assert "cannot send" in world.owner("yes", "SM-yes")
+    assert not world.store.outbox
+
+
 def test_redelivered_owner_yes_reuses_stored_reply_and_one_client_outbox() -> None:
     world = World()
     world.pending()
-    world.model.actions["draft"] = lambda tool: "Drafted." if draft(tool)["ok"] else "Failed."
+    world.model.actions["draft"] = preview
     world.owner("draft", "SM-draft")
     offer = world.store.read_active("pilot", OWNER)
     assert offer is not None
@@ -284,7 +329,7 @@ def test_redelivered_owner_yes_reuses_stored_reply_and_one_client_outbox() -> No
 def test_send_rechecks_and_returns_error_without_outbox(failure: str) -> None:
     world = World()
     world.pending()
-    world.model.actions["first"] = lambda tool: "Drafted." if draft(tool)["ok"] else "Failed."
+    world.model.actions["first"] = preview
     world.owner("first", "SM-first")
     offer = world.store.read_active("pilot", OWNER)
     assert offer is not None

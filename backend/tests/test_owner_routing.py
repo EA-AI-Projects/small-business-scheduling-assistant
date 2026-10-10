@@ -11,6 +11,7 @@ from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.domain.calendar import CalendarStatus
 from scheduling.domain.client_records import ClientProfile, HomeSize
 from scheduling.domain.conversation import ConversationService, MessageContext, MessageProposal
+from scheduling.domain.conversation_history import HistoryMessage
 from scheduling.domain.conversation_state import InMemoryConversationStates
 from scheduling.domain.holds import CreateHold, HoldService
 from scheduling.domain.lifecycle import LifecycleService
@@ -88,11 +89,21 @@ class Consent:
         return ConsentEvidence(business_id, "c1", "Synthetic", phone_e164, NOW, "v1")
 
 
+class History:
+    def __init__(self) -> None:
+        self.messages: list[HistoryMessage] = []
+
+    def read_conversation_history(self, receipt: InboundReceipt,
+                                  now: datetime) -> tuple[HistoryMessage, ...]:
+        return tuple(self.messages)
+
+
 class Chat:
     def __init__(self) -> None:
         self.store = InMemoryCalendarRepository()
         self.model = Model()
         self.consent = Consent()
+        self.history = History()
         self.offers = InMemoryCounterofferStore()
         self.now = NOW
         self.count = 0
@@ -104,7 +115,8 @@ class Chat:
             self.store, self.model, HoldService(self.store),
             LifecycleService(self.store, lambda: self.now), self.consent, lambda: self.now,
             OWNER, InMemoryConversationStates(),
-            counteroffers=CounterofferService(self.store, self.consent, self.offers, OWNER))
+            counteroffers=CounterofferService(self.store, self.consent, self.offers, OWNER),
+            history_reader=self.history)
 
     def hold(self, client: str = "c1", day: int = 1, key: str = "a") -> str:
         start = datetime(2026, 10, day, 9, tzinfo=ZONE).astimezone(UTC)
@@ -121,6 +133,10 @@ class Chat:
         if not result.committed:
             self.consent.replies[provider] = result.text
             self.consent.sent[provider] = self.now
+            offer = self.offers.read_active("pilot", OWNER)
+            if offer is not None and offer.state == OfferState.PROPOSED and offer.text in result.text:
+                self.history.messages.append(HistoryMessage(
+                    provider, "assistant", self.now, result.text))
         return result
 
     def status(self, request: str) -> CalendarStatus:

@@ -21,6 +21,7 @@ from scheduling.domain.availability import (
 )
 from scheduling.domain.calendar import CalendarSnapshot, CalendarStatus
 from scheduling.domain.client_records import ClientProfile
+from scheduling.domain.conversation_history import HistoryMessage
 from scheduling.domain.conversation_state import (
     PROMPT_LIFETIME,
     Selection,
@@ -360,7 +361,8 @@ class CounterofferService:
         return offer
 
     def send_counteroffer(self, receipt: InboundReceipt, now: datetime,
-                          pending: tuple[Appointment, ...], draft_id: str
+                          pending: tuple[Appointment, ...], draft_id: str,
+                          history: tuple[HistoryMessage, ...]
                           ) -> dict[str, object]:
         """Recheck an owned open draft and atomically queue its exact stored text once."""
         offer = self._owned_draft(receipt, draft_id)
@@ -373,6 +375,10 @@ class CounterofferService:
         if offer.expired(now):
             self._store.discard(offer)
             return {"ok": False, "error": "expired"}
+        if not any(message.role == "assistant" and message.at.tzinfo is not None
+                   and offer.created_at <= message.at <= now
+                   and offer.text in message.text for message in history):
+            return {"ok": False, "error": "owner_preview_missing"}
         active = self._store.read_active(receipt.business_id, receipt.sender)
         if active is None or active.offer_id != draft_id:
             return {"ok": False, "error": "draft_not_open"}

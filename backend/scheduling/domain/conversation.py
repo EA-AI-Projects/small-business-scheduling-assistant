@@ -1112,7 +1112,7 @@ class ConversationService:
                                 or re.fullmatch(r"co-[0-9a-f]{24}", draft_id) is None):
                             return {"ok": False, "error": "invalid_arguments"}
                         answer = (self._counteroffers.send_counteroffer(
-                            receipt, now, pending, draft_id) if name == "send_counteroffer"
+                            receipt, now, pending, draft_id, history) if name == "send_counteroffer"
                             else self._counteroffers.cancel_counteroffer(receipt, now, draft_id))
                     if answer["ok"]:
                         offer_action = name
@@ -1170,8 +1170,11 @@ class ConversationService:
             return replace(committed, text=text) if committed is not None else ConversationOutcome(text)
         except Exception:  # noqa: BLE001 - model/read failures have one fixed owner reply
             if drafted_offer_id is not None and self._counteroffers is not None:
-                discarded = self._counteroffers.cancel_counteroffer(
-                    receipt, self._clock(), drafted_offer_id)
+                try:
+                    discarded = self._counteroffers.cancel_counteroffer(
+                        receipt, self._clock(), drafted_offer_id)
+                except Exception as exc:
+                    raise RuntimeError("Undelivered owner draft could not be discarded") from exc
                 if not discarded["ok"] and discarded.get("error") != "expired":
                     raise RuntimeError("Undelivered owner draft could not be discarded")
             return (replace(committed, text=OWNER_FAILURE_TEXT) if committed is not None

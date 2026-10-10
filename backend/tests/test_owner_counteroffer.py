@@ -16,6 +16,7 @@ from scheduling.domain.conversation import (
     MessageContext,
     MessageProposal,
 )
+from scheduling.domain.conversation_history import HistoryMessage
 from scheduling.domain.holds import CreateHold, HoldService
 from scheduling.domain.lifecycle import LifecycleService
 from scheduling.domain.owner_counteroffer import (
@@ -130,6 +131,25 @@ class Repository(InMemoryCalendarRepository):
         pass
 
 
+class History:
+    def __init__(self) -> None:
+        self.messages: list[HistoryMessage] = []
+        self.error: Exception | None = None
+
+    def read_conversation_history(self, receipt: InboundReceipt,
+                                  now: datetime) -> tuple[HistoryMessage, ...]:
+        if self.error is not None:
+            raise self.error
+        return tuple(self.messages)
+
+    def record_preview(self, text: str, store: InMemoryCounterofferStore,
+                       at: datetime) -> None:
+        offer = store.read_active("pilot", OWNER)
+        if offer is not None and offer.state == OfferState.PROPOSED and offer.text in text:
+            self.messages.append(HistoryMessage(
+                f"SM-preview-{len(self.messages)}", "assistant", at, text))
+
+
 @dataclass
 class World:
     repository: InMemoryCalendarRepository
@@ -137,6 +157,7 @@ class World:
     consent: Consent
     service: ConversationService
     model: NeverModel
+    history: History
     messages: Messages
     sender: TwilioSmsSender
     clock: list[datetime]
@@ -144,9 +165,11 @@ class World:
 
     def say(self, body: str, provider_id: str | None = None) -> ConversationOutcome:
         self.count += 1
-        return self.service.handle(InboundReceipt(
+        result = self.service.handle(InboundReceipt(
             "pilot", provider_id or f"SM-{self.count}", OWNER, "+14155550000", body, self.clock[0],
             SenderRole.OWNER, None, Keyword.OTHER, True))
+        self.history.record_preview(result.text, self.store, self.clock[0])
+        return result
 
     def pending(self, start: datetime = THURSDAY_9AM, client: str = "client-1",
                 key: str = "seed") -> str:
@@ -179,16 +202,16 @@ def make_world() -> World:
     repository.save_profile(profile("client-2", "Blake Example", "+15005550007"), 0, None)
     store, consent, clock = InMemoryCounterofferStore(), Consent(), [NOW]
     counteroffers = CounterofferService(repository, consent, store, OWNER)
-    model = NeverModel()
+    model, history = NeverModel(), History()
     service = ConversationService(
         repository, model, HoldService(repository),
         LifecycleService(repository, lambda: clock[0]), consent, lambda: clock[0], OWNER,
-        counteroffers=counteroffers)
+        counteroffers=counteroffers, history_reader=history)
     messages = Messages()
     sender = TwilioSmsSender(messages, repository, consent,  # type: ignore[arg-type]
                              "pilot", "+14155550000", OWNER, clock=lambda: clock[0],
                              counteroffers=store)
-    return World(repository, store, consent, service, model, messages, sender, clock)
+    return World(repository, store, consent, service, model, history, messages, sender, clock)
 
 
 @pytest.fixture
@@ -293,6 +316,32 @@ def test_lost_consent_blocks_draft_and_send(world: World) -> None:
     assert not world.store.outbox and world.status(request)[0] == CalendarStatus.PENDING_APPROVAL
 
 
+def test_missing_or_unreadable_sent_preview_blocks_send(world: World) -> None:
+    request = world.pending()
+    world.say(ASK)
+    world.history.messages.clear()
+    assert "owner_preview_missing" in world.say("YES").text
+    assert state_of(world) == OfferState.PROPOSED
+    assert not world.store.outbox and world.status(request)[0] == CalendarStatus.PENDING_APPROVAL
+    world.history.error = OSError("history unavailable")
+    assert "Something went wrong" in world.say("YES").text
+    assert not world.store.outbox
+
+
+def test_preview_must_contain_exact_stored_text_after_draft_creation(world: World) -> None:
+    request = world.pending()
+    world.say(ASK)
+    preview = world.history.messages[-1]
+    world.history.messages[:] = [HistoryMessage(
+        preview.provider_id, "assistant", preview.at, preview.text.replace("Reply YES", "Reply OK"))]
+    assert "owner_preview_missing" in world.say("YES").text
+    world.history.messages[:] = [HistoryMessage(
+        preview.provider_id, "assistant", preview.at - timedelta(seconds=1), preview.text)]
+    assert "owner_preview_missing" in world.say("YES").text
+    assert state_of(world) == OfferState.PROPOSED and not world.store.outbox
+    assert world.status(request) == (CalendarStatus.PENDING_APPROVAL, 1)
+
+
 def test_dispatch_rechecks_slot_and_sends_no_client_sms_after_conflict(world: World) -> None:
     from scheduling.domain.outbox import PermanentDeliveryFailure
 
@@ -358,7 +407,9 @@ def test_redelivered_draft_and_confirmation_replay_without_sending_twice(
 
     reader = Reader()
     processor = ReceiptProcessor(reader, world.service, "pilot", lambda: NOW)
-    assert processor.process("pilot", "SM-ask") is not None
+    preview = processor.process("pilot", "SM-ask")
+    assert preview is not None
+    world.history.record_preview(preview.text, world.store, NOW)
     assert processor.process("pilot", "SM-ask") is None
     assert processor.process("pilot", "SM-yes") is not None
     assert processor.process("pilot", "SM-yes") is None

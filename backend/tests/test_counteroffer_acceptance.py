@@ -12,6 +12,7 @@ from test_owner_counteroffer import (
     THURSDAY_2PM,
     THURSDAY_9AM,
     Consent,
+    History,
     Messages,
     NeverModel,
     Repository,
@@ -49,6 +50,7 @@ class World:
     store: InMemoryCounterofferStore
     consent: Consent
     service: ConversationService
+    history: History
     sender: TwilioSmsSender
     messages: Messages
     clock: list[datetime]
@@ -56,9 +58,11 @@ class World:
 
     def owner(self, body: str) -> ConversationOutcome:
         self.count += 1
-        return self.service.handle(InboundReceipt(
+        result = self.service.handle(InboundReceipt(
             "pilot", f"SM-o{self.count}", OWNER, "+14155550000", body, self.clock[0],
             SenderRole.OWNER, None, Keyword.OTHER, True))
+        self.history.record_preview(result.text, self.store, self.clock[0])
+        return result
 
     def client(self, body: str, provider_id: str | None = None) -> ConversationOutcome:
         self.count += 1
@@ -101,18 +105,19 @@ class World:
 def world() -> World:
     repository = Repository()
     repository.save_profile(profile("client-1", "Avery Sample", CLIENT_PHONE), 0, None)
-    store, consent, clock = InMemoryCounterofferStore(), Consent(), [NOW]
+    store, consent, clock, history = InMemoryCounterofferStore(), Consent(), [NOW], History()
     holds = HoldService(repository)
     service = ConversationService(
         repository, NeverModel(), holds,
         LifecycleService(repository, lambda: clock[0]), consent, lambda: clock[0], OWNER,
         counteroffers=CounterofferService(repository, consent, store, OWNER),
-        counteroffer_acceptance=CounterofferAcceptance(repository, consent, store, holds))
+        counteroffer_acceptance=CounterofferAcceptance(repository, consent, store, holds),
+        history_reader=history)
     messages = Messages()
     sender = TwilioSmsSender(messages, repository, consent,  # type: ignore[arg-type]
                              "pilot", "+14155550000", OWNER, clock=lambda: clock[0],
                              counteroffers=store)
-    return World(repository, store, consent, service, sender, messages, clock)
+    return World(repository, store, consent, service, history, sender, messages, clock)
 
 
 def render(world: World, intent: OutboxIntent) -> str:
