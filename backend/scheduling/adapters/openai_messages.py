@@ -4,6 +4,7 @@ import json
 import re
 from collections.abc import Callable
 from datetime import date, time
+from time import monotonic
 from typing import Any
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -19,6 +20,8 @@ from scheduling.domain.owner_transitional import (
 )
 
 MODEL = "gpt-6-luna"
+OWNER_LOOP_MAX_CALLS = 4
+OWNER_LOOP_BUDGET_SECONDS = 36
 DATE_SHAPE = re.compile(r"\d{4}-\d{2}-\d{2}")
 TIME_SHAPE = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
 URL = "https://api.openai.com/v1/responses"
@@ -253,7 +256,11 @@ class OpenAIMessageInterpreter:
             f"{transcript_lines(history) or 'none'}\n"
             f"Owner message: {body}")}]
         revised = False
-        for _ in range(10):
+        deadline = monotonic() + OWNER_LOOP_BUDGET_SECONDS
+        for _ in range(OWNER_LOOP_MAX_CALLS):
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Owner tool loop time budget exceeded")
             payload = {
                 "model": MODEL, "instructions": OWNER_LOOP_INSTRUCTIONS,
                 "input": conversation, "tools": OWNER_LOOP_TOOLS,
@@ -265,7 +272,7 @@ class OpenAIMessageInterpreter:
                 "Authorization": f"Bearer {self._key}", "Content-Type": "application/json",
             })
             try:
-                with urlopen(request, timeout=self._timeout) as response:
+                with urlopen(request, timeout=min(self._timeout, remaining)) as response:
                     result = json.load(response)
             except HTTPError as exc:
                 raise RuntimeError(f"Model API HTTP {exc.code}") from exc

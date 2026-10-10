@@ -7,6 +7,7 @@ import json
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from io import BytesIO
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -21,7 +22,11 @@ from test_owner_counteroffer import (
 )
 from test_sms_processing import Reader
 
-from scheduling.adapters.openai_messages import OpenAIMessageInterpreter
+from scheduling.adapters.openai_messages import (
+    OWNER_LOOP_BUDGET_SECONDS,
+    OWNER_LOOP_MAX_CALLS,
+    OpenAIMessageInterpreter,
+)
 from scheduling.domain.calendar import CalendarStatus
 from scheduling.domain.conversation import (
     OWNER_FAILURE_TEXT,
@@ -256,3 +261,59 @@ def test_openai_loop_reasks_once_for_invalid_sms(monkeypatch: pytest.MonkeyPatch
         lambda _name, _args: {}) == "Nothing changed."
     assert len(payloads) == 2
     assert payloads[1]["tool_choice"] == "none"
+
+
+def test_owner_loop_can_rewrite_after_two_tools_within_worker_bound(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    responses = iter([
+        {"output": [{"type": "function_call", "name": "list_pending_requests",
+                     "call_id": "list", "arguments": "{}"}]},
+        {"output": [{"type": "function_call", "name": "approve_request",
+                     "call_id": "approve", "arguments": '{"ref":"abcd1234","version":1}'}]},
+        {"output": [{"type": "message", "content": [
+            {"type": "output_text", "text": "Approved 😀"}]}]},
+        {"output": [{"type": "message", "content": [
+            {"type": "output_text", "text": "Approved Avery's request."}]}]},
+    ])
+    calls: list[tuple[dict[str, Any], float]] = []
+
+    def fake_urlopen(request: Any, timeout: float) -> BytesIO:
+        calls.append((json.loads(request.data), timeout))
+        return BytesIO(json.dumps(next(responses)).encode())
+
+    monkeypatch.setattr("scheduling.adapters.openai_messages.urlopen", fake_urlopen)
+    reply = OpenAIMessageInterpreter("synthetic-key", timeout_seconds=8).run_owner_loop(
+        "Approve", date(2026, 10, 1), "America/Los_Angeles", (),
+        lambda name, _args: {"ok": True, "requests": [{"ref": "abcd1234", "version": 1}]}
+        if name == "list_pending_requests" else {"ok": True, "status": "confirmed"})
+    assert reply == "Approved Avery's request."
+    assert len(calls) == OWNER_LOOP_MAX_CALLS == 4
+    assert all(0 < timeout <= 8 for _, timeout in calls)
+    assert calls[-1][0]["tool_choice"] == "none"
+    worker = Path(__file__).resolve().parents[2].joinpath("template.yaml").read_text()
+    worker = worker.split("  SmsConversationFunction:\n", 1)[1].split(
+        "  SmsConversationLogGroup:\n", 1)[0]
+    assert "      Timeout: 60\n" in worker
+    assert OWNER_LOOP_BUDGET_SECONDS < 60
+
+
+def test_owner_loop_stops_at_total_deadline_for_fixed_failure(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    elapsed = [0.0]
+    calls: list[float] = []
+
+    def fake_urlopen(_request: Any, timeout: float) -> BytesIO:
+        calls.append(timeout)
+        elapsed[0] += timeout
+        return BytesIO(json.dumps({"output": [{"type": "function_call",
+            "name": "list_pending_requests", "call_id": f"call-{len(calls)}",
+            "arguments": "{}"}]}).encode())
+
+    monkeypatch.setattr("scheduling.adapters.openai_messages.urlopen", fake_urlopen)
+    monkeypatch.setattr("scheduling.adapters.openai_messages.monotonic", lambda: elapsed[0])
+    with pytest.raises(TimeoutError, match="time budget"):
+        OpenAIMessageInterpreter("synthetic-key", timeout_seconds=15).run_owner_loop(
+            "Approve", date(2026, 10, 1), "America/Los_Angeles", (),
+            lambda _name, _args: {"ok": True, "requests": []})
+    assert calls == [15, 15, 6]
+    assert sum(calls) == OWNER_LOOP_BUDGET_SECONDS

@@ -437,6 +437,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       Handler: scheduling.workers.sms_conversation.handler
+      Timeout: 60
       Environment:
         Variables:
           SMS_CONVERSATION_ENABLED: !If
