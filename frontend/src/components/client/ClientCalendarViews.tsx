@@ -64,7 +64,7 @@ export function ClientCalendarViews({ items, bookings, calendar, zone, nowMs, lo
   // The booking vanished on a refresh: close its card.
   if (selectedId && !loading && !selectedItem) setSelectedId(null);
 
-  const goDay = (day: string) => { calendar.goToDate(day); calendar.setView("day"); };
+  const goDay = calendar.openDay;
   const days = view === "day" || view === "week" ? datesForView(date, view) : [];
   const [first, last] = viewRange(date, view, scheduleDays);
   const today = todayKey(zone);

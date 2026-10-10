@@ -102,7 +102,8 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
   const setDate = calendar ? calendar.goToDate : setOwnDate;
   // The Calendar page asks for open times only in Day view, and never for a past day or past the booking horizon.
   const today = todayKey(zone);
-  const beyondHorizon = horizonDays !== null && date > addDays(today, horizonDays);
+  const maxDate = horizonDays === null ? null : addDays(today, horizonDays);
+  const beyondHorizon = maxDate !== null && date > maxDate;
   const wantTimes = (!calendar || (calendar.view === "day" && date >= today)) && !beyondHorizon;
   const [bookings, setBookings] = useState<ClientBooking[] | null>(null);
   const [bookingsError, setBookingsError] = useState<string | null>(null);
@@ -301,7 +302,7 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
           A request is not an appointment until the owner approves it.</p>
         <ClientCalendarViews items={items} bookings={bookings ?? []} calendar={calendar} zone={zone} nowMs={nowMs}
           loading={bookings === null && !bookingsError} error={bookingsError}
-          maxDate={horizonDays === null ? null : addDays(today, horizonDays)} />
+          maxDate={maxDate} />
       </section>
       {calendar.view === "day" && date >= today && timesSection}
     </div>;

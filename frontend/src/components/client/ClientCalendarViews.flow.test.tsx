@@ -32,15 +32,15 @@ const openStart = (day: string) => new Date(Date.parse(`${day}T10:00:00Z`) - 13 
 const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200 });
 
 /** The Calendar page: the shell's header controls beside the page, sharing one calendar state. */
-function Page() {
-  const maxDate = addDays(todayKey(ZONE), 14);
+function Page({ horizon = 14 }: { horizon?: number | null }) {
+  const maxDate = horizon === null ? null : addDays(todayKey(ZONE), horizon);
   const calendar = useCalendarState({ ready: true, zone: ZONE, maxDate });
   return <>
     <CalendarControls title={rangeTitle(calendar.date, calendar.view, calendar.scheduleDays)}
       announcement={rangeAnnouncement(calendar.date, calendar.view, calendar.scheduleDays)}
       view={calendar.view} date={calendar.date} today={todayKey(ZONE)} scheduleDays={calendar.scheduleDays} maxDate={maxDate}
       onToday={calendar.goToday} onPick={calendar.goToDate} onStep={calendar.stepRange} onView={calendar.setView} />
-    <ClientHome config={config} token="access" zone={ZONE} horizonDays={14} calendar={calendar} onSessionEnded={() => undefined} />
+    <ClientHome config={config} token="access" zone={ZONE} horizonDays={horizon} calendar={calendar} onSessionEnded={() => undefined} />
   </>;
 }
 
@@ -178,6 +178,41 @@ describe("client calendar views", () => {
     const asked = fetcher.mock.calls.map(([url]) => String(url));
     expect(asked.some((url) => url.endsWith("day=2026-10-25"))).toBe(false);
     expect(host.querySelector<HTMLButtonElement>("[aria-label='Next day']")!.disabled).toBe(true);
+  });
+  const pickDate = async (date: string) => {
+    await act(async () => host.querySelector<HTMLButtonElement>("[aria-label$='choose date']")!.click());
+    await act(async () => document.querySelector<HTMLButtonElement>(`[role='dialog'] [data-date='${date}']`)!.click());
+  };
+  it("keeps Month, Week and Year views at the horizon by arrows and by the picker", async () => {
+    for (const view of ["month", "week", "year"] as const) {
+      await press("Today");
+      await setView(view);
+      for (let step = 0; step < 3; step += 1) {
+        const next = host.querySelector<HTMLButtonElement>(`[aria-label^='Next ${view}']`)!;
+        if (!next.disabled) await act(async () => next.click());
+      }
+      expect(host.querySelector<HTMLButtonElement>(`[aria-label^='Next ${view}']`)!.disabled).toBe(true);
+      expect(host.textContent).toContain(rangeTitle("2026-10-24", view, 30));
+      // A pick well past the horizon lands on its last day, whatever the view.
+      await pickDate("2026-11-05");
+      expect(host.textContent).toContain(rangeTitle("2026-10-24", view, 30));
+      expect(host.querySelector<HTMLButtonElement>(`[aria-label^='Next ${view}']`)!.disabled).toBe(true);
+      expect(host.textContent).not.toContain("We only book up to");
+    }
+    expect(fetcher.mock.calls.map(([url]) => String(url)).some((url) => url.includes("day=2026-11"))).toBe(false);
+  });
+  it("limits nothing when the horizon is unknown", async () => {
+    await act(async () => root.render(<Page horizon={null} />));
+    await setView("year");
+    const next = host.querySelector<HTMLButtonElement>("[aria-label='Next year']")!;
+    expect(next.disabled).toBe(false);
+    await act(async () => next.click());
+    expect(host.textContent).toContain("2027");
+    await pickDate("2027-11-05");
+    expect(host.textContent).toContain("2027");
+    await setView("day");
+    expect(host.textContent).toContain("November 5, 2027");
+    expect(host.textContent).not.toContain("We only book up to");
   });
   it("drops a chosen time when the date or view changes", async () => {
     const pick = () => act(async () => host.querySelector<HTMLButtonElement>("[aria-label='Available start times'] button")!.click());
