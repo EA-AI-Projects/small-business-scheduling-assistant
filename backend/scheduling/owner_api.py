@@ -22,6 +22,11 @@ from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from scheduling.account_invitations import (
+    ClientAccountInvitations,
+    InvitationDenied,
+    VerifiedAccount,
+)
 from scheduling.adapters.dynamodb import DynamoClient, DynamoDBCalendarRepository
 from scheduling.adapters.sms_dynamodb import DynamoSmsIngressStore
 from scheduling.domain.appointments import Appointment
@@ -250,6 +255,10 @@ class ClientProfileBody(StrictModel):
     active: bool = True
 
 
+class AccountInvitationBody(StrictModel):
+    email: str = Field(min_length=3, max_length=320)
+
+
 class ClientNoteBody(StrictModel):
     appointment_id: str | None = None
     body: str = Field(min_length=1, max_length=2000)
@@ -310,6 +319,8 @@ def create_owner_app(
     *,
     invitation_consent: ConsentRepository | None = None,
     manual_invitation_enabled: Callable[[], bool] | None = None,
+    account_invitations: ClientAccountInvitations | None = None,
+    verify_account: Callable[[str], VerifiedAccount] | None = None,
     cors_origins: tuple[str, ...] = (),
     allow_loopback_http: bool = False,
 ) -> FastAPI:
@@ -364,6 +375,66 @@ def create_owner_app(
 
     def key(idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1)]) -> str:
         return idempotency_key
+
+    @app.post("/v1/owner/businesses/{business_id}/clients/{client_id}/account-invitation")
+    def invite_client_account(business_id: str, client_id: str,
+                              body: AccountInvitationBody,
+                              owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:
+        if account_invitations is None:
+            raise _error("UNAVAILABLE", "Account invitations are unavailable", 503)
+        try:
+            invitation = account_invitations.invite(
+                business_id, client_id, body.email, owner.actor_id)
+        except InvitationDenied as exc:
+            raise _error("INVITATION_DENIED", str(exc), 409) from exc
+        return {"expires_at": invitation.expires_at}
+
+    @app.get("/v1/owner/businesses/{business_id}/clients/{client_id}/account-invitation")
+    def client_account_status(business_id: str, client_id: str,
+                              owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:
+        del owner
+        if account_invitations is None:
+            raise _error("UNAVAILABLE", "Account invitations are unavailable", 503)
+        try:
+            invitation = account_invitations.status(business_id, client_id)
+        except InvitationDenied as exc:
+            raise _error("INVITATION_DENIED", str(exc), 404) from exc
+        if invitation is None:
+            return {"state": "none", "expires_at": None}
+        state = ("revoked" if invitation.revoked_at is not None else
+                 "active" if invitation.consumed_at is not None else
+                 "expired" if invitation.expires_at <= now() else "pending")
+        return {"state": state, "expires_at": invitation.expires_at}
+
+    @app.delete("/v1/owner/businesses/{business_id}/clients/{client_id}/account-invitation",
+                status_code=204)
+    def revoke_client_account(business_id: str, client_id: str,
+                              owner: Annotated[OwnerPrincipal, Depends(principal)]) -> None:
+        if account_invitations is None:
+            raise _error("UNAVAILABLE", "Account invitations are unavailable", 503)
+        try:
+            account_invitations.revoke(business_id, client_id, owner.actor_id, now())
+        except InvitationDenied as exc:
+            raise _error("INVITATION_DENIED", str(exc), 409) from exc
+
+    @app.post("/v1/account/invitations/{business_id}/{client_id}/activate")
+    def activate_client_account(business_id: str, client_id: str,
+                                credentials: Annotated[
+                                    HTTPAuthorizationCredentials | None,
+                                    Depends(security)]) -> object:
+        if account_invitations is None or verify_account is None:
+            raise _error("UNAVAILABLE", "Account activation is unavailable", 503)
+        if credentials is None:
+            raise _error("UNAUTHORIZED", "Verified account is required", 401)
+        try:
+            account = verify_account(credentials.credentials)
+        except Exception as exc:
+            raise _error("UNAUTHORIZED", "Verified account is required", 401) from exc
+        try:
+            account_invitations.activate(business_id, client_id, account, now())
+        except InvitationDenied as exc:
+            raise _error("INVITATION_DENIED", "Invitation is unavailable", 403) from exc
+        return {"activated": True}
 
     def run(operation: Callable[[], object], current: Callable[[], object | None] | None = None) -> object:
         try:
@@ -719,7 +790,9 @@ def create_owner_app(
 def create_persisted_owner_app(client: DynamoClient, table_name: str,
                                verify_token: OwnerTokenVerifier,
                                clock: Callable[[], datetime] | None = None,
-                               *, cors_origins: tuple[str, ...] = ()) -> FastAPI:
+                               *, cors_origins: tuple[str, ...] = (),
+                               account_invitations: ClientAccountInvitations | None = None,
+                               verify_account: Callable[[str], VerifiedAccount] | None = None) -> FastAPI:
     """Build the non-local owner API with strongly read DynamoDB state."""
     return create_owner_app(DynamoDBCalendarRepository(client, table_name), verify_token,
                             clock, DynamoSmsIngressStore(client, table_name),
@@ -727,4 +800,6 @@ def create_persisted_owner_app(client: DynamoClient, table_name: str,
                                 os.environ.get("MANUAL_INVITATION_DELIVERY_ENABLED") == "authorized"
                                 and os.environ.get("SMS_RETENTION_SCHEDULE_STATE") == "ENABLED"
                                 and os.environ.get("SMS_SEND_ENABLED") == "authorized"),
+                            account_invitations=account_invitations,
+                            verify_account=verify_account,
                             cors_origins=cors_origins)

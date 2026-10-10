@@ -7,11 +7,13 @@ import jwt
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 
+from scheduling.account_invitations import ClientAccountInvitations, VerifiedAccount
 from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.client_api import add_client_session_route
 from scheduling.identity_links import IdentityLink, IdentityLinks, LinkRole, LinkState
-from scheduling.linked_auth import CognitoLinkedTokenVerifier
+from scheduling.linked_auth import CognitoLinkedTokenVerifier, create_cognito_linked_app
 from scheduling.owner_api import OwnerPrincipal, create_owner_app
+from scheduling.owner_auth import CognitoVerifiedAccountVerifier
 
 ISSUER = "https://cognito-idp.us-west-1.amazonaws.com/us-west-1_synthetic"
 NOW = datetime.now(UTC)
@@ -145,3 +147,25 @@ def test_invalid_token_claims_and_signatures_never_reach_either_route() -> None:
     for bad_token in invalid:
         assert api.get(CLIENT_URL, headers=bearer(bad_token)).status_code == 401
         assert api.get(OWNER_URL, headers=bearer(bad_token)).status_code == 401
+
+
+def test_deployed_app_wires_client_activation_with_role_scoped_routes(monkeypatch) -> None:
+    activated: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        CognitoVerifiedAccountVerifier, "__call__",
+        lambda self, token: VerifiedAccount("client-sub", "client@example.test", True),
+    )
+
+    def record_activation(self, business_id: str, client_id: str,
+                          account: VerifiedAccount, now: datetime) -> None:
+        activated.append((business_id, client_id, account.subject))
+
+    monkeypatch.setattr(ClientAccountInvitations, "activate", record_activation)
+    app = create_cognito_linked_app(
+        object(), "test-table", ISSUER, "app-client", cognito_client=object())  # type: ignore[arg-type]
+    api = TestClient(app)
+    response = api.post("/v1/account/invitations/pilot/client-1/activate",
+                        headers=bearer("synthetic-id-token"))
+    assert response.status_code == 200
+    assert activated == [("pilot", "client-1", "client-sub")]
+    assert any(route.path == CLIENT_URL for route in app.routes)

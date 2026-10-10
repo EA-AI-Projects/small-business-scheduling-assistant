@@ -4,6 +4,23 @@
  */
 
 export interface paths {
+    "/v1/account/invitations/{business_id}/{client_id}/activate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Activate Client Account */
+        post: operations["activate_client_account_v1_account_invitations__business_id___client_id__activate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/client/session": {
         parameters: {
             query?: never;
@@ -193,6 +210,25 @@ export interface paths {
         post?: never;
         /** Erase Client */
         delete: operations["erase_client_v1_owner_businesses__business_id__clients__client_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/owner/businesses/{business_id}/clients/{client_id}/account-invitation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Client Account Status */
+        get: operations["client_account_status_v1_owner_businesses__business_id__clients__client_id__account_invitation_get"];
+        put?: never;
+        /** Invite Client Account */
+        post: operations["invite_client_account_v1_owner_businesses__business_id__clients__client_id__account_invitation_post"];
+        /** Revoke Client Account */
+        delete: operations["revoke_client_account_v1_owner_businesses__business_id__clients__client_id__account_invitation_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -392,6 +428,11 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AccountInvitationBody */
+        AccountInvitationBody: {
+            /** Email */
+            email: string;
+        };
         /** BlockBody */
         BlockBody: {
             /**
@@ -641,6 +682,38 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    activate_client_account_v1_account_invitations__business_id___client_id__activate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                business_id: string;
+                client_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     client_session_v1_client_session_get: {
         parameters: {
             query?: never;
@@ -1218,6 +1291,104 @@ export interface operations {
         };
     };
     erase_client_v1_owner_businesses__business_id__clients__client_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                business_id: string;
+                client_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    client_account_status_v1_owner_businesses__business_id__clients__client_id__account_invitation_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                business_id: string;
+                client_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    invite_client_account_v1_owner_businesses__business_id__clients__client_id__account_invitation_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                business_id: string;
+                client_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AccountInvitationBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    revoke_client_account_v1_owner_businesses__business_id__clients__client_id__account_invitation_delete: {
         parameters: {
             query?: never;
             header?: never;

@@ -5,12 +5,13 @@ import { normalizePhone } from "@/lib/phone";
 import { useOwner } from "@/owner/OwnerContext";
 
 import { ConsentForm } from "./ConsentForm";
+import { AccountInvitationForm } from "./AccountInvitationForm";
 import { deleteClientFlow } from "./deleteClientFlow";
 import { NoteForm } from "./NoteForm";
 import { NoteList } from "./NoteList";
 import { ProfileForm } from "./ProfileForm";
 
-type SectionName = "profile" | "consent" | "notes";
+type SectionName = "profile" | "consent" | "account" | "notes";
 
 function Accordion({ title, open, onToggle, disabledReason, children }: {
   title: string;
@@ -44,7 +45,7 @@ function Accordion({ title, open, onToggle, disabledReason, children }: {
 }
 
 /**
- * The body of the Client details pop-up: Profile, Text Consent and Notes as accordion sections.
+ * The body of the Client details pop-up: Profile, account, consent and notes sections.
  * Mounted once per opening (keyed by the parent), so the expanded sections survive refreshes.
  * `client` is undefined while a new profile has not been saved yet.
  */
@@ -62,6 +63,7 @@ export function ClientDetails({ client, blankKey, initialSection, onCreated, onD
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [open, setOpen] = useState<Record<SectionName, boolean>>({
     profile: initialSection === "profile", consent: initialSection === "consent",
+    account: initialSection === "account",
     notes: initialSection === "notes",
   });
   const [phoneDraft, setPhoneDraft] = useState<{ key: string; phone: string } | null>(null);
@@ -126,6 +128,10 @@ export function ClientDetails({ client, blankKey, initialSection, onCreated, onD
           <ConsentForm key={`consent:${profileKey}`} client={client} onboarding={onboarding}
             phoneUnsaved={phoneUnsaved} onSkip={() => setOnboardingId(null)} />
         )}
+      </Accordion>
+      <Accordion title="Account invitation" open={open.account} onToggle={() => toggle("account")}
+        disabledReason={client ? undefined : `${waiting} Account invitations require a saved client.`}>
+        {client && <AccountInvitationForm clientId={client.client_id} />}
       </Accordion>
       <Accordion title="Notes" open={open.notes} onToggle={() => toggle("notes")}
         disabledReason={client ? undefined : `${waiting} Notes are kept for a saved client.`}>
