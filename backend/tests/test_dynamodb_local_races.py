@@ -500,6 +500,73 @@ def test_concurrent_client_requests_for_one_time_hold_exactly_one(race_env: Race
     assert repo.read_revision(env.business) == revision_before + 1
 
 
+def test_portal_request_racing_a_text_hold_for_one_time_commits_exactly_one(
+        race_env: RaceEnv) -> None:
+    from test_conversation_flow import Script, ask
+
+    from scheduling.domain.conversation import ConversationService
+    from scheduling.domain.holds import HoldService
+    from scheduling.domain.sms_ingress import InboundReceipt, Keyword, SenderRole
+
+    env = race_env
+    api, repo = _client_portal(env)
+    now = datetime(2026, 9, 28, 15, tzinfo=UTC)
+    phone = "+15550100001"  # portal-a's verified number
+
+    class Consent:
+        def is_opted_out(self, business_id: str, phone_e164: str) -> bool:
+            return False
+
+        def read_consent(self, business_id: str, phone_e164: str) -> ConsentEvidence | None:
+            return ConsentEvidence(business_id, "portal-a", "Synthetic Client", phone_e164,
+                                   now, "v1")
+
+    model = Script()
+    ask_text = "Can you do Tuesday at 9?"
+    model.replies[ask_text] = ask("request_booking", "2026-09-29", "2026-09-29", "09:00", "09:00")
+    texts = ConversationService(
+        repo, model, HoldService(repo), LifecycleService(repo, lambda: now), Consent(),
+        lambda: now, "+14155559999")
+
+    def send(number: int, body: str) -> Any:
+        return texts.handle(InboundReceipt(
+            env.business, f"SM-{env.run}-{number}", phone, "+14155550000", body, now,
+            SenderRole.CLIENT, "portal-a", Keyword.OTHER, True))
+
+    offer = send(1, ask_text)
+    assert not offer.committed and "Reply YES" in offer.text  # A live offer; nothing written.
+    revision_before = repo.read_revision(env.business)
+    barrier = Barrier(2)
+
+    def attempt(path: str) -> Any:
+        barrier.wait(timeout=5)
+        if path == "text":
+            return send(2, "Yes please")
+        return _portal_request(api, "b", "race-portal")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        text_future = pool.submit(attempt, "text")
+        portal_future = pool.submit(attempt, "portal")
+        # Record IDs as each result arrives so a failure still lets cleanup find the hold.
+        text_result = text_future.result()
+        if text_result.appointment_id:
+            env.appointment_ids.append(text_result.appointment_id)
+        portal_result = portal_future.result()
+        if portal_result.status_code == 200:
+            env.appointment_ids.append(portal_result.json()["appointment_id"])
+    text_won, portal_won = bool(text_result.committed), portal_result.status_code == 200
+    assert text_won != portal_won  # exactly one path holds the time
+    if portal_won:
+        assert not text_result.committed and "Reply YES" not in text_result.text
+        assert text_result.appointment_id is None
+    else:
+        assert portal_result.status_code == 409
+        assert portal_result.json()["detail"]["code"] in {"SLOT_CONFLICT", "CALENDAR_BUSY"}
+    assert repo.read_revision(env.business) == revision_before + 1
+    holds = [item for item in _business_items(env) if item["SK"]["S"].startswith("EVENT#")]
+    assert len(holds) == 1
+
+
 def test_concurrent_client_retries_with_one_key_create_one_request(race_env: RaceEnv) -> None:
     env = race_env
     api, repo = _client_portal(env)
