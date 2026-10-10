@@ -29,7 +29,7 @@ def _loader() -> type[yaml.SafeLoader]:
 
 
 def _template() -> dict[str, Any]:
-    return yaml.load(TEMPLATE.read_text(), Loader=_loader())  # noqa: S506
+    return yaml.load(TEMPLATE.read_text(), Loader=_loader())
 
 
 def _mounted_client_routes() -> set[tuple[str, str]]:
