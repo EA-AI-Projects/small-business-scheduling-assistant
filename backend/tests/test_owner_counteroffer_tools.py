@@ -219,6 +219,40 @@ def test_send_reply_failure_and_receipt_redelivery_never_queue_second_client_tex
     assert world.store.read("pilot", offer.offer_id).confirmed_by == "SM-send"  # type: ignore[union-attr]
 
 
+@pytest.mark.parametrize("failure", ["exception", "invalid_sms"])
+def test_unreviewed_draft_is_discarded_if_owner_final_reply_fails(failure: str) -> None:
+    world = World()
+    world.pending()
+    drafted_id: str | None = None
+
+    def draft_then_fail(tool: Callable[[str, dict[str, Any]], dict[str, Any]]) -> str:
+        nonlocal drafted_id
+        result = draft(tool)
+        assert result["ok"]
+        drafted_id = result["draft_id"]
+        if failure == "exception":
+            raise RuntimeError("model final turn failed")
+        return "Unsendable owner reply 😀"
+
+    world.model.actions["draft"] = draft_then_fail
+    assert world.owner("draft", "SM-draft") == "Something went wrong. Please try again."
+    assert drafted_id is not None
+    stored = world.store.read("pilot", drafted_id)
+    assert stored is not None and stored.state == OfferState.DISCARDED
+    assert not world.store.outbox
+
+    def later_yes(tool: Callable[[str, dict[str, Any]], dict[str, Any]]) -> str:
+        listed = tool("list_pending_requests", {})
+        assert listed["open_offer"] is None
+        attempt = tool("send_counteroffer", {"draft_id": drafted_id})
+        assert attempt == {"ok": False, "error": "draft_not_open"}
+        return "There is no open offer to send."
+
+    world.model.actions["yes"] = later_yes
+    assert world.owner("yes", "SM-yes") == "There is no open offer to send."
+    assert not world.store.outbox
+
+
 def test_redelivered_owner_yes_reuses_stored_reply_and_one_client_outbox() -> None:
     world = World()
     world.pending()

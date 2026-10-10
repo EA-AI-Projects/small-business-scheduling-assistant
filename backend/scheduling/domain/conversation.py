@@ -1026,9 +1026,10 @@ class ConversationService:
             return ConversationOutcome(OWNER_FAILURE_TEXT)
         committed: ConversationOutcome | None = None
         offer_action: str | None = None
+        drafted_offer_id: str | None = None
 
         def tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
-            nonlocal committed, offer_action
+            nonlocal committed, offer_action, drafted_offer_id
             if name not in ("list_pending_requests", "approve_request", "decline_request",
                             "get_calendar", "draft_counteroffer", "send_counteroffer",
                             "cancel_counteroffer"):
@@ -1115,6 +1116,8 @@ class ConversationService:
                             else self._counteroffers.cancel_counteroffer(receipt, now, draft_id))
                     if answer["ok"]:
                         offer_action = name
+                        if name == "draft_counteroffer":
+                            drafted_offer_id = str(answer["draft_id"])
                     return answer
                 ref, version = args.get("ref"), args.get("version")
                 if (set(args) != {"ref", "version"} or not isinstance(ref, str)
@@ -1166,6 +1169,11 @@ class ConversationService:
                 raise ValueError("Owner reply is not deliverable")
             return replace(committed, text=text) if committed is not None else ConversationOutcome(text)
         except Exception:  # noqa: BLE001 - model/read failures have one fixed owner reply
+            if drafted_offer_id is not None and self._counteroffers is not None:
+                discarded = self._counteroffers.cancel_counteroffer(
+                    receipt, self._clock(), drafted_offer_id)
+                if not discarded["ok"] and discarded.get("error") != "expired":
+                    raise RuntimeError("Undelivered owner draft could not be discarded")
             return (replace(committed, text=OWNER_FAILURE_TEXT) if committed is not None
                     else ConversationOutcome(OWNER_FAILURE_TEXT))
 
