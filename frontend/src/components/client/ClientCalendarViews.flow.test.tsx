@@ -86,10 +86,10 @@ describe("client calendar views", () => {
     expect(labels).toHaveLength(3);
     expect(labels.find((label) => label.includes("Monday"))).toContain("Confirmed");
     const pendingLabel = labels.find((label) => label.includes("Tuesday"))!;
-    expect(pendingLabel).toContain("Waiting for approval");
+    expect(pendingLabel).toContain("Waiting for approval (not confirmed)");
     expect(pendingLabel).not.toContain("Confirmed");
     const moveLabel = labels.find((label) => label.includes("Wednesday"))!;
-    expect(moveLabel).toContain("Move request");
+    expect(moveLabel).toContain("Move request (not confirmed)");
     expect(moveLabel).not.toContain("Confirmed");
     expect(host.querySelector(".cal-event.confirmed")).not.toBeNull();
     expect(host.querySelector(".cal-event.pending")).not.toBeNull();
@@ -136,13 +136,26 @@ describe("client calendar views", () => {
     await setView("month");
     await press("Next month");
     await press("Next month");
-    // Past the 14-day horizon the Day view asks for no times and says how far ahead requests go.
+    // Past the 14-day horizon the Day view asks for no times and shows the ordinary no-times message.
     await press("Today");
     await setView("day");
     for (let step = 0; step < 15; step += 1) await press("Next day");
-    expect(host.textContent).toContain("Times can be requested up to 14 days ahead.");
+    expect(host.textContent).toContain("No times are available on this day. Try another day.");
+    expect(host.textContent).not.toContain("days ahead");
     const asked = fetcher.mock.calls.map(([url]) => String(url));
     expect(asked.some((url) => url.endsWith("day=2026-10-24"))).toBe(true);
     expect(asked.some((url) => url.endsWith("day=2026-10-25"))).toBe(false);
+  });
+  it("drops a chosen time when the date or view changes", async () => {
+    const pick = () => act(async () => host.querySelector<HTMLButtonElement>("[aria-label='Available start times'] button")!.click());
+    await pick();
+    expect(host.querySelector("[aria-label='Request this time']")).not.toBeNull();
+    await press("Next day");
+    expect(host.querySelector("[aria-label='Request this time']")).toBeNull();
+    await pick();
+    expect(host.querySelector("[aria-label='Request this time']")).not.toBeNull();
+    await setView("week");
+    await setView("day");
+    expect(host.querySelector("[aria-label='Request this time']")).toBeNull();
   });
 });

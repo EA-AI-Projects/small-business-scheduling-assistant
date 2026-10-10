@@ -185,6 +185,15 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
   const moving = stillCurrent(heldMoving);
   const confirming = stillCurrent(heldConfirming);
   const choose = (start: string | null) => { setChosen(start); setOutcome(null); };
+  // In calendar mode a new date or view drops any chosen time and outcome, as picking a day always did.
+  const calendarView = calendar?.view;
+  const lastSeen = useRef({ date, view: calendarView });
+  useEffect(() => {
+    if (!calendar) return;
+    if (lastSeen.current.date === date && lastSeen.current.view === calendarView) return;
+    lastSeen.current = { date, view: calendarView };
+    setChosen(null); setOutcome(null); attempt.current = null;
+  }, [calendar, date, calendarView]);
   const send = async () => {
     if (!chosen || sending) return;
     const id = `${moving?.appointment_id ?? "new"}|${moving?.version ?? 0}|${chosen}`;
@@ -244,7 +253,7 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
           onPick={(day) => { choose(null); setDate(day); }} />}
         <p className="meta">Times are shown in the business time zone ({zone}).
           {settled?.minutes ? ` Visits are about ${settled.minutes} minutes.` : ""}</p>
-        {beyondHorizon ? <p>Times can be requested up to {horizonDays} days ahead.</p>
+        {beyondHorizon ? <p>No times are available on this day. Try another day.</p>
           : startsError ? <p className="notice error" role="alert">{startsError}</p>
           : starts === null ? <p>Loading times…</p>
           : shown.length === 0 ? <p>No times are available on this day. Try another day.</p>

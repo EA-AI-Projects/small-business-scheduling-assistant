@@ -109,8 +109,10 @@ export function calendarItems(bookings: ClientBooking[], nowMs: number): Calenda
     if (Date.parse(booking.end_at) <= nowMs) return [];
     const base = { event_id: booking.appointment_id, start_at: booking.start_at, end_at: booking.end_at,
       status: booking.status };
-    if (isMoveRequest(booking)) return [{ ...base, label: "Move request", kind: "move" }];
+    if (isMoveRequest(booking)) return [{ ...base, label: "Move request (not confirmed)", kind: "move" }];
     const state = bookingState(booking, nowMs);
-    return [{ ...base, label: state.label, kind: state.tone === "confirmed" ? "confirmed" : "pending" }];
+    const confirmed = state.tone === "confirmed";
+    return [{ ...base, label: confirmed ? state.label : `${state.label} (not confirmed)`,
+      kind: confirmed ? "confirmed" : "pending" }];
   });
 }
