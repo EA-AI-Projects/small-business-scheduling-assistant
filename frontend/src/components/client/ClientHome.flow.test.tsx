@@ -27,7 +27,7 @@ function booking(id: string, status: string, hours: number, hold: string | null 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 
 const ended = vi.fn();
-/** Both client pages over one shell state, as the real shell shares them; `nav-*` buttons stand in for the menu. */
+/** Both client pages over one shell state, as the real shell shares them; `nav-*` buttons stand in for the menu. This test shell has no booking horizon; the real menu and session carry-over are covered in `src/lib/client.flow.test.tsx`. */
 function Shell({ start }: { start: "calendar" | "appointments" }) {
   const [page, setPage] = useState(start);
   const calendar = useCalendarState({ ready: true, zone: ZONE, maxDate: null });
@@ -106,6 +106,43 @@ describe("client calendar and bookings", () => {
     expect(host.textContent).not.toContain("Waiting for approval");
     await act(async () => refresh().click());
     expect(host.textContent).toContain("no upcoming appointments");
+  });
+
+  it("goes from the calendar through a request to Appointments and back, with no confirmed state and no open times on Appointments", async () => {
+    const start = "2026-10-10T03:00:00Z"; // 4:00 PM Auckland, after the fixed "now"
+    const pending = { appointment_id: "hold-9", status: "PENDING_APPROVAL", start_at: start,
+      end_at: "2026-10-10T04:30:00Z", duration_minutes: 90, hold_expires_at: "2026-10-11T00:00:00Z",
+      requested_at: "2026-10-10T00:00:00Z", version: 1, replaces_appointment_id: null };
+    let sent = false;
+    const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") { sent = true; return json(pending); }
+      return url.includes("availability") ? json({ day: TODAY, duration_minutes: 90, starts_at: [start] })
+        : json({ bookings: sent ? [pending] : [] });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    await render("calendar");
+    const times = "[aria-label='Available start times']";
+    await act(async () => host.querySelector<HTMLButtonElement>(`${times} button`)!.click());
+    await act(async () => Array.from(host.querySelectorAll("button"))
+      .find((b) => b.textContent?.includes("Send request for owner approval"))!.click());
+    expect(note()?.textContent).toContain("waiting for owner approval");
+
+    // Appointments lists the request as pending, with its own actions and no open times.
+    await nav("appointments");
+    expect(host.textContent).toContain("Waiting for approval");
+    expect(host.textContent).not.toContain("Confirmed");
+    expect(host.querySelector(times)).toBeNull();
+    expect(host.textContent).not.toContain("Open times");
+    expect(host.textContent).toContain("Cancel request");
+
+    // Back on the Calendar the same request shows on its day as pending, and open times return.
+    await nav("calendar");
+    const cards = Array.from(host.querySelectorAll("[data-event-id]")).map((node) => node.getAttribute("aria-label") ?? "");
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toContain("Waiting for approval (not confirmed)");
+    expect(cards[0]).not.toContain("Confirmed");
+    expect(host.querySelector(times)).not.toBeNull();
+    expect(Array.from(fetcher.mock.calls).filter((call) => (call[1] as RequestInit | undefined)?.method === "POST")).toHaveLength(1);
   });
 
   describe("requesting a time", () => {
