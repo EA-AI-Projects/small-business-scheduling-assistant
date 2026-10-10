@@ -8,7 +8,7 @@ import { CalendarControls } from "@/components/shell/CalendarControls";
 import { useCalendarState, type CalendarState } from "@/calendar/useCalendarState";
 import { authorizeUrl, clearPendingSignIn, completeSignIn, logoutUrl, tokenExpiry, type SignInResult } from "@/lib/auth";
 import { ConfigError, parseConfig, rawConfigFromEnv, type OwnerConfig } from "@/lib/config";
-import { rangeAnnouncement, rangeTitle, rangeTitleShort, todayKey } from "@/lib/time";
+import { rangeAnnouncement, rangeTitle, rangeTitleShort, todayKey, addDays } from "@/lib/time";
 
 /** Client menu sections. Add an entry here (and a page under `pages/client/`) to extend the menu. */
 export const CLIENT_SECTIONS = [
@@ -88,7 +88,9 @@ function ClientShell({ value: base, email, local, onSignOut, notice, children }:
 }) {
   const router = useRouter();
   const zone = base.zone;
-  const calendar = useCalendarState({ ready: Boolean(zone), zone: zone ?? "UTC" });
+  // Browsing stops at the booking horizon (decided on #316); an unknown horizon means no limit.
+  const maxDate = zone && base.horizonDays !== null ? addDays(todayKey(zone), base.horizonDays) : null;
+  const calendar = useCalendarState({ ready: Boolean(zone), zone: zone ?? "UTC", maxDate });
   const value = useMemo<ClientSessionValue>(() => ({ ...base, calendar }), [base, calendar]);
   const section = CLIENT_SECTIONS.find((item) => item.pathname === router.pathname.replace(/\/$/, "")) ?? CLIENT_SECTIONS[0];
   return <ClientSessionContext.Provider value={value}>
@@ -101,7 +103,7 @@ function ClientShell({ value: base, email, local, onSignOut, notice, children }:
         announcement={zone ? rangeAnnouncement(calendar.date, calendar.view, calendar.scheduleDays) : "Calendar"}
         shortTitle={zone ? rangeTitleShort(calendar.date, calendar.view, calendar.scheduleDays) : undefined}
         view={calendar.view} disabled={!zone} date={calendar.date} today={zone ? todayKey(zone) : ""}
-        scheduleDays={calendar.scheduleDays} onToday={calendar.goToday} onPick={calendar.goToDate}
+        scheduleDays={calendar.scheduleDays} maxDate={maxDate} onToday={calendar.goToday} onPick={calendar.goToDate}
         onStep={calendar.stepRange} onView={calendar.setView} />
         : <span className="range-title">{section.label}</span>}
     </AppHeader>

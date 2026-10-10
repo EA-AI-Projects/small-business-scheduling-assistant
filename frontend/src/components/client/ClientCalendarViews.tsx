@@ -29,9 +29,11 @@ const noSlot = () => undefined;
  * Year views. These views show no open times; the Day view's request flow lives beside them.
  * Tapping a day in Month, Year, or a Week heading opens Day.
  */
-export function ClientCalendarViews({ items, bookings, calendar, zone, nowMs, loading, error }: {
+export function ClientCalendarViews({ items, bookings, calendar, zone, nowMs, loading, error, maxDate = null }: {
   items: CalendarItem[]; bookings: ClientBooking[]; calendar: CalendarState; zone: string; nowMs: number;
   loading: boolean; error: string | null;
+  /** Last browsable date (booking horizon); Schedule offers no Load more past it. */
+  maxDate?: string | null;
 }) {
   const { date, view, scheduleDays } = calendar;
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -91,7 +93,7 @@ export function ClientCalendarViews({ items, bookings, calendar, zone, nowMs, lo
           <MonthGrid date={date} events={items} zone={zone} selectedId={selectedId} onSelect={select} onDay={goDay} />
         ) : view === "schedule" ? (
           <ScheduleList groups={groups} zone={zone} selectedId={selectedId} onSelect={select}
-            onLoadMore={calendar.loadMoreSchedule} itemTitle={itemTitle} />
+            onLoadMore={maxDate && last >= maxDate ? undefined : calendar.loadMoreSchedule} itemTitle={itemTitle} />
         ) : view === "year" ? (
           <YearGrid date={date} events={items} zone={zone} selectedId={selectedId} onSelect={select}
             onDismiss={close} onNavigate={calendar.goToDate} onDay={goDay} />

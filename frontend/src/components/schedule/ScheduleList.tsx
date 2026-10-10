@@ -10,7 +10,8 @@ import { dayTitle, localTime } from "@/lib/time";
 export function ScheduleList({ groups, zone, selectedId, onSelect, onLoadMore, itemTitle }: {
   groups: ScheduleDay[]; zone: string; selectedId: string | null;
   onSelect: (id: string, element: HTMLElement) => void;
-  onLoadMore: () => void;
+  /** Omitted when no further range may be shown (the client booking horizon). */
+  onLoadMore?: () => void;
   itemTitle: (item: CalendarItem) => string;
 }) {
   return (
@@ -40,7 +41,7 @@ export function ScheduleList({ groups, zone, selectedId, onSelect, onLoadMore, i
           </div>
         </section>
       ))}
-      <button type="button" className="schedule-load-more" onClick={onLoadMore}>Load more</button>
+      {onLoadMore && <button type="button" className="schedule-load-more" onClick={onLoadMore}>Load more</button>}
     </div>
   );
 }

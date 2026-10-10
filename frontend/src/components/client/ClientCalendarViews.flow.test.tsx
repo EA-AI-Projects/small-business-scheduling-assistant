@@ -6,7 +6,7 @@ import { useCalendarState } from "@/calendar/useCalendarState";
 import { ClientHome } from "@/components/client/ClientHome";
 import { CalendarControls } from "@/components/shell/CalendarControls";
 import { parseConfig } from "@/lib/config";
-import { rangeAnnouncement, rangeTitle, todayKey } from "@/lib/time";
+import { addDays, rangeAnnouncement, rangeTitle, todayKey } from "@/lib/time";
 
 const config = parseConfig({ authMode: "cognito", apiBaseUrl: "https://api.example.test",
   businessId: "pilot", cognitoDomain: "https://auth.example.test", clientId: "public" });
@@ -33,11 +33,12 @@ const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200
 
 /** The Calendar page: the shell's header controls beside the page, sharing one calendar state. */
 function Page() {
-  const calendar = useCalendarState({ ready: true, zone: ZONE });
+  const maxDate = addDays(todayKey(ZONE), 14);
+  const calendar = useCalendarState({ ready: true, zone: ZONE, maxDate });
   return <>
     <CalendarControls title={rangeTitle(calendar.date, calendar.view, calendar.scheduleDays)}
       announcement={rangeAnnouncement(calendar.date, calendar.view, calendar.scheduleDays)}
-      view={calendar.view} date={calendar.date} today={todayKey(ZONE)} scheduleDays={calendar.scheduleDays}
+      view={calendar.view} date={calendar.date} today={todayKey(ZONE)} scheduleDays={calendar.scheduleDays} maxDate={maxDate}
       onToday={calendar.goToday} onPick={calendar.goToDate} onStep={calendar.stepRange} onView={calendar.setView} />
     <ClientHome config={config} token="access" zone={ZONE} horizonDays={14} calendar={calendar} onSessionEnded={() => undefined} />
   </>;
@@ -118,33 +119,65 @@ describe("client calendar views", () => {
     expect(host.querySelector("[aria-label='Available start times']")).toBeNull();
     await setView("year");
     expect(host.querySelector("[aria-label='Available start times']")).toBeNull();
-    await press("Next year");
-    expect(host.textContent).toContain("January 2027");
+    // Browsing stops at the horizon: the year holding it is the last one.
+    expect(host.querySelector<HTMLButtonElement>("[aria-label='Next year']")!.disabled).toBe(true);
 
     // Only Day views asked for open times; the other views never did.
     expect(availabilityCalls()).toBe(3);
     expect(fetcher.mock.calls.every(([url]) => String(url).startsWith("https://api.example.test/v1/client/"))).toBe(true);
   });
 
-  it("shows an empty calendar with a short note for past dates, and stops offering times past the horizon", async () => {
+  it("shows an empty calendar with a short note for past dates", async () => {
     await press("Previous day");
     expect(host.textContent).toContain("Past visits are not shown.");
     expect(host.querySelector("[aria-label='Available start times']")).toBeNull();
     expect(eventLabels()).toHaveLength(0);
     expect(availabilityCalls()).toBe(1);
+  });
+  it("stops browsing at the booking horizon and explains a day beyond it", async () => {
+    // Today is Oct 10 in Auckland; the horizon day is Oct 24.
+    for (let step = 0; step < 14; step += 1) await press("Next day");
+    expect(host.querySelector("[aria-label='Available start times']")).not.toBeNull();
+    const next = host.querySelector<HTMLButtonElement>("[aria-label='Next day']")!;
+    expect(next.disabled).toBe(true);
+    await act(async () => next.click());
+    expect(host.textContent).toContain("October 24, 2026");
+    expect(host.textContent).not.toContain("We only book up to");
+
+    // Switching views at the edge does not crash; the period holding the horizon is the last one.
+    for (const view of ["week", "month", "schedule", "year", "day"]) await setView(view);
+    await setView("month");
+    expect(host.querySelector<HTMLButtonElement>("[aria-label='Next month']")!.disabled).toBe(true);
+    await setView("year");
+    expect(host.querySelector<HTMLButtonElement>("[aria-label='Next year']")!.disabled).toBe(true);
+    await setView("week");
+    expect(host.querySelector<HTMLButtonElement>("[aria-label='Next week']")!.disabled).toBe(true);
+    await setView("schedule");
+    expect(host.querySelector<HTMLButtonElement>("[aria-label='Next 30 days']")!.disabled).toBe(true);
+    expect(host.textContent).not.toContain("Load more");
+
+    // Today goes back; a month near the edge straddles the horizon and a day tapped past it says why.
+    await press("Today");
+    await setView("month");
+    expect(host.querySelector<HTMLButtonElement>("[aria-label='Next month']")!.disabled).toBe(true);
+    const asked = fetcher.mock.calls.map(([url]) => String(url));
+    expect(asked.some((url) => url.endsWith("day=2026-10-25"))).toBe(false);
+  });
+  it("clamps a picked date past the horizon and shows the horizon message for a straddling month day", async () => {
+    await press("Today");
+    await press("Next day");
+    await act(async () => host.querySelector<HTMLButtonElement>("[aria-label$='choose date']")!.click());
+    await act(async () => document.querySelector<HTMLButtonElement>("[data-date='2026-11-05']")!.click());
+    expect(host.textContent).toContain("October 24, 2026");
+    expect(host.textContent).not.toContain("We only book up to");
 
     await setView("month");
-    await press("Next month");
-    await press("Next month");
-    // Past the 14-day horizon the Day view asks for no times and shows the ordinary no-times message.
-    await press("Today");
-    await setView("day");
-    for (let step = 0; step < 15; step += 1) await press("Next day");
-    expect(host.textContent).toContain("No times are available on this day. Try another day.");
-    expect(host.textContent).not.toContain("days ahead");
+    await press("Wednesday, Oct 28, open Day view");
+    expect(host.textContent).toContain("We only book up to 14 days ahead.");
+    expect(host.querySelector("[aria-label='Available start times']")).toBeNull();
     const asked = fetcher.mock.calls.map(([url]) => String(url));
-    expect(asked.some((url) => url.endsWith("day=2026-10-24"))).toBe(true);
     expect(asked.some((url) => url.endsWith("day=2026-10-25"))).toBe(false);
+    expect(host.querySelector<HTMLButtonElement>("[aria-label='Next day']")!.disabled).toBe(true);
   });
   it("drops a chosen time when the date or view changes", async () => {
     const pick = () => act(async () => host.querySelector<HTMLButtonElement>("[aria-label='Available start times'] button")!.click());

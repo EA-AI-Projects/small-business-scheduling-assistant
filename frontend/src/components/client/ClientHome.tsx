@@ -253,7 +253,7 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
           onPick={(day) => { choose(null); setDate(day); }} />}
         <p className="meta">Times are shown in the business time zone ({zone}).
           {settled?.minutes ? ` Visits are about ${settled.minutes} minutes.` : ""}</p>
-        {beyondHorizon ? <p>No times are available on this day. Try another day.</p>
+        {beyondHorizon ? <p role="status">We only book up to {horizonDays} days ahead.</p>
           : startsError ? <p className="notice error" role="alert">{startsError}</p>
           : starts === null ? <p>Loading times…</p>
           : shown.length === 0 ? <p>No times are available on this day. Try another day.</p>
@@ -300,7 +300,8 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
         <p className="meta">Only your own appointments and requests are shown. Times are shown in the business time zone ({zone}).
           A request is not an appointment until the owner approves it.</p>
         <ClientCalendarViews items={items} bookings={bookings ?? []} calendar={calendar} zone={zone} nowMs={nowMs}
-          loading={bookings === null && !bookingsError} error={bookingsError} />
+          loading={bookings === null && !bookingsError} error={bookingsError}
+          maxDate={horizonDays === null ? null : addDays(today, horizonDays)} />
       </section>
       {calendar.view === "day" && date >= today && timesSection}
     </div>;
