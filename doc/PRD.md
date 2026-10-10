@@ -34,21 +34,31 @@ The owner currently coordinates appointments with clients by text, spending subs
 - Dynamic routing or address-based travel-time optimization.
 - Proactive outreach to clients when a cancellation opens a slot.
 - Payments, invoicing, staff payroll, or customer acquisition features.
-- A complex client portal or native mobile applications.
+- Client scheduling pages, a full client portal, or native mobile applications. The MVP includes client account access and a minimal signed-in landing state.
 - Storing door/entry codes as ordinary AI-generated notes.
 
 ## 5. Users and roles
 
 ### Owner
-The business owner (initially one phone number) manages working availability, receives booking/cancellation notices, and approves or declines requests by natural-language SMS. A minimal authenticated web view is available for schedule review and corrections.
+The business owner (initially one phone number) manages working availability, receives booking/cancellation notices, and approves or declines requests by natural-language SMS. A minimal authenticated web view is available for schedule review and corrections. An owner account is activated only by invitation or administrator approval; there is no administrator portal in the MVP.
 
 ### Client
-A known client texts the business number to request a visit, choose from available options, reschedule, cancel, or provide visit-related information. Clients may see all available appointment options through the SMS conversation; there is no client app requirement for MVP.
+A known client texts the business number to request a visit, choose from available options, reschedule, cancel, or provide visit-related information. Clients may see all available appointment options through the SMS conversation. The MVP also provides a separate client sign-in path and a minimal signed-in landing state, without client scheduling pages.
 
 ### Assistant
 An AI-assisted SMS interface that identifies intent, gathers required details, explains options, and communicates status. It may not bypass scheduling rules or claim an appointment is confirmed until the system records the applicable state.
 
 ## 6. Scope and requirements
+
+### 6.0 Owner and client accounts (#224)
+
+- Owner and client accounts have separate sign-in paths, sign-out, account recovery, and clear denied-access states. A signed-in client sees a minimal landing state; scheduling remains SMS-first. Client scheduling pages are outside this effort.
+- An owner may activate an account only after an invitation or administrator approval through the documented administrative process. The MVP has no administrator portal.
+- A client account may activate only for an existing owner-created client profile after the owner sends an email invitation for that profile and the client verifies control of the invited email address. An uninvited address cannot claim an existing profile.
+- A Cognito account alone grants no business or client access. The service links an approved owner identity to an authorized business and an invited client identity to its client profile. The owner can access only the authorized business; the client can access only their own client data and cannot use owner operations. The API enforces these boundaries, including after sign-in and recovery.
+- Account email verification and recovery establish control of the account email. They do not verify the profile phone, record in-person SMS consent, or remove an SMS opt-out. The existing phone and SMS rules in §6.2 still apply independently.
+
+Implementation follows [#226](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/issues/226) for identity links, [#227](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/issues/227) for provisioning and invitations, [#228](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/issues/228) for API access, and [#229](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/issues/229) for sign-in experiences.
 
 ### 6.1 Scheduling and availability
 

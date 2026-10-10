@@ -12,7 +12,7 @@
 - Prevent overlapping confirmed visits, pending holds, and unavailable blocks.
 - Make owner approval easy from SMS while preserving an audit trail.
 - Minimize sensitive data collection and protect client information.
-- Keep the first implementation small enough for a single-business pilot.
+- Keep the first implementation small enough for a single-business pilot, with owner and client accounts scoped to their linked records.
 
 ## 2. Proposed architecture
 
@@ -50,8 +50,8 @@
                                      ^
                                      |
                          +-----------+-----------+
-                         | Owner web admin       |
-                         | calendar/configuration|
+                         | Owner web admin and   |
+                         | client landing state  |
                          +-----------------------+
 ```
 
@@ -111,10 +111,17 @@ Manual invitations use the same eligibility and send-time checks but ignore the 
 
 ### 3.5 Owner web admin
 
-- Authenticated, mobile-friendly minimal interface for calendar/list review, pending requests, clients, unavailable blocks, and configuration. Use Cognito authorization-code PKCE in the browser, keep the access token in page memory (the ID token is read once for the display-only `email` claim, not signature-checked, and dropped; the scope stays `openid`), and serve the page on the same origin as the owner API. The API resolves owner-entered local date-times and rejects daylight-saving gaps or ambiguous times before calendar writes.
-- Role/access controls even if the first deployment has one owner account.
+- Authenticated, mobile-friendly minimal interface for calendar/list review, pending requests, clients, unavailable blocks, and configuration. The current owner app uses Cognito authorization-code PKCE in the browser and keeps the access token in page memory (the ID token is read once for the display-only `email` claim, not signature-checked, and dropped; the scope stays `openid`). It calls the owner API cross-origin through configured CORS. The API resolves owner-entered local date-times and rejects daylight-saving gaps or ambiguous times before calendar writes.
+- Owner activation requires invitation or administrator approval through the [manual administrative process](../README.md#account-provisioning-and-recovery); there is no administrator portal in MVP. An authenticated owner identity must link to the authorized business before it can use owner operations. Keep role and business checks even in a single-owner deployment (#226, #228).
 - Every write action uses the same scheduling domain service as SMS.
 - Basic audit history for changes, including actor/source and timestamps.
+
+### 3.5.1 Client account and recovery
+
+- Provide a separate client sign-in path with sign-out, email recovery, denied-access state, and minimal signed-in landing state (#229). Client scheduling pages are outside MVP; SMS remains the scheduling interface.
+- The owner creates a client profile first, then sends an email invitation for that profile. Activation requires verification of the invited email; uninvited or different addresses cannot claim a profile (#227). A verified Cognito account has no data access until its identity is linked to that client profile (#226).
+- Server authorization resolves the identity link and limits a client to their own profile data; a client token cannot call owner operations. An owner token is limited to its linked business. Check both the role and record scope on every route, including after recovery (#228).
+- Email verification and email-based account recovery establish account control only. They do not mark a phone verified, record in-person SMS consent, or clear opt-out. Those SMS gates continue independently.
 
 ### 3.6 Database and background jobs
 
@@ -130,6 +137,9 @@ Manual invitations use the same eligibility and send-time checks but ignore the 
 
 ### Client
 - `id`, `name`, `phone_e164` (unique per business unless shared-number handling is added), `service_address`, `home_size_category`, `default_duration_minutes`, `active`, timestamps
+
+### Account identity links
+- Cognito subject from a verified access token, role, approved business ID for an owner or existing business/client ID for a client, invitation/approval state, and timestamps. Resolve access from these server-side links, never from browser parameters or an email display claim (#226).
 
 ### Appointment
 - `id`, `business_id`, `client_id`, `start_at`, `end_at`, `duration_minutes`, `buffer_minutes`, `status`, `requested_by`, `approved_by`, `hold_expires_at`, optional `replaces_appointment_id`, timestamps

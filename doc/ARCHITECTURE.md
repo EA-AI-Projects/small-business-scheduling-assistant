@@ -85,7 +85,7 @@ The goal is low idle cost and low operational overhead—not a large-scale SaaS 
 | Backend API | Python 3.12+ + FastAPI + Mangum, one AWS Lambda function (ZIP package) | Matches NeuroSpineDx backend language/framework; scales to zero and is inexpensive at pilot traffic |
 | API ingress | Amazon API Gateway **HTTP API** | Managed webhook/API endpoint, lower-cost API Gateway option for this simple REST interface |
 | Primary data store | Amazon DynamoDB, on-demand (PAY_PER_REQUEST) | No provisioned database/idle capacity; suitable for a single small-business calendar |
-| Owner UI authentication | Amazon Cognito User Pool, owner account; no SMS-based Cognito MFA | Avoids custom password/session implementation; keep Cognito SMS charges out of the owner-login path |
+| Owner and client authentication | Amazon Cognito User Pool with separate owner and client sign-in paths; no SMS-based Cognito MFA | Avoids custom password/session implementation; application identity links and API checks enforce role and data scope |
 | SMS | Twilio (external provider), behind an internal SMS adapter | Mature inbound/outbound messaging and delivery callbacks; provider can be replaced later |
 | LLM | OpenAI API (external), behind a model adapter; choose a low-cost tool-capable model after testing | Follows the team's existing hosted-OpenAI pattern; no model servers to operate |
 | Secrets | AWS Systems Manager Parameter Store, Standard SecureString parameters for provider credentials; compare Secrets Manager if rotation is needed | Keeps fixed secret-management costs low for a tiny pilot; KMS encryption and narrow IAM permissions |
@@ -145,7 +145,9 @@ The inspected repository currently uses Next.js/React, Python/FastAPI, Amplify H
 
  Owner browser --> Amplify-hosted static Next.js app --> HTTP API
                          |
-                         +--> Cognito sign-in (owner only)
+                         +--> Cognito sign-in (owner and client paths)
+
+ Client browser --> minimal signed-in landing state --> client API (no scheduling pages)
 ```
 
 ### AWS-owned components
@@ -154,7 +156,7 @@ The inspected repository currently uses Next.js/React, Python/FastAPI, Amplify H
 - API Gateway HTTP API.
 - FastAPI Lambda function(s) and IAM roles.
 - DynamoDB table(s), SQS queue/DLQ, EventBridge schedule.
-- Cognito User Pool for owner web access.
+- Cognito User Pool for owner and client web access.
 - Parameter Store SecureString values (with KMS encryption).
 - CloudWatch logs/metrics/alarms.
 - GitHub Actions OIDC role for deployment.
@@ -174,9 +176,16 @@ The core calendar, appointment state, approval policy, and availability calculat
 - Build with static export and host via Amplify Hosting (platform `WEB`). No Next.js SSR or server actions in the initial design; all data operations use the API.
 - Implemented in `frontend/` with the Pages Router, whose static export emits no inline scripts, so a build-time CSP `<meta>` tag can allow only self-hosted scripts and connections to the exact API and Cognito origins. Amplify adds `frame-ancestors`, HSTS, and related headers from the repository-root `customHttp.yml`.
 - The owner API is cross-origin from the app. API Gateway CORS allows only the configured app origin, without credentials; owner routes use explicit methods so preflight never reaches the JWT authorizer.
-- Cognito signs in the owner. API Gateway validates the owner access token for admin routes. The app keeps the `openid` scope and reads the `email` claim from the ID token returned by the token exchange only to show who is signed in (display only, signature not checked, only the string kept in memory, never sent to the API). The claim is expected because the app client can read `email`; this is not yet verified against the live pool, and the app shows "Signed in" when it is absent.
+- Cognito signs in the owner through the owner path. The current owner app uses `openid` scope and reads the ID token `email` claim only to show who is signed in (display only, signature not checked, only the string kept in memory, never sent to the API). The approved API design verifies the access token and identity-to-business link before owner operations. Cognito authentication or a browser-supplied business ID alone grants no access. The current exact-subject owner gate remains until #226 and #228 replace it.
 - Screens: day/week calendar, followed by month, schedule, and year views (#169); pending approvals, client list/profile, unavailable blocks, and a small settings screen. The schedule view lists confirmed visits and pending requests from the selected date, initially covering 30 days with a Load more action.
-- Client-facing booking portal is not part of the MVP; the client workflow is SMS.
+- The separate client sign-in path leads to a minimal signed-in landing state. Client scheduling pages remain outside MVP; scheduling continues through SMS. Both paths need sign-out, recovery, and denied-access handling (#229).
+
+### 4.1.1 Account identity and authorization (#224)
+
+- An approved owner Cognito identity links to its authorized business; an invited client identity links to one existing owner-created client profile. These server-side links are the source of role and data scope (#226). A Cognito account without a valid link has no owner or client access. API routes resolve role and scope from the verified token and link, then enforce them on every request (#228); clients cannot call owner operations.
+- Owner activation requires an invitation or administrator approval. The administrator follows the documented manual process in [README.md](../README.md#account-provisioning-and-recovery); the MVP has no administrator portal. Client activation starts from an owner-sent email invitation for an existing profile and requires verification of that invited address. An arbitrary sign-up or different verified address cannot claim the profile (#227).
+- Account recovery uses the identity provider's email-based recovery path, followed by the same server-side link checks. A changed account address or identity must not silently inherit a prior link; the administrator or owner re-establishes the approved association as appropriate. A lost or revoked link produces denied access, not a new role. The application must never infer access from a displayed email claim, phone number, or caller-supplied profile ID.
+- Account email verification proves control of the invited email for sign-in. It does not verify an SMS phone or grant SMS consent. Phone verification still follows the in-person owner recording in §8.3 and the [PRD](PRD.md#62-client-profile-and-visit-duration); opt-out and live-send gates remain separate.
 
 ### 4.2 API/backend
 
@@ -186,6 +195,7 @@ The core calendar, appointment state, approval policy, and availability calculat
   - `POST /webhooks/sms/inbound` — provider-signed inbound messages.
   - `POST /webhooks/sms/status` — delivery status callbacks.
   - `/v1/owner/*` — authenticated owner schedule, client, configuration, and pending-request operations.
+  - Client-scoped authenticated routes for the minimal signed-in client state; exact endpoints belong to #228 and #229.
   - Internal worker entry points for SQS messages and scheduled hold expiry.
   - `/health` — non-sensitive readiness check.
 - Use Pydantic request/response schemas, explicit validation, typed domain services, and idempotency keys.
@@ -351,8 +361,8 @@ NeuroSpineDx currently deploys the FastAPI backend as an ECR container image to 
 ### S3 + CloudFront instead of Amplify
 Potentially lower-cost for a static single-page app and gives direct control over caching/CDN, but adds hosting/deployment wiring. Amplify is selected for continuity and simpler GitHub deploys; compare actual build/traffic cost after the first pilot.
 
-### Cognito vs custom owner login
-Cognito is preferred for password and token management. Do not use SMS OTP as the owner login factor in the MVP because it adds SMS cost and operational dependency; use email/password with strong password policy and optional authenticator-app MFA. If the owner admin view is not included in the earliest POC, Cognito can be deferred rather than replaced with hand-rolled auth.
+### Cognito vs custom account login
+Cognito is preferred for owner and client password, token, and email recovery management. Do not use SMS OTP as an MVP login factor because it adds SMS cost and operational dependency; use email/password with strong password policy and optional authenticator-app MFA. The existing owner-only deployment predates the approved client account work in #226–#229.
 
 ## 11. Test and operational requirements
 
