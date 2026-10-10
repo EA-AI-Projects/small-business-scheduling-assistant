@@ -533,7 +533,8 @@ def test_portal_request_racing_a_text_hold_for_one_time_commits_exactly_one(
             env.business, f"SM-{env.run}-{number}", phone, "+14155550000", body, now,
             SenderRole.CLIENT, "portal-a", Keyword.OTHER, True))
 
-    assert not send(1, ask_text).committed  # The offer writes nothing.
+    offer = send(1, ask_text)
+    assert not offer.committed and "Reply YES" in offer.text  # A live offer; nothing written.
     revision_before = repo.read_revision(env.business)
     barrier = Barrier(2)
 
@@ -544,15 +545,21 @@ def test_portal_request_racing_a_text_hold_for_one_time_commits_exactly_one(
         return _portal_request(api, "b", "race-portal")
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        text_result, portal_result = list(pool.map(attempt, ("text", "portal")))
-    # Record IDs first so a failed assertion still lets cleanup find the hold.
-    if text_result.appointment_id:
-        env.appointment_ids.append(text_result.appointment_id)
-    if portal_result.status_code == 200:
-        env.appointment_ids.append(portal_result.json()["appointment_id"])
+        text_future = pool.submit(attempt, "text")
+        portal_future = pool.submit(attempt, "portal")
+        # Record IDs as each result arrives so a failure still lets cleanup find the hold.
+        text_result = text_future.result()
+        if text_result.appointment_id:
+            env.appointment_ids.append(text_result.appointment_id)
+        portal_result = portal_future.result()
+        if portal_result.status_code == 200:
+            env.appointment_ids.append(portal_result.json()["appointment_id"])
     text_won, portal_won = bool(text_result.committed), portal_result.status_code == 200
     assert text_won != portal_won  # exactly one path holds the time
-    if not portal_won:
+    if portal_won:
+        assert not text_result.committed and "Reply YES" not in text_result.text
+        assert text_result.appointment_id is None
+    else:
         assert portal_result.status_code == 409
         assert portal_result.json()["detail"]["code"] in {"SLOT_CONFLICT", "CALENDAR_BUSY"}
     assert repo.read_revision(env.business) == revision_before + 1
