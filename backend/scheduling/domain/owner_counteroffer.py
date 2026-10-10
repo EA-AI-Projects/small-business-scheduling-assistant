@@ -1,19 +1,9 @@
-"""Owner counteroffers: prepare, confirm with the owner, then queue one client text.
+"""Validated owner counteroffer tools and client acceptance.
 
-The owner asks to offer a pending request's client a different time. This module
-resolves the request, shows the owner the exact client-facing text, and queues
-that text only on an immediately following plain confirmation. Nothing here
-writes the calendar. Offer instructions are parsed deterministically and the
-text is built from trusted records; the owner's other replies are routed by the
-model classification (#177) and validated by the backend. A client's acceptance of the offer (#176)
-is handled by ``CounterofferAcceptance`` below, which reads the confirmed offer
-through ``CounterofferStore`` and creates one linked pending request.
-
-Preparation and the client send both call ``check_offer`` so eligibility,
-consent, request state, and slot availability are verified twice.
+A draft stores the model-written client text, but sends nothing. Sending rechecks
+eligibility, consent, request state, and availability and queues one client outbox.
 """
 
-import re
 import threading
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
@@ -31,15 +21,12 @@ from scheduling.domain.availability import (
 )
 from scheduling.domain.calendar import CalendarSnapshot, CalendarStatus
 from scheduling.domain.client_records import ClientProfile
+from scheduling.domain.conversation_history import HistoryMessage
 from scheduling.domain.conversation_state import (
     PROMPT_LIFETIME,
-    WEEKDAYS,
     Selection,
-    day_text,
-    is_affirmative,
     is_negative,
     match_selection,
-    normalized,
     when_text,
 )
 from scheduling.domain.holds import (
@@ -66,29 +53,6 @@ CONFIRMATION_LIFETIME = timedelta(minutes=30)
 # any client offer, so it is open for the shared client-offer lifetime from the moment
 # the owner confirms it. Storage TTL (a retention window) never defines it.
 CLIENT_OFFER_VALIDITY = PROMPT_LIFETIME
-# A YES that arrives after the prompt lapsed is answered (and never approves the
-# request) for this long; after that the message is treated as unrelated.
-EXPIRED_NOTICE_WINDOW = timedelta(hours=1)
-
-MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
-INTENT = re.compile(r"\b(?:offer\w*|propos\w*|suggest\w*|counter\w*|instead)\b")
-CLOCK = re.compile(
-    r"(?<![\w:/-])(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<meridiem>[ap])\.?m\b\.?"
-    r"|(?<![\w:/-])(?P<hour24>[01]?\d|2[0-3]):(?P<minute24>[0-5]\d)(?![\w:])"
-    r"|\b(?P<noon>noon)\b")
-BARE_NUMBER = re.compile(r"(?<![\w:/-])\d{1,2}(?::\d{2})?(?![\w:/-])")
-ISO_DAY = re.compile(r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)")
-MONTH_DAY = re.compile(
-    rf"\b({'|'.join(MONTHS)})[a-z]*\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?\b")
-SLASH_DAY = re.compile(r"(?<![\w/])(\d{1,2})/(\d{1,2})(?![\w/])")
-REFERENCE = re.compile(r"(?<![0-9a-z])[0-9a-f]{8}(?![0-9a-z])")
-# An instruction that names an offer verb is unmistakable; "instead" alone is not (it is also
-# how an owner narrows a calendar view), so right after a calendar answer it is clarified.
-EXPLICIT_OFFER = re.compile(r"\b(?:offer\w*|propos\w*|suggest\w*|counter\w*)\b")
-STRICT_YES = re.compile(r"(?:yes|y|yep|yeah|yup)[.!]?")
-NO_TEXT = re.compile(
-    r"(?:no|nope|nah|cancel|cancel (?:it|that|the offer)|never ?mind|don'?t send(?: it)?|"
-    r"decline|declined|stop|discard)(?: please| thanks)?")
 
 
 class OfferState(StrEnum):
@@ -294,89 +258,8 @@ def check_offer(offer: Counteroffer, repository: OfferRepository, consent: Offer
     return None if offer.proposed_start in starts else OfferProblem.SLOT_UNAVAILABLE
 
 
-def offer_text(original_start: datetime, proposed_start: datetime, zone: ZoneInfo) -> str:
-    """The exact client-facing wording; the owner sees this before anything is sent."""
-    return (f"We can't do your cleaning request for {when_text(original_start, zone)}. "
-            f"Could {when_text(proposed_start, zone)} work instead? Reply YES to request "
-            "that time. The owner still has to approve it, so it is not confirmed yet.")
-
-
-@dataclass(frozen=True)
-class OfferView:
-    offer: "Counteroffer"
-    live: bool  # Proposed and unexpired: the owner's next YES or NO is about it.
-
-
-@dataclass(frozen=True)
-class _Ask:
-    """The owner's message could not be turned into one offer; ``question`` says why."""
-
-    question: str
-
-
-@dataclass(frozen=True)
-class _Request:
-    request: Appointment
-    clock: time
-    day: date
-
-
-def _parse_clock(text: str) -> time | _Ask | None:
-    """A single clock time, a question, or None when the text names no time at all."""
-    found: set[time] = set()
-    for match in CLOCK.finditer(text):
-        if match["noon"]:
-            found.add(time(12, 0))
-        elif match["meridiem"]:
-            hour = int(match["hour"])
-            if not 1 <= hour <= 12:
-                return _Ask("I couldn't read that time. Please say it like 2:00 PM.")
-            found.add(time(hour % 12 + (12 if match["meridiem"] == "p" else 0),
-                           int(match["minute"] or 0)))
-        else:
-            found.add(time(int(match["hour24"]), int(match["minute24"])))
-    if len(found) > 1:
-        return _Ask("I saw more than one time. Which single time should I offer?")
-    if found:
-        return next(iter(found))
-    return None
-
-
-def _parse_days(text: str, today: date) -> tuple[date, ...] | _Ask:
-    days: set[date] = set()
-    try:
-        for match in ISO_DAY.finditer(text):
-            days.add(date(int(match[1]), int(match[2]), int(match[3])))
-        for match in MONTH_DAY.finditer(text):
-            month, number = MONTHS.index(match[1]) + 1, int(match[2])
-            candidate = date(today.year, month, number)
-            days.add(candidate if candidate >= today else date(today.year + 1, month, number))
-        for match in SLASH_DAY.finditer(text):
-            candidate = date(today.year, int(match[1]), int(match[2]))
-            days.add(candidate if candidate >= today
-                     else date(today.year + 1, int(match[1]), int(match[2])))
-    except ValueError:
-        return _Ask("I couldn't read that date. Please say it like Fri Oct 9.")
-    words = re.findall(r"[a-z]+", text)
-    for word in words:
-        if word == "today":
-            days.add(today)
-        elif word == "tomorrow":
-            days.add(today + timedelta(days=1))
-        elif word in WEEKDAYS:
-            ahead = (WEEKDAYS.index(word) - today.weekday()) % 7 or 7
-            days.add(today + timedelta(days=ahead))
-    if len(days) > 1:
-        return _Ask("I saw more than one date. Which date should I offer?")
-    return tuple(days)
-
-
-_HANDLED = ("That offer was already handled, so nothing more was sent. The request was "
-            "not approved.")
-
-
 class CounterofferService:
-    """Owner SMS handling for counteroffers; every other owner message returns None."""
+    """Backend gates for model-chosen owner counteroffer tools."""
 
     def __init__(self, repository: OfferRepository, consent: OfferConsent,
                  store: CounterofferStore, owner_number: str) -> None:
@@ -385,387 +268,156 @@ class CounterofferService:
         self._store = store
         self._owner = owner_number
 
-    def handle(self, receipt: InboundReceipt, now: datetime,
-               pending: tuple[Appointment, ...],
-               calendar_last: bool = False) -> "ConversationOutcome | None":
-        """The deterministic part of owner offer handling; None leaves the message to routing.
-
-        ``calendar_last``: the assistant's latest message to the owner was a calendar answer,
-        so a bare YES or an "instead" without an offer verb is not clearly about the offer.
-        """
-        from scheduling.domain.conversation import ConversationOutcome
-
-        body = receipt.body or ""
-        text = normalized(body)
-        active = self._store.read_active(receipt.business_id, receipt.sender)
-        if active is not None and now >= active.expires_at + EXPIRED_NOTICE_WINDOW:
-            active = None
-        # Same owner message delivered twice: answer the same way, never act twice.
-        if active is not None and active.confirmed_by == receipt.provider_id:
-            return ConversationOutcome(self._queued_text(active))
-        if active is not None and active.offer_id == offer_id_for(
-                receipt.business_id, receipt.provider_id):
-            if active.state == OfferState.PROPOSED and not active.expired(now):
-                return ConversationOutcome(self._prompt(active, receipt.business_id))
-            return ConversationOutcome(_HANDLED)
-        parsed = self._parse(text, now, receipt.business_id, pending)
-        if (isinstance(parsed, _Request) and calendar_last
-                and not EXPLICIT_OFFER.search(text)):
-            return ConversationOutcome(self._ambiguous_instead(parsed, receipt.business_id))
-        if active is not None:
-            answered = self._answer(active, receipt, text, now, pending, parsed, calendar_last)
-            if answered is not None:
-                return answered
-        if parsed is None:
-            return None
-        if isinstance(parsed, _Ask):
-            return ConversationOutcome(parsed.question)
-        return self._prepare(receipt, now, parsed)
-
-    def prepare_from_model(self, receipt: InboundReceipt, now: datetime,
-                           pending: tuple[Appointment, ...], reference: str | None,
-                           version: int | None, day: date | None, clock: time | None,
-                           calendar_last: bool) -> "ConversationOutcome":
-        """The prepare_counteroffer owner tool (#274): a model-named offer, drafted only.
-
-        The model reads the owner's wording and names a request (reference and version),
-        a local day, and a time. Everything it names is checked against stored state: the
-        reference must be exactly one current pending request and the version must be that
-        request's current version. The result is the same draft as the deterministic path:
-        the owner must still reply YES, and the request stays pending. After a calendar
-        answer an offer verb in the owner's own text is required, as for typed instructions.
-        """
-        from scheduling.domain.conversation import ConversationOutcome
-
-        requests = tuple(request for request in pending
-                         if request.replaces_appointment_id is None)
-        zone = ZoneInfo(self._repository.read_policy(receipt.business_id).timezone)
-        ref = (reference or "").lower()
-        named = ([request for request in requests if len(ref) >= 8
-                  and request.appointment_id.startswith(ref)]
-                 if requests else [])
-        if not requests:
-            return ConversationOutcome(
-                "No request is waiting for approval right now, so I have nothing to counter. "
-                "Nothing was sent.")
-        if len(named) != 1 or day is None or clock is None:
-            return ConversationOutcome(self._which(
-                requests, zone, "I wasn't sure which request or time you meant."))
-        request = named[0]
-        if version != request.version:
-            return ConversationOutcome(
-                "I couldn't match that to a current request, so nothing changed or was sent. "
-                f"Pending: {self._line(request, zone)}. Tell me the time to offer again.")
-        parsed = _Request(request, clock, day)
-        if calendar_last and not EXPLICIT_OFFER.search(normalized(receipt.body or "")):
-            return ConversationOutcome(self._ambiguous_instead(parsed, receipt.business_id))
-        active = self._store.read_active(receipt.business_id, receipt.sender)
-        if active is not None and active.state == OfferState.PROPOSED:
-            self._store.discard(active)  # A revised instruction replaces the open draft.
-            self._store.clear_active(active.business_id, active.owner, active.offer_id)
-        return self._prepare(receipt, now, parsed)
-
-    def _ambiguous_instead(self, parsed: "_Request", business_id: str) -> str:
-        zone = ZoneInfo(self._repository.read_policy(business_id).timezone)
-        request = parsed.request
-        profile = self._repository.read_profile(business_id, request.client_id)
-        name = profile.name if profile is not None else "the client"
-        clock = parsed.clock.strftime("%I:%M %p").lstrip("0")
-        ref = request.appointment_id[:8]
-        return (f"I wasn't sure what you meant. Do you want me to offer {clock} to {name} "
-                f"instead of {when_text(request.start_at, zone)} (ref {ref}), or are you "
-                "asking about the calendar? Nothing was sent or changed. To prepare an offer, "
-                f"say: Offer {clock} instead for ref {ref}. To see the calendar, ask for a "
-                "day or week.")
-
-    # --- What routing needs to know about the owner's offer -------------------------------
+    def _facts(self, offer: Counteroffer) -> dict[str, object]:
+        zone = ZoneInfo(self._repository.read_policy(offer.business_id).timezone)
+        profile = self._repository.read_profile(offer.business_id, offer.client_id)
+        name = (profile.name.split()[0] if profile is not None and profile.name.split()
+                else "client")
+        return {"draft_id": offer.offer_id, "ref": offer.request_id[:8],
+                "version": offer.request_version, "client": name,
+                "time": when_text(offer.proposed_start, zone), "client_text": offer.text,
+                "expires_at": offer.expires_at.isoformat()}
 
     def open_offer(self, business_id: str, owner: str, now: datetime,
-                   pending: tuple[Appointment, ...]) -> "OfferView | None":
-        """The owner's offer while its request is still pending: live (awaiting YES or NO)
-        or closed (cancelled, sent, failed, accepted, or lapsed, within the notice window)."""
+                   pending: tuple[Appointment, ...]) -> Counteroffer | None:
         active = self._store.read_active(business_id, owner)
-        if active is None or now >= active.expires_at + EXPIRED_NOTICE_WINDOW:
+        if active is None or active.owner != owner or active.business_id != business_id:
+            return None
+        if active.state != OfferState.PROPOSED or active.expired(now):
             return None
         if not any(item.appointment_id == active.request_id
                    and item.version == active.request_version for item in pending):
             return None
-        return OfferView(active, active.state == OfferState.PROPOSED and not active.expired(now))
+        return active
 
-    def settle(self, view: "OfferView | None") -> None:
-        """The owner moved on from a finished offer; stop absorbing replies for it."""
-        if view is not None and not view.live:
-            self._store.clear_active(view.offer.business_id, view.offer.owner,
-                                     view.offer.offer_id)
+    def open_facts(self, business_id: str, owner: str, now: datetime,
+                   pending: tuple[Appointment, ...]) -> dict[str, object] | None:
+        offer = self.open_offer(business_id, owner, now, pending)
+        return self._facts(offer) if offer is not None else None
 
-    def reminder(self, offer: Counteroffer) -> str:
-        zone = ZoneInfo(self._repository.read_policy(offer.business_id).timezone)
-        return (f"Your offer to {self._client_name(offer)} for "
-                f"{when_text(offer.proposed_start, zone)} is still waiting: reply YES to send it "
-                f"or NO to cancel it. To approve the original request, reply APPROVE "
-                f"{offer.request_id[:8]}.")
-
-    def closed_note(self, offer: Counteroffer) -> str:
-        lapsed = "That offer expired. " if offer.state == OfferState.PROPOSED else ""
-        return (f"{lapsed}Nothing was approved or sent by that reply. The request is still pending. "
-                f"To approve the original request, reply APPROVE {offer.request_id[:8]}.")
-
-    def offer_line(self, offer: Counteroffer) -> tuple[str, str]:
-        """Client first name and the offered time, for the bounded model context."""
-        zone = ZoneInfo(self._repository.read_policy(offer.business_id).timezone)
-        name = self._client_name(offer).split()
-        return (name[0] if name else "client", when_text(offer.proposed_start, zone))
-
-    def short_reminder(self, offer: Counteroffer) -> str:
-        zone = ZoneInfo(self._repository.read_policy(offer.business_id).timezone)
-        return (f"(Your offer to {self._client_name(offer)} for "
-                f"{when_text(offer.proposed_start, zone)} still waits for YES or NO.)")
-
-    def _newer_request(self, offer: Counteroffer, pending: tuple[Appointment, ...]) -> bool:
-        """A request arrived after the offer was drafted: the owner may mean that one."""
-        # The request's own recorded creation time, never derived from the hold length, which
-        # the owner can edit. A record from before it was stored (no created_at) cannot be
-        # ordered, so it counts as possibly newer: a re-prompt is chosen over a send.
+    @staticmethod
+    def _newer_request(offer: Counteroffer, pending: tuple[Appointment, ...]) -> bool:
         return any(item.appointment_id != offer.request_id
                    and (item.created_at is None or item.created_at > offer.created_at)
                    for item in pending)
 
-    def _reprompt(self, offer: Counteroffer, receipt: InboundReceipt,
-                  now: datetime) -> "ConversationOutcome":
-        """Show the draft again as the latest message instead of sending it on a stale YES."""
-        from scheduling.domain.conversation import ConversationOutcome
-
-        fresh = replace(offer, offer_id=offer_id_for(receipt.business_id, receipt.provider_id),
-                        version=1, created_at=now, expires_at=now + CONFIRMATION_LIFETIME)
-        self._store.discard(offer)
-        if not self._store.put_draft(fresh):
-            return ConversationOutcome(_HANDLED)
-        return ConversationOutcome(
-            "A new request arrived after I drafted this offer, so I did not send it yet. "
-            + self._prompt(fresh, receipt.business_id))
-
-    def confirm_offer(self, offer: Counteroffer, receipt: InboundReceipt,
-                      now: datetime, pending: tuple[Appointment, ...]) -> "ConversationOutcome":
-        """Send the reviewed offer; rechecked exactly like a plain YES."""
-        from scheduling.domain.conversation import ConversationOutcome
-
-        if offer.expired(now):
-            self._store.discard(offer)
-            return ConversationOutcome(
-                "That offer expired after 30 minutes, so nothing was sent and the request was "
-                "not approved. Tell me the time to offer and I'll prepare it again. "
-                f"To approve the original request, reply APPROVE {offer.request_id[:8]}.")
-        if self._newer_request(offer, pending):
-            return self._reprompt(offer, receipt, now)
-        return self._confirm(offer, receipt, now)
-
-    def cancel_offer(self, offer: Counteroffer) -> "ConversationOutcome":
-        from scheduling.domain.conversation import ConversationOutcome
-
-        self._store.discard(offer)
-        return ConversationOutcome(
-            f"OK, I cancelled the offer to {self._client_name(offer)}; nothing was sent. "
-            "The request is still pending. To approve the original request, reply APPROVE "
-            f"{offer.request_id[:8]}.")
-
-    # An open offer is only ever answered here by: a plain YES (confirm it), NO (cancel it), a
-    # new offer instruction (replace it), or an exact APPROVE/DECLINE command (which drops it).
-    # Every other message leaves it untouched for routing: a calendar question keeps the offer
-    # (the reply says it is still waiting), and anything unclear is asked about. Nothing here
-    # reaches approval, so a YES that confirms an offer can never approve the request.
-    # The pointer outlives the offer (confirmed, failed, cancelled, or expired) for
-    # EXPIRED_NOTICE_WINDOW: while the same request is still pending, a bare yes/no is absorbed
-    # ("nothing was approved") and writes nothing.
-    def _answer(self, active: Counteroffer, receipt: InboundReceipt, text: str,
-                now: datetime, pending: tuple[Appointment, ...],
-                parsed: "_Request | _Ask | None",
-                calendar_last: bool) -> "ConversationOutcome | None":
-        from scheduling.domain.conversation import EXACT_COMMAND, ConversationOutcome
-
-        if EXACT_COMMAND.fullmatch((receipt.body or "").strip()):
-            if active.state == OfferState.PROPOSED:
-                self._store.discard(active)
-            self._store.clear_active(active.business_id, active.owner, active.offer_id)
-            return None  # An exact approve or decline command always works.
-        # After a calendar answer only an unmistakable YES reads as answering the offer.
-        yes = bool(STRICT_YES.fullmatch(text)) if calendar_last else is_affirmative(text)
-        no = is_negative(text) or bool(NO_TEXT.fullmatch(text))
-        ref = active.request_id[:8]
-        how = f"To approve the original request, reply APPROVE {ref}."
-        still_pending = any(item.appointment_id == active.request_id
-                            and item.version == active.request_version for item in pending)
-        if active.state != OfferState.PROPOSED:
-            if not still_pending:
-                self._store.clear_active(active.business_id, active.owner, active.offer_id)
-                return None
-            if not (yes or no):
-                return None
-            if active.failure is not None:
-                reason = PROBLEM_TEXT[OfferProblem(active.failure)]
-                return ConversationOutcome(
-                    f"That offer could not be sent ({reason.rstrip('.')}), so nothing was "
-                    f"sent and nothing was approved. Tell me another time to offer. {how}")
-            if active.state == OfferState.ACCEPTED:
-                return ConversationOutcome(
-                    "The client already accepted that offer, so a new request is waiting "
-                    "for your approval (ref "
-                    f"{(active.accepted_request_id or '')[:8]}). Nothing was approved by "
-                    "this reply. Reply APPROVE or DECLINE with that reference.")
-            if active.state == OfferState.CONFIRMED:
-                return ConversationOutcome(
-                    "That offer was already queued, so nothing more was sent. The request "
-                    f"is still pending and was not approved. {how}")
-            return ConversationOutcome(
-                f"Nothing was approved or sent. The request is still pending. {how}")
-        if yes:
-            if active.expired(now):
-                self._store.discard(active)
-                return ConversationOutcome(
-                    "That offer expired after 30 minutes, so nothing was sent and the request "
-                    f"was not approved. Tell me the time to offer and I'll prepare it again. {how}")
-            if self._newer_request(active, pending):
-                return self._reprompt(active, receipt, now)
-            return self._confirm(active, receipt, now)
-        if no:
-            self._store.discard(active)
-            return ConversationOutcome(
-                f"OK, I cancelled the offer to {self._client_name(active)}; nothing was sent. "
-                f"The request is still pending. {how}")
-        if isinstance(parsed, _Request):
-            self._store.discard(active)  # A revised instruction replaces the offer.
-            self._store.clear_active(active.business_id, active.owner, active.offer_id)
-        return None
-
-    def _confirm(self, active: Counteroffer, receipt: InboundReceipt,
-                 now: datetime) -> "ConversationOutcome":
-        from scheduling.domain.conversation import ConversationOutcome
-
-        problem = check_offer(active, self._repository, self._consent, now)
-        if problem is not None:
-            self._store.discard(active)
-            return ConversationOutcome(
-                f"I did not send it. {PROBLEM_TEXT[problem]} Tell me another time to offer.")
-        outbox = counteroffer_outbox(confirmed_offer(active, receipt.provider_id, now), now)
-        confirmed = self._store.confirm(active, receipt.provider_id, now, outbox)
-        if confirmed is None:
-            return ConversationOutcome(_HANDLED)
-        return ConversationOutcome(self._queued_text(confirmed))
-
-    def _queued_text(self, offer: Counteroffer) -> str:
-        zone = ZoneInfo(self._repository.read_policy(offer.business_id).timezone)
-        return (f"Queued the offer to {self._client_name(offer)} for "
-                f"{when_text(offer.proposed_start, zone)}. It goes out shortly, and I'll tell "
-                "you if it can't be sent. The original request is still pending and was not "
-                "approved. If they accept, it comes back to you for approval.")
-
-    def _client_name(self, offer: Counteroffer) -> str:
-        profile = self._repository.read_profile(offer.business_id, offer.client_id)
-        return profile.name if profile is not None else "the client"
-
-    def _prompt(self, offer: Counteroffer, business_id: str) -> str:
-        zone = ZoneInfo(self._repository.read_policy(business_id).timezone)
-        return (f"Offer for {self._client_name(offer)}, "
-                f"{when_text(offer.proposed_start, zone)}. Text I would send: "
-                f"\"{offer.text}\" Reply YES to send exactly this, or NO to cancel. "
-                "Nothing is sent until you reply YES, and the request stays pending.")
-
-    def _parse(self, text: str, now: datetime, business_id: str,
-               pending: tuple[Appointment, ...]) -> "_Request | _Ask | None":
-        if not text or not INTENT.search(text):
-            return None
-        clock = _parse_clock(text)
-        if isinstance(clock, _Ask):
-            return clock
-        if clock is None:
-            undated = MONTH_DAY.sub(" ", SLASH_DAY.sub(" ", ISO_DAY.sub(" ", text)))
-            if BARE_NUMBER.search(undated) is None:
-                return None
-            return _Ask("Please include AM or PM with the time, for example 2:00 PM. "
-                        "Nothing was sent.")
-        zone = ZoneInfo(self._repository.read_policy(business_id).timezone)
-        days = _parse_days(CLOCK.sub(" ", text), now.astimezone(zone).date())
-        if isinstance(days, _Ask):
-            return days
-        requests = tuple(request for request in pending
-                         if request.replaces_appointment_id is None)
-        if not requests:
-            return _Ask("No request is waiting for approval right now, so I have "
-                        "nothing to counter. Nothing was sent.")
-        chosen = self._select(text, requests, days, zone)
-        if isinstance(chosen, _Ask):
-            return chosen
-        day = days[0] if days else chosen.start_at.astimezone(zone).date()
-        return _Request(chosen, clock, day)
-
-    def _select(self, text: str, requests: tuple[Appointment, ...], days: tuple[date, ...],
-                zone: ZoneInfo) -> "Appointment | _Ask":
-        references = {match for match in REFERENCE.findall(text)}
-        if references:
-            named = [r for r in requests if r.appointment_id[:8] in references]
-            if len(named) == 1 and len(references) == 1:
-                return named[0]
-            return _Ask(self._which(requests, zone, "I couldn't match that reference."))
-        words = set(re.findall(r"[a-z]{3,}", text))
-        by_name = [r for r in requests
-                   if (profile := self._repository.read_profile(r.business_id, r.client_id))
-                   is not None and words & set(re.findall(r"[a-z]{3,}", profile.name.lower()))]
-        if len(by_name) == 1:
-            return by_name[0]
-        if len(requests) == 1:
-            return requests[0]
-        if days:
-            same_day = [r for r in requests if r.start_at.astimezone(zone).date() == days[0]]
-            if len(same_day) == 1:
-                return same_day[0]
-        return _Ask(self._which(requests, zone, "Which request do you mean?"))
-
-    def _which(self, requests: tuple[Appointment, ...], zone: ZoneInfo, lead: str) -> str:
-        shown = "; ".join(
-            f"{self._line(r, zone)}" for r in requests[:4])
-        more = f"; and {len(requests) - 4} more" if len(requests) > 4 else ""
-        return (f"{lead} Pending: {shown}{more}. Nothing was sent. Say it again with the "
-                "reference, like: Offer 2:00 PM instead for ref " + requests[0].appointment_id[:8]
-                + ".")
-
-    def _line(self, request: Appointment, zone: ZoneInfo) -> str:
-        profile = self._repository.read_profile(request.business_id, request.client_id)
-        name = profile.name if profile is not None else "client"
-        return f"{name}, {when_text(request.start_at, zone)} (ref {request.appointment_id[:8]})"
-
-    def _prepare(self, receipt: InboundReceipt, now: datetime,
-                 parsed: "_Request") -> "ConversationOutcome":
-        from scheduling.domain.conversation import ConversationOutcome
-
-        request = parsed.request
-        policy = self._repository.read_policy(receipt.business_id)
-        zone = ZoneInfo(policy.timezone)
-        wall = datetime.combine(parsed.day, parsed.clock)
+    def draft_counteroffer(self, receipt: InboundReceipt, now: datetime,
+                           pending: tuple[Appointment, ...], ref: str, version: int,
+                           day: date, clock: time, client_text: str) -> dict[str, object]:
+        """Validate current state, then store exactly the model's client text without sending."""
+        if receipt.sender != self._owner:
+            return {"ok": False, "error": "owner_mismatch"}
+        matches = [item for item in pending if ref.lower() in
+                   (item.appointment_id[:8], item.appointment_id)
+                   and item.replaces_appointment_id is None]
+        if len(matches) != 1:
+            return {"ok": False, "error": "not_found"}
+        request = matches[0]
+        if request.version != version:
+            return {"ok": False, "error": "stale_version",
+                    "current_version": request.version}
+        zone = ZoneInfo(self._repository.read_policy(receipt.business_id).timezone)
+        wall = datetime.combine(day, clock)
         instants = {candidate.astimezone(UTC) for fold in (0, 1)
                     if (candidate := wall.replace(tzinfo=zone, fold=fold))
                     .astimezone(UTC).astimezone(zone).replace(tzinfo=None) == wall}
         if len(instants) != 1:
-            return ConversationOutcome(
-                "That local time is missing or ambiguous. Tell me another time to offer.")
-        start = next(iter(instants))
-        profile = self._repository.read_profile(request.business_id, request.client_id)
+            return {"ok": False, "error": "invalid_time"}
+        profile = self._repository.read_profile(receipt.business_id, request.client_id)
         if profile is None:
-            return ConversationOutcome(
-                f"I did not prepare it. {PROBLEM_TEXT[OfferProblem.CLIENT_INELIGIBLE]} "
-                "Nothing was sent.")
+            return {"ok": False, "error": OfferProblem.CLIENT_INELIGIBLE.value.lower()}
         draft = Counteroffer(
             receipt.business_id, offer_id_for(receipt.business_id, receipt.provider_id),
             receipt.sender, request.appointment_id, request.version, request.client_id,
-            profile.phone_e164, start, request.duration_minutes,
-            offer_text(request.start_at, start, zone), OfferState.PROPOSED, 1, now,
-            now + CONFIRMATION_LIFETIME)
+            profile.phone_e164, next(iter(instants)), request.duration_minutes,
+            client_text, OfferState.PROPOSED, 1, now, now + CONFIRMATION_LIFETIME)
         problem = check_offer(draft, self._repository, self._consent, now)
         if problem is not None:
-            return ConversationOutcome(
-                f"I did not prepare an offer for {day_text(parsed.day)}. "
-                f"{PROBLEM_TEXT[problem]} Nothing was sent. Tell me another time to offer.")
+            return {"ok": False, "error": problem.value.lower()}
+        existing = self._store.read(receipt.business_id, draft.offer_id)
+        if existing is not None:
+            active_existing = self._store.read_active(receipt.business_id, receipt.sender)
+            if (existing.state == OfferState.PROPOSED and active_existing is not None
+                    and active_existing.offer_id == existing.offer_id):
+                return {"ok": True, **self._facts(existing)}
+            return {"ok": False, "error": "draft_conflict"}
+        active = self._store.read_active(receipt.business_id, receipt.sender)
+        if active is not None and active.offer_id != draft.offer_id \
+                and active.state == OfferState.PROPOSED:
+            self._store.discard(active)
+            previous = self._store.read(receipt.business_id, active.offer_id)
+            if previous is None or previous.state != OfferState.DISCARDED:
+                return {"ok": False, "error": "draft_conflict"}
         if not self._store.put_draft(draft):
-            return ConversationOutcome(_HANDLED)
-        return ConversationOutcome(self._prompt(draft, receipt.business_id))
+            return {"ok": False, "error": "draft_conflict"}
+        return {"ok": True, **self._facts(draft)}
+
+    def _owned_draft(self, receipt: InboundReceipt, draft_id: str) -> Counteroffer | None:
+        if receipt.sender != self._owner:
+            return None
+        offer = self._store.read(receipt.business_id, draft_id)
+        if offer is None or offer.business_id != receipt.business_id or offer.owner != receipt.sender:
+            return None
+        return offer
+
+    def send_counteroffer(self, receipt: InboundReceipt, now: datetime,
+                          pending: tuple[Appointment, ...], draft_id: str,
+                          history: tuple[HistoryMessage, ...]
+                          ) -> dict[str, object]:
+        """Recheck an owned open draft and atomically queue its exact stored text once."""
+        offer = self._owned_draft(receipt, draft_id)
+        if offer is None:
+            return {"ok": False, "error": "not_found"}
+        if offer.state == OfferState.CONFIRMED and offer.confirmed_by == receipt.provider_id:
+            return {"ok": True, "already_sent": True, **self._facts(offer)}
+        if offer.state != OfferState.PROPOSED:
+            return {"ok": False, "error": "draft_not_open"}
+        if offer.expired(now):
+            self._store.discard(offer)
+            return {"ok": False, "error": "expired"}
+        if not any(message.role == "assistant" and message.at.tzinfo is not None
+                   and offer.created_at <= message.at <= now
+                   and offer.text in message.text for message in history):
+            return {"ok": False, "error": "owner_preview_missing"}
+        active = self._store.read_active(receipt.business_id, receipt.sender)
+        if active is None or active.offer_id != draft_id:
+            return {"ok": False, "error": "draft_not_open"}
+        if self._newer_request(offer, pending):
+            return {"ok": False, "error": "newer_request"}
+        problem = check_offer(offer, self._repository, self._consent, now)
+        if problem is not None:
+            self._store.discard(offer)
+            return {"ok": False, "error": problem.value.lower()}
+        outbox = counteroffer_outbox(confirmed_offer(offer, receipt.provider_id, now), now)
+        confirmed = self._store.confirm(offer, receipt.provider_id, now, outbox)
+        if confirmed is None:
+            return {"ok": False, "error": "draft_conflict"}
+        return {"ok": True, "queued": True, **self._facts(confirmed)}
+
+    def cancel_counteroffer(self, receipt: InboundReceipt, now: datetime,
+                            draft_id: str) -> dict[str, object]:
+        offer = self._owned_draft(receipt, draft_id)
+        if offer is None:
+            return {"ok": False, "error": "not_found"}
+        if offer.state != OfferState.PROPOSED:
+            return {"ok": False, "error": "draft_not_open"}
+        if offer.expired(now):
+            self._store.discard(offer)
+            return {"ok": False, "error": "expired"}
+        active = self._store.read_active(receipt.business_id, receipt.sender)
+        if active is None or active.offer_id != draft_id:
+            return {"ok": False, "error": "draft_not_open"}
+        self._store.discard(offer)
+        current = self._store.read(receipt.business_id, draft_id)
+        if current is None or current.state != OfferState.DISCARDED:
+            return {"ok": False, "error": "draft_conflict"}
+        return {"ok": True, "cancelled": True, "draft_id": draft_id}
+
+    def discard_open_for_decision(self, business_id: str, owner: str) -> None:
+        """An exact owner APPROVE/DECLINE command supersedes its open draft."""
+        active = self._store.read_active(business_id, owner)
+        if active is not None and active.state == OfferState.PROPOSED:
+            self._store.discard(active)
 
 
 class HoldCreator(Protocol):
@@ -956,7 +608,7 @@ class InMemoryCounterofferStore:
         with self._lock:
             key = (offer.business_id, offer.offer_id)
             existing = self._offers.get(key)
-            if existing is not None and existing.state != OfferState.PROPOSED:
+            if existing is not None:
                 return False
             self._offers[key] = offer
             self._active[(offer.business_id, offer.owner)] = offer.offer_id
@@ -967,6 +619,7 @@ class InMemoryCounterofferStore:
             key = (offer.business_id, offer.offer_id)
             current = self._offers.get(key)
             if (current is not None and current.state == OfferState.PROPOSED
+                    and self._active.get((offer.business_id, offer.owner)) == offer.offer_id
                     and current.version == offer.version):
                 self._offers[key] = replace(current, state=OfferState.DISCARDED,
                                             version=current.version + 1)
@@ -983,6 +636,7 @@ class InMemoryCounterofferStore:
             current = self._offers.get(key)
             if (current is None or current.state != OfferState.PROPOSED
                     or current.version != offer.version
+                    or self._active.get((offer.business_id, offer.owner)) != offer.offer_id
                     or outbox.entity_id != offer.offer_id):
                 return None
             confirmed = confirmed_offer(current, confirmed_by, now)

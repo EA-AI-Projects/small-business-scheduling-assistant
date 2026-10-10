@@ -11,6 +11,7 @@ from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.domain.calendar import CalendarStatus
 from scheduling.domain.client_records import ClientProfile, HomeSize
 from scheduling.domain.conversation import ConversationService, MessageContext, MessageProposal
+from scheduling.domain.conversation_history import HistoryMessage
 from scheduling.domain.conversation_state import InMemoryConversationStates
 from scheduling.domain.holds import CreateHold, HoldService
 from scheduling.domain.lifecycle import LifecycleService
@@ -18,11 +19,6 @@ from scheduling.domain.owner_counteroffer import (
     CounterofferService,
     InMemoryCounterofferStore,
     OfferState,
-)
-from scheduling.domain.owner_transitional import (
-    OwnerTransitionContext,
-    OwnerTransitionIntent,
-    OwnerTransitionProposal,
 )
 from scheduling.domain.sms_ingress import ConsentEvidence, InboundReceipt, Keyword, SenderRole
 
@@ -35,20 +31,25 @@ ASK = "That doesn't work for me. Can you offer 2:00 PM instead?"
 class Model:
     def __init__(self) -> None:
         self.loop_calls: list[str] = []
-        self.transition_calls: list[str] = []
-        self.transitions: dict[str, OwnerTransitionProposal] = {}
+        self.draft_id: str | None = None
 
     def propose(self, body: str, context: MessageContext) -> MessageProposal:
         raise AssertionError("Owner path must not use the client proposer")
 
-    def classify_owner_transition(self, body: str,
-                                  context: OwnerTransitionContext) -> OwnerTransitionProposal:
-        self.transition_calls.append(body)
-        return self.transitions.get(body, OwnerTransitionProposal(OwnerTransitionIntent.UNCLEAR))
-
     def run_owner_loop(self, body: str, today: date, timezone: str, history: Any,
                        tool: Any) -> str:
         self.loop_calls.append(body)
+        if body == ASK:
+            target = tool("list_pending_requests", {})["requests"][0]
+            client_text = "Could Thu Oct 1 at 2:00 PM work? Reply YES to request that time."
+            result = tool("draft_counteroffer", {"ref": target["ref"],
+                "version": target["version"], "date": "2026-10-01", "time": "14:00",
+                "client_text": client_text})
+            self.draft_id = result["draft_id"]
+            return f"Text I would send: {client_text} Reply YES to send exactly this."
+        if body == "YES":
+            result = tool("send_counteroffer", {"draft_id": self.draft_id})
+            return "Queued the offer." if result["ok"] else "Nothing was sent."
         if body.startswith("What "):
             first, last = (("2026-10-05", "2026-10-11")
                            if "next week" in body else
@@ -58,7 +59,9 @@ class Model:
                                            "statuses": [], "offset": 0})
             text = f"Calendar {first} to {last}: {result['total']} items."
             if result.get("open_offer"):
-                text += f" {result['open_offer']}"
+                offer = result["open_offer"]
+                text += (f" Your offer to {offer['client']} for {offer['time']} "
+                         "still waits for YES or NO.")
             return text
         if body == "Approve Avery, please":
             target = tool("list_pending_requests", {})["requests"][0]
@@ -86,11 +89,21 @@ class Consent:
         return ConsentEvidence(business_id, "c1", "Synthetic", phone_e164, NOW, "v1")
 
 
+class History:
+    def __init__(self) -> None:
+        self.messages: list[HistoryMessage] = []
+
+    def read_conversation_history(self, receipt: InboundReceipt,
+                                  now: datetime) -> tuple[HistoryMessage, ...]:
+        return tuple(self.messages)
+
+
 class Chat:
     def __init__(self) -> None:
         self.store = InMemoryCalendarRepository()
         self.model = Model()
         self.consent = Consent()
+        self.history = History()
         self.offers = InMemoryCounterofferStore()
         self.now = NOW
         self.count = 0
@@ -102,7 +115,8 @@ class Chat:
             self.store, self.model, HoldService(self.store),
             LifecycleService(self.store, lambda: self.now), self.consent, lambda: self.now,
             OWNER, InMemoryConversationStates(),
-            counteroffers=CounterofferService(self.store, self.consent, self.offers, OWNER))
+            counteroffers=CounterofferService(self.store, self.consent, self.offers, OWNER),
+            history_reader=self.history)
 
     def hold(self, client: str = "c1", day: int = 1, key: str = "a") -> str:
         start = datetime(2026, 10, day, 9, tzinfo=ZONE).astimezone(UTC)
@@ -119,6 +133,10 @@ class Chat:
         if not result.committed:
             self.consent.replies[provider] = result.text
             self.consent.sent[provider] = self.now
+            offer = self.offers.read_active("pilot", OWNER)
+            if offer is not None and offer.state == OfferState.PROPOSED and offer.text in result.text:
+                self.history.messages.append(HistoryMessage(
+                    provider, "assistant", self.now, result.text))
         return result
 
     def status(self, request: str) -> CalendarStatus:
@@ -141,13 +159,13 @@ def test_calendar_question_uses_read_only_tool_loop() -> None:
     assert chat.status(request) == CalendarStatus.PENDING_APPROVAL
 
 
-def test_counteroffer_instruction_prepares_without_sending_or_model_call() -> None:
+def test_counteroffer_instruction_prepares_without_sending() -> None:
     chat = Chat()
     request = chat.hold()
     answer = chat.ask(ASK)
     assert "Text I would send" in answer.text and "2:00 PM" in answer.text
     assert chat.offer_state() == OfferState.PROPOSED
-    assert not chat.offers.outbox and chat.model.loop_calls == []
+    assert not chat.offers.outbox and chat.model.loop_calls == [ASK]
     assert chat.status(request) == CalendarStatus.PENDING_APPROVAL
 
 
@@ -157,7 +175,7 @@ def test_plain_yes_sends_reviewed_offer_but_does_not_approve_request() -> None:
     chat.ask(ASK)
     answer = chat.ask("YES")
     assert answer.text.startswith("Queued the offer") and not answer.committed
-    assert len(chat.offers.outbox) == 1 and chat.model.loop_calls == []
+    assert len(chat.offers.outbox) == 1 and chat.model.loop_calls == [ASK, "YES"]
     assert chat.status(request) == CalendarStatus.PENDING_APPROVAL
 
 
@@ -165,12 +183,10 @@ def test_calendar_answer_during_offer_keeps_offer_waiting() -> None:
     chat = Chat()
     chat.hold()
     chat.ask(ASK)
-    chat.model.transitions["What do I have on Friday?"] = OwnerTransitionProposal(
-        OwnerTransitionIntent.CALENDAR_QUESTION)
     answer = chat.ask("What do I have on Friday?")
     assert "2026-10-02" in answer.text and "still waits for YES or NO" in answer.text
     assert chat.offer_state() == OfferState.PROPOSED
-    assert not chat.offers.outbox and chat.model.loop_calls == ["What do I have on Friday?"]
+    assert not chat.offers.outbox and chat.model.loop_calls == [ASK, "What do I have on Friday?"]
 
 
 def test_exact_command_bypasses_model_even_after_calendar_and_offer() -> None:
@@ -179,7 +195,7 @@ def test_exact_command_bypasses_model_even_after_calendar_and_offer() -> None:
     chat.ask("What do I have on Thursday?")
     chat.ask(ASK)
     answer = chat.ask(f"APPROVE {request[:8]}")
-    assert answer.committed and chat.model.loop_calls == ["What do I have on Thursday?"]
+    assert answer.committed and chat.model.loop_calls == ["What do I have on Thursday?", ASK]
     assert chat.status(request) == CalendarStatus.CONFIRMED
     assert not chat.offers.outbox
 

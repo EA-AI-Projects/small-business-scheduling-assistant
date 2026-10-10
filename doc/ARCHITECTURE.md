@@ -58,12 +58,14 @@ sender rechecks, and no-history drafts keep replay and delivery idempotent.
 This client read path does not perform a calendar write; direct booking requests
 follow the separately scoped #272 work.
 Owner approval and decline (#298): after the owner phone, consent, and opt-out
-checks and the still-active exact-command and counteroffer handlers,
+checks and exact-command handling,
 the model receives the owner's bounded, sent-aware 24-hour SMS thread, the
 business-local date, and timezone. A read failure uses the fixed owner failure
 line. The model may call only strict JSON `list_pending_requests()`,
 `approve_request(ref, version)`, `decline_request(ref, version)`, or the #299
-`get_calendar(from, to, statuses, offset)` read tool. The pending-request
+`get_calendar(from, to, statuses, offset)` read tool, or the #300
+`draft_counteroffer(ref, version, date, time, client_text)`, `send_counteroffer(draft_id)`,
+and `cancel_counteroffer(draft_id)` tools. The pending-request
 read returns current business-scoped references, versions, client first names,
 local times, and statuses. A clear choice among several requests may act; the
 #177 short-reply allowlist, HIGH confidence gate, and sent-clarification-question
@@ -92,9 +94,34 @@ prose; that residual risk is accepted without a second owner drafter or #285
 per-entry validator. The deterministic owner calendar question and MORE
 matchers, `OWNER_QUESTION#<phone>` follow-up state, and stored paging cursor
 are removed. A fresh page can differ after an intervening calendar write. The
-existing open counteroffer draft remains open across a calendar read and its
-YES/NO reminder, expiry, and send checks remain until #300. No live model
+existing open counteroffer draft remains open across a calendar read; its
+expiry and send checks remain. No live model
 evaluation or SMS was run for #299. See [CONVERSATION.md](CONVERSATION.md#owner-calendar-questions-299).
+
+Counteroffers (#300) use the same loop. The model reads the owner's transcript
+to select a current request, prepare a proposed local date and time with
+client-facing `client_text`, or interpret an open draft's confirmation or
+cancellation. The draft tool checks the request
+reference and version, active verified client and consent, opt-out, time,
+availability, and expiry before it stores the model's exact `client_text` in a
+30-minute proposal; it sends nothing. A revision replaces the stored draft.
+Only the send tool may move
+that owner's current unexpired draft to confirmed and queue the exact stored
+model-written client text in the transactional outbox. Before that write it
+requires trusted sent-history evidence that an owner preview containing that
+exact text was sent after the draft was created; missing evidence returns
+`owner_preview_missing` and queues nothing. The send also rechecks request
+version and pending state, eligibility, availability, and any newer request. The cancel
+tool discards the draft without a send. Stable outbox IDs and receipt replay
+prevent a duplicate client message. The deterministic owner YES/NO offer hook,
+typed offer parser, closed-offer reminder logic, and fixed owner counteroffer
+sentences are removed. The model writes the final owner reply, subject to the
+GSM-7/480-septet delivery check; the backend does not check its meaning or
+client draft wording. A model misunderstanding can choose the wrong tool, but
+the backend still enforces the stored-draft and send guards. No live SMS is
+authorized by this change. If a queued client send later fails its final check,
+the existing fixed owner delivery-failure notice remains as an exception to
+model-written conversation replies. See [SCHEDULING_CONTRACTS.md](SCHEDULING_CONTRACTS.md#owner-counteroffer-confirmation-175).
 
 This document makes the AWS deployment and technology choices for the SMS-first scheduling MVP. It uses the existing **NeuroSpineDx** project as a reference for the team's AWS/serverless patterns, but adapts the choices to a small, low-traffic scheduling workload and its most important correctness constraint: no overlapping appointments or active holds.
 

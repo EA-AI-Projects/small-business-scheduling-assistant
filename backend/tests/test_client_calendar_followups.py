@@ -170,8 +170,8 @@ def scripted(world: World) -> Script:  # noqa: F811 - pytest fixture
 
 def test_calendar_answer_reminds_of_an_open_counteroffer_and_yes_still_accepts_it(
         world: World) -> None:  # noqa: F811 - pytest fixture
-    model = scripted(world)
     world.offered()
+    model = scripted(world)
     model.replies["Do I have bookings this week?"] = cal(*THIS_WEEK)
     answer = world.client("Do I have bookings this week?")
     assert answer.text.endswith(
@@ -185,8 +185,8 @@ def test_calendar_answer_reminds_of_an_open_counteroffer_and_yes_still_accepts_i
 
 def test_inside_a_calendar_conversation_only_plain_yes_or_no_answers_a_counteroffer(
         world: World) -> None:  # noqa: F811 - pytest fixture
-    model = scripted(world)
     world.offered()
+    model = scripted(world)
     before = dict(world.repository._appointments)
     model.replies["Do I have bookings this week?"] = cal(*THIS_WEEK)
     model.replies["Just the confirmed one"] = cal(statuses=("confirmed",))

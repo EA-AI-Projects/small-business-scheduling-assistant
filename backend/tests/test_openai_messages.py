@@ -1,7 +1,7 @@
 """The model adapter proposes bounded intent and never receives customer context."""
 
 import json
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime
 from io import BytesIO
 from typing import Any, cast
 from urllib.request import Request
@@ -12,11 +12,6 @@ from scheduling.adapters.openai_messages import OpenAIMessageInterpreter
 from scheduling.domain.client_replies import ClientReplyFact, ClientReplyResult
 from scheduling.domain.conversation import MessageContext
 from scheduling.domain.conversation_history import HistoryMessage
-from scheduling.domain.owner_transitional import (
-    OwnerTransitionContext,
-    OwnerTransitionIntent,
-    PendingRef,
-)
 from scheduling.domain.sms_ingress import SenderRole
 
 
@@ -127,54 +122,6 @@ def test_ambiguous_proposal_with_action_is_rejected(monkeypatch: pytest.MonkeyPa
         OpenAIMessageInterpreter("synthetic-key").propose("Yes", context)
 
 
-def owner_reply_response(**changes: Any) -> BytesIO:
-    arguments: dict[str, Any] = {
-        "intent": "calendar_followup", "request_reference": None, "statuses": ["confirmed"], "date_from": None, "date_to": None,
-        "request_version": None, "offer_date": None, "offer_time": None}
-    arguments.update(changes)
-    return BytesIO(json.dumps({"output": [{
-        "type": "function_call", "name": "classify_owner_transition",
-        "arguments": json.dumps(arguments),
-    }]}).encode())
-
-
-@pytest.mark.parametrize("changes", [
-    {"intent": "approve_everything"}, {"statuses": ["bogus"]},
-    {"date_from": "next friday"}, {"request_reference": "x" * 65},
-    {"offer_date": "Friday"}, {"offer_time": "2pm"}, {"request_version": "2"},
-    {"request_version": True}])
-def test_invalid_owner_reply_classification_is_rejected(
-        monkeypatch: pytest.MonkeyPatch, changes: dict[str, Any]) -> None:
-    monkeypatch.setattr("scheduling.adapters.openai_messages.urlopen",
-                        lambda *_args, **_kwargs: owner_reply_response(**changes))
-    context = OwnerTransitionContext(date(2026, 10, 4), "America/Los_Angeles", "calendar_answer",
-                                "summary", None, None, (), ())
-    with pytest.raises(ValueError):
-        OpenAIMessageInterpreter("synthetic-key").classify_owner_transition("yes", context)
-
-
-def test_owner_reply_classification_describes_an_open_offer_and_accepts_offer_intents(
-        monkeypatch: pytest.MonkeyPatch) -> None:
-    sent: list[dict[str, Any]] = []
-
-    def fake_urlopen(request: Request, timeout: int) -> BytesIO:
-        sent.append(json.loads(cast(bytes, request.data or b"{}")))
-        return owner_reply_response(intent="confirm_offer", statuses=None)
-
-    monkeypatch.setattr("scheduling.adapters.openai_messages.urlopen", fake_urlopen)
-    pending = PendingRef("abc12345", "Blake", "Wed Oct 7 at 9:00 AM")
-    context = OwnerTransitionContext(
-        date(2026, 10, 4), "America/Los_Angeles", "offer_prompt", "none", None, None, (),
-        (pending,), PendingRef("abc12345", "Blake", "Wed Oct 7 at 2:00 PM"))
-    result = OpenAIMessageInterpreter("synthetic-key").classify_owner_transition("go ahead", context)
-    assert result.intent == OwnerTransitionIntent.CONFIRM_OFFER
-    text = sent[0]["input"]
-    assert "Last assistant message: offer_prompt" in text
-    assert "Open offer: ref abc12345, Blake, new time Wed Oct 7 at 2:00 PM" in text
-    enum = sent[0]["tools"][0]["parameters"]["properties"]["intent"]["enum"]
-    assert {"confirm_offer", "cancel_offer"} <= set(enum)
-
-
 def test_calendar_question_carries_statuses_view_and_the_open_answer(
         monkeypatch: pytest.MonkeyPatch) -> None:
     requests: list[dict[str, Any]] = []
@@ -230,19 +177,3 @@ def test_a_stray_range_scope_does_not_break_a_booking_request(
     context = MessageContext(SenderRole.CLIENT, date(2026, 9, 29), "America/Los_Angeles", ())
     result = OpenAIMessageInterpreter("synthetic-key").propose("A cleaning soon?", context)
     assert result.intent == "availability" and result.range_scope is None
-
-
-def test_owner_counteroffer_tool_arguments_are_typed(
-        monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "scheduling.adapters.openai_messages.urlopen",
-        lambda *_args, **_kwargs: owner_reply_response(
-            intent="prepare_counteroffer", request_reference="abc12345", statuses=None,
-            request_version=2, offer_date="2026-10-09", offer_time="14:00"))
-    context = OwnerTransitionContext(date(2026, 10, 4), "America/Los_Angeles", "none", "none",
-                                None, None, (), ())
-    result = OpenAIMessageInterpreter("synthetic-key").classify_owner_transition(
-        "could Blake do Friday at two", context)
-    assert result.intent == OwnerTransitionIntent.PREPARE_COUNTEROFFER
-    assert (result.request_version, result.offer_date, result.offer_time) == (
-        2, date(2026, 10, 9), time(14, 0))
