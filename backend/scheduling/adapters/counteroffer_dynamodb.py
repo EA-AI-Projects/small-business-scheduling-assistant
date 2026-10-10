@@ -120,10 +120,7 @@ class DynamoCounterofferStore:
         try:
             self._client.transact_write_items(TransactItems=[
                 {"Put": {"TableName": self._table, "Item": self._item(offer),
-                         # A redelivered owner message rewrites the same proposal.
-                         "ConditionExpression": "attribute_not_exists(PK) OR #s = :proposed",
-                         "ExpressionAttributeNames": {"#s": "state"},
-                         "ExpressionAttributeValues": {":proposed": {"S": "PROPOSED"}}}},
+                         "ConditionExpression": "attribute_not_exists(PK)"}},
                 {"Put": {"TableName": self._table,
                          "Item": self._pointer(offer, f"COUNTEROFFER_ACTIVE#{offer.owner}")}},
                 *self._erasure_checks(offer),
@@ -137,6 +134,12 @@ class DynamoCounterofferStore:
     def discard(self, offer: Counteroffer) -> None:
         try:
             self._client.transact_write_items(TransactItems=[
+                {"ConditionCheck": {
+                    "TableName": self._table,
+                    "Key": self._key(offer.business_id,
+                                     f"COUNTEROFFER_ACTIVE#{offer.owner}"),
+                    "ConditionExpression": "offer_id = :id",
+                    "ExpressionAttributeValues": {":id": {"S": offer.offer_id}}}},
                 {"Update": {
                     "TableName": self._table,
                     "Key": self._key(offer.business_id, f"COUNTEROFFER#{offer.offer_id}"),
@@ -181,6 +184,12 @@ class DynamoCounterofferStore:
                          "ExpressionAttributeValues": {
                              ":proposed": {"S": OfferState.PROPOSED.value},
                              ":version": {"N": str(offer.version)}}}},
+                {"ConditionCheck": {
+                    "TableName": self._table,
+                    "Key": self._key(offer.business_id,
+                                     f"COUNTEROFFER_ACTIVE#{offer.owner}"),
+                    "ConditionExpression": "offer_id = :id",
+                    "ExpressionAttributeValues": {":id": {"S": offer.offer_id}}}},
                 {"Put": {"TableName": self._table, "Item": {
                     **self._key(outbox.business_id, f"OUTBOX#{outbox.outbox_id}"),
                     **due_keys(DeliveryState.PENDING, outbox.created_at, outbox.outbox_id),

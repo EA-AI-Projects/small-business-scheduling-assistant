@@ -78,7 +78,7 @@ Behavior checked offline with a scripted model in `backend/tests/test_conversati
 
 ## Owner approval and decline tool loop (#298)
 
-After owner verification and the existing deterministic command and offer handlers, an owner message enters a model tool loop. The model receives the owner's bounded, sent-aware 24-hour SMS transcript, the business-local date, and the timezone. The transcript is conversation data, not authority to perform an action. The model can call only these structured JSON tools (the calendar read joined in #299):
+After owner verification and exact-command handling, an owner message enters a model tool loop. The model receives the owner's bounded, sent-aware 24-hour SMS transcript, the business-local date, and the timezone. The transcript is conversation data, not authority to perform an action. The model can call only these structured JSON tools (#299 added the calendar read; #300 added the counteroffer tools):
 
 | Tool | Arguments | Authoritative result |
 | --- | --- | --- |
@@ -86,6 +86,9 @@ After owner verification and the existing deterministic command and offer handle
 | `get_calendar` | `from`, `to`, `statuses`, `offset` | Current business-scoped calendar and first-name client facts for the requested local range and page. Read-only. |
 | `approve_request` | `ref`, `version` | Lifecycle approval result or a precise error. |
 | `decline_request` | `ref`, `version` | Lifecycle decline result or a precise error. |
+| `draft_counteroffer` | `ref`, `version`, `date`, `time`, `client_text` | A checked, stored 30-minute draft with the model's exact client-facing text and its ID; no client send. |
+| `send_counteroffer` | `draft_id` | Send result for this owner's current, unexpired draft. |
+| `cancel_counteroffer` | `draft_id` | Discard result for this owner's current, unexpired draft; no client send. |
 
 The model chooses the target and action from the owner's message and current tool result. A clear choice among several requests can act. A hedged or qualified message is interpreted in context; no fixed short-reply vocabulary or HIGH-confidence threshold gates the decision. If the target or intent remains ambiguous, the model asks a short question and does not call a decision tool. The #177 plain-reply allowlist and sent-clarification-question state no longer govern this owner approval path. Exact `APPROVE <ref>` and `DECLINE <ref>` commands still bypass the model.
 
@@ -93,7 +96,9 @@ The backend derives the owner and business from the verified receipt, accepts on
 
 The model writes the final owner SMS after seeing the tool result. It must describe only a successful action or say that nothing changed after an error; the backend no longer applies #285's per-entry date, time, and reference checks to this decision reply. It checks that the text is nonempty GSM-7 and at most 480 septets. If the final text is invalid, it asks the model once to rewrite it within that limit without another tool call. A second invalid answer, model failure, timeout, or unreadable history uses the fixed owner failure line. If a decision already committed, the fallback does not undo it; the persisted lifecycle and outbox result remains authoritative. No live model or SMS call is part of this change.
 
-Calendar questions and paging use the same owner tool loop from #299. Counteroffer drafting and confirmation retain their existing handler until #300. Its reminders, expiry, and confirmation checks still apply; a calendar read cannot send a counteroffer or change the schedule.
+Calendar questions, paging, and counteroffer drafting, sending, and cancellation use the same owner tool loop. A calendar read cannot send a counteroffer or change the schedule; only `send_counteroffer` can queue the client text.
+
+For a counteroffer (#300), the model writes `client_text` as part of `draft_counteroffer`; the backend runs the existing preparation checks and stores that exact client-facing text for a later send. The model also writes the owner's draft receipt and later send, cancel, or error SMS from the tool result under the same GSM-7/480-septet final-reply rule. The backend does not apply a separate semantic wording check to the model's decision or draft text, so the model can misunderstand a confirmation or describe a draft inaccurately. Before send, the backend rechecks the request's pending status and version, the draft's owner and 30-minute lifetime, any newer request, client eligibility and consent, and the proposed slot. A failed or stale tool call sends no client message. The send is idempotent, and a redelivered owner receipt replays the stored reply without sending again. The client receives only the model's exact `client_text` stored with the confirmed offer through the existing outbox and sender checks. Live SMS still requires separate authorization.
 
 ## What cannot cause a write
 
@@ -117,19 +122,18 @@ The last offer, list of visits, confirmation question, or client calendar questi
 
 ## Owner message routing
 
-The owner model uses one tool loop for pending-request decisions and calendar reads. The counteroffer handler remains ahead of that loop until #300; its stored offer safeguards still govern sends.
+The owner model uses one tool loop for pending-request decisions, calendar reads, and counteroffers. The backend keeps the stored offer safeguards for every draft and send.
 
 Order of handling for each owner text (first match wins):
 
 1. **Exact commands.** `APPROVE <ref>` / `DECLINE <ref>` act without the model. If an offer is open it is dropped first.
 2. **Offer redelivery.** The same SMS delivered again replays its original reply and never acts twice.
-3. **Offer hook (deterministic).** A plain YES sends an open offer, NO or CANCEL drops it, and a new offer instruction ("Can you offer 2:00 PM instead?") replaces it or prepares one. A finished offer absorbs a bare yes/no ("nothing was approved") for one hour while its request is still pending.
-4. **Owner tool loop**, with the bounded transcript, local date, and timezone, for calendar questions, follow-ups, MORE, pending-request reads, and decisions.
+3. **Owner tool loop**, with the bounded transcript, local date, timezone, and current draft details, for calendar questions, follow-ups, MORE, pending-request decisions, and counteroffer drafting, sending, or cancellation.
 
-Contexts and what each allows during the transition:
+Contexts and what each allows:
 
-- **Counteroffer draft.** The existing typed offer instruction prepares a 30-minute draft; the owner's plain YES sends it and NO or CANCEL drops it. A calendar question does not close the draft and its answer includes a reminder. A newer request, changed version, expired draft, or unsent prompt keeps the existing send checks. A model decision tool cannot send or cancel this offer. This path remains until #300.
-- **Calendar conversation.** The model interprets complete questions, status or count clarifications, follow-ups, and MORE from the owner's text and sent transcript, then calls `get_calendar` for current facts. It may read while a counteroffer draft waits, but must mention the draft and how the owner can answer it. A calendar read itself never approves or declines a request.
+- **Counteroffer draft.** The model interprets an owner's proposed time, reads the current request if needed, writes the client-facing offer text, and calls `draft_counteroffer` with its reference, version, local date, time, and `client_text`. The backend checks the request, client eligibility and consent, past or unavailable times, and stores that exact text in a 30-minute draft without sending. A revised instruction replaces the draft. A clear plain YES while it is open is read by the model as a send and leads to `send_counteroffer`; a cancellation leads to `cancel_counteroffer`. Tool-loop sends and cancellations go through those stored-draft tools. The deterministic YES/NO offer hook, typed offer parser, closed-offer replies, and fixed counteroffer reply sentences are removed.
+- **Calendar conversation.** The model interprets complete questions, status or count clarifications, follow-ups, and MORE from the owner's text and sent transcript, then calls `get_calendar` for current facts. It may read while a counteroffer draft waits; the draft stays open until sent, cancelled, replaced, or expired. The model should mention that draft and what a YES would send. A calendar read itself never approves, declines, or sends.
 - **Pending-request decision.** Remaining owner wording enters the same tool loop. The model reads current requests before a decision, and the backend enforces their versions. The old #174 sent-question and #177 allowlist restrictions no longer gate this decision. A clear decision about one of several pending requests can use its reference and version; if the target is unclear, the model asks.
 - **Failure and replay.** A tool error is returned to the model for a truthful final message. If the model or history fails, the fixed failure line is sent. The existing receipt and outbox path stores one response and replays it for a duplicate delivery.
 
@@ -140,7 +144,7 @@ The verified owner can ask by text what next week looks like, which clients are 
 - **Grounded scope.** The tool exposes only this business's current confirmed visits, unexpired pending requests, and unavailable blocks. Declined, cancelled, and expired records are omitted. Client names are first names only; no phone, address, notes, or other-client business data enters the result. The model can still misstate a count, date, or status in its prose; #299 accepts this residual risk rather than adding the old #285 per-entry owner draft checks.
 - **Local dates and statuses.** `from` and `to` are interpreted in the business timezone. A local day spans midnight to midnight there; a block crossing midnight appears on both days but counts once in a total. Times include the appropriate PDT or PST abbreviation on a daylight-saving transition. The reply should name the requested date or range and label confirmed visits, pending requests that are not yet confirmed, and unavailable blocks separately. An unclear range or an ambiguous bare "bookings" count gets a focused question about the date or statuses before a tool read.
 - **Follow-ups and MORE.** The model uses the preceding sent exchange to interpret "just the pending ones", "what about Friday?", "how many?", "by day", and "MORE". It supplies the resulting range, statuses, and page offset in each new tool call. The backend rereads the current calendar on every turn, including MORE, so an intervening approval, cancellation, expiry, or block edit is reflected. The old deterministic owner calendar matchers, `OWNER_QUESTION#<phone>` follow-up state, and stored paging fingerprint/cursor are removed; the transcript supplies conversational context. If a page changes between messages, the fresh result is authoritative, so a later page is not promised to match an earlier snapshot.
-- **Open counteroffer.** A calendar read leaves the existing draft open. The model is told its current details and must remind the owner what a YES sends and how NO cancels it; the draft's 30-minute expiry and send-time checks still apply. The `get_calendar` tool cannot prepare, send, or cancel an offer. Counteroffer routing remains with its existing handler until #300.
+- **Open counteroffer.** A calendar read leaves the draft open. The model is told its current details and should remind the owner what a YES would send and how to cancel it; the draft's 30-minute expiry and send-time checks still apply. `get_calendar` itself cannot prepare, send, or cancel an offer.
 - **Reply and replay.** The model writes one final owner SMS under the #298 GSM-7 and 480-septet rule, including its single rewrite on invalid output and fixed failure line on failure. There is no separate read-only owner drafter or per-entry date/time/reference validator. The existing receipt and outbox path stores the reply; a duplicate inbound message replays it without another calendar read or model call.
 
 ## Try it locally

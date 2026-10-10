@@ -48,11 +48,6 @@ from scheduling.domain.conversation_state import InMemoryConversationStates
 from scheduling.domain.holds import HoldService, OutboxIntent
 from scheduling.domain.lifecycle import LifecycleService
 from scheduling.domain.outbox import PermanentDeliveryFailure
-from scheduling.domain.owner_transitional import (
-    OwnerTransitionContext,
-    OwnerTransitionIntent,
-    OwnerTransitionProposal,
-)
 from scheduling.domain.sms_ingress import (
     HELP_WORDS,
     START_WORDS,
@@ -100,11 +95,6 @@ class OfflineInterpreter:
     def propose(self, body: str, context: MessageContext) -> MessageProposal:
         self.consulted = True
         return MessageProposal("clarify", None, None, None, True)
-
-    def classify_owner_transition(self, body: str,
-                                  context: OwnerTransitionContext) -> OwnerTransitionProposal:
-        self.consulted = True
-        return OwnerTransitionProposal(OwnerTransitionIntent.UNCLEAR)
 
     def run_owner_loop(self, body: str, today: date, timezone: str,
                        history: tuple[HistoryMessage, ...],

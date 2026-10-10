@@ -4,6 +4,7 @@ The interpreter proposes intent only. This layer checks actor, target, date,
 current state, and policy before calling the existing transactional services.
 """
 
+import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -77,12 +78,6 @@ from scheduling.domain.lifecycle import (
 )
 from scheduling.domain.owner_calendar_tool import STATUSES as OWNER_CALENDAR_STATUSES
 from scheduling.domain.owner_calendar_tool import calendar_page
-from scheduling.domain.owner_transitional import (
-    OwnerTransitionClassifier,
-    OwnerTransitionContext,
-    OwnerTransitionIntent,
-    PendingRef,
-)
 from scheduling.domain.sms_ingress import (
     ConsentEvidence,
     InboundReceipt,
@@ -95,10 +90,10 @@ if TYPE_CHECKING:
     from scheduling.domain.owner_counteroffer import (
         CounterofferAcceptance,
         CounterofferService,
-        OfferView,
     )
 
 MAX_CONTEXT_APPOINTMENTS = 8
+LOGGER = logging.getLogger(__name__)
 MAX_MESSAGE_LENGTH = 1000
 EXPLICIT_DATE = re.compile(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)")
 EXPLICIT_START = re.compile(r"(?<!\d)\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?!\d)")
@@ -215,7 +210,6 @@ class ConversationService:
                  holds: HoldService, lifecycle: LifecycleService,
                  consent: ConsentLookup, clock: Callable[[], datetime],
                  owner_number: str, states: ConversationStateStore | None = None,
-                 owner_transition_classifier: OwnerTransitionClassifier | None = None,
                  counteroffers: "CounterofferService | None" = None,
                  counteroffer_acceptance: "CounterofferAcceptance | None" = None,
                  history_reader: ConversationHistoryReader | None = None) -> None:
@@ -228,9 +222,6 @@ class ConversationService:
         self._owner_number = normalize_phone(owner_number)
         self._availability = AvailabilityService(repository)
         self._states = states if states is not None else InMemoryConversationStates()
-        self._owner_transition = (
-            owner_transition_classifier if owner_transition_classifier is not None
-            else interpreter if isinstance(interpreter, OwnerTransitionClassifier) else None)
         self._counteroffers = counteroffers
         self._acceptance = counteroffer_acceptance
         self._history_reader = history_reader
@@ -346,18 +337,7 @@ class ConversationService:
                 return ConversationOutcome(
                     "I can't check the current schedule right now. Please try again later.")
             return ConversationOutcome(OWNER_FAILURE_TEXT)
-        if receipt.role == SenderRole.OWNER and self._counteroffers is not None:
-            # Owner counteroffers (#175) run first so a YES that confirms an offer
-            # is never read as approval of the pending request.
-            try:
-                calendar_last = self._calendar_last(receipt, targets, now)
-                countered = self._counteroffers.handle(receipt, now, targets, calendar_last)
-            except Exception:  # noqa: BLE001 - history/offer failures use one fixed owner line
-                return ConversationOutcome(OWNER_FAILURE_TEXT)
-            if countered is not None:
-                return countered
-        # Inside a calendar conversation only a plain YES or NO answers an owner counteroffer;
-        # "Just the confirmed one", "1", or "the first one" is about the calendar answer.
+        # A client's calendar follow-up is distinct from accepting a client offer.
         body = receipt.body or ""
         plain = is_negative(body) or (is_affirmative(body) and not mentions_status(body))
         if (receipt.role == SenderRole.CLIENT and self._acceptance is not None
@@ -665,6 +645,11 @@ class ConversationService:
         except (HoldExpired, InvalidTransition, StaleVersion, SlotConflict,
                 TooManyConflicts, IdempotencyKeyReused):
             return ConversationOutcome("That request changed. Please review the current calendar.")
+        if self._counteroffers is not None:
+            try:
+                self._counteroffers.discard_open_for_decision(receipt.business_id, receipt.sender)
+            except Exception:
+                LOGGER.exception("Counteroffer cleanup failed after owner decision")
         state = "confirmed" if action == Action.APPROVE else "declined"
         text = f"Request {target.appointment_id[:8]} {state}."
         if action == Action.APPROVE and result.replaced_appointment is not None:
@@ -1030,45 +1015,9 @@ class ConversationService:
                                  (self._client_fact(result.appointment.start_at, zone,
                                                     "cancelled", target.appointment_id[:8]),))
 
-    def _calendar_last(self, receipt: InboundReceipt, targets: tuple[Appointment, ...],
-                       now: datetime) -> bool:
-        """A later assistant reply makes a bare offer answer ambiguous."""
-        if self._history_reader is None or self._counteroffers is None:
-            return False
-        view = self._counteroffers.open_offer(receipt.business_id, receipt.sender, now, targets)
-        if view is None or not view.live:
-            return False
-        history = self._history_reader.read_conversation_history(receipt, now)
-        later = [message for message in history
-                 if message.role == "assistant" and message.at > view.offer.created_at]
-        if not later:
-            return False
-        latest = later[-1].text
-        # The counteroffer's own draft prompt is delivered after its creation.
-        # Only a later, different assistant reply makes a bare offer answer ambiguous.
-        return not ("Text I would send:" in latest
-                    and "Reply YES to send exactly this" in latest)
-
     def _owner_answer(self, receipt: InboundReceipt, targets: tuple[Appointment, ...],
                       now: datetime) -> ConversationOutcome:
-        """Keep transitional counteroffers, then use the owner model tool loop."""
-        body = receipt.body or ""
-        offers = self._counteroffers
-        view = (offers.open_offer(receipt.business_id, receipt.sender, now, targets)
-                if offers is not None else None)
-        if (view is not None and view.offer.state.value == "ACCEPTED"
-                and re.match(r"^\s*(?:approve|decline)\b", body, re.IGNORECASE)):
-            return self._owner_tool_loop(receipt, now)
-        if (self._owner_transition is not None
-                and (view is not None or re.search(
-                    r"\b(?:offer|instead|rather than|another time|free)\b",
-                    body, re.IGNORECASE))):
-            try:
-                transition = self._route_transition(receipt, targets, now, view)
-            except Exception:  # noqa: BLE001 - history failures use one fixed owner line
-                return ConversationOutcome(OWNER_FAILURE_TEXT)
-            if transition is not None:
-                return transition
+        """The model handles owner conversation through validated tools."""
         return self._owner_tool_loop(receipt, now)
 
     def _owner_tool_loop(self, receipt: InboundReceipt, now: datetime) -> ConversationOutcome:
@@ -1076,11 +1025,13 @@ class ConversationService:
         if not isinstance(self._interpreter, OwnerToolLoop):
             return ConversationOutcome(OWNER_FAILURE_TEXT)
         committed: ConversationOutcome | None = None
+        offer_action: str | None = None
 
         def tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
-            nonlocal committed
+            nonlocal committed, offer_action
             if name not in ("list_pending_requests", "approve_request", "decline_request",
-                            "get_calendar"):
+                            "get_calendar", "draft_counteroffer", "send_counteroffer",
+                            "cancel_counteroffer"):
                 return {"ok": False, "error": "unknown_tool"}
             try:
                 policy = self._repository.read_policy(receipt.business_id)
@@ -1107,21 +1058,64 @@ class ConversationService:
                                                     zone, now, first, last, tuple(statuses), offset)
                     if self._counteroffers is not None:
                         pending = self._repository.read_pending_requests(receipt.business_id, now)
-                        offer = self._counteroffers.open_offer(
+                        open_offer = self._counteroffers.open_facts(
                             receipt.business_id, receipt.sender, now, pending)
-                        if offer is not None and offer.live:
-                            calendar_result["open_offer"] = self._counteroffers.short_reminder(
-                                offer.offer)
+                        if open_offer is not None:
+                            calendar_result["open_offer"] = open_offer
                     return calendar_result
                 pending = self._repository.read_pending_requests(receipt.business_id, now)
                 if name == "list_pending_requests":
                     if args:
                         return {"ok": False, "error": "invalid_arguments"}
-                    return {"ok": True, "requests": [
+                    list_result: dict[str, Any] = {"ok": True, "requests": [
                         {"ref": item.appointment_id[:8], "version": item.version,
-                         "client": self._pending_ref(receipt.business_id, item, zone).client,
+                         "client": (profile.name.split()[0] if (profile := self._repository.read_profile(
+                             receipt.business_id, item.client_id)) is not None
+                             and profile.name.split() else "client"),
                          "time": when_text(item.start_at, zone), "status": item.status.value}
                         for item in pending]}
+                    if self._counteroffers is not None:
+                        list_result["open_offer"] = self._counteroffers.open_facts(
+                            receipt.business_id, receipt.sender, now, pending)
+                    return list_result
+                if name in ("draft_counteroffer", "send_counteroffer", "cancel_counteroffer"):
+                    if self._counteroffers is None:
+                        return {"ok": False, "error": "unavailable"}
+                    if committed is not None or offer_action is not None:
+                        return {"ok": False, "error": "already_changed"}
+                    if name == "draft_counteroffer":
+                        ref, version = args.get("ref"), args.get("version")
+                        raw_day, raw_clock = args.get("date"), args.get("time")
+                        client_text = args.get("client_text")
+                        if (set(args) != {"ref", "version", "date", "time", "client_text"}
+                                or not isinstance(ref, str)
+                                or not isinstance(version, int) or isinstance(version, bool)
+                                or not isinstance(raw_day, str)
+                                or re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw_day) is None
+                                or not isinstance(raw_clock, str)
+                                or re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", raw_clock) is None
+                                or not isinstance(client_text, str)
+                                or not client_text.strip() or client_text != client_text.strip()
+                                or (size := gsm_septets(client_text, True)) is None
+                                or size > 480):
+                            return {"ok": False, "error": "invalid_arguments"}
+                        try:
+                            day, clock = date.fromisoformat(raw_day), time.fromisoformat(raw_clock)
+                        except ValueError:
+                            return {"ok": False, "error": "invalid_arguments"}
+                        answer = self._counteroffers.draft_counteroffer(
+                            receipt, now, pending, ref, version, day, clock, client_text)
+                    else:
+                        draft_id = args.get("draft_id")
+                        if (set(args) != {"draft_id"} or not isinstance(draft_id, str)
+                                or re.fullmatch(r"co-[0-9a-f]{24}", draft_id) is None):
+                            return {"ok": False, "error": "invalid_arguments"}
+                        answer = (self._counteroffers.send_counteroffer(
+                            receipt, now, pending, draft_id) if name == "send_counteroffer"
+                            else self._counteroffers.cancel_counteroffer(receipt, now, draft_id))
+                    if answer["ok"]:
+                        offer_action = name
+                    return answer
                 ref, version = args.get("ref"), args.get("version")
                 if (set(args) != {"ref", "version"} or not isinstance(ref, str)
                         or not isinstance(version, int) or isinstance(version, bool)):
@@ -1134,11 +1128,8 @@ class ConversationService:
                 if target.version != version:
                     return {"ok": False, "error": "stale_version", "ref": ref,
                             "current_version": target.version}
-                if self._counteroffers is not None:
-                    offer = self._counteroffers.open_offer(
-                        receipt.business_id, receipt.sender, now, pending)
-                    if offer is not None and offer.live:
-                        return {"ok": False, "error": "offer_pending", "ref": ref}
+                if offer_action is not None:
+                    return {"ok": False, "error": "already_changed", "ref": ref}
                 if committed is not None:
                     return {"ok": False, "error": "already_decided", "ref": ref}
                 action = Action.APPROVE if name == "approve_request" else Action.DECLINE
@@ -1148,6 +1139,12 @@ class ConversationService:
                     owner_reply_required=True))
                 committed = ConversationOutcome("", True, result.appointment.appointment_id,
                                                 owner_reply_on_commit=True)
+                if self._counteroffers is not None:
+                    try:
+                        self._counteroffers.discard_open_for_decision(
+                            receipt.business_id, receipt.sender)
+                    except Exception:
+                        LOGGER.exception("Counteroffer cleanup failed after owner decision")
                 return {"ok": True, "ref": target.appointment_id[:8],
                         "status": result.appointment.status.value}
             except ReplacementPending:
@@ -1171,68 +1168,6 @@ class ConversationService:
         except Exception:  # noqa: BLE001 - model/read failures have one fixed owner reply
             return (replace(committed, text=OWNER_FAILURE_TEXT) if committed is not None
                     else ConversationOutcome(OWNER_FAILURE_TEXT))
-
-    def _route_transition(self, receipt: InboundReceipt,
-                          targets: tuple[Appointment, ...], now: datetime,
-                          view: "OfferView | None") -> ConversationOutcome | None:
-        """Keep counteroffer interpretation until #300."""
-        classifier = self._owner_transition
-        if classifier is None:
-            return None
-        policy = self._repository.read_policy(receipt.business_id)
-        zone = ZoneInfo(policy.timezone)
-        calendar_last = self._calendar_last(receipt, targets, now)
-        kind = ("offer_with_calendar_answer" if calendar_last else "offer_prompt") if (
-            view is not None and view.live) else "offer_closed" if view is not None else "none"
-        offer = None
-        if view is not None and self._counteroffers is not None:
-            client, when = self._counteroffers.offer_line(view.offer)
-            offer = PendingRef(view.offer.request_id[:8], client, when)
-        try:
-            history = (self._history_reader.read_conversation_history(receipt, now)
-                       if self._history_reader is not None else ())
-            proposal = classifier.classify_owner_transition(receipt.body or "",
-                OwnerTransitionContext(
-                    now.astimezone(zone).date(), policy.timezone, kind,
-                    "none", None, None, (),
-                    tuple(self._pending_ref(receipt.business_id, item, zone)
-                          for item in targets[:MAX_CONTEXT_APPOINTMENTS]), offer, history))
-        except Exception:  # noqa: BLE001 - a model failure uses the one fixed owner line
-            return ConversationOutcome(OWNER_FAILURE_TEXT)
-        if proposal.intent == OwnerTransitionIntent.PREPARE_COUNTEROFFER:
-            if self._counteroffers is None:
-                return None
-            try:
-                return self._counteroffers.prepare_from_model(
-                    receipt, now, targets, proposal.request_reference, proposal.request_version,
-                    proposal.offer_date, proposal.offer_time, calendar_last)
-            except (OSError, ValueError, TypeError, KeyError, RuntimeError):
-                return ConversationOutcome(OWNER_FAILURE_TEXT)
-        if proposal.intent == OwnerTransitionIntent.CONFIRM_OFFER:
-            if self._counteroffers is not None and view is not None and view.live:
-                return self._counteroffers.confirm_offer(view.offer, receipt, now, targets)
-            return None
-        if proposal.intent == OwnerTransitionIntent.CANCEL_OFFER:
-            if self._counteroffers is not None and view is not None and view.live:
-                return self._counteroffers.cancel_offer(view.offer)
-            return None
-        if proposal.intent in (OwnerTransitionIntent.CALENDAR_FOLLOWUP,
-                               OwnerTransitionIntent.CALENDAR_QUESTION):
-            return None  # The owner loop reads the calendar and writes the answer.
-        if view is not None and self._counteroffers is not None:
-            if view.live:
-                return ConversationOutcome(self._counteroffers.reminder(view.offer))
-            note = self._counteroffers.closed_note(view.offer)
-            self._counteroffers.settle(view)
-            return ConversationOutcome(note)
-        return None
-
-    def _pending_ref(self, business_id: str, target: Appointment,
-                     zone: ZoneInfo) -> PendingRef:
-        profile = self._repository.read_profile(business_id, target.client_id)
-        name = profile.name.split()[0] if profile is not None and profile.name.split() else "client"
-        return PendingRef(target.appointment_id[:8], name, when_text(target.start_at, zone),
-                          target.version)
 
     @staticmethod
     def _active_target(receipt: InboundReceipt, appointment_id: str | None,

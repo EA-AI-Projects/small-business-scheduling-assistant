@@ -289,11 +289,11 @@ def test_ambiguous_reply_keeps_the_offer_open(world: World) -> None:
 
 
 def test_a_calendar_question_keeps_the_offer_open(world: World) -> None:
+    world.offered()
     model = ScriptedModel()
     model.proposal = MessageProposal("calendar_question", None, None, None, False,
                                      "2026-09-28", "2026-10-04")
     world.service._interpreter = model
-    world.offered()
     answer = world.client("Do I have bookings this week?")
     assert "pending owner approval, not confirmed yet" in answer.text
     assert not answer.committed
@@ -337,9 +337,9 @@ class ScriptedModel:
 
 
 def _accepted_and_approved(world: World) -> ScriptedModel:
+    request = world.offered()
     model = ScriptedModel()
     world.service._interpreter = model
-    request = world.offered()
     world.clock[0] = NOW + timedelta(minutes=5)
     assert world.client("YES").committed
     new = world.replacement_of(request)
@@ -414,7 +414,7 @@ def _crashed_after_hold(world: World) -> str:
     world.store.accept = lambda offer, request_id: None  # type: ignore[method-assign]
     assert world.client("YES", "SM-crash").committed
     world.store.accept = real_accept  # type: ignore[method-assign]
-    return world.replacement_of(request).appointment_id
+    return str(world.replacement_of(request).appointment_id)
 
 
 def _says_no_false_status(text: str) -> None:
