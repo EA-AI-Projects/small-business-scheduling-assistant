@@ -35,6 +35,7 @@ function Shell({ start }: { start: "calendar" | "appointments" }) {
   const move = { booking: moving, set: setMoving };
   return <>
     <button type="button" data-nav="calendar" onClick={() => setPage("calendar")}>nav calendar</button>
+    <button type="button" data-view="week" onClick={() => calendar.setView("week")}>week</button>
     <button type="button" data-nav="appointments" onClick={() => setPage("appointments")}>nav appointments</button>
     {page === "calendar"
       ? <ClientHome key="calendar" config={config} token="access" zone={ZONE} calendar={calendar} move={move} onSessionEnded={ended} />
@@ -410,6 +411,63 @@ describe("client calendar and bookings", () => {
       expect(host.querySelector("[role=alert]")?.textContent).toContain("no longer open");
       expect(host.querySelector("[aria-label='Other open times']")).not.toBeNull();
       expect(host.textContent).not.toContain("Move requested");
+    });
+
+    describe("a move held while bookings are still loading", () => {
+      const slow = (second: unknown) => {
+        let release: (response: Response) => void = () => undefined;
+        let bookingReads = 0;
+        const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+          if (init?.method === "POST") return json(replacement);
+          if (url.includes("availability")) return json({ day: TODAY, duration_minutes: 90, starts_at: [START] });
+          bookingReads += 1;
+          if (bookingReads === 1) return json({ bookings: [original] });
+          return new Promise<Response>((resolve) => { release = resolve; });
+        });
+        vi.stubGlobal("fetch", fetcher);
+        return { fetcher, finish: () => act(async () => release(json({ bookings: second }))) };
+      };
+      const timeButtons = () => host.querySelectorAll("[aria-label='Available start times'] button");
+
+      it("offers no time and posts no new request until the booking is known", async () => {
+        const { fetcher, finish } = slow([original]);
+        await render();
+        await act(async () => button("Move to another time")!.click());
+        // Availability has resolved; the booking has not.
+        expect(timeButtons()).toHaveLength(0);
+        expect(host.textContent).toContain("Loading times");
+        await finish();
+        expect(timeButtons()).toHaveLength(1);
+        expect(host.querySelector("[aria-label='Moving this appointment']")).not.toBeNull();
+        await act(async () => (timeButtons()[0] as HTMLElement).click());
+        expect(button("Send request for owner approval")).toBeUndefined();
+        await act(async () => button("Send move request for owner approval")!.click());
+        expect(posts(fetcher).map(([url]) => url)).toEqual(["https://api.example.test/v1/client/bookings/visit-1/reschedule"]);
+      });
+
+      it("drops a move whose booking changed, says so, and sends nothing", async () => {
+        const { fetcher, finish } = slow([{ ...original, version: 4 }]);
+        await render();
+        await act(async () => button("Move to another time")!.click());
+        await finish();
+        expect(host.querySelector("[aria-label='Moving this appointment']")).toBeNull();
+        expect(host.querySelector("[role=alert]")?.textContent).toContain("move was cancelled and nothing was sent");
+        expect(posts(fetcher)).toHaveLength(0);
+      });
+
+      it("shows the moving notice outside Day view and on Appointments, each with a way to keep the appointment", async () => {
+        stub([[original]], () => json({}));
+        await render();
+        await act(async () => button("Move to another time")!.click());
+        await act(async () => host.querySelector<HTMLButtonElement>("[data-view=week]")!.click());
+        expect(host.textContent).toContain("You are moving your appointment");
+        await nav("appointments");
+        expect(host.textContent).toContain("You started moving your appointment");
+        await act(async () => button("Keep my current appointment")!.click());
+        expect(host.textContent).not.toContain("started moving");
+        await nav("calendar");
+        expect(host.textContent).not.toContain("You are moving");
+      });
     });
 
     it("offers no change without a version from the server", async () => {

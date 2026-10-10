@@ -123,6 +123,10 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
   const [ownMoving, setOwnMoving] = useState<ClientBooking | null>(null);
   const heldMoving = move ? move.booking : ownMoving;
   const setMoving = move ? move.set : setOwnMoving;
+  const [moveDropped, setMoveDropped] = useState(false);
+  // Read by the bookings load, which clears a move whose booking is gone or changed.
+  const heldMove = useRef({ held: heldMoving, set: setMoving, dropped: setMoveDropped });
+  useEffect(() => { heldMove.current = { held: heldMoving, set: setMoving, dropped: setMoveDropped }; }, [heldMoving, setMoving]);
   // A booking whose cancellation is waiting for the separate, explicit confirm press.
   const [heldConfirming, setConfirming] = useState<ClientBooking | null>(null);
   const cancelAttempt = useRef<{ id: string; key: string } | null>(null);
@@ -145,7 +149,12 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
     let current = true;
     read(config, token, "/v1/client/bookings").then((data) => {
       if (!current) return;
-      setBookings(parseBookings(data)); setBookingsError(null); setNowMs(Date.now());
+      const list = parseBookings(data);
+      const { held, set, dropped } = heldMove.current;
+      if (held && !list.some((item) => item.appointment_id === held.appointment_id && item.version === held.version)) {
+        set(null); dropped(true);
+      }
+      setBookings(list); setBookingsError(null); setNowMs(Date.now());
     }).catch((error: unknown) => { if (current) fail(error, setBookingsError); });
     return () => { current = false; };
   }, [config, token, fail, refresh]);
@@ -194,6 +203,8 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
   const stillCurrent = (held: ClientBooking | null) => held && bookings?.some((item) =>
     item.appointment_id === held.appointment_id && item.version === held.version) ? held : null;
   const moving = stillCurrent(heldMoving);
+  // A held move whose booking is not loaded yet must never fall back to a new request.
+  const moveLoading = heldMoving !== null && bookings === null;
   const confirming = stillCurrent(heldConfirming);
   const choose = (start: string | null) => { setChosen(start); setOutcome(null); };
   // In calendar mode a new date or view drops any chosen time and outcome, as picking a day always did.
@@ -206,7 +217,7 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
     setChosen(null); setOutcome(null); attempt.current = null;
   }, [calendar, date, calendarView]);
   const send = async () => {
-    if (!chosen || sending) return;
+    if (!chosen || sending || moveLoading || (heldMoving && !moving)) return;
     const id = `${moving?.appointment_id ?? "new"}|${moving?.version ?? 0}|${chosen}`;
     if (attempt.current?.id !== id) attempt.current = { id, key: crypto.randomUUID() };
     setSending(true);
@@ -247,7 +258,7 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
     finally { setChanging(false); }
   };
   const startMove = (booking: ClientBooking) => {
-    setMoving(booking); setConfirming(null); setChangeOutcome(null); choose(null);
+    setMoveDropped(false); setMoving(booking); setConfirming(null); setChangeOutcome(null); choose(null);
     onOpenCalendar?.();
   };
 
@@ -265,7 +276,7 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
           {settled?.minutes ? ` Visits are about ${settled.minutes} minutes.` : ""}</p>
         {beyondHorizon ? <p role="status">We only book up to {horizonDays} days ahead.</p>
           : startsError ? <p className="notice error" role="alert">{startsError}</p>
-          : starts === null ? <p>Loading times…</p>
+          : starts === null || moveLoading ? <p>Loading times…</p>
           : shown.length === 0 ? <p>No times are available on this day. Try another day.</p>
           : <ul className="card-list" aria-label="Available start times">
             {shown.map((start) => <li key={start}>
@@ -282,7 +293,7 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
           <p>You picked <strong>{localStamp(chosen, zone)}</strong> ({zone}). Sending asks the owner for approval.
             This time is not booked and is not confirmed until the owner approves it.
             {moving ? ` Your appointment on ${localStamp(moving.start_at, zone)} stays confirmed until then.` : ""}</p>
-          <button type="button" disabled={sending} onClick={() => void send()}>
+          <button type="button" disabled={sending || moveLoading} onClick={() => void send()}>
             {sending ? "Sending…" : moving ? "Send move request for owner approval" : "Send request for owner approval"}</button>
         </div>}
         {outcome?.kind === "sent" && outcome.booking.status !== "PENDING_APPROVAL" && <p role="status" className="notice">
@@ -313,6 +324,9 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
           loading={bookings === null && !bookingsError} error={bookingsError}
           maxDate={maxDate} />
       </section>
+      {moveDropped && !moving && <p className="notice error" role="alert">
+        The appointment you were moving changed or is no longer there, so the move was cancelled and nothing was sent.
+        Open Appointments to review it.</p>}
       {moving && !(calendar.view === "day" && date >= today) && <p className="notice" role="status">
         You are moving your appointment on <strong>{localStamp(moving.start_at, zone)}</strong>. Open Day view
         on a day to pick a new time, or{" "}
@@ -321,6 +335,10 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
     </div>;
   }
   return <div className="stack client-home">
+    {moving && <p className="notice" role="status">
+      You started moving your appointment on <strong>{localStamp(moving.start_at, zone)}</strong>. Choose a new time in
+      Calendar, Day view. Nothing changes until you send it and the owner approves.{" "}
+      <button type="button" onClick={() => setMoving(null)}>Keep my current appointment</button></p>}
     <section className="card" aria-labelledby="client-bookings">
       <h2 id="client-bookings">Your appointments</h2>
       <button type="button" onClick={() => { setConfirming(null); setMoving(null); setRefresh((count) => count + 1); }}>Refresh</button>
