@@ -77,6 +77,8 @@ Open `http://127.0.0.1:8000/local/texts` and paste the owner token printed by Te
 4. Open `http://127.0.0.1:3000` in another tab, sign in with the owner token, and approve or decline the request under pending requests. Or, in the text simulator, text as the owner `Approve REF` (or `yes` when it is the only pending request). Reload `/client/` (sign in again) to see the status.
 5. As the client, cancel a visit, or move a confirmed one (the original stays confirmed until the owner approves the replacement). Avery starts with one confirmed visit and Blake with one pending request.
 
+Known limit: revoking a client in the local owner app does not stop that client's local token; the local verifier always returns an active link. Everything resets when Terminal A stops.
+
 Use a private window or sign out to try the other client; each token reaches only its own client's bookings. The client page and the text simulator use the same backend rules.
 
 - **Client texts:** choose Avery Example or Blake Sample and ask in plain language, for example "Do you have availability for tomorrow?". The reply offers 3–5 open times and writes nothing. Answer with one of them ("10 works", "option 2", or "yes" when one time was offered) within 30 minutes to create a pending request. Refresh the owner calendar to see it. The model sees that client's recent inbound texts and displayed replies under the production 24-hour history bounds. See the [conversation flow](doc/CONVERSATION.md) for what counts as a pick.

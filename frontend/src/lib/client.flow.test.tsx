@@ -83,6 +83,10 @@ describe("client account entry", () => {
         url.endsWith("/session") ? '{"role":"client","business_id":"pilot","client_id":"client-1","timezone":"America/Los_Angeles"}'
           : url.includes("availability") ? '{"starts_at":[]}' : '{"bookings":[]}', { status: 200 }));
       vi.stubGlobal("fetch", fetcher);
+      // Node's own localStorage is unavailable here; a recording stand-in catches any write to it.
+      const store = new Map<string, string>();
+      vi.stubGlobal("localStorage", { setItem: (k: string, v: string) => store.set(k, v), getItem: (k: string) => store.get(k) ?? null,
+        removeItem: (k: string) => store.delete(k), clear: () => store.clear() });
       await act(async () => root.render(<ClientAccess config={local} />));
       expect(host.textContent).toContain("Local client sign-in");
       await submit("pasted-local-client-token");
@@ -92,7 +96,10 @@ describe("client account entry", () => {
       expect(fetcher.mock.calls.every(([url]) => !String(url).includes("/v1/account/"))).toBe(true);
       expect(auth.completeSignIn).not.toHaveBeenCalled();
       expect(auth.authorizeUrl).not.toHaveBeenCalled();
-      expect(JSON.stringify({ ...sessionStorage })).not.toContain("pasted-local-client-token");
+      const secret = "pasted-local-client-token";
+      expect(JSON.stringify({ ...sessionStorage })).not.toContain(secret);
+      expect(JSON.stringify([...store])).not.toContain(secret);
+      expect(window.location.href).not.toContain(secret);
     });
 
     it("shows a denial and no client content for a rejected token", async () => {

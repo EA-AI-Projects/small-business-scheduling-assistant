@@ -28,6 +28,8 @@ Requires Node 22 (see `.nvmrc`).
 
 The same backend serves a text simulator at `http://127.0.0.1:8000/local/texts` that shares this calendar. Unless `OPENAI_API_KEY` is set in your shell, it accepts only exact commands; see [Try the app locally](../README.md#try-the-app-locally).
 
+Revoking a client in the local owner app does not stop that client's local token (local verifier always returns an active link).
+
 Local mode exists only for the synthetic local API and requires a loopback `NEXT_PUBLIC_API_BASE_URL`. It shows the local sign-in on both `/` and `/client/`; Amplify deployments use Cognito mode, where `/client/` signs in through the hosted UI.
 
 ## Configuration
