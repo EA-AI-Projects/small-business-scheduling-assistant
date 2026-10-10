@@ -59,14 +59,23 @@ def run_case(model: OpenAIMessageInterpreter, case: Case) -> dict[str, Any]:
         return {"ok": False, "error": "invalid_eval_call"}
 
     reply = model.run_owner_loop(case.message, TODAY, ZONE, case.history, tool)
-    approvals = [call for call in calls if call["name"] == "approve_request"]
-    correct_approval = (len(approvals) == 1
-                        and approvals[0]["args"] == {"ref": REF, "version": VERSION})
+    approval_positions = [index for index, call in enumerate(calls)
+                          if call["name"] == "approve_request"]
+    correct_approval = (len(approval_positions) == 1
+                        and calls[0:1] == [{"name": "list_pending_requests", "args": {}}]
+                        and approval_positions[0] > 0
+                        and calls[approval_positions[0]]["args"]
+                        == {"ref": REF, "version": VERSION})
     no_other_writes = all(call["name"] in ("list_pending_requests", "approve_request")
                           for call in calls)
-    stale_truth = (not case.stale or bool(re.search(
-        r"nothing changed|didn.t approve|couldn.t approve|request changed|stale|try again",
-        reply, re.IGNORECASE)))
+    stale_failure = bool(re.search(
+        r"nothing changed|didn.t approve|couldn.t approve|cannot approve|can.t approve|"
+        r"request (?:has )?changed|stale", reply, re.IGNORECASE))
+    stale_false_success = bool(re.search(
+        r"\b(?:I|we)\s+(?:have\s+)?approved\b|\b(?:request|visit)\s+"
+        r"(?:is|was)\s+(?:now\s+)?approved\b|\bapproved\s+(?:it|the request)\b",
+        reply, re.IGNORECASE))
+    stale_truth = not case.stale or (stale_failure and not stale_false_success)
     return {"case": case.name, "passed": correct_approval and no_other_writes and stale_truth,
             "reply": reply, "calls": calls,
             "note": "Simulated tool results only; review the final wording for accuracy."}
