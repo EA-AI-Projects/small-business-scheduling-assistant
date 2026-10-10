@@ -502,6 +502,8 @@ export interface components {
              * @default client
              */
             role: string;
+            /** Timezone */
+            timezone?: string | null;
         };
         /** DecisionBody */
         DecisionBody: {

@@ -9,6 +9,7 @@ from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.client_api import add_client_session_route
 from scheduling.domain.availability import AvailabilityPolicy
 from scheduling.domain.calendar import CalendarStatus
+from scheduling.domain.client_records import ClientProfile, HomeSize
 from scheduling.domain.holds import CreateHold, HoldService
 from scheduling.domain.lifecycle import Action, ActorRole, AppointmentCommand, LifecycleService
 from scheduling.domain.owner_policy import PolicyNotConfigured
@@ -41,7 +42,17 @@ def setup() -> tuple[TestClient, InMemoryCalendarRepository]:
     app = create_owner_app(repository, lambda _t: OwnerPrincipal("o", "business-1"),
                            lambda: NOW)
     add_client_session_route(app, verify, repository, lambda: NOW)
+    for client in ("client-a", "client-b"):
+        save_profile(repository, client, 60)
     return TestClient(app), repository
+
+
+def save_profile(repository: InMemoryCalendarRepository, client: str, minutes: int,
+                 active: bool = True) -> None:
+    repository.save_profile(ClientProfile(
+        "business-1", client, "Synthetic Client", "+15550100001" if client == "client-a"
+        else "+15550100002", "1 Test Street", HomeSize.MEDIUM, minutes, active, 1, NOW, NOW),
+        0, None)
 
 
 def hold(repository: InMemoryCalendarRepository, client: str, key: str,
@@ -50,8 +61,8 @@ def hold(repository: InMemoryCalendarRepository, client: str, key: str,
         CreateHold(business, client, client, key, start, 60), NOW).hold_id
 
 
-def starts(api: TestClient, who: str = "a", duration: int = 60) -> list[str]:
-    response = api.get(f"/v1/client/availability?day={DAY}&duration_minutes={duration}",
+def starts(api: TestClient, who: str = "a") -> list[str]:
+    response = api.get(f"/v1/client/availability?day={DAY}",
                        headers=auth(who))
     assert response.status_code == 200
     return list(response.json()["starts_at"])
@@ -59,7 +70,7 @@ def starts(api: TestClient, who: str = "a", duration: int = 60) -> list[str]:
 
 def test_requests_without_valid_client_link_are_denied() -> None:
     api, _ = setup()
-    for url in ("/v1/client/availability?day=2026-09-29&duration_minutes=60",
+    for url in ("/v1/client/availability?day=2026-09-29",
                 "/v1/client/bookings"):
         assert api.get(url).status_code == 401
         assert api.get(url, headers=auth("owner")).status_code == 403
@@ -77,17 +88,17 @@ def test_availability_reuses_rules_and_ignores_caller_scope() -> None:
     api, repository = setup()
     assert datetime(2026, 9, 29, 16, tzinfo=UTC).isoformat().replace("+00:00", "Z") in [
         value.replace("+00:00", "Z") for value in starts(api)]
-    bad = api.get(f"/v1/client/availability?day={DAY}&duration_minutes=600", headers=auth("a"))
+    bad = api.get(f"/v1/client/availability?day={DAY}0", headers=auth("a"))
     assert bad.status_code == 422
     # Caller-supplied identity or business scope is rejected, not honored.
     for extra in ("client_id=client-b", "business_id=other"):
-        assert api.get(f"/v1/client/availability?day={DAY}&duration_minutes=60&{extra}",
+        assert api.get(f"/v1/client/availability?day={DAY}&{extra}",
                        headers=auth("a")).status_code == 422
     # Outside the horizon and on a weekend there is nothing to book.
     far = (NOW + timedelta(days=60)).date().isoformat()
-    assert api.get(f"/v1/client/availability?day={far}&duration_minutes=60",
+    assert api.get(f"/v1/client/availability?day={far}",
                    headers=auth("a")).json()["starts_at"] == []
-    assert api.get("/v1/client/availability?day=2026-10-03&duration_minutes=60",
+    assert api.get("/v1/client/availability?day=2026-10-03",
                    headers=auth("a")).json()["starts_at"] == []
     assert repository.read_revision("business-1") == 0
 
@@ -119,9 +130,50 @@ def test_availability_hides_owner_blocks_without_exposing_them() -> None:
     assert created.status_code == 200
     after = starts(api)
     assert set(baseline) - set(after)
-    response = api.get(f"/v1/client/availability?day={DAY}&duration_minutes=60",
+    response = api.get(f"/v1/client/availability?day={DAY}",
                        headers=auth("a"))
     assert set(response.json()) == {"day", "duration_minutes", "starts_at"}
+
+
+def test_availability_uses_the_linked_clients_profile_duration() -> None:
+    api, repository = setup()
+    assert api.get(f"/v1/client/availability?day={DAY}",
+                   headers=auth("a")).json()["duration_minutes"] == 60
+    repository.save_profile(ClientProfile(
+        "business-1", "client-b", "Synthetic Client", "+15550100002", "1 Test Street",
+        HomeSize.LARGE, 180, True, 2, NOW, NOW), 1, "+15550100002")
+    long_day = api.get(f"/v1/client/availability?day={DAY}", headers=auth("b")).json()
+    assert long_day["duration_minutes"] == 180
+    assert len(long_day["starts_at"]) < len(starts(api, "a"))
+
+
+@pytest.mark.parametrize("state", ["missing", "inactive", "too-long"])
+def test_availability_unavailable_without_a_usable_profile(state: str) -> None:
+    api, repository = setup()
+    if state == "missing":
+        client = TestClient(api.app)
+        link = IdentityLink("sub-c", LinkRole.CLIENT, "business-1", "client-c",
+                            LinkState.ACTIVE, 1, NOW, "synthetic-admin", "test")
+        LINKS["token-c"] = link
+        try:
+            response = client.get(f"/v1/client/availability?day={DAY}", headers=auth("c"))
+        finally:
+            del LINKS["token-c"]
+    else:
+        repository.save_profile(ClientProfile(
+            "business-1", "client-a", "Synthetic Client", "+15550100001", "1 Test Street",
+            HomeSize.MEDIUM, 60 if state == "inactive" else 900, state != "inactive", 2,
+            NOW, NOW), 1, "+15550100001")
+        response = api.get(f"/v1/client/availability?day={DAY}", headers=auth("a"))
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Booking is unavailable"}
+
+
+def test_session_reports_the_business_time_zone() -> None:
+    api, _ = setup()
+    body = api.get("/v1/client/session", headers=auth("a")).json()
+    assert body["timezone"] == "America/Los_Angeles"
+    assert body["client_id"] == "client-a"
 
 
 def test_bookings_list_only_the_callers_pending_and_confirmed_visits() -> None:
@@ -186,6 +238,6 @@ def test_missing_policy_returns_503_without_detail() -> None:
                            lambda: NOW)
     add_client_session_route(app, verify, repository, lambda: NOW)
     response = TestClient(app).get(
-        f"/v1/client/availability?day={DAY}&duration_minutes=60", headers=auth("a"))
+        f"/v1/client/availability?day={DAY}", headers=auth("a"))
     assert response.status_code == 503
     assert response.json() == {"detail": "Booking is unavailable"}
