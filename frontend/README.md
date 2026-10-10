@@ -2,6 +2,8 @@
 
 Static Next.js (Pages Router) + React + TypeScript app for the owner calendar, built with `output: "export"` and hosted on AWS Amplify Hosting. It has no SSR, server actions, or API routes; all data comes from the authenticated owner API, which allows CORS only from the configured app origin.
 
+The approved MVP adds a separate client sign-in path, sign-out and email recovery, a denied-access state, and a minimal signed-in client landing state (#229). Client scheduling pages are outside scope; scheduling stays SMS-first. The current app and configuration below are owner-only. Identity links (#226), approved invitations (#227), and API authorization (#228) precede the client experience. See the [manual provisioning and recovery process](../README.md#account-provisioning-and-recovery).
+
 ## Local development
 
 Requires Node 22 (see `.nvmrc`).
@@ -46,6 +48,7 @@ The Cognito callback and sign-out URL is the app origin followed by `/` (the sta
 - Sign-in uses the Cognito hosted UI authorization-code flow with PKCE (`openid` scope). Only the one-time PKCE verifier and OAuth state, plus the fixed "Your session ended" notice text after a 401, are held in `sessionStorage`, and only across a redirect.
 - The access token is held in React state only. The access token is never written to storage, cookies, or the URL, and it is sent only to `NEXT_PUBLIC_API_BASE_URL`. Reloading the page requires signing in again. Sign-out also ends the hosted UI session, and so does a 401 from the API (expired token or a Cognito user who is not the owner), so the next Sign in asks for credentials.
 - The account pop-up shows the signed-in email. The app reads the `email` claim from the ID token returned by the token exchange, for display only: the signature is not checked because the value is only shown and never grants access (the API verifies the access token on every call). Only the email string is kept in React state; the ID token is dropped at once and is never stored, logged, put in a URL, or sent to the API. The scope stays `openid`; the claim is expected because the app client can read `email`, which is not yet verified against the live pool. With no email claim the pop-up shows "Signed in", and local mode shows "Local owner (synthetic)".
+- The approved client path will require an existing owner-created profile, an owner-sent invitation, verification of the invited email, and a server-side identity link before client data is shown. A Cognito login by itself grants neither client nor owner access. Recovery must preserve the same link and role checks; a changed identity or email cannot silently claim a profile. Email verification does not mark the SMS phone verified or record text consent.
 - `_document.tsx` renders a build-time Content-Security-Policy `<meta>` tag that allows scripts and styles only from the app itself and connections only to the API and Cognito origins. The repository-root `customHttp.yml` adds `frame-ancestors 'none'`, HSTS, `nosniff`, and `no-referrer` response headers on Amplify. `npm run check:export` fails the build if the export contains inline scripts or styles.
 
 ## Checks
