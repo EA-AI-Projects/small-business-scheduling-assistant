@@ -6,14 +6,19 @@ from datetime import datetime, timedelta
 from typing import Protocol
 from uuid import uuid4
 
-from scheduling.domain.conversation import ConversationOutcome, ConversationService
-from scheduling.domain.sms_ingress import InboundReceipt, SmsCommandInterrupted
+from scheduling.domain.conversation import (
+    OWNER_FAILURE_TEXT,
+    ConversationOutcome,
+    ConversationService,
+)
+from scheduling.domain.sms_ingress import InboundReceipt, SenderRole, SmsCommandInterrupted
 
 
 class ReceiptReader(Protocol):
     def read_received(self, business_id: str, provider_id: str) -> InboundReceipt | None: ...
     def read_reply_text(self, business_id: str, provider_id: str) -> str | None: ...
     def has_committed_command(self, receipt: InboundReceipt) -> bool: ...
+    def has_committed_owner_reply_command(self, receipt: InboundReceipt) -> bool: ...
     def is_opted_out(self, business_id: str, phone_e164: str) -> bool: ...
     def claim_processing(self, receipt: InboundReceipt, token: str,
                          now: datetime, lease_until: datetime) -> bool: ...
@@ -61,8 +66,19 @@ class ReceiptProcessor:
         # between that write and marking the receipt processed, skip re-running
         # a now-terminal command and finish the receipt instead.
         if (receipt.body is None
-                or self._store.read_reply_text(business_id, provider_id) is not None
-                or self._store.has_committed_command(receipt)):
+                or self._store.read_reply_text(business_id, provider_id) is not None):
+            self._store.mark_processed(receipt, token, self._clock())
+            return None
+        if self._store.has_committed_command(receipt):
+            if (receipt.role == SenderRole.OWNER
+                    and self._store.has_committed_owner_reply_command(receipt)
+                    and not self._store.is_opted_out(business_id, receipt.sender)):
+                try:
+                    self._store.put_reply(receipt, OWNER_FAILURE_TEXT, token, self._clock())
+                except SmsCommandInterrupted:
+                    self._store.mark_processed(receipt, token, self._clock())
+                    return None
+                return ConversationOutcome(OWNER_FAILURE_TEXT)
             self._store.mark_processed(receipt, token, self._clock())
             return None
         conversation = (self._conversation_factory(receipt)
@@ -74,7 +90,8 @@ class ReceiptProcessor:
             if self._store.is_opted_out(business_id, receipt.sender):
                 self._store.mark_processed(receipt, token, self._clock())
                 return None
-            retry_text = "The schedule changed while I handled that request. Please send it again."
+            retry_text = (OWNER_FAILURE_TEXT if receipt.role == SenderRole.OWNER else
+                          "The schedule changed while I handled that request. Please send it again.")
             self._store.put_reply(receipt, retry_text, token, self._clock())
             return ConversationOutcome(retry_text)
         if outcome.committed:
@@ -82,7 +99,15 @@ class ReceiptProcessor:
                     and not self._store.is_opted_out(business_id, receipt.sender)):
                 self._store.put_committed_reply(receipt, outcome.client_outbox_id,
                                                 outcome.text, token)
-            self._store.mark_processed(receipt, token, self._clock())
+            if (outcome.owner_reply_on_commit
+                    and not self._store.is_opted_out(business_id, receipt.sender)):
+                try:
+                    self._store.put_reply(receipt, outcome.text, token, self._clock())
+                except SmsCommandInterrupted:
+                    self._store.mark_processed(receipt, token, self._clock())
+                    return None
+            else:
+                self._store.mark_processed(receipt, token, self._clock())
         elif self._store.is_opted_out(business_id, receipt.sender):
             self._store.mark_processed(receipt, token, self._clock())
         else:

@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from scheduling.adapters.memory import InMemoryCalendarRepository
@@ -21,11 +22,10 @@ from scheduling.domain.owner_calendar import (
     OwnerCalendarCommand,
     OwnerCalendarService,
 )
-from scheduling.domain.owner_reply_classification import (
-    Confidence,
-    OwnerReplyContext,
-    OwnerReplyIntent,
-    OwnerReplyProposal,
+from scheduling.domain.owner_transitional import (
+    OwnerTransitionContext,
+    OwnerTransitionIntent,
+    OwnerTransitionProposal,
 )
 from scheduling.domain.sms_ingress import ConsentEvidence, InboundReceipt, Keyword, SenderRole
 
@@ -38,7 +38,7 @@ def local(month: int, day: int, hour: int, minute: int = 0) -> datetime:
     return datetime(2026, month, day, hour, minute, tzinfo=ZONE).astimezone(UTC)
 
 
-UNCLEAR = OwnerReplyProposal(OwnerReplyIntent.UNCLEAR, None, Confidence.HIGH)
+UNCLEAR = OwnerTransitionProposal(OwnerTransitionIntent.UNCLEAR)
 
 
 class Model:
@@ -46,19 +46,23 @@ class Model:
 
     def __init__(self) -> None:
         self.calls: list[str] = []
-        self.classified: list[tuple[str, OwnerReplyContext]] = []
-        self.script: dict[str, OwnerReplyProposal] = {}
+        self.classified: list[tuple[str, OwnerTransitionContext]] = []
+        self.script: dict[str, OwnerTransitionProposal] = {}
         self.error: Exception | None = None
 
     def propose(self, body: str, context: MessageContext) -> MessageProposal:
         self.calls.append(body)
         return MessageProposal("clarify", None, None, None, True)
 
-    def classify_owner_reply(self, body: str, context: OwnerReplyContext) -> OwnerReplyProposal:
+    def classify_owner_transition(self, body: str, context: OwnerTransitionContext) -> OwnerTransitionProposal:
         self.classified.append((body, context))
         if self.error is not None:
             raise self.error
         return self.script.get(body, UNCLEAR)
+
+    def run_owner_loop(self, body: str, today: date, timezone: str, history: Any,
+                       tool: Any) -> str:
+        return "I wasn't sure what you meant."
 
 
 class Consent:
@@ -247,8 +251,8 @@ def test_follow_ups_narrow_expand_and_reread_the_current_calendar() -> None:
     assert count.text.startswith("Mon Oct 5 to Sun Oct 11, 2026 (America/Los_Angeles): "
                                  "1 pending request counted.")
     chat.model.calls.clear()
-    chat.model.script["what about confirmed"] = OwnerReplyProposal(
-        OwnerReplyIntent.CALENDAR_FOLLOWUP, None, Confidence.HIGH,
+    chat.model.script["what about confirmed"] = OwnerTransitionProposal(
+        OwnerTransitionIntent.CALENDAR_FOLLOWUP, None,
         frozenset({CalendarStatus.CONFIRMED}))
     everything = chat.ask("what about confirmed")
     assert "2 confirmed visits" in everything.text
@@ -340,20 +344,15 @@ def test_dynamo_context_round_trips_without_message_text() -> None:
     context = QuestionContext(
         "pilot", OWNER, View.COUNT, date(2026, 10, 2), date(2026, 10, 2),
         frozenset({CalendarStatus.CONFIRMED}), 3, Ask.STATUS, NOW, NOW + timedelta(minutes=10),
-        2, "SM-1", "abc", "SM-2", 4, "SM-9", NOW)
+        2, "SM-1", "abc", NOW)
     store.put_context(context)
     assert store.read_context("pilot", OWNER) == context
     answered = replace(context, answered_at=NOW + timedelta(minutes=1))
     store.put_context(answered)
     assert store.read_context("pilot", OWNER) == answered
-    # The TTL keeps a clarifying question for 24 hours after it was asked, past the conversation.
     stored = items[("BUSINESS#pilot", f"OWNER_QUESTION#{OWNER}")]
     assert stored["answered_at"] == {"S": (NOW + timedelta(minutes=1)).isoformat()}
-    assert stored["expires_at_epoch"] == {"N": str(int((NOW + timedelta(hours=24)).timestamp()))}
-    plain = replace(context, clarified_at=None, clarified_request="", clarified_by="")
-    store.put_context(plain)
-    assert items[("BUSINESS#pilot", f"OWNER_QUESTION#{OWNER}")]["expires_at_epoch"] == {
-        "N": str(int(plain.expires_at.timestamp()))}
+    assert stored["expires_at_epoch"] == {"N": str(int(context.expires_at.timestamp()))}
     assert store.read_context("pilot", "+14155550123") is None
     partial = QuestionContext("pilot", OWNER, View.SUMMARY, None, None, None, 0, Ask.RANGE,
                               NOW, NOW + timedelta(minutes=10))
@@ -375,138 +374,6 @@ def status_of(chat: Chat, request: str) -> CalendarStatus:
     return appointment.status
 
 
-def decision(intent: OwnerReplyIntent, request: str | None,
-             confidence: Confidence = Confidence.HIGH) -> OwnerReplyProposal:
-    return OwnerReplyProposal(intent, request[:8] if request else None, confidence,
-                              request_version=1 if request else None)
-
-
-def only_confirmed() -> OwnerReplyProposal:
-    return OwnerReplyProposal(OwnerReplyIntent.CALENDAR_FOLLOWUP, None, Confidence.HIGH,
-                              frozenset({CalendarStatus.CONFIRMED}))
-
-
-def test_approval_like_replies_the_model_calls_calendar_followups_approve_nothing() -> None:
-    chat, request = week_with_one_pending()
-    for phrase in ("confirmed please", "yes please", "ok thanks", "confirmed it", "yes it"):
-        chat.ask("What is next week looking like?")
-        chat.model.script[phrase] = only_confirmed()
-        reply = chat.ask(phrase)
-        assert not reply.committed, phrase
-        assert "Avery Example" in reply.text and "Blake Sample" not in reply.text, phrase
-        assert status_of(chat, request) == CalendarStatus.PENDING_APPROVAL, phrase
-
-
-def test_model_context_is_small_and_has_no_phone_numbers_or_full_names() -> None:
-    chat, _request = week_with_one_pending()
-    chat.ask("yes please")
-    body, context = chat.model.classified[-1]
-    assert body == "yes please"
-    assert context.last_kind == "calendar_answer" and context.named is None
-    assert [(item.client, item.when) for item in context.pending] == [
-        ("Blake", "Wed Oct 7 at 9:00 AM")]
-    assert "Sample" not in repr(context) and "+1415" not in repr(context)
-
-
-def test_an_approval_needs_the_request_to_have_been_named_first() -> None:
-    chat, request = week_with_one_pending()
-    chat.model.script["yes please"] = decision(OwnerReplyIntent.APPROVE_NAMED_REQUEST, request)
-    first = chat.ask("yes please")  # Nothing was named yet, so even a confident approve asks.
-    assert not first.committed
-    assert first.text.endswith("Reply APPROVE or DECLINE to decide it, or ask me about the calendar.")
-    assert "Blake Sample, Wed Oct 7 at 9:00 AM" in first.text
-    assert status_of(chat, request) == CalendarStatus.PENDING_APPROVAL
-    approved = chat.ask("yes please")  # Same words now answer the named request.
-    assert approved.committed and approved.text.startswith("Approved: Blake Sample")
-    assert chat.model.classified[-1][1].named is not None
-    assert status_of(chat, request) == CalendarStatus.CONFIRMED
-
-
-def test_a_correct_decline_after_the_request_was_named_declines_it() -> None:
-    chat, request = week_with_one_pending()
-    chat.ask("ok")  # Unclear: asks, naming the request.
-    chat.model.script["decline it"] = decision(
-        OwnerReplyIntent.DECLINE_NAMED_REQUEST, request)
-    declined = chat.ask("decline it")
-    assert declined.committed and declined.text.startswith("Declined: Blake Sample")
-    assert status_of(chat, request) == CalendarStatus.DECLINED
-
-
-def test_wrong_missing_or_short_references_never_approve() -> None:
-    chat, request = week_with_one_pending()
-    chat.ask("ok")  # Names the request.
-    before = chat.snapshot()
-    for reference in ("deadbeef", None, request[:4], "00000000"):
-        chat.model.script["yes please"] = OwnerReplyProposal(
-            OwnerReplyIntent.APPROVE_NAMED_REQUEST, reference, Confidence.HIGH)
-        reply = chat.ask("yes please")
-        assert not reply.committed, reference
-        assert reply.text.startswith("That request may have changed."), reference
-    assert chat.snapshot() == before
-
-
-def test_unclear_low_confidence_errors_and_timeouts_ask_and_write_nothing() -> None:
-    chat, request = week_with_one_pending()
-    chat.ask("ok")
-    before = chat.snapshot()
-    chat.model.script["yes please"] = decision(
-        OwnerReplyIntent.APPROVE_NAMED_REQUEST, request, Confidence.MEDIUM)
-    assert "wasn't sure" in chat.ask("yes please").text
-    chat.model.script["yes please"] = decision(
-        OwnerReplyIntent.APPROVE_NAMED_REQUEST, request, Confidence.LOW)
-    assert "wasn't sure" in chat.ask("yes please").text
-    chat.model.script["yes please"] = UNCLEAR
-    assert "wasn't sure" in chat.ask("yes please").text
-    for error in (RuntimeError("Model API HTTP 500"), TimeoutError(), ValueError("bad schema")):
-        chat.model.error = error
-        reply = chat.ask("yes please")
-        assert not reply.committed and "couldn't tell what you meant" in reply.text
-        assert reply.text.endswith("or ask me about the calendar.")
-    assert chat.snapshot() == before
-
-
-def test_without_a_classifier_an_approval_like_reply_still_asks_instead_of_approving() -> None:
-    chat, request = week_with_one_pending()
-    chat.service._owner_classifier = None
-    reply = chat.ask("yes please")
-    assert not reply.committed and "wasn't sure" in reply.text
-    assert status_of(chat, request) == CalendarStatus.PENDING_APPROVAL
-
-
-def test_request_x_gone_and_y_arrived_is_not_approved_on_the_old_question() -> None:
-    chat, request_x = week_with_one_pending()
-    chat.ask("ok")  # The assistant asked about X by name.
-    LifecycleService(chat.store, lambda: chat.now).apply(AppointmentCommand(
-        "pilot", request_x, "owner", ActorRole.OWNER, Action.DECLINE, "gone", 1))
-    request_y = chat.hold("c3", local(10, 8, 9), "y")
-    before = chat.snapshot()
-    for phrase in ("yes please", "ok thanks"):
-        chat.model.script[phrase] = decision(OwnerReplyIntent.APPROVE_NAMED_REQUEST, request_x)
-        stale = chat.ask(phrase)
-        assert not stale.committed and stale.text.startswith("That request may have changed.")
-        assert "Casey Testperson" in stale.text
-    chat.model.script["yes please"] = decision(OwnerReplyIntent.APPROVE_NAMED_REQUEST, request_y)
-    after_question = chat.ask("yes please")  # The question now names Y, so this approves Y.
-    assert after_question.committed
-    assert status_of(chat, request_y) == CalendarStatus.CONFIRMED
-    assert chat.snapshot() != before
-
-
-def test_exact_commands_skip_the_model_and_a_plain_yes_needs_it_outside_a_conversation() -> None:
-    chat = Chat()
-    request = chat.hold("c1", local(10, 1, 9), "a")
-    assert not chat.ask("Yes").committed  # The model has no verdict, so the owner is asked.
-    chat.model.script["Yes"] = decision(OwnerReplyIntent.APPROVE_NAMED_REQUEST, request)
-    approved = chat.ask("Yes")  # No conversation open: the model judges one pending request.
-    assert approved.committed and status_of(chat, request) == CalendarStatus.CONFIRMED
-    chat.model.classified.clear()
-    other = chat.hold("c2", local(10, 5, 9), "b")
-    chat.ask("What is next week looking like?")
-    exact = chat.ask(f"APPROVE {other[:8]}")
-    assert exact.committed and status_of(chat, other) == CalendarStatus.CONFIRMED
-    assert chat.model.classified == []
-
-
 def test_a_full_calendar_question_with_a_status_word_does_not_go_to_the_model() -> None:
     chat, _request = week_with_one_pending()
     reply = chat.ask("How many confirmed visits do we have next week?")
@@ -516,13 +383,13 @@ def test_a_full_calendar_question_with_a_status_word_does_not_go_to_the_model() 
 
 def test_model_followup_can_change_the_range_but_only_within_limits() -> None:
     chat, request = week_with_one_pending()
-    chat.model.script["ok, and the week after"] = OwnerReplyProposal(
-        OwnerReplyIntent.CALENDAR_FOLLOWUP, None, Confidence.HIGH, None,
+    chat.model.script["ok, and the week after"] = OwnerTransitionProposal(
+        OwnerTransitionIntent.CALENDAR_FOLLOWUP, None, None,
         date(2026, 10, 12), date(2026, 10, 18))
     moved = chat.ask("ok, and the week after")
     assert moved.text.startswith("Mon Oct 12 to Sun Oct 18, 2026")
-    chat.model.script["ok, and forever"] = OwnerReplyProposal(
-        OwnerReplyIntent.CALENDAR_FOLLOWUP, None, Confidence.HIGH, None,
+    chat.model.script["ok, and forever"] = OwnerTransitionProposal(
+        OwnerTransitionIntent.CALENDAR_FOLLOWUP, None, None,
         date(2026, 10, 12), date(2027, 10, 18))
     assert "wasn't sure" in chat.ask("ok, and forever").text
     assert status_of(chat, request) == CalendarStatus.PENDING_APPROVAL
@@ -621,109 +488,6 @@ def test_the_25_hour_fall_back_sunday_counts_one_overnight_block_once() -> None:
     week = chat.ask("What is this week looking like?").text
     assert "1 unavailable block." in week.splitlines()[0]
     assert "Mon Nov 2" not in week.splitlines()[0]
-
-
-def test_a_redelivered_asking_message_asks_again_instead_of_approving() -> None:
-    chat, request = week_with_one_pending()
-    chat.model.script["yes please"] = decision(OwnerReplyIntent.APPROVE_NAMED_REQUEST, request)
-    first = chat.ask("yes please", "SM-owner-1")
-    assert not first.committed and first.text.startswith("I wasn't sure what you meant.")
-    # The reply may never have been saved; SQS redelivers the same message.
-    again = chat.ask("yes please", "SM-owner-1")
-    assert not again.committed and again.text == first.text
-    assert status_of(chat, request) == CalendarStatus.PENDING_APPROVAL
-    approved = chat.ask("yes please", "SM-owner-2")  # A new message answers the question.
-    assert approved.committed and status_of(chat, request) == CalendarStatus.CONFIRMED
-
-
-def test_a_half_stated_model_range_asks_instead_of_reusing_the_old_range() -> None:
-    chat, request = week_with_one_pending()
-    for start, end in ((date(2026, 10, 12), None), (None, date(2026, 10, 18))):
-        chat.model.script["ok, and later"] = OwnerReplyProposal(
-            OwnerReplyIntent.CALENDAR_FOLLOWUP, None, Confidence.HIGH, None, start, end)
-        reply = chat.ask("ok, and later")
-        assert "wasn't sure" in reply.text and not reply.committed
-    assert status_of(chat, request) == CalendarStatus.PENDING_APPROVAL
-
-
-def asked_but_reply_lost() -> tuple[Chat, str]:
-    chat, request = week_with_one_pending()
-    chat.model.script["yes please"] = decision(OwnerReplyIntent.APPROVE_NAMED_REQUEST, request)
-    lost = chat.ask("yes please", "SM-A", save=False)  # The reply was never saved or sent.
-    assert not lost.committed
-    return chat, request
-
-
-def test_a_resent_message_cannot_approve_a_question_that_was_never_saved() -> None:
-    chat, request = asked_but_reply_lost()
-    resent = chat.ask("yes please", "SM-B")
-    assert not resent.committed and status_of(chat, request) == CalendarStatus.PENDING_APPROVAL
-    approved = chat.ask("yes please", "SM-C")  # SM-B's question was saved and seen.
-    assert approved.committed and status_of(chat, request) == CalendarStatus.CONFIRMED
-
-
-def test_a_redelivered_lost_question_cannot_approve_after_a_later_one_was_saved() -> None:
-    chat, request = asked_but_reply_lost()
-    later = chat.ask("ok", "SM-B")
-    assert not later.committed
-    chat.model.script["ok"] = decision(OwnerReplyIntent.APPROVE_NAMED_REQUEST, request)
-    redelivered = chat.ask("yes please", "SM-A")  # Received before SM-B's question.
-    assert not redelivered.committed and status_of(chat, request) == CalendarStatus.PENDING_APPROVAL
-    approved = chat.ask("yes please", "SM-C")
-    assert approved.committed and status_of(chat, request) == CalendarStatus.CONFIRMED
-
-
-def test_a_message_received_before_the_question_was_asked_asks_again() -> None:
-    chat, request = week_with_one_pending()
-    chat.model.script["yes please"] = decision(OwnerReplyIntent.APPROVE_NAMED_REQUEST, request)
-    early = chat.now
-    chat.ask("ok", "SM-A")  # Asks and is saved.
-    stale = chat.ask("yes please", "SM-B", received_at=early)
-    assert not stale.committed and status_of(chat, request) == CalendarStatus.PENDING_APPROVAL
-    assert chat.ask("yes please", "SM-C").committed
-
-
-def test_without_a_way_to_check_saved_replies_nothing_is_ever_named() -> None:
-    chat, request = week_with_one_pending()
-    chat.service._reply_lookup = None
-    chat.model.script["yes please"] = decision(OwnerReplyIntent.APPROVE_NAMED_REQUEST, request)
-    chat.ask("yes please")
-    assert not chat.ask("yes please").committed
-    assert status_of(chat, request) == CalendarStatus.PENDING_APPROVAL
-
-
-def test_a_question_that_is_pending_or_failed_is_not_named_yet() -> None:
-    for state in ("PENDING", "FAILED"):
-        chat, request = week_with_one_pending()
-        chat.model.script["yes please"] = decision(OwnerReplyIntent.APPROVE_NAMED_REQUEST, request)
-        chat.ask("yes please", "SM-A", state=state)
-        resent = chat.ask("yes please", "SM-B")
-        assert not resent.committed, state
-        assert status_of(chat, request) == CalendarStatus.PENDING_APPROVAL, state
-        # SM-B's question was sent, so a message received after that send approves.
-        assert chat.ask("yes please", "SM-C").committed, state
-
-
-def test_a_message_received_before_the_send_but_processed_after_it_asks_again() -> None:
-    chat, request = week_with_one_pending()
-    chat.model.script["yes please"] = decision(OwnerReplyIntent.APPROVE_NAMED_REQUEST, request)
-    chat.ask("ok", "SM-A", state="PENDING")
-    sent_at = chat.now + timedelta(seconds=60)
-    chat.consent.outbox["SM-A"] = ("SENT", sent_at)  # The sender sends it a minute later.
-    early = chat.ask("yes please", "SM-B", received_at=sent_at - timedelta(seconds=20))
-    assert not early.committed and status_of(chat, request) == CalendarStatus.PENDING_APPROVAL
-    chat.now = sent_at + timedelta(minutes=1)
-    assert chat.ask("yes please", "SM-C").committed
-
-
-def test_a_failed_sent_lookup_asks_again() -> None:
-    chat, request = week_with_one_pending()
-    chat.model.script["yes please"] = decision(OwnerReplyIntent.APPROVE_NAMED_REQUEST, request)
-    chat.ask("ok", "SM-A")
-    chat.consent.lookup_error = RuntimeError("table unavailable")
-    assert not chat.ask("yes please", "SM-B").committed
-    chat.consent.lookup_error = None
-    assert status_of(chat, request) == CalendarStatus.PENDING_APPROVAL
 
 
 def test_sms_store_reports_a_sent_time_only_for_a_sent_outbox_item() -> None:

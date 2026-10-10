@@ -2014,6 +2014,8 @@ class DynamoDBCalendarRepository:
             "request_hash": {"S": commit.request_hash},
             "response": {"S": json.dumps(result_payload, sort_keys=True)},
             "client_id": {"S": before.client_id},
+            **({"owner_reply_required": {"BOOL": True}}
+               if command.owner_reply_required else {}),
         }))
         writes.append(fresh_put({
             **self._business_key(before.business_id, f"AUDIT#{commit.audit_id}"),

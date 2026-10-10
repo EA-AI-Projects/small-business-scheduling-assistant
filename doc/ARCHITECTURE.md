@@ -48,24 +48,30 @@ the result's dates, times, and references, then falls back to the backend answer
 on malformed output or timeout. The model instructions govern status wording.
 This minimal check cannot detect every contradictory claim or association among
 multiple visits; the owner chose freer wording with this fallback (#283, 2026-10-08).
-This is the only reply-drafting call (#275 removed the earlier read-only drafter); the backend sentence is its fallback. The same draft check covers client write results; a valid
+This is the only client reply-drafting call (#275 removed the earlier read-only drafter); the backend sentence is its fallback. The same draft check covers client write results; a valid
 draft can attach to the existing pending notification intent, while a sender
 that already claimed the intent sends its safe template.
-Owner replies (#285): the owner's rolling 24-hour thread (history keyed by owner
-phone) is passed to the owner classifier and drafter; an unreadable history means
-no transcript, never a failed record. A second model call covers only read-only
-owner results (a rendered calendar answer, a pending-request summary, a how-to)
-and, as for clients, writes the whole message from the backend's facts, the list
-of replies the backend will honor (including an open offer and a continuing
-page), and the backend's existing text as the fallback. It runs after the result
-and receives client first names only. Basic check: GSM-7 within 480 characters,
-exact dates, times, and references per entry (see CONVERSATION.md). Enrique
-chose this and accepted the residual risk (#285, 2026-10-08): names, statuses,
-counts, whether the offer reminder or paging line is included, command wording,
-and model-written YES/NO prompts are not checked. Approvals, declines, offers,
-counteroffers, and failures are never drafted. Any failure, including a history
-read error, sends the backend text, which the existing receipt-based path stores
-once, so a duplicate inbound message replays it.
+Owner approval and decline (#298): after the owner phone, consent, and opt-out
+checks and the still-active exact-command, calendar, and counteroffer handlers,
+the model receives the owner's bounded, sent-aware 24-hour SMS thread, the
+business-local date, and timezone. A read failure uses the fixed owner failure
+line. The model may call only strict JSON `list_pending_requests()`,
+`approve_request(ref, version)`, or `decline_request(ref, version)` tools. The
+read returns current business-scoped references, versions, client first names,
+local times, and statuses. A clear choice among several requests may act; the
+#177 short-reply allowlist, HIGH confidence gate, and sent-clarification-question
+state no longer gate owner decisions. The backend resolves the exact current
+request and passes its expected version to the transactional lifecycle service,
+which preserves expiry, conflict, and transition checks. The receipt ID remains
+the idempotency key. The model writes the final SMS from the tool result; the
+#285 per-entry owner decision draft checks are removed. The service accepts only
+nonempty GSM-7 text of at most 480 septets, asks the model once to shorten an
+invalid final answer without calling another tool, then uses the fixed failure
+line if it remains invalid. A committed lifecycle write is not undone by a
+later reply failure. Audit and notification intents still use the transactional
+outbox; sender rechecks and receipt replay remain in force. Calendar and
+counteroffer behavior stays transitional until #299 and #300; no live SMS or
+model call is part of #298. See [CONVERSATION.md](CONVERSATION.md#owner-approval-and-decline-tool-loop-298).
 The first model call asks the client to retry later on failure. Each model call
 has an eight-second timeout and no internal retry, keeping the two-call path
 inside the worker's 30-second limit. Receipt leases, stable outbox intents,

@@ -9,12 +9,7 @@ from datetime import date, datetime
 from typing import Any, Protocol
 
 from scheduling.domain.calendar import CalendarStatus
-from scheduling.domain.owner_calendar_questions import (
-    CLARIFICATION_RETENTION,
-    Ask,
-    QuestionContext,
-    View,
-)
+from scheduling.domain.owner_calendar_questions import Ask, QuestionContext, View
 
 
 class QuestionDynamoClient(Protocol):
@@ -47,10 +42,6 @@ class DynamoQuestionContexts:
             datetime.fromisoformat(item["expires_at"]["S"]),
             int(item["page_start"]["N"]), item.get("receipt_id", {}).get("S", ""),
             item.get("fingerprint", {}).get("S", ""),
-            item.get("clarified_request", {}).get("S", ""),
-            int(item.get("clarified_version", {"N": "0"})["N"]),
-            item.get("clarified_by", {}).get("S", ""),
-            datetime.fromisoformat(item["clarified_at"]["S"]) if "clarified_at" in item else None,
             datetime.fromisoformat(item["answered_at"]["S"]) if "answered_at" in item else None)
 
     def put_context(self, context: QuestionContext) -> None:
@@ -58,26 +49,20 @@ class DynamoQuestionContexts:
             **self._key(context.business_id, context.sender),
             "view": {"S": context.view.value}, "skip": {"N": str(context.skip)},
             "page_start": {"N": str(context.page_start)},
-            "clarified_version": {"N": str(context.clarified_version)},
             "created_at": {"S": context.created_at.isoformat()},
             "expires_at": {"S": context.expires_at.isoformat()},
         }
-        keep_until = context.expires_at
-        if context.clarified_at is not None:  # A clarifying question outlives its conversation.
-            keep_until = max(keep_until, context.clarified_at + CLARIFICATION_RETENTION)
-        item["expires_at_epoch"] = {"N": str(int(keep_until.timestamp()))}
+        item["expires_at_epoch"] = {"N": str(int(context.expires_at.timestamp()))}
         if context.first is not None and context.last is not None:
             item["first"] = {"S": context.first.isoformat()}
             item["last"] = {"S": context.last.isoformat()}
         if context.statuses:
             item["statuses"] = {"SS": sorted(status.value for status in context.statuses)}
-        for name in ("receipt_id", "fingerprint", "clarified_request", "clarified_by"):
+        for name in ("receipt_id", "fingerprint"):
             if getattr(context, name):
                 item[name] = {"S": getattr(context, name)}
         if context.answered_at is not None:
             item["answered_at"] = {"S": context.answered_at.isoformat()}
-        if context.clarified_at is not None:
-            item["clarified_at"] = {"S": context.clarified_at.isoformat()}
         if context.ask is not None:
             item["ask"] = {"S": context.ask.value}
         self._client.put_item(TableName=self._table, Item=item)

@@ -23,7 +23,7 @@ import re
 import threading
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Any
 from zoneinfo import ZoneInfo
 
@@ -48,11 +48,10 @@ from scheduling.domain.conversation_state import InMemoryConversationStates
 from scheduling.domain.holds import HoldService, OutboxIntent
 from scheduling.domain.lifecycle import LifecycleService
 from scheduling.domain.outbox import PermanentDeliveryFailure
-from scheduling.domain.owner_reply_classification import (
-    Confidence,
-    OwnerReplyContext,
-    OwnerReplyIntent,
-    OwnerReplyProposal,
+from scheduling.domain.owner_transitional import (
+    OwnerTransitionContext,
+    OwnerTransitionIntent,
+    OwnerTransitionProposal,
 )
 from scheduling.domain.sms_ingress import (
     HELP_WORDS,
@@ -102,9 +101,16 @@ class OfflineInterpreter:
         self.consulted = True
         return MessageProposal("clarify", None, None, None, True)
 
-    def classify_owner_reply(self, body: str, context: OwnerReplyContext) -> OwnerReplyProposal:
-        self.consulted = True  # Offline, an owner's plain reply is only ever clarified.
-        return OwnerReplyProposal(OwnerReplyIntent.UNCLEAR, None, Confidence.HIGH)
+    def classify_owner_transition(self, body: str,
+                                  context: OwnerTransitionContext) -> OwnerTransitionProposal:
+        self.consulted = True
+        return OwnerTransitionProposal(OwnerTransitionIntent.UNCLEAR)
+
+    def run_owner_loop(self, body: str, today: date, timezone: str,
+                       history: tuple[HistoryMessage, ...],
+                       tool: Callable[[str, dict[str, Any]], dict[str, Any]]) -> str:
+        self.consulted = True
+        raise RuntimeError("Offline owner model is unavailable")
 
 
 @dataclass(frozen=True)

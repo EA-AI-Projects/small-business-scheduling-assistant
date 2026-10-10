@@ -263,6 +263,18 @@ class DynamoSmsIngressStore(SmsIngressStore):
         return any(self._get(receipt.business_id, key) is not None
                    for key in self._command_keys(receipt))
 
+    def has_committed_owner_reply_command(self, receipt: InboundReceipt) -> bool:
+        return self._committed_owner_reply_key(receipt) is not None
+
+    def _committed_owner_reply_key(self, receipt: InboundReceipt) -> str | None:
+        if receipt.role != SenderRole.OWNER:
+            return None
+        for key in self._command_keys(receipt):
+            item = self._get(receipt.business_id, key)
+            if item is not None and item.get("owner_reply_required", {}).get("BOOL") is True:
+                return key
+        return None
+
     @staticmethod
     def _command_keys(receipt: InboundReceipt) -> tuple[str, ...]:
         actor_id = (receipt.sender if receipt.role == SenderRole.OWNER else
@@ -367,6 +379,7 @@ class DynamoSmsIngressStore(SmsIngressStore):
         recipient = receipt.role.value
         if recipient not in {"owner", "client"}:
             raise ValueError("Conversation recipient is unknown")
+        committed_owner_key = self._committed_owner_reply_key(receipt)
         outbox = {
             **self._key(receipt.business_id, f"OUTBOX#{outbox_id}"),
             **due_keys(DeliveryState.PENDING, now, outbox_id),
@@ -416,7 +429,13 @@ class DynamoSmsIngressStore(SmsIngressStore):
                     "TableName": self._table,
                     "Key": self._key(receipt.business_id, key),
                     "ConditionExpression": "attribute_not_exists(PK)",
-                }} for key in self._command_keys(receipt)),
+                }} for key in self._command_keys(receipt) if key != committed_owner_key),
+                *([{"ConditionCheck": {
+                    "TableName": self._table,
+                    "Key": self._key(receipt.business_id, committed_owner_key),
+                    "ConditionExpression": "owner_reply_required = :required",
+                    "ExpressionAttributeValues": {":required": {"BOOL": True}},
+                }}] if committed_owner_key is not None else []),
                 *([self._erasure_check(receipt.business_id, receipt.client_id)]
                   if receipt.client_id is not None else []),
                 self._phone_erasure_check(receipt.business_id, receipt.sender),

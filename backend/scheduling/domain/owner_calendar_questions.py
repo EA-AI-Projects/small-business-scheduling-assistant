@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from hashlib import sha256
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 from zoneinfo import ZoneInfo
 
 from scheduling.domain.appointments import Appointment
@@ -23,10 +23,6 @@ from scheduling.domain.client_records import ClientProfile
 from scheduling.domain.conversation_state import clock_text, day_text, normalized
 
 QUESTION_LIFETIME = timedelta(minutes=30)
-# A clarifying question about a named request: a reply to it counts for this long after it was
-# sent. An unsent one blocks approvals for the longer retention, so a resend cannot skip it.
-CLARIFICATION_LIFETIME = timedelta(minutes=30)
-CLARIFICATION_RETENTION = timedelta(hours=24)
 ASK_LIFETIME = timedelta(minutes=10)  # An unanswered clarifying question goes stale sooner.
 MAX_REPLY_LENGTH = 480  # Three GSM-7 segments (160 each); longer answers are paged, never cut.
 FOOTER_ROOM = 60
@@ -94,10 +90,6 @@ class QuestionContext:
     page_start: int = 0  # Offset of the page last sent, so a redelivered MORE repeats it.
     receipt_id: str = ""  # The inbound message that produced that page.
     fingerprint: str = ""  # Hash of the full entry list the offsets refer to.
-    clarified_request: str = ""  # Request the assistant last asked the owner about.
-    clarified_version: int = 0  # Its version when asked; approval needs the same version.
-    clarified_by: str = ""  # Inbound message that asked; its redelivery must ask again.
-    clarified_at: datetime | None = None  # When it asked (our clock); answers must be later.
     answered_at: datetime | None = None  # When the assistant last answered or asked a range.
 
     def expired(self, now: datetime) -> bool:
@@ -123,17 +115,6 @@ class InMemoryQuestionContexts:
     def put_context(self, context: QuestionContext) -> None:
         with self._lock:
             self._contexts[(context.business_id, context.sender)] = context
-
-
-@runtime_checkable
-class ReplyLookup(Protocol):
-    """Whether the reply to an inbound message was saved, and when our sender sent it."""
-
-    def read_reply_text(self, business_id: str, provider_id: str) -> str | None: ...
-
-    def read_reply_sent_at(self, business_id: str, provider_id: str) -> datetime | None:
-        """When the reply was sent, or None unless its outbox item is SENT."""
-        ...
 
 
 class QuestionRepository(Protocol):
@@ -342,37 +323,10 @@ class OwnerCalendarQuestions:
         parsed = parse(body, today, False)
         return parsed is not None and parsed.fresh
 
-    def read_clarification(self, business_id: str, sender: str,
-                           now: datetime) -> QuestionContext | None:
-        """The stored record of the last clarifying question about a request, if it has not
-        lapsed on its own. It outlives the calendar conversation it was asked in."""
-        context = self._contexts.read_context(business_id, sender)
-        if (context is None or not context.clarified_request or context.clarified_at is None
-                or now >= context.clarified_at + CLARIFICATION_RETENTION):
-            return None
-        return context
-
-    def mark_clarified(self, business_id: str, sender: str, now: datetime,
-                       request_id: str, version: int, receipt_id: str) -> None:
-        """Remember the request the owner was just asked about, with or without an open
-        calendar conversation (an expired or missing one is kept closed)."""
-        context = self._contexts.read_context(business_id, sender)
-        if context is None:
-            context = QuestionContext(business_id, sender, View.SUMMARY, None, None, None, 0,
-                                      None, now, now, answered_at=now)
-        self._contexts.put_context(replace(
-            context, clarified_request=request_id, clarified_version=version,
-            clarified_by=receipt_id, clarified_at=now))
-
     def ask_range(self, business_id: str, sender: str, now: datetime) -> str:
         """Ask which day or week, so a bare "next week" answers it."""
-        stored = self._contexts.read_context(business_id, sender)
         draft = QuestionContext(business_id, sender, View.SUMMARY, None, None, None, 0,
                                 Ask.RANGE, now, now + ASK_LIFETIME, answered_at=now)
-        if stored is not None:  # Keep any open clarifying question about a request.
-            draft = replace(draft, clarified_request=stored.clarified_request,
-                            clarified_version=stored.clarified_version,
-                            clarified_by=stored.clarified_by, clarified_at=stored.clarified_at)
         self._contexts.put_context(draft)
         return RANGE_QUESTION
 
@@ -441,10 +395,6 @@ class OwnerCalendarQuestions:
             statuses = base.statuses
         draft = QuestionContext(business_id, sender, view, first, last, statuses, 0, None,
                                 now, now + QUESTION_LIFETIME)
-        if stored is not None:  # A clarifying question about a request outlives the answer.
-            draft = replace(draft, clarified_request=stored.clarified_request,
-                            clarified_version=stored.clarified_version,
-                            clarified_by=stored.clarified_by, clarified_at=stored.clarified_at)
         if first is None or last is None:
             self._contexts.put_context(replace(
                 draft, ask=Ask.RANGE, expires_at=now + ASK_LIFETIME, answered_at=now))

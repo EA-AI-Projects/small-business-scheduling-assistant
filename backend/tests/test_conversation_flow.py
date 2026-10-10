@@ -1,7 +1,8 @@
 """Plain-language texts write only when a reply maps to one current offer or prompt."""
 
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -24,12 +25,6 @@ from scheduling.domain.conversation_state import (
 )
 from scheduling.domain.holds import CreateHold, HoldService
 from scheduling.domain.lifecycle import Action, ActorRole, AppointmentCommand, LifecycleService
-from scheduling.domain.owner_reply_classification import (
-    Confidence,
-    OwnerReplyContext,
-    OwnerReplyIntent,
-    OwnerReplyProposal,
-)
 from scheduling.domain.sms_ingress import ConsentEvidence, InboundReceipt, Keyword, SenderRole
 
 ZONE = ZoneInfo("America/Los_Angeles")
@@ -53,7 +48,7 @@ class Script:
         self.replies: dict[str, MessageProposal] = {}
         self.calls: list[str] = []
         self.contexts: list[MessageContext] = []
-        self.owner: dict[str, OwnerReplyIntent] = {}  # Owner reply text to what the model says.
+        self.owner: dict[str, str] = {}
         self.classified: list[str] = []
 
     def propose(self, body: str, context: MessageContext) -> MessageProposal:
@@ -61,12 +56,18 @@ class Script:
         self.contexts.append(context)
         return self.replies.get(body, CLARIFY)
 
-    def classify_owner_reply(self, body: str, context: OwnerReplyContext) -> OwnerReplyProposal:
+    def run_owner_loop(self, body: str, today: date, timezone: str, history: Any,
+                       tool: Any) -> str:
         self.classified.append(body)
-        intent = self.owner.get(body, OwnerReplyIntent.UNCLEAR)
-        reference = context.pending[0].ref if len(context.pending) == 1 else None
-        version = context.pending[0].version if len(context.pending) == 1 else None
-        return OwnerReplyProposal(intent, reference, Confidence.HIGH, request_version=version)
+        requests = tool("list_pending_requests", {})["requests"]
+        if not requests:
+            return "No request is waiting for approval right now."
+        action = self.owner.get(body)
+        if action is None or len(requests) != 1:
+            return "Nothing changed. Which request do you mean?"
+        result = tool(action, {"ref": requests[0]["ref"], "version": requests[0]["version"]})
+        return (f"{'Approved' if action == 'approve_request' else 'Declined'}: "
+                f"Avery Example, {requests[0]['time']} (ref {requests[0]['ref']}).") if result["ok"] else "Nothing changed."
 
 class DraftScript(Script):
     def __init__(self) -> None:
@@ -155,7 +156,7 @@ def test_plain_language_booking_then_owner_yes_confirms_it() -> None:
     assert chat.status(booked.appointment_id) == CalendarStatus.PENDING_APPROVAL
     assert chat.model.calls == ["Hi. Do you have availability for tomorrow?"]
 
-    chat.model.owner["Yes"] = OwnerReplyIntent.APPROVE_NAMED_REQUEST
+    chat.model.owner["Yes"] = "approve_request"
     approved = chat.text("Yes", SenderRole.OWNER)
     assert approved.committed
     assert approved.text == (f"Approved: Avery Example, Wed Sep 30 at 10:00 AM "
@@ -496,7 +497,7 @@ def test_owner_plain_decline_and_yes_without_pending_requests() -> None:
     chat = Harness()
     assert "No request is waiting" in chat.text("yes", SenderRole.OWNER).text
     request = chat.hold(THURSDAY, "request")
-    chat.model.owner["Decline"] = OwnerReplyIntent.DECLINE_NAMED_REQUEST
+    chat.model.owner["Decline"] = "decline_request"
     declined = chat.text("Decline", SenderRole.OWNER)
     assert declined.committed and declined.text.startswith("Declined: Avery Example, Thu Oct 1")
     assert chat.status(request) == CalendarStatus.DECLINED
