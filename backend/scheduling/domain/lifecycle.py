@@ -67,6 +67,7 @@ class AppointmentCommand:
     expected_version: int
     start_at: datetime | None = None
     duration_minutes: int | None = None
+    owner_reply_required: bool = False
 
     def __post_init__(self) -> None:
         if not all((self.business_id, self.appointment_id, self.actor_id, self.idempotency_key)):
@@ -79,6 +80,10 @@ class AppointmentCommand:
             self.start_at is not None or self.duration_minutes is not None
         ):
             raise ValueError("Only appointment edits accept a new start or duration")
+        if self.owner_reply_required and (
+                self.actor_role != ActorRole.OWNER
+                or self.operation not in (Action.APPROVE, Action.DECLINE)):
+            raise ValueError("Only owner decisions may require a model reply")
 
     def request_hash(self) -> str:
         payload = {
@@ -88,6 +93,7 @@ class AppointmentCommand:
             "actor_role": self.actor_role.value,
             "operation": self.operation.value,
             "expected_version": self.expected_version,
+            "owner_reply_required": self.owner_reply_required,
             "start_at": self.start_at.astimezone(UTC).isoformat() if self.start_at else None,
             "duration_minutes": self.duration_minutes,
         }
@@ -417,10 +423,11 @@ class LifecycleService:
         elif before.replaces_appointment_id and command.operation in (
                 Action.DECLINE, Action.CANCEL):
             template = "replacement-original-retained"
-        return (
-            OutboxIntent(f"{audit_id}#client", before.appointment_id, "client", template),
-            OutboxIntent(f"{audit_id}#owner", before.appointment_id, "owner", template),
-        )
+        client = OutboxIntent(f"{audit_id}#client", before.appointment_id, "client", template)
+        if command.owner_reply_required:
+            return (client,)
+        return (client, OutboxIntent(f"{audit_id}#owner", before.appointment_id,
+                                     "owner", template))
 
     @staticmethod
     def _replay(record: TransitionRecord, request_hash: str) -> TransitionResult:

@@ -16,12 +16,13 @@ cd backend
 
 To try your own **fictional** messages, use the same subshell setup and run
 `.venv/bin/python -m evals.scheduling_messages --interactive` from `backend` instead. Type
-`/client` or `/owner` to switch perspectives and `/quit` to exit. The preview
-uses two invented visit/request references (`a101a101`, `b202b202`) and prints the
-model's proposed interpretation, including any resolved dates and clarification
-question. It does not send an SMS, change the calendar, or apply the backend
-permission and availability checks. Do not enter real names, phone numbers,
-addresses, access codes, or customer messages. The preview rejects recognizable
+`/quit` to exit. The client preview uses two invented visit references
+(`a101a101`, `b202b202`) and prints the model's proposed interpretation, including
+any resolved dates and clarification question. It does not exercise the #298
+owner approval tool loop. It does not send an SMS, change the calendar, or apply
+the backend permission and availability checks.
+Do not enter real names, phone numbers, addresses, access codes, or customer
+messages. The preview rejects recognizable
 phone numbers and access-code phrases before an API call, but this filter cannot
 detect every kind of private information.
 
@@ -65,15 +66,13 @@ allows at most 20 steps per run; use a short focused reproduction for each issue
 
 For local tests, a password manager can supply the value when creating `.env`; no secret value or vault item reference belongs in this repository. Add future local-only variables to the ignored file as their test harnesses need them. The deployed Twilio integration uses an environment-scoped SSM SecureString and has separate SMS authorization gates; a local `.env` does not configure or authorize live messaging.
 
-The script sends synthetic texts (nine from #24 and #60, plus the #241 calendar cases below) with no real people, phones, addresses, or access codes, using the production instructions, tool schema, and model input from `scheduling.adapters.openai_messages`. "Today" is fixed at Monday 2026-09-28. Since #60, the model resolves relative dates instead of refusing them, so the checks are:
+The script sends synthetic client texts (from #24, #60, and #241) with no real people, phones, addresses, or access codes, using the production client instructions, tool schema, and model input from `scheduling.adapters.openai_messages`. "Today" is fixed at Monday 2026-09-28. Since #60, the model resolves relative dates instead of refusing them, so the checks are:
 
 - An impossible date (February 30) must clarify with every action field null.
 - "Tomorrow" must resolve to 2026-09-29. "Next Friday afternoon" may clarify, or resolve to one Friday (Oct 2 or Oct 9) within 12:00–17:00. "Tuesday around 3" may clarify, or resolve to 2026-09-29 within 14:00–16:00.
-- The owner's "Yes" with two pending requests, and "Approve X or Y", must not name a reference.
 - "Cancel my appointment" with two visits must name neither a reference nor a day. "I can't make Thursday" must propose `cancel` for 2026-10-01 without a reference.
-- An exact owner reference must propose that reference and decision.
 
-The model sees one `propose_message` function. The script provides no scheduling write tool and does not call the calendar service. A passing run does not replace backend validation: offers write nothing, and only a deterministic reply to a stored offer or confirmation changes the calendar.
+The client model sees one `propose_message` function. The script provides no scheduling write tool and does not call the calendar service. A passing run does not replace backend validation.
 
 The response is a JSON summary of the model's proposals. A failed clarification case returns a nonzero exit code and prevents selecting the candidate as the pilot model. Store the summary and model ID in #24 after the live synthetic run; do not store the API key.
 
@@ -116,9 +115,9 @@ On 2026-09-29, the nine #60 cases were run four times against the production pro
 
 Retain `gpt-6-luna` as the **initial pilot interpretation model ID** for #22. This small synthetic evaluation is a gate, not proof of reliable behavior on all real conversations. #22 must validate every model proposal against actor permissions, exact request references, dates, and the authoritative calendar before a write. An uncertain or malformed proposal must ask for clarification or fall back safely. No live SMS or customer data was used in this evaluation, and selecting the model does not authorize either.
 
-### Direct-action tools (#272, #273, #274)
+### Historical direct-action tool evaluation (#272, #273, #274)
 
-The script now also covers the typed intents the backend honors only against stored state: `request_booking` for a time the assistant just offered, `confirm_cancel` and `keep_visit` after a cancellation question, and the owner tools (`show_requests`, `prepare_counteroffer`, version-quoted approve and decline). Client cases pass the open prompt kind and a synthetic transcript, with Monday 2026-10-12 as "today" for the booking cases. Owner cases call the production `classify_owner_reply` with one or two invented pending requests and no shown calendar range or view. They check what the model proposes, not what the backend does:
+Before #298, this script also covered typed owner intents (`show_requests`, `prepare_counteroffer`, and version-quoted approve and decline) through `classify_owner_reply`. Those owner cases were removed with the classifier and are historical evidence, not a current evaluation path. The client cases remain: `request_booking` for a time just offered, and `confirm_cancel` and `keep_visit` after a cancellation question. Client cases pass the open prompt kind and a synthetic transcript, with Monday 2026-10-12 as "today" for the booking cases. The old owner cases used one or two invented pending requests and checked model proposals, not backend effects:
 - An invitation followed by "Oct 13 at 1 pm" must be `availability` for 13:00, never a booking. After an unavailable time, "Oct 13" must be `availability` for that day without a clarification.
 - "lovely, lets lock that in" after an offer of Oct 13 at 1:00 PM must be `request_booking` for exactly that time. "can we do 3 pm instead?", "is 1 pm the earliest you have?", and "sounds good" with no offer open must not be.
 - "yes please, go ahead" after a cancellation question must be `confirm_cancel`, "actually let's hold onto it" must be `keep_visit`, and a question about Friday must stay `availability`. The same yes with no question open must not be `confirm_cancel`.
@@ -130,16 +129,16 @@ On 2026-10-08 the owner authorized live runs of these cases against `gpt-6-luna`
 - Final instruction wording: four runs passed 36/36 on the cases before the invitation case was added. With it (37 cases), two of four runs passed 37/37. The other two each missed one case: the lapsed-cancel-question case again, and the older "Approve a101a101 or b202b202" case (the model named the first reference). Neither miss can write: the backend has no stored prompt for the first, and a model-named decision with two pending requests only asks for the exact command.
 - Treat the eval as a sampling check, not a pass/fail certificate. The model is not deterministic; the lapsed-cancel miss appeared in 1 of 8 runs after the instruction change versus 1 of 2 before. A pass shows only that these synthetic texts were read as intended; the backend's stored-state checks still decide every write, and real conversations may differ. These runs evaluate the model's reading of the text, not its reply wording; client reply drafts are covered by the `--drafts` cases above (#283).
 
-### Owner reply drafts (#285)
+### Historical owner reply drafts (#285)
 
-`backend/evals/scheduling_messages.py --owner-drafts` defines seven synthetic cases for the three read-only owner results (a day's calendar answer, a page that continues, a calendar answer with an open offer, a pending summary, a single request detail with a prior transcript, and two how-to replies). It uses the production owner draft adapter and `valid_owner_draft`. The model writes the whole message from the facts and the replies the backend will honor. **One live run** was separately authorized by Enrique on 2026-10-08 against `gpt-6-luna` (key read from the environment only; no SMS or scheduling action): **all seven passed** with no fallback. The drafts included the open-offer reminder, the MORE line, and the APPROVE/DECLINE commands with the right references; they stayed close to the backend's wording and added little beyond it (for example, "Nothing has changed yet"). This is one run of a nondeterministic model, so the fallback rate is a sample, not a measurement. A pass means only the basic check described in CONVERSATION.md: it does not verify names, statuses, counts, whether the offer reminder or paging line was included, or whether command wording is right. Enrique accepted that residual risk (#285, 2026-10-08).
+Before #298, `backend/evals/scheduling_messages.py --owner-drafts` defined seven synthetic cases for read-only owner replies. The flag and `valid_owner_draft` have been removed. The production adapter still drafts read-only calendar answers, while the new owner decision path uses the tool loop. **One historical live run** was separately authorized by Enrique on 2026-10-08 against `gpt-6-luna` (key read from the environment only; no SMS or scheduling action): **all seven passed** with no fallback. This one nondeterministic run does not validate the new tool loop. A small live tool-loop evaluation remains for a later issue and requires separate authorization.
 
-Offline scripted conversations (`test_owner_reply_drafts.py`, `test_client_reply_contract.py`) cover: valid drafts used as the whole trimmed text; invented or missing dates, times, and references; a wrong year; swapped references, dates, and times within and across sentences; a restated swap in a sentence with no reference; over-length and non-GSM text; timeouts, malformed output, and a throttled (non-OSError) history read, each sending the unchanged backend text; an open offer whose time and request reference are accepted as facts and whose fallback is unchanged; model-written YES/MORE/APPROVE prompts being accepted; out-of-scope results never reaching the drafter; opt-out and non-owner senders never reaching the model; the 24-hour transcript reaching both owner model calls; and a duplicate inbound delivery drafting once.
+Current offline checks in `test_owner_tool_loop.py`, `test_owner_reply_drafts.py`, and `test_client_reply_contract.py` cover the model continuation after tool results, stale and rejected writes, reply length and GSM limits, replay, crash recovery, and read-only calendar drafting. No live tool-loop call was made for #298.
 
 ### Cutover validation (#275)
 
 The model-led client path is the shipped path: #272 to #274 supply the typed tools, #282 their live evaluation, and #283 the validated reply drafts. #275 removed the superseded read-only drafter and added offline checks for opt-out (the model is not called) and an over-length draft. No new live model run was made for it. The live evidence is the 2026-10-08 runs above, so the open gaps are:
 - The minimal draft validator passed one live rerun (five of five); a single run is a sampling check, and status wording is not validated.
 - The 37-case tool run is a sampling check (two of four runs passed fully, with misses that cannot write).
-- Owner replies are fixed backend text except the three read-only kinds drafted since #285 (calendar answer, pending-request summary, how-to); those have offline checks and one live run of the seven synthetic cases (7/7).
+- The historical owner draft run (7/7) predates #298 and does not validate owner tool-loop replies.
 - No deployment, live SMS, or real conversation was used; the AWS handoff stays disabled until Enrique separately authorizes it.

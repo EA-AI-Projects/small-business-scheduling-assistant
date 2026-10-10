@@ -30,18 +30,10 @@ from scheduling.domain.client_records import ACCESS_CODE_PATTERN
 from scheduling.domain.client_replies import (
     ClientReplyFact,
     ClientReplyResult,
-    facts_from_text,
     valid_draft,
-    valid_owner_draft,
 )
-from scheduling.domain.conversation import HOW_TO_FACTS, MessageContext
+from scheduling.domain.conversation import MessageContext
 from scheduling.domain.conversation_history import HistoryMessage
-from scheduling.domain.owner_reply_classification import (
-    OwnerReplyContext,
-    OwnerReplyIntent,
-    OwnerReplyProposal,
-    PendingRef,
-)
 from scheduling.domain.sms_ingress import SenderRole
 
 URL = "https://api.openai.com/v1/responses"
@@ -151,9 +143,6 @@ CASES = (
     Case("missing-month", "client", "How about Tuesday around 3?", (),
          lambda proposal: clarifies(proposal) or asks_for_day(
              "2026-09-29", "14:00", "16:00")(proposal)),
-    Case("owner-yes-two-requests", "owner", "Yes", TWO_REFS, no_reference),
-    Case("owner-two-references", "owner", "Approve a101a101 or b202b202", TWO_REFS,
-         no_reference),
     Case("cancel-two-visits", "client", "Cancel my appointment", TWO_REFS,
          lambda proposal: clarifies(proposal) or (
              proposal["intent"] == "cancel" and no_reference(proposal)
@@ -161,11 +150,6 @@ CASES = (
     Case("cant-make-thursday", "client", "I can't make Thursday", TWO_REFS,
          lambda proposal: proposal["intent"] == "cancel" and no_reference(proposal)
          and proposal["target_date"] == "2026-10-01"),
-    Case("explicit-owner-reference", "owner", "Approve a101a101", ("a101a101",),
-         lambda proposal: proposal["needs_clarification"] is False
-         and proposal["intent"] == "owner_decision"
-         and proposal["request_reference"] == "a101a101"
-         and proposal["owner_decision"] == "approve"),
     # Client calendar questions (#241): the model reads any wording or language; the backend
     # answers from the client's own visits. Cases 1-3 are the reported screenshot texts.
     Case("screenshot-1-bookings-this-week", "client", "do I have any bookings for this week?",
@@ -256,43 +240,6 @@ CASES = (
 
 
 @dataclass(frozen=True)
-class OwnerCase:
-    """An owner text read by the production owner classifier (#173, #274)."""
-
-    name: str
-    message: str
-    pending: tuple[PendingRef, ...]
-    expect: Callable[[OwnerReplyProposal], bool]
-    last_kind: str = "none"
-
-
-AVERY = PendingRef("a101a101", "Avery", "Thu Oct 1 at 9:00 AM", 1)
-BLAKE = PendingRef("b202b202", "Blake", "Fri Oct 2 at 1:00 PM", 3)
-
-OWNER_CASES = (
-    OwnerCase("owner-show-requests", "what's waiting for me?", (AVERY, BLAKE),
-              lambda p: p.intent == OwnerReplyIntent.SHOW_REQUESTS),
-    OwnerCase("owner-prepare-counteroffer", "offer Avery Friday at 2pm instead", (AVERY, BLAKE),
-              lambda p: p.intent == OwnerReplyIntent.PREPARE_COUNTEROFFER
-              and p.request_reference == "a101a101" and p.request_version == 1
-              and p.offer_date == date(2026, 10, 2) and str(p.offer_time) == "14:00:00"),
-    OwnerCase("owner-approve-by-name-quotes-version", "approve Blake's", (AVERY, BLAKE),
-              lambda p: p.intent == OwnerReplyIntent.APPROVE_NAMED_REQUEST
-              and p.request_reference == "b202b202" and p.request_version == 3),
-    OwnerCase("owner-approve-it-with-two-pending-names-no-request", "approve it", (AVERY, BLAKE),
-              lambda p: p.intent in (OwnerReplyIntent.UNCLEAR, OwnerReplyIntent.SHOW_REQUESTS)
-              or p.request_reference is None),
-    OwnerCase("owner-free-form-yes-after-calendar-is-not-approval", "yes please", (AVERY,),
-              lambda p: p.intent not in (OwnerReplyIntent.APPROVE_NAMED_REQUEST,
-                                         OwnerReplyIntent.DECLINE_NAMED_REQUEST),
-              last_kind="calendar_answer"),
-    OwnerCase("owner-single-pending-decline", "no, decline that one", (AVERY,),
-              lambda p: p.intent == OwnerReplyIntent.DECLINE_NAMED_REQUEST
-              and p.request_reference == "a101a101" and p.request_version == 1),
-)
-
-
-@dataclass(frozen=True)
 class DraftCase:
     name: str
     message: str
@@ -343,95 +290,6 @@ def evaluate_draft(case: DraftCase, key: str) -> dict[str, Any]:
     draft = OpenAIMessageInterpreter(key, 30).draft_client_reply(
         case.message, context_for(history_case), case.result)
     return {"case": case.name, "passed": valid_draft(draft, case.result),
-            "draft": draft}
-
-
-@dataclass(frozen=True)
-class OwnerDraftCase:
-    """A read-only owner result the model writes in full (#285), as a client reply is."""
-
-    name: str
-    message: str
-    result: ClientReplyResult
-    history: tuple[tuple[str, str], ...] = ()
-
-
-def owner_result(kind: str, model_body: str, instructions: tuple[str, ...],
-                 offer: str = "") -> ClientReplyResult:
-    """The backend result: required facts, honored replies, and an open offer's extra facts."""
-    return ClientReplyResult(kind, "read_only", model_body, facts_from_text(model_body), None,
-                             model_body, instructions, facts_from_text(offer))
-
-
-OWNER_ASKED = ("owner", "what's waiting for me?")
-OWNER_ANSWERED = ("assistant", (
-    "2 requests are pending, so nothing changed: Avery Sample, Thu Oct 1 at 9:00 AM "
-    "(ref a101a101); Blake Example, Fri Oct 2 at 1:00 PM (ref b202b202). Reply APPROVE or "
-    "DECLINE with the reference."))
-NOTHING = "Nothing has changed; this is a read-only calendar answer"
-OFFER_OPEN = (
-    ("An offer to Avery for Fri Oct 2 at 2:00 PM is open and waiting: YES sends exactly that "
-    "offer, NO cancels it; always tell the owner this and how to answer"),
-    "APPROVE a101a101 approves the original request (ref a101a101) instead")
-DECIDE = "APPROVE <ref> or DECLINE <ref> with a pending request's reference decides that request"
-
-OWNER_DRAFT_CASES = (
-    OwnerDraftCase("owner-calendar-day", "what does Thursday look like?", owner_result(
-        "owner_calendar",
-        "Thu Oct 1, 2026 (America/Los_Angeles): 1 pending request.\n"
-        "Thu Oct 1, 9:00 AM-11:00 AM: Avery (pending, ref a101a101)", (NOTHING,))),
-    OwnerDraftCase("owner-calendar-page-continues", "show me next week", owner_result(
-        "owner_calendar",
-        "Mon Oct 5 to Sun Oct 11, 2026 (America/Los_Angeles): 1 confirmed visit, "
-        "1 pending request.\nMon Oct 5, 9:00 AM-11:00 AM: Blake (confirmed)\n"
-        "Tue Oct 6, 1:00 PM-3:00 PM: Avery (pending, ref a101a101)",
-        (NOTHING, "MORE shows the next page of this calendar answer"))),
-    OwnerDraftCase("owner-calendar-with-open-offer", "what does Thursday look like?",
-                   owner_result(
-                       "owner_calendar",
-                       "Thu Oct 1, 2026 (America/Los_Angeles): 1 pending request.\n"
-                       "Thu Oct 1, 9:00 AM-11:00 AM: Avery (pending, ref a101a101)",
-                       (NOTHING, *OFFER_OPEN), "Fri Oct 2 at 2:00 PM a101a101")),
-    OwnerDraftCase("owner-pending-summary", "what is pending?", owner_result(
-        "owner_requests",
-        "2 requests are pending: Avery, Thu Oct 1 at 9:00 AM (ref a101a101); Blake, "
-        "Fri Oct 2 at 1:00 PM (ref b202b202).", (DECIDE, "Nothing has changed yet"))),
-    OwnerDraftCase("owner-one-request-detail", "tell me about Avery's request", owner_result(
-        "owner_requests",
-        "Pending owner approval, not confirmed: Avery, Thu Oct 1 at 9:00 AM (ref a101a101), "
-        "120 minutes.",
-        ("APPROVE a101a101 approves this request; DECLINE a101a101 declines it",
-         "Nothing has changed yet")), (OWNER_ASKED, OWNER_ANSWERED)),
-    OwnerDraftCase("owner-how-to", "how do I approve something?", owner_result(
-        "owner_how_to", "One request is pending: Avery, Thu Oct 1 at 9:00 AM (ref a101a101).",
-        HOW_TO_FACTS)),
-    OwnerDraftCase("owner-how-to-no-requests", "what can you do?", owner_result(
-        "owner_how_to", "No request is waiting for approval right now.", HOW_TO_FACTS)),
-)
-
-
-def owner_context(case: OwnerCase) -> OwnerReplyContext:
-    return OwnerReplyContext(TODAY, TIMEZONE, case.last_kind, "none", None, None, (),
-                             None, case.pending)
-
-
-def evaluate_owner(case: OwnerCase, key: str) -> dict[str, Any]:
-    proposal = OpenAIMessageInterpreter(key, 30).classify_owner_reply(
-        case.message, owner_context(case))
-    return {"case": case.name, "passed": bool(case.expect(proposal)),
-            "intent": proposal.intent.value, "request_reference": proposal.request_reference,
-            "request_version": proposal.request_version, "confidence": proposal.confidence.value}
-
-
-def evaluate_owner_draft(case: OwnerDraftCase, key: str) -> dict[str, Any]:
-    at = datetime(2026, 10, 12, 17, tzinfo=ZoneInfo("UTC"))
-    history = tuple(HistoryMessage(f"m{number}", role, at, text)
-                    for number, (role, text) in enumerate(case.history))
-    context = MessageContext(SenderRole.OWNER, date(2026, 10, 12), TIMEZONE, (),
-                             history=history)
-    draft = OpenAIMessageInterpreter(key, 30).draft_owner_reply(
-        case.message, context, case.result)
-    return {"case": case.name, "passed": valid_owner_draft(draft, case.result),
             "draft": draft}
 
 
@@ -509,27 +367,23 @@ def safe_preview_message(message: str) -> bool:
 
 
 def interactive(key: str) -> int:
-    print("Synthetic message preview. Use no real client details or access codes.")
-    print("/client or /owner changes the actor; /quit exits. No bookings or texts are sent.")
+    print("Synthetic client message preview. Use no real client details or access codes.")
+    print("/quit exits. No bookings or texts are sent.")
     print(f"Synthetic references {' and '.join(TWO_REFS)} stand in for visits or requests.")
-    actor = "client"
     while True:
         try:
-            message = input(f"{actor}> ").strip()
+            message = input("client> ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return 0
         if message == "/quit":
             return 0
-        if message in {"/client", "/owner"}:
-            actor = message[1:]
-            continue
         if not message:
             continue
         if not safe_preview_message(message):
             print("Input looks like a phone number or access code; nothing was sent.")
             continue
-        case = Case("preview", actor, message, TWO_REFS, lambda _proposal: True)
+        case = Case("preview", "client", message, TWO_REFS, lambda _proposal: True)
         today = datetime.now(ZoneInfo(TIMEZONE)).date()
         print(json.dumps(propose(case, key, today), indent=2))
         print("Preview only; the scheduling service has not acted on this proposal.")
@@ -541,9 +395,6 @@ def main(argv: list[str] | None = None) -> int:
                         help="Preview synthetic messages without scheduling writes")
     parser.add_argument("--drafts", action="store_true",
                         help="Run synthetic client SMS draft cases (requires a separately authorized live run)")
-    parser.add_argument("--owner-drafts", action="store_true",
-                        help="Run synthetic owner SMS draft cases (requires a separately "
-                        "authorized live run)")
     args = parser.parse_args(argv)
     key = os.environ.get("OPENAI_API_KEY")
     if not key:
@@ -555,12 +406,7 @@ def main(argv: list[str] | None = None) -> int:
         results = [evaluate_draft(case, key) for case in DRAFT_CASES]
         print(json.dumps({"model": MODEL, "draft_results": results}, indent=2))
         return 0 if all(item["passed"] for item in results) else 1
-    if args.owner_drafts:
-        results = [evaluate_owner_draft(case, key) for case in OWNER_DRAFT_CASES]
-        print(json.dumps({"model": MODEL, "owner_draft_results": results}, indent=2))
-        return 0 if all(item["passed"] for item in results) else 1
     results = [evaluate(case, key) for case in CASES]
-    results += [evaluate_owner(case, key) for case in OWNER_CASES]
     print(json.dumps({"model": MODEL, "results": results}, indent=2))
     return 0 if all(item["passed"] for item in results) else 1
 

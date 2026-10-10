@@ -1,18 +1,13 @@
 """The local text simulator shares the synthetic owner API's calendar."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 from fastapi.testclient import TestClient
 
 from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.domain.conversation import MessageContext, MessageProposal
 from scheduling.domain.owner_policy import OwnerPolicyService, PolicyCommand
-from scheduling.domain.owner_reply_classification import (
-    Confidence,
-    OwnerReplyContext,
-    OwnerReplyIntent,
-    OwnerReplyProposal,
-)
 from scheduling.local_owner import create_local_owner_app, seed_synthetic_data
 from scheduling.local_texts import OfflineInterpreter, TextSimulator
 
@@ -75,10 +70,10 @@ def test_model_sees_only_its_own_recent_simulated_texts() -> None:
             self.client_histories.append([message.text for message in context.history])
             return MessageProposal("clarify", None, None, None, True)
 
-        def classify_owner_reply(self, body: str,
-                                 context: OwnerReplyContext) -> OwnerReplyProposal:
-            self.owner_histories.append([message.text for message in context.history])
-            return OwnerReplyProposal(OwnerReplyIntent.UNCLEAR, None, Confidence.HIGH)
+        def run_owner_loop(self, body: str, today: date, timezone: str, history: Any,
+                           tool: Any) -> str:
+            self.owner_histories.append([message.text for message in history])
+            return "Nothing changed."
 
     model = Reading()
     current = [NOW]
@@ -98,8 +93,8 @@ def test_model_sees_only_its_own_recent_simulated_texts() -> None:
     text(client, "client-1", "What about Wednesday?")
     assert model.client_histories[-1] == ["What about Wednesday?"]
     current[0] += timedelta(seconds=1)
-    text(client, "owner", "What is waiting for me?")
-    assert model.owner_histories[-1] == ["What is waiting for me?"]
+    text(client, "owner", "yes")
+    assert model.owner_histories[-1] == ["yes"]
     current[0] += timedelta(seconds=1)
     booked = text(client, "client-1", "Book 2026-10-05 09:00")
     client_notice = next(message["body"] for message in booked
@@ -233,13 +228,18 @@ class Plain:
                                    "2026-09-30", "2026-09-30")
         return MessageProposal("clarify", None, None, None, True)
 
-    def classify_owner_reply(self, body: str, context: OwnerReplyContext) -> OwnerReplyProposal:
-        """A plain yes with exactly one request pending is a decision."""
-        if body.lower() == "yes" and len(context.pending) == 1:
-            return OwnerReplyProposal(OwnerReplyIntent.APPROVE_NAMED_REQUEST,
-                                      context.pending[0].ref, Confidence.HIGH,
-                                      request_version=context.pending[0].version)
-        return OwnerReplyProposal(OwnerReplyIntent.UNCLEAR, None, Confidence.HIGH)
+    def run_owner_loop(self, body: str, today: date, timezone: str, history: Any,
+                       tool: Any) -> str:
+        """A plain yes with exactly one request pending calls the owner tool."""
+        pending = tool("list_pending_requests", {})["requests"]
+        if body.lower() != "yes" or len(pending) != 1:
+            return "Which request do you mean?"
+        target = pending[0]
+        result = tool("approve_request", {"ref": target["ref"],
+                                          "version": target["version"]})
+        full_name = {"Blake": "Blake Sample", "Avery": "Avery Example"}[target["client"]]
+        return (f"Approved: {full_name}, {target['time']} "
+                f"(ref {target['ref']}).") if result["ok"] else "Nothing changed."
 
 
 def test_plain_language_booking_and_owner_yes_in_the_simulator() -> None:

@@ -1,8 +1,9 @@
 """Model proposals cannot bypass the trusted scheduling services."""
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from io import BytesIO
+from typing import Any
 
 import pytest
 
@@ -33,10 +34,16 @@ class Interpreter:
     def __init__(self, proposal: MessageProposal) -> None:
         self.proposal = proposal
         self.calls: list[MessageContext] = []
+        self.owner_calls: list[str] = []
 
     def propose(self, body: str, context: MessageContext) -> MessageProposal:
         self.calls.append(context)
         return self.proposal
+
+    def run_owner_loop(self, body: str, today: date, timezone: str, history: Any,
+                       tool: Any) -> str:
+        self.owner_calls.append(body)
+        return "Which request do you mean?"
 
 
 class Consent:
@@ -102,8 +109,9 @@ class TimedOut(Interpreter):
         self.calls.append(context)
         raise TimeoutError("synthetic model timeout")
 
-    def classify_owner_reply(self, body: str, context: object) -> object:
-        self.calls.append(context)  # type: ignore[arg-type]
+    def run_owner_loop(self, body: str, today: date, timezone: str, history: Any,
+                       tool: Any) -> str:
+        self.owner_calls.append(body)
         raise TimeoutError("synthetic model timeout")
 
 
@@ -176,12 +184,12 @@ def test_owner_yes_with_two_pending_cannot_approve_even_if_model_selects_target(
     service, store, model, _ = setup(MessageProposal("owner_decision", None,
                                                       None, "approve", False))
     hold_id = pending(store)
-    other_id = second_pending(store)
+    second_pending(store)
     model.proposal = MessageProposal("owner_decision", hold_id[:8], None, "approve", False)
     result = service.handle(receipt("Yes", role=SenderRole.OWNER))
     assert not result.committed
-    assert "2 requests are pending" in result.text
-    assert hold_id[:8] in result.text and other_id[:8] in result.text
+    assert result.text == "Which request do you mean?"
+    assert model.owner_calls == ["Yes"]
     assert not model.calls
     assert store.read_appointment(hold_id).status == CalendarStatus.PENDING_APPROVAL  # type: ignore[union-attr]
 
@@ -402,11 +410,11 @@ def test_model_timeout_gives_safe_retry_and_writes_nothing() -> None:
     for message, expected in (
             (receipt("Can you come Friday?"), "try again later"),
             (receipt("Looks fine to me", role=SenderRole.OWNER, provider_id="SM-owner"),
-             "couldn't tell what you meant")):
+             "Something went wrong")):
         result = service.handle(message)
         assert not result.committed
         assert expected in result.text
-    assert len(model.calls) == 2
+    assert len(model.calls) == 1 and model.owner_calls == ["Looks fine to me"]
     assert calendar_state(store) == before
     assert store.read_appointment(hold_id).status == CalendarStatus.PENDING_APPROVAL  # type: ignore[union-attr]
 
@@ -437,30 +445,3 @@ def test_issue_24_synthetic_cases_cannot_change_calendar_even_with_unsafe_model_
                                             provider_id=f"SM-eval-{number}-{variant}"))
             assert not result.committed, (case.name, proposal)
     assert calendar_state(store) == before
-
-
-def test_issue_24_cases_with_real_references_do_not_let_the_model_pick_one() -> None:
-    service, store, model, _ = setup(MessageProposal("clarify", None, None, None, True))
-    first = pending(store)
-    second = HoldService(store).create(CreateHold(
-        "pilot", "client-1", "client-1", "seed-second", START + timedelta(days=1), 120),
-        NOW).hold_id
-    before = calendar_state(store)
-    refs = {"a101a101": first[:8], "b202b202": second[:8]}
-    for case in CASES:
-        if case.actor != "owner" or case.name == "explicit-owner-reference":
-            continue
-        body = case.message
-        for placeholder, reference in refs.items():
-            body = body.replace(placeholder, reference)
-        for decision in ("approve", "decline"):
-            model.proposal = MessageProposal("owner_decision", first[:8], None, decision, False)
-            result = service.handle(receipt(body, role=SenderRole.OWNER,
-                                            provider_id=f"SM-real-{case.name}-{decision}"))
-            assert not result.committed, (case.name, decision)
-    assert calendar_state(store) == before
-    explicit = next(case for case in CASES if case.name == "explicit-owner-reference")
-    result = service.handle(receipt(explicit.message.replace("a101a101", first[:8]),
-                                    role=SenderRole.OWNER, provider_id="SM-real-explicit"))
-    assert result.committed
-    assert store.read_appointment(first).status == CalendarStatus.CONFIRMED  # type: ignore[union-attr]

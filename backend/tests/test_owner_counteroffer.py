@@ -1,7 +1,7 @@
 """Owner counteroffers: prepare, confirm, and send only what the owner reviewed."""
 
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -26,11 +26,10 @@ from scheduling.domain.owner_counteroffer import (
     InMemoryCounterofferStore,
     OfferState,
 )
-from scheduling.domain.owner_reply_classification import (
-    Confidence,
-    OwnerReplyContext,
-    OwnerReplyIntent,
-    OwnerReplyProposal,
+from scheduling.domain.owner_transitional import (
+    OwnerTransitionContext,
+    OwnerTransitionIntent,
+    OwnerTransitionProposal,
 )
 from scheduling.domain.sms_ingress import ConsentEvidence, InboundReceipt, Keyword, SenderRole
 
@@ -55,12 +54,18 @@ class NeverModel:
     def propose(self, body: str, context: MessageContext) -> MessageProposal:
         return MessageProposal("clarify", None, None, None, True)
 
-    def classify_owner_reply(self, body: str, context: OwnerReplyContext) -> OwnerReplyProposal:
-        if len(context.pending) != 1:
-            return OwnerReplyProposal(OwnerReplyIntent.UNCLEAR, None, Confidence.HIGH)
-        return OwnerReplyProposal(OwnerReplyIntent.APPROVE_NAMED_REQUEST,
-                                  context.pending[0].ref, Confidence.HIGH,
-                                  request_version=context.pending[0].version)
+    def classify_owner_transition(self, body: str,
+                                  context: OwnerTransitionContext) -> OwnerTransitionProposal:
+        return OwnerTransitionProposal(OwnerTransitionIntent.UNCLEAR)
+
+    def run_owner_loop(self, body: str, today: date, timezone: str, history: Any,
+                       tool: Any) -> str:
+        pending = tool("list_pending_requests", {})["requests"]
+        if len(pending) != 1:
+            return "Which request do you mean?"
+        result = tool("approve_request", {"ref": pending[0]["ref"],
+                                          "version": pending[0]["version"]})
+        return "Approved." if result["ok"] else "Nothing changed."
 
 
 class Consent:
