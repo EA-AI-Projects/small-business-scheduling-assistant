@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import type { Appointment, CalendarEvent, UnavailableBlock } from "@/api/types";
-import { toCalendarItem } from "@/calendar/item";
+import { toCalendarItem } from "@/owner/calendarItem";
 import { path } from "@/lib/api";
 import { localInput } from "@/lib/time";
 import { errorMessage, useOwner } from "@/owner/OwnerContext";

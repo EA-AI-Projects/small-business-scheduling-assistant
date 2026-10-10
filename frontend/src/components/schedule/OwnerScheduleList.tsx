@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 
 import type { Appointment, CalendarEvent } from "@/api/types";
-import { toCalendarItem, type CalendarItem } from "@/calendar/item";
+import type { CalendarItem } from "@/calendar/item";
+import { toCalendarItem } from "@/owner/calendarItem";
 import { path } from "@/lib/api";
 import { scheduleEvents } from "@/lib/scheduleEvents";
 import { useOwner } from "@/owner/OwnerContext";
