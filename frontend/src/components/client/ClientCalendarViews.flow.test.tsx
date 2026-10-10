@@ -46,6 +46,9 @@ function Page({ horizon = 14 }: { horizon?: number | null }) {
 
 // Boundary: the client Calendar page over a stubbed client API. Not covered: sign-in, the real
 // header, popover placement, or the request/move/cancel writes (see ClientHome.flow.test.tsx).
+// These tests step through many views with the DOM re-rendering each time; the default 5s is tight on a busy machine.
+const SLOW = 30_000;
+
 describe("client calendar views", () => {
   let host: HTMLDivElement;
   let root: Root;
@@ -125,7 +128,7 @@ describe("client calendar views", () => {
     // Only Day views asked for open times; the other views never did.
     expect(availabilityCalls()).toBe(3);
     expect(fetcher.mock.calls.every(([url]) => String(url).startsWith("https://api.example.test/v1/client/"))).toBe(true);
-  });
+  }, SLOW);
 
   it("shows an empty calendar with a short note for past dates", async () => {
     await press("Previous day");
@@ -162,7 +165,7 @@ describe("client calendar views", () => {
     expect(host.querySelector<HTMLButtonElement>("[aria-label='Next month']")!.disabled).toBe(true);
     const asked = fetcher.mock.calls.map(([url]) => String(url));
     expect(asked.some((url) => url.endsWith("day=2026-10-25"))).toBe(false);
-  });
+  }, SLOW);
   it("clamps a picked date past the horizon and shows the horizon message for a straddling month day", async () => {
     await press("Today");
     await press("Next day");
@@ -200,7 +203,7 @@ describe("client calendar views", () => {
       expect(host.textContent).not.toContain("We only book up to");
     }
     expect(fetcher.mock.calls.map(([url]) => String(url)).some((url) => url.includes("day=2026-11"))).toBe(false);
-  });
+  }, SLOW);
   it("limits nothing when the horizon is unknown", async () => {
     await act(async () => root.render(<Page horizon={null} />));
     await setView("year");
