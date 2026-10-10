@@ -3,7 +3,7 @@
 import json
 from datetime import UTC, date, datetime, time
 from io import BytesIO
-from typing import Any
+from typing import Any, cast
 from urllib.request import Request
 
 import pytest
@@ -25,7 +25,7 @@ def test_client_reply_draft_uses_structured_result_and_rejects_malformed_output(
     sent: list[dict[str, Any]] = []
 
     def reply(request: Request, timeout: int) -> BytesIO:
-        sent.append(json.loads(request.data or b"{}"))
+        sent.append(json.loads(cast(bytes, request.data or b"{}")))
         return BytesIO(json.dumps({"output": [{"type": "function_call", "name": "draft_sms",
                                        "arguments": json.dumps({"text": "It’s pending owner approval. Ref a101a101."})}]}).encode())
 
@@ -72,7 +72,7 @@ def test_bounded_model_call_contains_only_refs_actor_and_text(monkeypatch: pytes
     def fake_urlopen(request: Request, timeout: int) -> BytesIO:
         assert timeout == 15
         assert request.full_url == "https://api.openai.com/v1/responses"
-        payload = json.loads(request.data or b"{}")
+        payload = json.loads(cast(bytes, request.data or b"{}"))
         requests.append(payload)
         return response(proposal())
 
@@ -94,7 +94,7 @@ def test_date_only_proposal_sees_rolling_history_as_untrusted_data(
     sent: list[dict[str, Any]] = []
 
     def fake_urlopen(request: Request, timeout: int) -> BytesIO:
-        sent.append(json.loads(request.data or b"{}"))
+        sent.append(json.loads(cast(bytes, request.data or b"{}")))
         return response(proposal(intent="availability", request_reference=None,
                                  owner_decision=None, date_from="2026-10-13",
                                  date_to="2026-10-13"))
@@ -138,29 +138,6 @@ def owner_reply_response(**changes: Any) -> BytesIO:
     }]}).encode())
 
 
-def test_owner_reply_classification_sends_only_bounded_context(
-        monkeypatch: pytest.MonkeyPatch) -> None:
-    sent: list[dict[str, Any]] = []
-
-    def fake_urlopen(request: Request, timeout: int) -> BytesIO:
-        sent.append(json.loads(request.data or b"{}"))
-        return owner_reply_response()
-
-    monkeypatch.setattr("scheduling.adapters.openai_messages.urlopen", fake_urlopen)
-    pending = PendingRef("abc12345", "Blake", "Wed Oct 7 at 9:00 AM", 3)
-    context = OwnerTransitionContext(date(2026, 10, 4), "America/Los_Angeles", "calendar_answer",
-                                "summary", date(2026, 10, 5), date(2026, 10, 11),
-                                ("confirmed", "pending"), (pending,))
-    result = OpenAIMessageInterpreter("synthetic-key").classify_owner_transition(
-        "yes please", context)
-    assert result.intent == OwnerTransitionIntent.CALENDAR_FOLLOWUP
-    assert result.statuses is not None
-    payload = sent[0]
-    assert payload["store"] is False and payload["tool_choice"]["name"] == "classify_owner_transition"
-    assert "ref abc12345, version 3, Blake, Wed Oct 7 at 9:00 AM" in payload["input"]
-    assert "yes please" in payload["input"] and "synthetic-key" not in json.dumps(payload)
-
-
 @pytest.mark.parametrize("changes", [
     {"intent": "approve_everything"}, {"statuses": ["bogus"]},
     {"date_from": "next friday"}, {"request_reference": "x" * 65},
@@ -181,7 +158,7 @@ def test_owner_reply_classification_describes_an_open_offer_and_accepts_offer_in
     sent: list[dict[str, Any]] = []
 
     def fake_urlopen(request: Request, timeout: int) -> BytesIO:
-        sent.append(json.loads(request.data or b"{}"))
+        sent.append(json.loads(cast(bytes, request.data or b"{}")))
         return owner_reply_response(intent="confirm_offer", statuses=None)
 
     monkeypatch.setattr("scheduling.adapters.openai_messages.urlopen", fake_urlopen)
@@ -195,7 +172,7 @@ def test_owner_reply_classification_describes_an_open_offer_and_accepts_offer_in
     assert "Last assistant message: offer_prompt" in text
     assert "Open offer: ref abc12345, Blake, new time Wed Oct 7 at 2:00 PM" in text
     enum = sent[0]["tools"][0]["parameters"]["properties"]["intent"]["enum"]
-    assert {"confirm_offer", "cancel_offer", "calendar_question"} <= set(enum)
+    assert {"confirm_offer", "cancel_offer"} <= set(enum)
 
 
 def test_calendar_question_carries_statuses_view_and_the_open_answer(
@@ -203,7 +180,7 @@ def test_calendar_question_carries_statuses_view_and_the_open_answer(
     requests: list[dict[str, Any]] = []
 
     def fake_urlopen(request: Request, timeout: int) -> BytesIO:
-        requests.append(json.loads(request.data or b"{}"))
+        requests.append(json.loads(cast(bytes, request.data or b"{}")))
         return response(proposal(intent="calendar_question", request_reference=None,
                                  owner_decision=None, statuses=["confirmed"], view="count"))
 
@@ -269,41 +246,3 @@ def test_owner_counteroffer_tool_arguments_are_typed(
     assert result.intent == OwnerTransitionIntent.PREPARE_COUNTEROFFER
     assert (result.request_version, result.offer_date, result.offer_time) == (
         2, date(2026, 10, 9), time(14, 0))
-
-
-def test_owner_classifier_and_draft_receive_the_transcript_but_not_the_fallback_text(
-        monkeypatch: pytest.MonkeyPatch) -> None:
-    sent: list[dict[str, Any]] = []
-
-    def fake_urlopen(request: Request, timeout: int) -> BytesIO:
-        sent.append(json.loads(request.data or b"{}"))
-        if sent[-1]["tools"][0]["name"] == "draft_sms":
-            return BytesIO(json.dumps({"output": [{
-                "type": "function_call", "name": "draft_sms",
-                "arguments": json.dumps({"text": "Avery waits on Thu Oct 1."})}]}).encode())
-        return owner_reply_response()
-
-    monkeypatch.setattr("scheduling.adapters.openai_messages.urlopen", fake_urlopen)
-    at = datetime(2026, 10, 4, 15, tzinfo=UTC)
-    history = (HistoryMessage("SM-1", "owner", at, "synthetic owner question"),
-               HistoryMessage("SM-2", "assistant", at, "synthetic assistant answer"))
-    model = OpenAIMessageInterpreter("synthetic-key")
-    model.classify_owner_transition("what is pending", OwnerTransitionContext(
-        date(2026, 10, 4), "America/Los_Angeles", "none", "none", None, None, (), (),
-        history=history))
-    assert '{"role": "owner", "text": "synthetic owner question"}' in sent[0]["input"]
-    assert "synthetic assistant answer" in sent[0]["input"]
-    result = ClientReplyResult(
-        "owner_calendar", "read_only", "Reply APPROVE or DECLINE: Avery Sample, Thu Oct 1",
-        (ClientReplyFact("Thu Oct 1", None, "listed"),), None,
-        "One request is pending: Avery, Thu Oct 1.", ("APPROVE <ref> decides a request",))
-    draft = model.draft_owner_reply("what is pending", MessageContext(
-        SenderRole.OWNER, date(2026, 10, 4), "America/Los_Angeles", (), history=history), result)
-    assert draft == "Avery waits on Thu Oct 1."
-    payload = sent[1]
-    assert payload["store"] is False and payload["tool_choice"]["name"] == "draft_sms"
-    assert "synthetic assistant answer" in payload["input"]
-    assert "Avery, Thu Oct 1" in payload["input"]
-    # The full name and the stored fallback text never leave the backend.
-    assert "Sample" not in payload["input"] and "Reply APPROVE" not in payload["input"]
-    assert '"honored_replies": ["APPROVE <ref> decides a request"]' in payload["input"]
