@@ -1,5 +1,5 @@
 /** Pure layout for the Day and Week time grids. Positions are business-local wall-clock minutes. */
-import type { CalendarEvent } from "@/api/types";
+import type { CalendarItem } from "@/calendar/item";
 
 import { addDays, localInput } from "./time";
 
@@ -8,7 +8,7 @@ export const MINUTES_PER_DAY = 1440;
 export const MIN_DRAWN_MINUTES = 30;
 
 export interface PlacedEvent {
-  event: CalendarEvent;
+  event: CalendarItem;
   /** Minutes after local midnight where the item starts on this day (0 if it began earlier). */
   startMinute: number;
   /** Drawn end in minutes (at least MIN_DRAWN_MINUTES after start, clipped to the day; 1440 if it runs past midnight). */
@@ -31,7 +31,7 @@ function minuteOf(local: string): number {
  * so on DST days the column still has 24 hour rows; an item whose wall-clock end is not after its
  * start (the repeated fall-back hour) falls back to its real duration.
  */
-export function layoutDay(events: CalendarEvent[], day: string, zone: string): PlacedEvent[] {
+export function layoutDay(events: CalendarItem[], day: string, zone: string): PlacedEvent[] {
   const dayStart = `${day}T00:00`;
   const nextStart = `${addDays(day, 1)}T00:00`;
   const items: Omit<PlacedEvent, "lane" | "lanes">[] = [];

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import type { CalendarEvent } from "@/api/types";
+import { itemKind, type CalendarItem } from "@/calendar/item";
 import { addMonths, monthGrid } from "@/lib/monthGrid";
 import { addDays, localInput, localTime, statusLabel, todayKey } from "@/lib/time";
 
@@ -13,10 +13,10 @@ function longName(date: string): string {
   });
 }
 
-/** Twelve Monday-first mini calendars backed by the owner calendar snapshot. */
+/** Twelve Monday-first mini calendars backed by a loaded calendar. */
 export function YearGrid({ date, events, zone, selectedId, onSelect, onDismiss, onNavigate, onDay }: {
   date: string;
-  events: CalendarEvent[];
+  events: CalendarItem[];
   zone: string;
   selectedId: string | null;
   onSelect: (id: string, element: HTMLElement) => void;
@@ -65,9 +65,9 @@ export function YearGrid({ date, events, zone, selectedId, onSelect, onDismiss, 
   };
 
   const months = Array.from({ length: 12 }, (_, index) => `${year}-${String(index + 1).padStart(2, "0")}-01`);
-  // The owner snapshot covers the whole calendar. An item spanning midnight appears on both
+  // The loaded items may cover the whole calendar. An item spanning midnight appears on both
   // dates, while one ending exactly at midnight does not appear on the next date.
-  const byDay = new Map<string, CalendarEvent[]>();
+  const byDay = new Map<string, CalendarItem[]>();
   for (const item of events) {
     const start = localInput(item.start_at, zone);
     const end = localInput(item.end_at, zone);
@@ -126,7 +126,7 @@ export function YearGrid({ date, events, zone, selectedId, onSelect, onDismiss, 
                   <button type="button" key={item.event_id} data-event-id={item.event_id}
                     data-popover-anchor="" aria-haspopup="dialog"
                     aria-current={item.event_id === selectedId ? "true" : undefined}
-                    className={`year-item ${item.status.toLowerCase().split("_")[0]}${item.event_id === selectedId ? " selected" : ""}`}
+                    className={`year-item ${itemKind(item)}${item.event_id === selectedId ? " selected" : ""}`}
                     onClick={(click) => onSelect(item.event_id, click.currentTarget)}>
                     <span>{localInput(item.start_at, zone).slice(0, 10) < expanded ? "Continues" : localTime(item.start_at, zone)}</span>
                     <strong>{statusLabel(item.status)}</strong>

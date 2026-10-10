@@ -2,8 +2,9 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
   type ReactNode } from "react";
 
 import type { Appointment, CalendarSnapshot, ClientProfile, OutreachState, PolicyState } from "@/api/types";
+import { useCalendarState } from "@/calendar/useCalendarState";
 import { ApiError, type OwnerApi, type RequestOptions } from "@/lib/api";
-import { stepDate, todayKey, type CalendarView } from "@/lib/time";
+import type { CalendarView } from "@/lib/time";
 
 export type Tab = "schedule" | "requests" | "clients" | "settings";
 
@@ -81,9 +82,6 @@ export function OwnerProvider({ api, notify, children }: {
   const [loaded, setLoaded] = useState(false);
   const [stamp, setStamp] = useState<RefreshStamp>({ version: 0, preserveSelection: false });
   const [tab, setTab] = useState<Tab>("schedule");
-  const [pickedDate, setPickedDate] = useState<string | null>(null);
-  const [view, setView] = useState<CalendarView>("day");
-  const [scheduleDays, setScheduleDays] = useState(30);
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
   const [noteAppointmentId, setNoteAppointmentId] = useState<string | null>(null);
   const [notesRequest, setNotesRequest] = useState<string | null>(null);
@@ -152,17 +150,10 @@ export function OwnerProvider({ api, notify, children }: {
       return true;
     }, [api, refresh, safeNotify]);
 
-  // Until the owner navigates, the date is today in the business timezone. Before the first
-  // load the zone is unknown, so there is no date ("") and navigation does nothing.
-  const date = pickedDate ?? (loaded ? todayKey(data.zone) : "");
-  const changeView = useCallback((next: CalendarView) => { setView(next); setScheduleDays(30); }, []);
-  const goToday = useCallback(() => { setPickedDate(null); setScheduleDays(30); }, []);
-  const goToDate = useCallback((next: string) => { if (loaded) { setPickedDate(next); setScheduleDays(30); } }, [loaded]);
-  const stepRange = useCallback((direction: -1 | 1) => {
-    if (!loaded) return;
-    setPickedDate(stepDate(pickedDate ?? todayKey(data.zone), view, direction, scheduleDays));
-  }, [loaded, pickedDate, data.zone, view, scheduleDays]);
-  const loadMoreSchedule = useCallback(() => setScheduleDays((days) => days + 30), []);
+  // Date, view, and navigation are the shared calendar state; the owner supplies readiness
+  // (the business timezone is known once the first load completes) and the zone.
+  const { date, view, setView: changeView, scheduleDays, loadMoreSchedule, goToday, goToDate, stepRange } =
+    useCalendarState({ ready: loaded, zone: data.zone });
 
   const resolveLocal = useCallback(async (value: string) => {
     safeNotify(""); // first step of a save: clear the previous result

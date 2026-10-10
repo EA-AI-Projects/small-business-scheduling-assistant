@@ -8,9 +8,9 @@ import { errorMessage, useOwner } from "@/owner/OwnerContext";
 import type { CardAnchor } from "../PopoverCard";
 import { SectionHeading } from "../Workspace";
 import { CalendarGrid } from "./CalendarGrid";
-import { EventCard } from "./EventCard";
+import { OwnerEventCard } from "./OwnerEventCard";
 import { MonthGrid } from "./MonthGrid";
-import { ScheduleList } from "./ScheduleList";
+import { OwnerScheduleList } from "./OwnerScheduleList";
 import { SlotCard } from "./SlotCard";
 import { YearGrid } from "./YearGrid";
 
@@ -132,7 +132,7 @@ export function ScheduleTab() {
               <MonthGrid date={date} events={events} zone={data.zone} selectedId={selectedId}
                 onSelect={select} onDay={(day) => { goToDate(day); setView("day"); }} />
             ) : view === "schedule" ? (
-              <ScheduleList date={date} days={scheduleDays} events={events} zone={data.zone}
+              <OwnerScheduleList date={date} days={scheduleDays} events={events} zone={data.zone}
                 selectedId={selectedId} onSelect={select} onLoadMore={loadMoreSchedule} />
             ) : view === "year" ? (
               <YearGrid date={date} events={events} zone={data.zone} selectedId={selectedId}
@@ -148,7 +148,7 @@ export function ScheduleTab() {
           </>
         )}
       </div>
-      {selected && <EventCard event={selected} getAnchor={getAnchor} onClose={close} onAnchorPress={pressItem}
+      {selected && <OwnerEventCard event={selected} getAnchor={getAnchor} onClose={close} onAnchorPress={pressItem}
         onSlotPress={pressSlot} returnFocus={returnFocus} />}
       {slot && <SlotCard range={slot.range} openKey={slot.key} getAnchor={getSlotAnchor} onClose={close}
         onAnchorPress={pressItem} onSlotPress={pressSlot} returnFocus={slotReturnFocus} />}
