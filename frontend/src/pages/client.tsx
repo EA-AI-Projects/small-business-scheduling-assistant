@@ -10,7 +10,7 @@ const config = (() => {
   catch { return new ConfigError("Account sign-in is not configured."); }
 })();
 
-type ClientSession = { role: "client"; business_id: string; client_id: string };
+type ClientSession = { role: "client"; business_id: string; client_id: string; timezone: string | null };
 
 async function accountRequest(config: OwnerConfig, path: string, credential: string, method = "GET"): Promise<Response> {
   try {
@@ -103,7 +103,7 @@ export function ClientAccess({ config }: { config: OwnerConfig }) {
       <section className="card"><h2>Welcome to your client account</h2>
         <p>Choosing a time asks the owner for approval. Nothing is booked until the owner approves it.</p>
         <button type="button" className="primary" onClick={() => end(null, true)}>Sign out</button></section>
-      <ClientHome config={config} token={accessToken}
+      <ClientHome config={config} token={accessToken} zone={session.timezone ?? null}
         onSessionEnded={() => end("Your session ended. Sign in again.", true)} />
     </> : <section className="welcome card">
       <h2>Client sign-in</h2>

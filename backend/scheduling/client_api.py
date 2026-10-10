@@ -10,7 +10,7 @@ from typing import Annotated, Protocol, cast
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from scheduling.domain.appointments import Appointment
 from scheduling.domain.availability import (
@@ -20,6 +20,7 @@ from scheduling.domain.availability import (
     InvalidPolicy,
 )
 from scheduling.domain.calendar import CalendarStatus
+from scheduling.domain.client_records import ClientProfile
 from scheduling.domain.owner_policy import PolicyNotConfigured
 from scheduling.identity_links import IdentityLink, LinkRole
 
@@ -28,13 +29,16 @@ class ClientSession(BaseModel):
     role: str = "client"
     business_id: str
     client_id: str
+    # Business IANA time zone for rendering times and choosing a day; None when unconfigured.
+    timezone: str | None = None
 
 
 class ClientAvailabilityQuery(BaseModel):
+    """Only the day; the visit length comes from the linked client's owner-set profile."""
+
     model_config = ConfigDict(extra="forbid")
 
     day: date
-    duration_minutes: int = Field(gt=0)
 
 
 class ClientAvailability(BaseModel):
@@ -64,6 +68,8 @@ class ClientBookings(BaseModel):
 
 
 class ClientBookingRepository(AvailabilityRepository, Protocol):
+    def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None: ...
+
     def read_client_bookings(self, business_id: str, client_id: str,
                              now: datetime) -> tuple[Appointment, ...]: ...
 
@@ -90,15 +96,22 @@ def add_client_session_route(
             raise HTTPException(status_code=403, detail="Client access is required")
         return ClientSession(business_id=link.business_id, client_id=link.client_id)
 
+    store = cast(ClientBookingRepository, repository) if repository is not None else None
+
     @app.get("/v1/client/session", response_model=ClientSession)
     def client_session(
         session: Annotated[ClientSession, Depends(linked_client)],
     ) -> ClientSession:
-        return session
+        if store is None:
+            return session
+        try:
+            zone: str | None = store.read_policy(session.business_id).timezone
+        except (InvalidPolicy, PolicyNotConfigured):
+            zone = None
+        return session.model_copy(update={"timezone": zone})
 
-    if repository is None:
+    if store is None:
         return
-    store = cast(ClientBookingRepository, repository)
     availability_service = AvailabilityService(store)
 
     @app.get("/v1/client/availability", response_model=ClientAvailability)
@@ -106,15 +119,18 @@ def add_client_session_route(
         session: Annotated[ClientSession, Depends(linked_client)],
         query: Annotated[ClientAvailabilityQuery, Query()],
     ) -> ClientAvailability:
+        profile = store.read_profile(session.business_id, session.client_id)
+        if profile is None or not profile.active:
+            raise HTTPException(status_code=503, detail="Booking is unavailable")
+        duration = profile.default_duration_minutes
         try:
             starts = availability_service.find_starts(
-                session.business_id, query.day, query.duration_minutes, now())
-        except InvalidDuration as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        except (InvalidPolicy, PolicyNotConfigured) as exc:
+                session.business_id, query.day, duration, now())
+        except (InvalidDuration, InvalidPolicy, PolicyNotConfigured) as exc:
+            # A stored duration the policy rejects is the owner's to fix, not the client's.
             raise HTTPException(status_code=503, detail="Booking is unavailable") from exc
         return ClientAvailability(
-            day=query.day, duration_minutes=query.duration_minutes, starts_at=list(starts))
+            day=query.day, duration_minutes=duration, starts_at=list(starts))
 
     @app.get("/v1/client/bookings", response_model=ClientBookings)
     def client_bookings(

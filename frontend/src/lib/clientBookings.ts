@@ -19,8 +19,8 @@ export interface BookingState {
 }
 
 const ENDED = {
-  DECLINED: { label: "Declined", detail: "The business could not take this request. The time was released; you may request another time." },
-  EXPIRED: { label: "Expired", detail: "This request was not approved in time and the time was released. You may request another time." },
+  DECLINED: { label: "Declined", detail: "The business could not take this request. You may request another time." },
+  EXPIRED: { label: "Expired", detail: "This request was not approved in time. You may request another time." },
   CANCELLED: { label: "Cancelled", detail: "This visit was cancelled." },
 } as const;
 
@@ -50,8 +50,20 @@ export function parseBookings(data: unknown): ClientBooking[] {
     && !Number.isNaN(Date.parse((item as ClientBooking).end_at)));
 }
 
-export function parseStarts(data: unknown): string[] {
-  const list = (data as { starts_at?: unknown } | null)?.starts_at;
-  if (!Array.isArray(list)) throw new Error("Unexpected availability response");
-  return list.filter((item): item is string => typeof item === "string" && !Number.isNaN(Date.parse(item)));
+export interface ClientAvailability { starts: string[]; durationMinutes: number | null }
+
+export function parseAvailability(data: unknown): ClientAvailability {
+  const body = data as { starts_at?: unknown; duration_minutes?: unknown } | null;
+  if (!Array.isArray(body?.starts_at)) throw new Error("Unexpected availability response");
+  return {
+    starts: body.starts_at.filter((item): item is string => typeof item === "string" && !Number.isNaN(Date.parse(item))),
+    durationMinutes: typeof body.duration_minutes === "number" ? body.duration_minutes : null,
+  };
+}
+
+/** Earliest future pending-hold expiry, so the page can re-read bookings when it passes. */
+export function nextHoldExpiry(bookings: ClientBooking[], nowMs: number): number | null {
+  const times = bookings.filter((booking) => booking.status === "PENDING_APPROVAL" && booking.hold_expires_at)
+    .map((booking) => Date.parse(booking.hold_expires_at ?? "")).filter((time) => time > nowMs);
+  return times.length ? Math.min(...times) : null;
 }
