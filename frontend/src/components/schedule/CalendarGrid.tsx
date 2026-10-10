@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
-import type { AvailabilityPolicy, CalendarEvent } from "@/api/types";
+import type { AvailabilityPolicy } from "@/api/types";
+import { itemKind, type CalendarItem } from "@/calendar/item";
 import { closedRanges } from "@/lib/dateExceptions";
 import { layoutDay, MINUTES_PER_DAY, type PlacedEvent } from "@/lib/calendarLayout";
 import { dayTitle, localInput, localTime, statusLabel, todayKey } from "@/lib/time";
@@ -31,7 +32,7 @@ function eventLabel(placed: PlacedEvent, zone: string, day: string): string {
 }
 
 export function CalendarGrid({ days, events, policy, zone, selectedId, onSelect, onSlotPress }: {
-  days: string[]; events: CalendarEvent[]; policy?: AvailabilityPolicy | null; zone: string; selectedId: string | null;
+  days: string[]; events: CalendarItem[]; policy?: AvailabilityPolicy | null; zone: string; selectedId: string | null;
   onSelect: (id: string, element: HTMLElement) => void;
   /** A press on an empty part of a day column (not on an item, heading, or the gutter). */
   onSlotPress: (column: HTMLElement, x: number, y: number) => void;
@@ -115,7 +116,7 @@ function EventBlock({ placed, zone, day, selected, onSelect }: {
   placed: PlacedEvent; zone: string; day: string; selected: boolean; onSelect: (id: string, element: HTMLElement) => void;
 }) {
   const { event, startMinute, endMinute, lane, lanes } = placed;
-  const kind = event.status.toLowerCase().split("_")[0];
+  const kind = itemKind(event);
   return (
     <button type="button" aria-label={eventLabel(placed, zone, day)} aria-current={selected ? "true" : undefined}
       aria-haspopup="dialog" data-popover-anchor="" data-event-id={event.event_id}

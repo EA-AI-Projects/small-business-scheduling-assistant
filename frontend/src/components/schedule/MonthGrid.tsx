@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import type { CalendarEvent } from "@/api/types";
+import { itemKind, type CalendarItem } from "@/calendar/item";
 import { monthChipTime, monthEvents } from "@/lib/monthEvents";
 import { monthWeeks } from "@/lib/monthGrid";
 import { dayTitle, statusLabel, todayKey } from "@/lib/time";
@@ -8,7 +8,7 @@ import { dayTitle, statusLabel, todayKey } from "@/lib/time";
 const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
 export function MonthGrid({ date, events, zone, selectedId, onSelect, onDay }: {
-  date: string; events: CalendarEvent[]; zone: string; selectedId: string | null;
+  date: string; events: CalendarItem[]; zone: string; selectedId: string | null;
   onSelect: (id: string, element: HTMLElement) => void;
   onDay: (date: string) => void;
 }) {
@@ -46,7 +46,7 @@ export function MonthGrid({ date, events, zone, selectedId, onSelect, onDay }: {
                       <button key={placed.event.event_id} type="button" data-event-id={placed.event.event_id}
                         data-popover-anchor="" aria-haspopup="dialog" aria-current={placed.event.event_id === selectedId ? "true" : undefined}
                         aria-label={`${monthChipTime(placed, zone)}${placed.continuesBefore ? ", continues from previous day" : ""}, ${statusLabel(placed.event.status)}, ${dayTitle(day.date)}`}
-                        className={`month-item ${placed.event.status.toLowerCase().split("_")[0]}${placed.event.event_id === selectedId ? " selected" : ""}${index > 0 && expanded !== day.date ? " month-extra" : ""}`}
+                        className={`month-item ${itemKind(placed.event)}${placed.event.event_id === selectedId ? " selected" : ""}${index > 0 && expanded !== day.date ? " month-extra" : ""}`}
                         onClick={(click) => onSelect(placed.event.event_id, click.currentTarget)}>
                         <span>{monthChipTime(placed, zone)}{placed.continuesBefore ? " · continues" : ""}</span>
                         <strong>{statusLabel(placed.event.status)}</strong>

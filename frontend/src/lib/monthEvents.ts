@@ -1,11 +1,11 @@
-import type { CalendarEvent } from "@/api/types";
+import type { CalendarItem } from "@/calendar/item";
 
 import { layoutDay, type PlacedEvent } from "./calendarLayout";
 import { monthWeeks } from "./monthGrid";
 import { localTime } from "./time";
 
 /** Place the loaded calendar snapshot into every visible local day, including adjacent months. */
-export function monthEvents(events: CalendarEvent[], date: string, zone: string): Map<string, PlacedEvent[]> {
+export function monthEvents(events: CalendarItem[], date: string, zone: string): Map<string, PlacedEvent[]> {
   const byDay = new Map<string, PlacedEvent[]>();
   for (const day of monthWeeks(date).flat()) {
     byDay.set(day.date, layoutDay(events, day.date, zone));
