@@ -384,7 +384,7 @@ def create_owner_app(
             raise _error("UNAVAILABLE", "Account invitations are unavailable", 503)
         try:
             invitation = account_invitations.invite(
-                business_id, client_id, body.email, owner.actor_id, now())
+                business_id, client_id, body.email, owner.actor_id)
         except InvitationDenied as exc:
             raise _error("INVITATION_DENIED", str(exc), 409) from exc
         return {"expires_at": invitation.expires_at}

@@ -1,5 +1,6 @@
 """DynamoDB invitation records and Cognito's email invitation transport."""
 
+from dataclasses import replace
 from datetime import datetime
 from hashlib import sha256
 from typing import Any
@@ -81,16 +82,20 @@ class DynamoClientInvitations:
                 raise InvitationDenied("Invitation changed") from exc
             raise
 
-    def mark_sent(self, invitation: ClientInvitation, now: datetime) -> None:
+    def mark_sent(self, invitation: ClientInvitation, now: datetime,
+                  expires_at: datetime) -> ClientInvitation:
         try:
             self._client.update_item(
                 TableName=self._table,
                 Key=self._key(invitation.business_id, invitation.client_id),
-                UpdateExpression="SET sent_at = :now",
+                UpdateExpression="SET sent_at = :now, expires_at = :new_expiry",
                 ConditionExpression="subject = :sub AND expires_at = :expiry "
-                                    "AND attribute_not_exists(sent_at)",
+                                    "AND attribute_not_exists(sent_at) "
+                                    "AND attribute_not_exists(consumed_at) "
+                                    "AND attribute_not_exists(revoked_at)",
                 ExpressionAttributeValues={
                     ":now": {"S": now.isoformat()},
+                    ":new_expiry": {"S": expires_at.isoformat()},
                     ":sub": {"S": invitation.subject},
                     ":expiry": {"S": invitation.expires_at.isoformat()},
                 },
@@ -99,6 +104,7 @@ class DynamoClientInvitations:
             if "ConditionalCheckFailed" in str(exc):
                 raise InvitationDenied("Invitation delivery changed") from exc
             raise
+        return replace(invitation, sent_at=now, expires_at=expires_at)
 
     def activate_link(self, invitation: ClientInvitation,
                       pending: IdentityLink, now: datetime) -> None:

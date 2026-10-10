@@ -1,5 +1,6 @@
 """Owner-issued account invitations; email and SMS identities remain separate."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -41,7 +42,8 @@ class InvitationStore(Protocol):
                          previous: ClientInvitation | None) -> None: ...
     def activate_link(self, invitation: ClientInvitation,
                       pending: IdentityLink, now: datetime) -> None: ...
-    def mark_sent(self, invitation: ClientInvitation, now: datetime) -> None: ...
+    def mark_sent(self, invitation: ClientInvitation, now: datetime,
+                  expires_at: datetime) -> ClientInvitation: ...
     def revoke_invitation(self, invitation: ClientInvitation, now: datetime) -> None: ...
     def read_profile(self, business_id: str, client_id: str) -> object | None: ...
 
@@ -66,11 +68,13 @@ def email_fingerprint(email: str) -> str:
 
 class ClientAccountInvitations:
     def __init__(self, store: InvitationStore, links: IdentityLinks,
-                 directory: AccountDirectory) -> None:
+                 directory: AccountDirectory,
+                 clock: Callable[[], datetime] | None = None) -> None:
         self._store = store
         self._links = links
         self._directory = directory
         self._lifetime = timedelta(hours=24)
+        self._now = clock or (lambda: datetime.now(UTC))
 
     def status(self, business_id: str, client_id: str) -> ClientInvitation | None:
         if self._store.read_profile(business_id, client_id) is None:
@@ -79,19 +83,21 @@ class ClientAccountInvitations:
 
     def invite(self, business_id: str, client_id: str, email: str,
                owner_subject: str, now: datetime | None = None) -> ClientInvitation:
-        issued_at = now or datetime.now(UTC)
+        issued_at = now or self._now()
         address = normalize_email(email)
         if self._store.read_profile(business_id, client_id) is None:
             raise InvitationDenied("Client profile does not exist")
         prior = self._store.read_invitation(business_id, client_id)
         if prior is not None and prior.consumed_at is not None and prior.revoked_at is None:
             raise InvitationDenied("Client profile already activated")
-        if prior is not None and prior.revoked_at is None and prior.expires_at > issued_at:
+        if (prior is not None and prior.revoked_at is None
+                and (prior.sent_at is None or prior.expires_at > issued_at)):
             if prior.email_hash != email_fingerprint(address):
                 raise InvitationDenied("Revoke the previous invitation before changing email")
             if prior.sent_at is None:
                 self._directory.send_invitation(address, created=False)
-                self._store.mark_sent(prior, issued_at)
+                sent_at = now or self._now()
+                return self._store.mark_sent(prior, sent_at, sent_at + self._lifetime)
             return prior
         if prior is not None and prior.revoked_at is None:
             self.revoke(business_id, client_id, owner_subject, issued_at)
@@ -114,12 +120,12 @@ class ClientAccountInvitations:
                                       owner_subject)
         self._store.write_invitation(invitation, prior)
         self._directory.send_invitation(address, created=created)
-        self._store.mark_sent(invitation, issued_at)
-        return invitation
+        sent_at = now or self._now()
+        return self._store.mark_sent(invitation, sent_at, sent_at + self._lifetime)
 
     def activate(self, business_id: str, client_id: str, account: VerifiedAccount,
                  now: datetime | None = None) -> None:
-        instant = now or datetime.now(UTC)
+        instant = now or self._now()
         invite = self._store.read_invitation(business_id, client_id)
         if (invite is None or invite.consumed_at is not None or invite.expires_at <= instant
                 or invite.sent_at is None or invite.revoked_at is not None
@@ -135,7 +141,7 @@ class ClientAccountInvitations:
 
     def revoke(self, business_id: str, client_id: str, owner_subject: str,
                now: datetime | None = None) -> None:
-        instant = now or datetime.now(UTC)
+        instant = now or self._now()
         invite = self._store.read_invitation(business_id, client_id)
         if invite is None or invite.revoked_at is not None:
             raise InvitationDenied("Invitation is unavailable")

@@ -45,9 +45,11 @@ class Records:
             raise InvitationDenied("Invitation changed")
         self.invites[key] = invitation
 
-    def mark_sent(self, invitation: ClientInvitation, now: datetime) -> None:
-        self.invites[(invitation.business_id, invitation.client_id)] = replace(
-            invitation, sent_at=now)
+    def mark_sent(self, invitation: ClientInvitation, now: datetime,
+                  expires_at: datetime) -> ClientInvitation:
+        updated = replace(invitation, sent_at=now, expires_at=expires_at)
+        self.invites[(invitation.business_id, invitation.client_id)] = updated
+        return updated
 
     def activate_link(self, invitation: ClientInvitation,
                       pending: IdentityLink, now: datetime) -> None:
@@ -93,6 +95,7 @@ class Directory:
     def __init__(self) -> None:
         self.users: dict[str, str] = {}
         self.sent: list[str] = []
+        self.fail_next = False
 
     def create_or_find_invitee(self, email: str) -> tuple[str, bool]:
         if email in self.users:
@@ -103,6 +106,9 @@ class Directory:
 
     def send_invitation(self, email: str, *, created: bool) -> None:
         del created
+        if self.fail_next:
+            self.fail_next = False
+            raise RuntimeError("synthetic delivery failure")
         self.sent.append(email)
 
 
@@ -114,7 +120,7 @@ def test_owner_invite_activation_and_rejected_claims() -> None:
     records = Records(profiles)
     directory = Directory()
     links = IdentityLinks(records)
-    service = ClientAccountInvitations(records, links, directory)
+    service = ClientAccountInvitations(records, links, directory, lambda: NOW)
 
     def verify_owner(token: str) -> OwnerPrincipal:
         if token != "owner-token":
@@ -174,7 +180,7 @@ def test_expired_deleted_and_changed_email_invitations_fail_closed() -> None:
     records = Records(profiles)
     directory = Directory()
     links = IdentityLinks(records)
-    service = ClientAccountInvitations(records, links, directory)
+    service = ClientAccountInvitations(records, links, directory, lambda: NOW)
     service.invite("pilot", "client-a", "first@example.test", "owner-sub", NOW)
     old = VerifiedAccount("sub-1", "first@example.test", True)
     try:
@@ -201,3 +207,35 @@ def test_expired_deleted_and_changed_email_invitations_fail_closed() -> None:
         pass
     else:
         raise AssertionError("Deleted profile activated")
+
+
+def test_failed_send_retried_after_provisional_expiry_gets_full_24_hours() -> None:
+    profiles = InMemoryCalendarRepository()
+    ClientRecordService(profiles).save_profile(
+        "pilot", "client-a", "Synthetic Client", "+14155550101",
+        "123 Test Street", HomeSize.SMALL, 60, True, 0, 180, NOW)
+    records = Records(profiles)
+    directory = Directory()
+    links = IdentityLinks(records)
+    service = ClientAccountInvitations(records, links, directory)
+    directory.fail_next = True
+    try:
+        service.invite("pilot", "client-a", "client@example.test", "owner-sub", NOW)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("First synthetic delivery should fail")
+    pending = records.read_invitation("pilot", "client-a")
+    assert pending is not None and pending.sent_at is None
+    assert links.resolve("sub-1") is None
+
+    sent_at = NOW + timedelta(hours=25)
+    invite = service.invite("pilot", "client-a", "client@example.test",
+                            "owner-sub", sent_at)
+    assert invite.subject == pending.subject
+    assert invite.sent_at == sent_at
+    assert invite.expires_at == sent_at + timedelta(hours=24)
+    assert directory.sent == ["client@example.test"]
+    service.activate("pilot", "client-a", VerifiedAccount(
+        "sub-1", "client@example.test", True), sent_at + timedelta(hours=23))
+    assert links.resolve("sub-1").client_id == "client-a"
