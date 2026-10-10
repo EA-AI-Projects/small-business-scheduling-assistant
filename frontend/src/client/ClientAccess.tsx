@@ -2,10 +2,12 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import Link from "next/link";
 import { useRouter } from "next/router";
 
+import type { MoveState } from "@/components/client/ClientHome";
 import { AccountMenu } from "@/components/shell/AccountMenu";
 import { AppHeader } from "@/components/shell/AppHeader";
 import { CalendarControls } from "@/components/shell/CalendarControls";
 import { useCalendarState, type CalendarState } from "@/calendar/useCalendarState";
+import type { ClientBooking } from "@/lib/clientBookings";
 import { authorizeUrl, clearPendingSignIn, completeSignIn, logoutUrl, tokenExpiry, type SignInResult } from "@/lib/auth";
 import { ConfigError, parseConfig, rawConfigFromEnv, type OwnerConfig } from "@/lib/config";
 import { rangeAnnouncement, rangeTitle, rangeTitleShort, todayKey, addDays } from "@/lib/time";
@@ -23,7 +25,7 @@ export interface ClientSessionBase {
   horizonDays: number | null; onSessionEnded: () => void;
 }
 /** The signed-in shell adds the calendar state, so the header controls and the Calendar page share it. */
-export interface ClientSessionValue extends ClientSessionBase { calendar: CalendarState }
+export interface ClientSessionValue extends ClientSessionBase { calendar: CalendarState; move: MoveState }
 const ClientSessionContext = createContext<ClientSessionValue | null>(null);
 export function useClientSession(): ClientSessionValue {
   const value = useContext(ClientSessionContext);
@@ -91,7 +93,10 @@ function ClientShell({ value: base, email, local, onSignOut, notice, children }:
   // Browsing stops at the booking horizon (decided on #316); an unknown horizon means no limit.
   const maxDate = zone && base.horizonDays !== null ? addDays(todayKey(zone), base.horizonDays) : null;
   const calendar = useCalendarState({ ready: Boolean(zone), zone: zone ?? "UTC", maxDate });
-  const value = useMemo<ClientSessionValue>(() => ({ ...base, calendar }), [base, calendar]);
+  // A move started on Appointments is picked on the Calendar, so it lives here, above both pages.
+  const [moving, setMoving] = useState<ClientBooking | null>(null);
+  const move = useMemo<MoveState>(() => ({ booking: moving, set: setMoving }), [moving]);
+  const value = useMemo<ClientSessionValue>(() => ({ ...base, calendar, move }), [base, calendar, move]);
   const section = CLIENT_SECTIONS.find((item) => item.pathname === router.pathname.replace(/\/$/, "")) ?? CLIENT_SECTIONS[0];
   return <ClientSessionContext.Provider value={value}>
     <AppHeader appName="Smart Scheduling Assistant" current={section.id}
