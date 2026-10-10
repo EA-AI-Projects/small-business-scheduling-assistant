@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 
-import { itemKind, type CalendarItem } from "@/calendar/item";
+import { itemKind, itemLabel, type CalendarItem } from "@/calendar/item";
 import { monthChipTime, monthEvents } from "@/lib/monthEvents";
 import { monthWeeks } from "@/lib/monthGrid";
-import { dayTitle, statusLabel, todayKey } from "@/lib/time";
+import { dayTitle, todayKey } from "@/lib/time";
 
 const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
@@ -45,11 +45,11 @@ export function MonthGrid({ date, events, zone, selectedId, onSelect, onDay }: {
                     {visible.map((placed, index) => (
                       <button key={placed.event.event_id} type="button" data-event-id={placed.event.event_id}
                         data-popover-anchor="" aria-haspopup="dialog" aria-current={placed.event.event_id === selectedId ? "true" : undefined}
-                        aria-label={`${monthChipTime(placed, zone)}${placed.continuesBefore ? ", continues from previous day" : ""}, ${statusLabel(placed.event.status)}, ${dayTitle(day.date)}`}
+                        aria-label={`${monthChipTime(placed, zone)}${placed.continuesBefore ? ", continues from previous day" : ""}, ${itemLabel(placed.event)}, ${dayTitle(day.date)}`}
                         className={`month-item ${itemKind(placed.event)}${placed.event.event_id === selectedId ? " selected" : ""}${index > 0 && expanded !== day.date ? " month-extra" : ""}`}
                         onClick={(click) => onSelect(placed.event.event_id, click.currentTarget)}>
                         <span>{monthChipTime(placed, zone)}{placed.continuesBefore ? " · continues" : ""}</span>
-                        <strong>{statusLabel(placed.event.status)}</strong>
+                        <strong>{itemLabel(placed.event)}</strong>
                       </button>
                     ))}
                     {expanded !== day.date && list.length > 2 && (

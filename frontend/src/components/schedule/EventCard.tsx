@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 
-import { type CalendarItem } from "@/calendar/item";
-import { localStamp, localTime, statusLabel } from "@/lib/time";
+import { itemLabel, type CalendarItem } from "@/calendar/item";
+import { localStamp, localTime } from "@/lib/time";
 
 import { PopoverCard, type CardAnchor } from "../PopoverCard";
 
@@ -21,7 +21,7 @@ export function EventCard({ item, zone, title, getAnchor, onClose, onAnchorPress
     <PopoverCard title={title} getAnchor={getAnchor} onClose={onClose} onAnchorPress={onAnchorPress}
       onSlotPress={onSlotPress} returnFocus={returnFocus} refocusKey={refocusKey}>
       <div>
-        <p className="badge">{statusLabel(item.status)}</p>
+        <p className="badge">{itemLabel(item)}</p>
         <p>{localStamp(item.start_at, zone)}–{localTime(item.end_at, zone)}</p>
         {children}
       </div>

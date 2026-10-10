@@ -124,6 +124,17 @@
       },
       "ClientSession": {
         "properties": {
+          "booking_horizon_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Booking Horizon Days"
+          },
           "business_id": {
             "title": "Business Id",
             "type": "string"

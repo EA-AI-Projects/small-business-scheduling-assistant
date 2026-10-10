@@ -1,6 +1,6 @@
-import type { CalendarItem } from "@/calendar/item";
+import { itemKind, itemLabel, type CalendarItem } from "@/calendar/item";
 import type { ScheduleDay } from "@/lib/scheduleEvents";
-import { dayTitle, localTime, statusLabel } from "@/lib/time";
+import { dayTitle, localTime } from "@/lib/time";
 
 /**
  * The agenda: items already grouped by day (see `scheduleEvents`). `itemTitle` supplies the
@@ -10,7 +10,8 @@ import { dayTitle, localTime, statusLabel } from "@/lib/time";
 export function ScheduleList({ groups, zone, selectedId, onSelect, onLoadMore, itemTitle }: {
   groups: ScheduleDay[]; zone: string; selectedId: string | null;
   onSelect: (id: string, element: HTMLElement) => void;
-  onLoadMore: () => void;
+  /** Omitted when no further range may be shown (the client booking horizon). */
+  onLoadMore?: () => void;
   itemTitle: (item: CalendarItem) => string;
 }) {
   return (
@@ -23,13 +24,13 @@ export function ScheduleList({ groups, zone, selectedId, onSelect, onLoadMore, i
           <div className="schedule-day-items">
             {group.events.map((event) => {
               const client = itemTitle(event);
-              const status = statusLabel(event.status);
+              const status = itemLabel(event);
               const time = localTime(event.start_at, zone);
               return (
                 <button type="button" key={event.event_id} data-event-id={event.event_id} data-popover-anchor=""
                   aria-haspopup="dialog" aria-current={event.event_id === selectedId ? "true" : undefined}
                   aria-label={`${dayTitle(group.date)}, ${time}, ${status}, ${client}`}
-                  className={`schedule-item ${event.status === "CONFIRMED" ? "confirmed" : "pending"}${event.event_id === selectedId ? " selected" : ""}`}
+                  className={`schedule-item ${itemKind(event)}${event.event_id === selectedId ? " selected" : ""}`}
                   onClick={(click) => onSelect(event.event_id, click.currentTarget)}>
                   <span className="schedule-item-time">{time}</span>
                   <span className="schedule-item-client">{client}</span>
@@ -40,7 +41,7 @@ export function ScheduleList({ groups, zone, selectedId, onSelect, onLoadMore, i
           </div>
         </section>
       ))}
-      <button type="button" className="schedule-load-more" onClick={onLoadMore}>Load more</button>
+      {onLoadMore && <button type="button" className="schedule-load-more" onClick={onLoadMore}>Load more</button>}
     </div>
   );
 }

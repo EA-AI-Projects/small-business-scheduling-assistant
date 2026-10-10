@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 
-import { itemKind, type CalendarItem } from "@/calendar/item";
+import { itemKind, itemLabel, type CalendarItem } from "@/calendar/item";
 import { addMonths, monthGrid } from "@/lib/monthGrid";
-import { addDays, localInput, localTime, statusLabel, todayKey } from "@/lib/time";
+import { addDays, localInput, localTime, todayKey } from "@/lib/time";
 
 const WEEKDAYS = [["M", "Monday"], ["T", "Tuesday"], ["W", "Wednesday"], ["T", "Thursday"],
   ["F", "Friday"], ["S", "Saturday"], ["S", "Sunday"]] as const;
@@ -129,7 +129,7 @@ export function YearGrid({ date, events, zone, selectedId, onSelect, onDismiss, 
                     className={`year-item ${itemKind(item)}${item.event_id === selectedId ? " selected" : ""}`}
                     onClick={(click) => onSelect(item.event_id, click.currentTarget)}>
                     <span>{localInput(item.start_at, zone).slice(0, 10) < expanded ? "Continues" : localTime(item.start_at, zone)}</span>
-                    <strong>{statusLabel(item.status)}</strong>
+                    <strong>{itemLabel(item)}</strong>
                   </button>
                 ))}
               </div>

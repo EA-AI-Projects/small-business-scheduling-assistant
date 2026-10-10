@@ -1,11 +1,12 @@
 import { useCallback, useRef, useState } from "react";
 
-import type { CalendarView } from "@/lib/time";
+import { pastLimit } from "@/calendar/horizon";
+import { stepDate, type CalendarView } from "@/lib/time";
 import { PopoverCard } from "../PopoverCard";
 import { MiniCalendar } from "./MiniCalendar";
 
 /** Today, previous/next, range title (opens a date picker) and view selector. State lives with the caller. */
-export function CalendarControls({ title, shortTitle, announcement = title, view, date, today, scheduleDays, disabled = false, onToday, onStep, onView, onPick }: {
+export function CalendarControls({ title, shortTitle, announcement = title, view, date, today, scheduleDays, maxDate = null, disabled = false, onToday, onStep, onView, onPick }: {
   title: string;
   /** Spoken date range; can be fuller than the compact visible title. */
   announcement?: string;
@@ -18,6 +19,8 @@ export function CalendarControls({ title, shortTitle, announcement = title, view
   date: string;
   today: string;
   scheduleDays?: number;
+  /** Last date browsing may reach (client booking horizon); Next is disabled when the next period lies past it. */
+  maxDate?: string | null;
   onToday: () => void;
   onStep: (direction: -1 | 1) => void;
   onView: (view: CalendarView) => void;
@@ -25,6 +28,7 @@ export function CalendarControls({ title, shortTitle, announcement = title, view
   onPick: (date: string) => void;
 }) {
   const unit = view === "year" ? "year" : view === "month" ? "month" : view === "week" ? "week" : view === "schedule" ? `${scheduleDays ?? 30} days` : "day";
+  const atLimit = Boolean(date) && pastLimit(stepDate(date, view, 1, scheduleDays ?? 30), view, maxDate);
   const [picking, setPicking] = useState(false);
   const titleButton = useRef<HTMLButtonElement>(null);
   const getAnchor = useCallback(() => titleButton.current, []);
@@ -43,7 +47,7 @@ export function CalendarControls({ title, shortTitle, announcement = title, view
         <button type="button" className="icon-button" aria-label={`Previous ${unit}`}
           disabled={disabled} onClick={() => onStep(-1)}>‹</button>
         <button type="button" className="icon-button" aria-label={`Next ${unit}`}
-          disabled={disabled} onClick={() => onStep(1)}>›</button>
+          disabled={disabled || atLimit} onClick={() => onStep(1)}>›</button>
       </span>
       <h2 className="range-title" title={title}>
         <button ref={titleButton} type="button" className="range-title-button" disabled={disabled}

@@ -37,6 +37,9 @@
   --color-inactive-bg: #f1f1f1;
   --color-inactive-edge: #8a8a8a;
   --color-inactive-ink: #555;
+  --color-move-bg: #efe6fb;
+  --color-move-edge: #5b2a9e;
+  --color-move-ink: #2e1459;
   --color-confirmed-bg: #0b57d0;
   --color-confirmed-edge: #062e6f;
   --color-confirmed-ink: #fff;
@@ -335,3 +338,17 @@ code { font-size: .9em; }
 .year-item.selected, .year-count:focus-visible { outline: 3px solid var(--color-focus); outline-offset: 1px; }
 @media (max-width: 900px) { .year-calendar { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 600px) { .year-calendar { grid-template-columns: minmax(0, 1fr); padding: .75rem; } }
+
+/* A client's move request: not confirmed, and distinct from both a confirmed visit and a plain pending request. */
+.cal-event.move { background: var(--color-move-bg); border: 1px dotted var(--color-move-edge); border-left: 4px solid var(--color-move-edge); color: var(--color-move-ink); }
+.month-item.move { background: var(--color-move-bg); border-color: var(--color-move-edge); border-style: dotted; color: var(--color-move-ink); }
+.year-item.move { background: var(--color-move-bg); border-left-color: var(--color-move-edge); color: var(--color-move-ink); }
+.schedule-item.move { background: var(--color-move-bg); border-left-color: var(--color-move-edge); color: var(--color-move-ink); }
+.client-legend { display: flex; flex-wrap: wrap; gap: .4rem .9rem; margin: .25rem 0; padding: 0; list-style: none; font-size: .85rem; }
+.client-legend li { display: inline-flex; align-items: center; gap: .35rem; }
+.client-legend i { display: inline-block; width: .9rem; height: .9rem; border-radius: 3px; border: 2px solid; }
+.client-legend .confirmed { background: var(--color-confirmed-bg); border-color: var(--color-confirmed-edge); }
+.client-legend .pending { background: var(--color-pending-bg); border-color: var(--color-pending-edge); }
+.client-legend .move { background: var(--color-move-bg); border: 2px dotted var(--color-move-edge); }
+.cal-head-button { display: flex; flex-direction: column; align-items: center; width: 100%; min-height: 2.75rem; padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; }
+.cal-head-button:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }

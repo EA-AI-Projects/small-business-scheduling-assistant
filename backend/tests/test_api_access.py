@@ -93,13 +93,14 @@ def test_direct_owner_and_client_requests_follow_only_the_verified_link() -> Non
 
     assert api.get(OWNER_URL, headers=owner).status_code == 200
     assert api.get(CLIENT_URL, headers=client).json() == {
-        "role": "client", "business_id": "pilot", "client_id": "client-1", "timezone": None}
+        "role": "client", "business_id": "pilot", "client_id": "client-1", "timezone": None,
+        "booking_horizon_days": None}
     assert api.get(OWNER_URL, headers=client).status_code == 401
     assert api.get(CLIENT_URL, headers=owner).status_code == 403
     assert api.get(OWNER_URL.replace("pilot", "other"), headers=owner).status_code == 403
     assert api.get(CLIENT_URL + "?client_id=other", headers=client).json()["client_id"] == "client-1"
     assert api.get(CLIENT_URL, headers=client).json().keys() == {
-        "role", "business_id", "client_id", "timezone"}
+        "role", "business_id", "client_id", "timezone", "booking_horizon_days"}
     links.profiles.add(("pilot", "client-2"))
     links.add("other-client-sub", LinkRole.CLIENT, client_id="client-2")
     other_client = bearer(token(key, "other-client-sub"))

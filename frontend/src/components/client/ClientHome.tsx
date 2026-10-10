@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import type { CalendarState } from "@/calendar/useCalendarState";
 import { MiniCalendar } from "@/components/shell/MiniCalendar";
-import { bookingState, hasStalePending, hasVersion, nextHoldExpiry, parseAvailability, parseBookings, pendingReplacement, type ClientBooking } from "@/lib/clientBookings";
+import { bookingState, calendarItems, hasStalePending, hasVersion, nextHoldExpiry, parseAvailability, parseBookings, pendingReplacement, type ClientBooking } from "@/lib/clientBookings";
 import type { OwnerConfig } from "@/lib/config";
-import { dayKey, localStamp, localTime, todayKey } from "@/lib/time";
+import { addDays, dayKey, localStamp, localTime, todayKey } from "@/lib/time";
+
+import { ClientCalendarViews } from "./ClientCalendarViews";
 
 export const RETRY_BASE_MS = 2000;
 const MAX_RETRIES = 4;
@@ -77,18 +80,31 @@ async function write(config: OwnerConfig, token: string, path: string, payload: 
  * request for owner approval; it is never an appointment until the owner approves. The visit length is
  * the owner-set length on the client's profile, chosen by the server.
  */
-export function ClientHome({ config, token, zone, onSessionEnded }: {
+export function ClientHome({ config, token, zone, onSessionEnded, calendar, horizonDays }: {
   config: OwnerConfig; token: string; zone: string | null; onSessionEnded: () => void;
+  /** Given on the Calendar page: its shared view state drives Day to Year views. Omitted on Appointments. */
+  calendar?: CalendarState;
+  /** Days ahead the business takes bookings, when the server said. */
+  horizonDays?: number | null;
 }) {
   if (!zone) return <section className="card"><p className="notice error" role="alert">
     Online times are not available right now. Please text the business.</p></section>;
-  return <ClientCalendar config={config} token={token} zone={zone} onSessionEnded={onSessionEnded} />;
+  return <ClientCalendar config={config} token={token} zone={zone} onSessionEnded={onSessionEnded}
+    calendar={calendar} horizonDays={horizonDays ?? null} />;
 }
 
-function ClientCalendar({ config, token, zone, onSessionEnded }: {
+function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizonDays }: {
   config: OwnerConfig; token: string; zone: string; onSessionEnded: () => void;
+  calendar: CalendarState | undefined; horizonDays: number | null;
 }) {
-  const [date, setDate] = useState(() => todayKey(zone));
+  const [ownDate, setOwnDate] = useState(() => todayKey(zone));
+  const date = calendar ? calendar.date : ownDate;
+  const setDate = calendar ? calendar.goToDate : setOwnDate;
+  // The Calendar page asks for open times only in Day view, and never for a past day or past the booking horizon.
+  const today = todayKey(zone);
+  const maxDate = horizonDays === null ? null : addDays(today, horizonDays);
+  const beyondHorizon = maxDate !== null && date > maxDate;
+  const wantTimes = (!calendar || (calendar.view === "day" && date >= today)) && !beyondHorizon;
   const [bookings, setBookings] = useState<ClientBooking[] | null>(null);
   const [bookingsError, setBookingsError] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -150,6 +166,7 @@ function ClientCalendar({ config, token, zone, onSessionEnded }: {
   }, [bookings]);
 
   useEffect(() => {
+    if (!wantTimes) return;
     let current = true;
     const key = availabilityKey;
     read(config, token, `/v1/client/availability?day=${date}`)
@@ -161,7 +178,7 @@ function ClientCalendar({ config, token, zone, onSessionEnded }: {
       .catch((error: unknown) => { if (current) fail(error, (message) =>
         setAvailability({ key, starts: null, minutes: null, error: message })); });
     return () => { current = false; };
-  }, [config, token, date, availabilityKey, fail]);
+  }, [config, token, date, availabilityKey, fail, wantTimes]);
 
   // A re-read that changed a booking's version drops any panel still holding the old one.
   const stillCurrent = (held: ClientBooking | null) => held && bookings?.some((item) =>
@@ -169,6 +186,15 @@ function ClientCalendar({ config, token, zone, onSessionEnded }: {
   const moving = stillCurrent(heldMoving);
   const confirming = stillCurrent(heldConfirming);
   const choose = (start: string | null) => { setChosen(start); setOutcome(null); };
+  // In calendar mode a new date or view drops any chosen time and outcome, as picking a day always did.
+  const calendarView = calendar?.view;
+  const lastSeen = useRef({ date, view: calendarView });
+  useEffect(() => {
+    if (!calendar) return;
+    if (lastSeen.current.date === date && lastSeen.current.view === calendarView) return;
+    lastSeen.current = { date, view: calendarView };
+    setChosen(null); setOutcome(null); attempt.current = null;
+  }, [calendar, date, calendarView]);
   const send = async () => {
     if (!chosen || sending) return;
     const id = `${moving?.appointment_id ?? "new"}|${moving?.version ?? 0}|${chosen}`;
@@ -219,53 +245,70 @@ function ClientCalendar({ config, token, zone, onSessionEnded }: {
   const startsError = settled?.error ?? null;
   const shown = (starts ?? []).filter((start) => dayKey(start, zone) === date);
 
-  return <div className="stack client-home">
+  const timesSection = (
     <section className="card" aria-labelledby="client-times">
-      <h2 id="client-times">Available times</h2>
-      <p className="notice">Choosing a time asks the owner for approval. A time shown here is open, not booked,
-        and a request is not a confirmed appointment until the owner approves it.</p>
-      <MiniCalendar date={date} today={todayKey(zone)} view="day"
-        onPick={(day) => { choose(null); setDate(day); }} />
-      <p className="meta">Times are shown in the business time zone ({zone}).
-        {settled?.minutes ? ` Visits are about ${settled.minutes} minutes.` : ""}</p>
-      {startsError ? <p className="notice error" role="alert">{startsError}</p>
-        : starts === null ? <p>Loading times…</p>
-        : shown.length === 0 ? <p>No times are available on this day. Try another day.</p>
-        : <ul className="card-list" aria-label="Available start times">
-          {shown.map((start) => <li key={start}>
-            <button type="button" aria-pressed={chosen === start} onClick={() => choose(start)}>{localTime(start, zone)}</button>
-          </li>)}
-        </ul>}
-      {moving && <div role="group" aria-label="Moving this appointment" className="notice">
-        <p>You are asking to move your appointment on <strong>{localStamp(moving.start_at, zone)}</strong>.
-          Pick a new time above. Your current appointment stays confirmed until the owner approves the new time;
-          if the owner declines or does not answer, nothing changes.</p>
-        <button type="button" onClick={() => { setMoving(null); choose(null); }}>Keep my current appointment</button>
-      </div>}
-      {chosen && <div role="group" aria-label="Request this time" className="notice">
-        <p>You picked <strong>{localStamp(chosen, zone)}</strong> ({zone}). Sending asks the owner for approval.
-          This time is not booked and is not confirmed until the owner approves it.
-          {moving ? ` Your appointment on ${localStamp(moving.start_at, zone)} stays confirmed until then.` : ""}</p>
-        <button type="button" disabled={sending} onClick={() => void send()}>
-          {sending ? "Sending…" : moving ? "Send move request for owner approval" : "Send request for owner approval"}</button>
-      </div>}
-      {outcome?.kind === "sent" && outcome.booking.status !== "PENDING_APPROVAL" && <p role="status" className="notice">
-        This request is no longer waiting for approval: {bookingState(outcome.booking, nowMs).label}.{" "}
-        {bookingState(outcome.booking, nowMs).detail}</p>}
-      {outcome?.kind === "sent" && outcome.booking.status === "PENDING_APPROVAL" && <p role="status" className="notice">{outcome.booking.replaces_appointment_id ? "Move requested for" : "Request sent for"}{" "}
-        <strong>{localStamp(outcome.booking.start_at, zone)}</strong> to {localTime(outcome.booking.end_at, zone)}.
-        Status: waiting for owner approval. It is not confirmed yet.
-        {outcome.booking.replaces_appointment_id ? " Your original appointment is still confirmed." : ""}</p>}
-      {outcome?.kind === "conflict" && <div role="alert" className="notice error">
-        <p>That time is no longer open, so nothing was requested.
-          {outcome.alternatives.length ? " These times are open now:" : " Please pick another time or day."}</p>
-        {outcome.alternatives.length > 0 && <ul className="card-list" aria-label="Other open times">
-          {outcome.alternatives.map((start) => <li key={start}>
-            <button type="button" onClick={() => { setDate(dayKey(start, zone)); choose(start); }}>{localStamp(start, zone)}</button>
-          </li>)}</ul>}
-      </div>}
-      {outcome?.kind === "error" && <p role="alert" className="notice error">{outcome.message}</p>}
-    </section>
+        <h2 id="client-times">Available times</h2>
+        <p className="notice">Choosing a time asks the owner for approval. A time shown here is open, not booked,
+          and a request is not a confirmed appointment until the owner approves it.</p>
+        {!calendar && <MiniCalendar date={date} today={todayKey(zone)} view="day"
+          onPick={(day) => { choose(null); setDate(day); }} />}
+        <p className="meta">Times are shown in the business time zone ({zone}).
+          {settled?.minutes ? ` Visits are about ${settled.minutes} minutes.` : ""}</p>
+        {beyondHorizon ? <p role="status">We only book up to {horizonDays} days ahead.</p>
+          : startsError ? <p className="notice error" role="alert">{startsError}</p>
+          : starts === null ? <p>Loading times…</p>
+          : shown.length === 0 ? <p>No times are available on this day. Try another day.</p>
+          : <ul className="card-list" aria-label="Available start times">
+            {shown.map((start) => <li key={start}>
+              <button type="button" aria-pressed={chosen === start} onClick={() => choose(start)}>{localTime(start, zone)}</button>
+            </li>)}
+          </ul>}
+        {moving && <div role="group" aria-label="Moving this appointment" className="notice">
+          <p>You are asking to move your appointment on <strong>{localStamp(moving.start_at, zone)}</strong>.
+            Pick a new time above. Your current appointment stays confirmed until the owner approves the new time;
+            if the owner declines or does not answer, nothing changes.</p>
+          <button type="button" onClick={() => { setMoving(null); choose(null); }}>Keep my current appointment</button>
+        </div>}
+        {chosen && <div role="group" aria-label="Request this time" className="notice">
+          <p>You picked <strong>{localStamp(chosen, zone)}</strong> ({zone}). Sending asks the owner for approval.
+            This time is not booked and is not confirmed until the owner approves it.
+            {moving ? ` Your appointment on ${localStamp(moving.start_at, zone)} stays confirmed until then.` : ""}</p>
+          <button type="button" disabled={sending} onClick={() => void send()}>
+            {sending ? "Sending…" : moving ? "Send move request for owner approval" : "Send request for owner approval"}</button>
+        </div>}
+        {outcome?.kind === "sent" && outcome.booking.status !== "PENDING_APPROVAL" && <p role="status" className="notice">
+          This request is no longer waiting for approval: {bookingState(outcome.booking, nowMs).label}.{" "}
+          {bookingState(outcome.booking, nowMs).detail}</p>}
+        {outcome?.kind === "sent" && outcome.booking.status === "PENDING_APPROVAL" && <p role="status" className="notice">{outcome.booking.replaces_appointment_id ? "Move requested for" : "Request sent for"}{" "}
+          <strong>{localStamp(outcome.booking.start_at, zone)}</strong> to {localTime(outcome.booking.end_at, zone)}.
+          Status: waiting for owner approval. It is not confirmed yet.
+          {outcome.booking.replaces_appointment_id ? " Your original appointment is still confirmed." : ""}</p>}
+        {outcome?.kind === "conflict" && <div role="alert" className="notice error">
+          <p>That time is no longer open, so nothing was requested.
+            {outcome.alternatives.length ? " These times are open now:" : " Please pick another time or day."}</p>
+          {outcome.alternatives.length > 0 && <ul className="card-list" aria-label="Other open times">
+            {outcome.alternatives.map((start) => <li key={start}>
+              <button type="button" onClick={() => { setDate(dayKey(start, zone)); choose(start); }}>{localStamp(start, zone)}</button>
+            </li>)}</ul>}
+        </div>}
+        {outcome?.kind === "error" && <p role="alert" className="notice error">{outcome.message}</p>}
+      </section>
+  );
+  if (calendar) {
+    const items = bookings ? calendarItems(bookings, nowMs) : [];
+    return <div className="stack client-home">
+      <section className="card" aria-label="Your calendar">
+        <p className="meta">Only your own appointments and requests are shown. Times are shown in the business time zone ({zone}).
+          A request is not an appointment until the owner approves it.</p>
+        <ClientCalendarViews items={items} bookings={bookings ?? []} calendar={calendar} zone={zone} nowMs={nowMs}
+          loading={bookings === null && !bookingsError} error={bookingsError}
+          maxDate={maxDate} />
+      </section>
+      {calendar.view === "day" && date >= today && timesSection}
+    </div>;
+  }
+  return <div className="stack client-home">
+    {timesSection}
 
     <section className="card" aria-labelledby="client-bookings">
       <h2 id="client-bookings">Your appointments</h2>
