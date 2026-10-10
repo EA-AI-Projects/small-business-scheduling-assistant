@@ -326,6 +326,13 @@ Resources:
             Path: /v1/account/invitations/{business_id}/{client_id}/activate
             Method: POST
             Auth: {Authorizer: OwnerJwt}
+        ClientAccountActivationPending:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OwnerHttpApi
+            Path: /v1/account/invitations/activate
+            Method: POST
+            Auth: {Authorizer: OwnerJwt}
         OwnerProxyGet:
           Type: HttpApi
           Properties:
