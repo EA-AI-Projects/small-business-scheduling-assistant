@@ -261,6 +261,8 @@ Resources:
       AllowedOAuthFlowsUserPoolClient: true
       AllowedOAuthFlows: [code]
       AllowedOAuthScopes: [openid]
+      # Do not let a signed-in user change the email bound to an active identity link.
+      WriteAttributes: [name]
       CallbackURLs: [!Sub '${OwnerAppOrigin}/', !Sub '${OwnerAppOrigin}/client/']
       LogoutURLs: [!Sub '${OwnerAppOrigin}/', !Sub '${OwnerAppOrigin}/client/']
       SupportedIdentityProviders: [COGNITO]

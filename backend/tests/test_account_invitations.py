@@ -3,6 +3,7 @@
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from fastapi.testclient import TestClient
 
 from scheduling.account_invitations import (
@@ -11,6 +12,7 @@ from scheduling.account_invitations import (
     InvitationDenied,
     VerifiedAccount,
 )
+from scheduling.adapters.account_invitations_aws import CognitoAccountDirectory
 from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.domain.client_records import ClientRecordService, HomeSize
 from scheduling.identity_links import IdentityLink, IdentityLinks, LinkConflict, LinkRole, LinkState
@@ -239,3 +241,59 @@ def test_failed_send_retried_after_provisional_expiry_gets_full_24_hours() -> No
     service.activate("pilot", "client-a", VerifiedAccount(
         "sub-1", "client@example.test", True), sent_at + timedelta(hours=23))
     assert links.resolve("sub-1").client_id == "client-a"
+
+
+def test_new_cognito_invitee_uses_emailed_password_as_address_proof() -> None:
+    class Cognito:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def admin_get_user(self, **kwargs: object) -> object:
+            del kwargs
+            raise RuntimeError("UserNotFoundException")
+
+        def admin_create_user(self, **kwargs: object) -> dict[str, object]:
+            self.calls.append(kwargs)
+            return {"User": {"Attributes": [{"Name": "sub", "Value": "new-sub"}]}}
+
+    cognito = Cognito()
+    directory = CognitoAccountDirectory(cognito, "synthetic-pool")
+    assert directory.create_or_find_invitee("client@example.test") == ("new-sub", True)
+    assert cognito.calls[0]["MessageAction"] == "SUPPRESS"
+    assert cognito.calls[0]["UserAttributes"] == [
+        {"Name": "email", "Value": "client@example.test"},
+        {"Name": "email_verified", "Value": "true"},
+    ]
+    directory.send_invitation("client@example.test", created=True)
+    assert cognito.calls[1]["MessageAction"] == "RESEND"
+    assert cognito.calls[1]["DesiredDeliveryMediums"] == ["EMAIL"]
+
+
+def test_existing_cognito_invitee_needs_matching_verified_email() -> None:
+    class Cognito:
+        def __init__(self, email: str, verified: str) -> None:
+            self.email = email
+            self.verified = verified
+            self.sent = False
+
+        def admin_get_user(self, **kwargs: object) -> dict[str, object]:
+            del kwargs
+            return {"Enabled": True, "UserAttributes": [
+                {"Name": "sub", "Value": "existing-sub"},
+                {"Name": "email", "Value": self.email},
+                {"Name": "email_verified", "Value": self.verified},
+            ]}
+
+        def admin_create_user(self, **kwargs: object) -> None:
+            del kwargs
+            self.sent = True
+
+    for email, verified in (("client@example.test", "false"),
+                            ("other@example.test", "true")):
+        cognito = Cognito(email, verified)
+        directory = CognitoAccountDirectory(cognito, "synthetic-pool")
+        with pytest.raises(InvitationDenied):
+            directory.create_or_find_invitee("client@example.test")
+        assert not cognito.sent
+    directory = CognitoAccountDirectory(Cognito("CLIENT@example.test", "true"), "synthetic-pool")
+    assert directory.create_or_find_invitee("client@example.test") == ("existing-sub", False)

@@ -135,6 +135,7 @@ def test_template_wires_cors_and_owner_app_origin() -> None:
     assert "OwnerRedirectUri" not in text
     assert "Path: /owner\n" not in text and "Path: /owner/{proxy+}" not in text
     assert "LogoutURLs: [!Sub '${OwnerAppOrigin}/', !Sub '${OwnerAppOrigin}/client/']" in pool_client
+    assert "WriteAttributes: [name]" in pool_client
     function = _resource(text, "OwnerApiFunction")
     assert "OWNER_APP_ORIGIN: !Ref OwnerAppOrigin" in function
 
