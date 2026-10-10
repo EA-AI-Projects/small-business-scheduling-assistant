@@ -197,7 +197,8 @@ def test_bookings_list_only_the_callers_pending_and_confirmed_visits() -> None:
         (pending, CalendarStatus.PENDING_APPROVAL.value),
         (confirmed, CalendarStatus.CONFIRMED.value)]
     assert set(mine[0]) == {"appointment_id", "status", "start_at", "end_at",
-                            "duration_minutes", "hold_expires_at", "requested_at"}
+                            "duration_minutes", "hold_expires_at", "requested_at", "version",
+                         "replaces_appointment_id"}
     assert mine[0]["hold_expires_at"] is not None
     assert mine[1]["duration_minutes"] == 60
     ids = {item["appointment_id"] for item in mine}

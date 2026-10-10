@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { MiniCalendar } from "@/components/shell/MiniCalendar";
-import { bookingState, hasStalePending, nextHoldExpiry, parseAvailability, parseBookings, type ClientBooking } from "@/lib/clientBookings";
+import { bookingState, hasStalePending, hasVersion, nextHoldExpiry, parseAvailability, parseBookings, pendingReplacement, type ClientBooking } from "@/lib/clientBookings";
 import type { OwnerConfig } from "@/lib/config";
 import { dayKey, localStamp, localTime, todayKey } from "@/lib/time";
 
@@ -27,16 +27,28 @@ type Outcome =
   | { kind: "conflict"; alternatives: string[] }
   | { kind: "error"; message: string };
 
-/** Submit one request. The body names only the start; the server fixes client, business, and length. */
-async function submitRequest(config: OwnerConfig, token: string, start: string, key: string): Promise<Outcome> {
+const REFUSALS: Record<string, string> = {
+  STALE_BOOKING: "That appointment changed since you last looked, so nothing was changed. Refresh and review it first.",
+  REPLACEMENT_PENDING: "A move request for this appointment is already waiting for the owner. Withdraw it first to change anything else.",
+  BOOKING_NOT_ACTIVE: "That appointment is no longer active, so nothing was changed. Refresh to see its current state.",
+  BOOKING_NOT_RESCHEDULABLE: "Only an upcoming confirmed appointment can be moved. Refresh to see its current state.",
+  CALENDAR_BUSY: "The calendar changed while sending. Nothing was changed; please try again.",
+  PROFILE_INCOMPLETE: "Your profile needs the owner's attention before you can change appointments online. Please contact the business.",
+  IDEMPOTENCY_KEY_REUSED: "That attempt was already used for something else. Refresh and try again.",
+};
+
+/** One client write. The body names only a start and the version the client saw; the server fixes everything else. */
+async function write(config: OwnerConfig, token: string, path: string, payload: unknown, key: string, timed: boolean): Promise<Outcome> {
   let response: Response;
   try {
-    response = await fetch(`${config.apiBaseUrl}/v1/client/requests`, { method: "POST",
+    response = await fetch(`${config.apiBaseUrl}${path}`, { method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "Idempotency-Key": key },
-      body: JSON.stringify({ start_at: start }),
+      body: JSON.stringify(payload),
       credentials: "omit", cache: "no-store", referrerPolicy: "no-referrer" });
-  } catch { return { kind: "error", message: "Could not tell whether your request was sent. Check Your appointments, "
-    + "or send it again; sending again will not create a second request." }; }
+  } catch { return { kind: "error", message: (timed ? "Could not tell whether your request was sent. Check Your appointments, "
+      + "or send it again; sending again will not create a second request."
+    : "Could not tell whether this was sent. Check Your appointments, "
+      + "or press it again; pressing again will not repeat it.") }; }
   if (response.status === 401 || response.status === 403) throw new Unauthorized();
   const body = await response.json().catch(() => null) as { detail?: { code?: string; alternatives?: unknown } } | null;
   if (response.ok) {
@@ -45,15 +57,18 @@ async function submitRequest(config: OwnerConfig, token: string, start: string, 
     return list.length === 1 && booking ? { kind: "sent", booking }
       : { kind: "error", message: "Unexpected response. Check Your appointments before trying again." };
   }
-  if (response.status === 409 && (body?.detail?.code === "SLOT_CONFLICT" || body?.detail?.code === "CALENDAR_BUSY")) {
-    const alternatives = Array.isArray(body.detail.alternatives)
+  const code = body?.detail?.code;
+  // Only a chosen time can be "no longer open"; a cancel that hits a busy calendar is a plain retry.
+  if (timed && response.status === 409 && (code === "SLOT_CONFLICT" || code === "CALENDAR_BUSY")) {
+    const alternatives = Array.isArray(body?.detail?.alternatives)
       ? body.detail.alternatives.filter((item): item is string => typeof item === "string" && !Number.isNaN(Date.parse(item))) : [];
     return { kind: "conflict", alternatives };
   }
-  if (response.status === 409 && body?.detail?.code === "PROFILE_INCOMPLETE") return { kind: "error",
-    message: "Your profile needs the owner's attention before you can request online. Please contact the business." };
-  if (response.status === 503) return { kind: "error", message: "Online requests are not available right now." };
-  return { kind: "error", message: "Your request was not sent. Please try again." };
+  if (response.status === 409 && code && code in REFUSALS) return { kind: "error", message: REFUSALS[code]! };
+  if (response.status === 404) return { kind: "error", message: "That appointment was not found. Refresh to see your appointments." };
+  if (response.status === 503) return { kind: "error", message: timed ? "Online requests are not available right now." : "Online changes are not available right now." };
+  return { kind: "error", message: timed ? "Your request was not sent. Please try again."
+    : "Nothing was changed. Please try again." };
 }
 
 /**
@@ -78,7 +93,15 @@ function ClientCalendar({ config, token, zone, onSessionEnded }: {
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [chosen, setChosen] = useState<string | null>(null);
   // One key per chosen time, reused on a retry so a lost response cannot create a second request.
-  const attempt = useRef<{ start: string; key: string } | null>(null);
+  const attempt = useRef<{ id: string; key: string } | null>(null);
+  // A visit being moved: the confirmed original stays booked until the owner approves the replacement.
+  const [moving, setMoving] = useState<ClientBooking | null>(null);
+  // A booking whose cancellation is waiting for the separate, explicit confirm press.
+  const [confirming, setConfirming] = useState<ClientBooking | null>(null);
+  const cancelAttempt = useRef<{ id: string; key: string } | null>(null);
+  const [changing, setChanging] = useState(false);
+  const [changeOutcome, setChangeOutcome] = useState<{ kind: "cancelled"; booking: ClientBooking }
+    | { kind: "error"; message: string } | null>(null);
   const [sending, setSending] = useState(false);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const [refresh, setRefresh] = useState(0);
@@ -142,14 +165,41 @@ function ClientCalendar({ config, token, zone, onSessionEnded }: {
   const choose = (start: string | null) => { setChosen(start); setOutcome(null); };
   const send = async () => {
     if (!chosen || sending) return;
-    if (attempt.current?.start !== chosen) attempt.current = { start: chosen, key: crypto.randomUUID() };
+    const id = `${moving?.appointment_id ?? "new"}|${moving?.version ?? 0}|${chosen}`;
+    if (attempt.current?.id !== id) attempt.current = { id, key: crypto.randomUUID() };
     setSending(true);
     try {
-      const result = await submitRequest(config, token, chosen, attempt.current.key);
+      const result = moving && hasVersion(moving)
+        ? await write(config, token, `/v1/client/bookings/${encodeURIComponent(moving.appointment_id)}/reschedule`,
+          { start_at: chosen, expected_version: moving.version }, attempt.current.key, true)
+        : await write(config, token, "/v1/client/requests", { start_at: chosen }, attempt.current.key, true);
       if (result.kind !== "error") { attempt.current = null; setChosen(null); setRefresh((count) => count + 1); }
+      if (result.kind === "sent") setMoving(null);
       setOutcome(result);
     } catch (error) { fail(error, (message) => setOutcome({ kind: "error", message })); }
     finally { setSending(false); }
+  };
+  const startCancel = (booking: ClientBooking) => {
+    setConfirming(booking); setChangeOutcome(null); setMoving(null); choose(null);
+  };
+  const confirmCancel = async () => {
+    if (!confirming || !hasVersion(confirming) || changing) return;
+    const id = `${confirming.appointment_id}|${confirming.version}`;
+    if (cancelAttempt.current?.id !== id) cancelAttempt.current = { id, key: crypto.randomUUID() };
+    setChanging(true);
+    try {
+      const result = await write(config, token,
+        `/v1/client/bookings/${encodeURIComponent(confirming.appointment_id)}/cancel`,
+        { expected_version: confirming.version }, cancelAttempt.current.key, false);
+      if (result.kind === "sent") {
+        cancelAttempt.current = null; setConfirming(null); setChangeOutcome({ kind: "cancelled", booking: result.booking });
+        setRefresh((count) => count + 1);
+      } else if (result.kind === "error") setChangeOutcome(result);
+    } catch (error) { fail(error, (message) => setChangeOutcome({ kind: "error", message })); }
+    finally { setChanging(false); }
+  };
+  const startMove = (booking: ClientBooking) => {
+    setMoving(booking); setConfirming(null); setChangeOutcome(null); choose(null);
   };
 
   const settled = availability?.key === availabilityKey ? availability : null;
@@ -174,18 +224,26 @@ function ClientCalendar({ config, token, zone, onSessionEnded }: {
             <button type="button" aria-pressed={chosen === start} onClick={() => choose(start)}>{localTime(start, zone)}</button>
           </li>)}
         </ul>}
+      {moving && <div role="group" aria-label="Moving this appointment" className="notice">
+        <p>You are asking to move your appointment on <strong>{localStamp(moving.start_at, zone)}</strong>.
+          Pick a new time above. Your current appointment stays confirmed until the owner approves the new time;
+          if the owner declines or does not answer, nothing changes.</p>
+        <button type="button" onClick={() => { setMoving(null); choose(null); }}>Keep my current appointment</button>
+      </div>}
       {chosen && <div role="group" aria-label="Request this time" className="notice">
         <p>You picked <strong>{localStamp(chosen, zone)}</strong> ({zone}). Sending asks the owner for approval.
-          This time is not booked and is not confirmed until the owner approves it.</p>
+          This time is not booked and is not confirmed until the owner approves it.
+          {moving ? ` Your appointment on ${localStamp(moving.start_at, zone)} stays confirmed until then.` : ""}</p>
         <button type="button" disabled={sending} onClick={() => void send()}>
-          {sending ? "Sending…" : "Send request for owner approval"}</button>
+          {sending ? "Sending…" : moving ? "Send move request for owner approval" : "Send request for owner approval"}</button>
       </div>}
       {outcome?.kind === "sent" && outcome.booking.status !== "PENDING_APPROVAL" && <p role="status" className="notice">
         This request is no longer waiting for approval: {bookingState(outcome.booking, nowMs).label}.{" "}
         {bookingState(outcome.booking, nowMs).detail}</p>}
-      {outcome?.kind === "sent" && outcome.booking.status === "PENDING_APPROVAL" && <p role="status" className="notice">Request sent for{" "}
+      {outcome?.kind === "sent" && outcome.booking.status === "PENDING_APPROVAL" && <p role="status" className="notice">{outcome.booking.replaces_appointment_id ? "Move requested for" : "Request sent for"}{" "}
         <strong>{localStamp(outcome.booking.start_at, zone)}</strong> to {localTime(outcome.booking.end_at, zone)}.
-        Status: waiting for owner approval. It is not confirmed yet.</p>}
+        Status: waiting for owner approval. It is not confirmed yet.
+        {outcome.booking.replaces_appointment_id ? " Your original appointment is still confirmed." : ""}</p>}
       {outcome?.kind === "conflict" && <div role="alert" className="notice error">
         <p>That time is no longer open, so nothing was requested.
           {outcome.alternatives.length ? " These times are open now:" : " Please pick another time or day."}</p>
@@ -205,12 +263,47 @@ function ClientCalendar({ config, token, zone, onSessionEnded }: {
         : bookings.length === 0 ? <p>You have no upcoming appointments or pending requests.</p>
         : <ul className="card-list">{bookings.map((booking) => {
           const state = bookingState(booking, nowMs);
+          const live = state.tone === "confirmed" || state.label === "Waiting for approval";
+          const replacement = booking.status === "CONFIRMED" ? pendingReplacement(bookings, booking) : null;
+          const original = booking.replaces_appointment_id
+            ? bookings.find((item) => item.appointment_id === booking.replaces_appointment_id) : undefined;
+          const canChange = live && hasVersion(booking);
           return <li key={booking.appointment_id} className="card" data-status={state.tone}>
             <strong>{localStamp(booking.start_at, zone)}</strong> to {localTime(booking.end_at, zone)}{" "}
-            <span className="badge">{state.label}</span>
-            <p className="meta">{state.detail}</p>
+            <span className="badge">{booking.replaces_appointment_id && booking.status === "PENDING_APPROVAL"
+              ? "Move request: waiting for approval" : state.label}</span>
+            <p className="meta">{booking.replaces_appointment_id && booking.status === "PENDING_APPROVAL"
+              ? `Not confirmed. This is a request to move${original ? ` your ${localStamp(original.start_at, zone)} appointment` : " your appointment"} here. `
+                + "Your original appointment stays confirmed until the owner approves this time."
+              : state.detail}</p>
+            {replacement && <p className="meta">A request to move this appointment to {localStamp(replacement.start_at, zone)} is
+              waiting for the owner. This appointment stays confirmed until the owner approves it.</p>}
+            {canChange && <div className="actions">
+              {booking.status === "CONFIRMED" && !replacement && <button type="button" onClick={() => startMove(booking)}>
+                Move to another time</button>}
+              {booking.status === "CONFIRMED" && replacement ? <span className="meta">To cancel, first withdraw the move request.</span>
+                : <button type="button" onClick={() => startCancel(booking)}>
+                  {booking.status === "CONFIRMED" ? "Cancel appointment"
+                    : booking.replaces_appointment_id ? "Withdraw move request" : "Cancel request"}</button>}
+            </div>}
+            {confirming?.appointment_id === booking.appointment_id && <div role="group" aria-label="Confirm cancellation" className="notice">
+              <p>{booking.status === "CONFIRMED" ? "Cancel this confirmed appointment?" : booking.replaces_appointment_id
+                ? "Withdraw this move request? Your original appointment stays confirmed." : "Cancel this request?"}
+                {" "}<strong>{localStamp(booking.start_at, zone)}</strong> to {localTime(booking.end_at, zone)} ({zone}).
+                {booking.status === "CONFIRMED" ? " The time is released and the owner is told." : ""}</p>
+              <button type="button" disabled={changing} onClick={() => void confirmCancel()}>
+                {changing ? "Cancelling…" : booking.replaces_appointment_id ? "Yes, withdraw this request" : "Yes, cancel this " + (booking.status === "CONFIRMED" ? "appointment" : "request")}</button>
+              <button type="button" disabled={changing} onClick={() => { setConfirming(null); setChangeOutcome(null); }}>
+                {booking.replaces_appointment_id ? "No, keep the request" : "No, keep it"}</button>
+            </div>}
           </li>;
         })}</ul>}
+      {changeOutcome?.kind === "cancelled" && <p role="status" className="notice">
+        {changeOutcome.booking.status === "CANCELLED"
+          ? <>Cancelled: <strong>{localStamp(changeOutcome.booking.start_at, zone)}</strong> to {localTime(changeOutcome.booking.end_at, zone)}.
+            The time was released and the owner was told.</>
+          : `This is no longer active: ${bookingState(changeOutcome.booking, nowMs).label}.`}</p>}
+      {changeOutcome?.kind === "error" && <p role="alert" className="notice error">{changeOutcome.message}</p>}
     </section>
   </div>;
 }

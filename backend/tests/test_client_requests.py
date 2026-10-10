@@ -77,7 +77,8 @@ def test_request_is_pending_visible_to_owner_and_queues_existing_notices() -> No
     assert datetime.fromisoformat(body["start_at"]) == START
     assert body["duration_minutes"] == 60  # the profile's length, not caller input
     assert set(body) == {"appointment_id", "status", "start_at", "end_at",
-                         "duration_minutes", "hold_expires_at", "requested_at"}
+                         "duration_minutes", "hold_expires_at", "requested_at", "version",
+                         "replaces_appointment_id"}
     pending = api.get(f"{BASE}/requests", headers=OWNER).json()
     assert [item["appointment_id"] for item in pending] == [body["appointment_id"]]
     assert pending[0]["client_id"] == "client-a"
