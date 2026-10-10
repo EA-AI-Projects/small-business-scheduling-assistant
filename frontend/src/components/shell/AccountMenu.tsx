@@ -24,9 +24,11 @@ function Avatar({ initial, large = false }: { initial: string | null; large?: bo
  * Account button for the header and its pop-up: who is signed in, then rows of actions. Today the
  * only row is Sign out; further rows (for example Preferences) go in the same `.account-actions` list.
  */
-export function AccountMenu({ email, local, onSignOut }: {
+export function AccountMenu({ email, local, localLabel = "Local owner (synthetic)", onSignOut }: {
   email: string | null;
   local: boolean;
+  /** Name shown in local mode; the owner app's default, a client shell passes its own. */
+  localLabel?: string;
   onSignOut: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -34,7 +36,7 @@ export function AccountMenu({ email, local, onSignOut }: {
   const getAnchor = useCallback(() => button.current, []);
   const returnFocus = useCallback(() => button.current, []);
   const initial = !local && email ? (Array.from(email)[0] ?? "").toLocaleUpperCase() || null : null;
-  const identity = local ? "Local owner (synthetic)" : email ?? "Signed in";
+  const identity = local ? localLabel : email ?? "Signed in";
   return (
     <>
       <button ref={button} type="button" className="avatar-button" aria-haspopup="dialog" aria-expanded={open}
