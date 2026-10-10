@@ -368,6 +368,41 @@ Resources:
             Path: /v1/client/session
             Method: GET
             Auth: {Authorizer: OwnerJwt}
+        ClientAvailabilityGet:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OwnerHttpApi
+            Path: /v1/client/availability
+            Method: GET
+            Auth: {Authorizer: OwnerJwt}
+        ClientBookingsGet:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OwnerHttpApi
+            Path: /v1/client/bookings
+            Method: GET
+            Auth: {Authorizer: OwnerJwt}
+        ClientRequestPost:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OwnerHttpApi
+            Path: /v1/client/requests
+            Method: POST
+            Auth: {Authorizer: OwnerJwt}
+        ClientBookingCancelPost:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OwnerHttpApi
+            Path: /v1/client/bookings/{appointment_id}/cancel
+            Method: POST
+            Auth: {Authorizer: OwnerJwt}
+        ClientBookingReschedulePost:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OwnerHttpApi
+            Path: /v1/client/bookings/{appointment_id}/reschedule
+            Method: POST
+            Auth: {Authorizer: OwnerJwt}
   OwnerApiLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
