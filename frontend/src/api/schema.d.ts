@@ -4,6 +4,23 @@
  */
 
 export interface paths {
+    "/v1/account/invitations/activate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Activate Pending Client Account */
+        post: operations["activate_pending_client_account_v1_account_invitations_activate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/account/invitations/{business_id}/{client_id}/activate": {
         parameters: {
             query?: never;
@@ -682,6 +699,26 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    activate_pending_client_account_v1_account_invitations_activate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
     activate_client_account_v1_account_invitations__business_id___client_id__activate_post: {
         parameters: {
             query?: never;

@@ -718,6 +718,29 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/v1/account/invitations/activate": {
+      "post": {
+        "operationId": "activate_pending_client_account_v1_account_invitations_activate_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Activate Pending Client Account V1 Account Invitations Activate Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Activate Pending Client Account"
+      }
+    },
     "/v1/account/invitations/{business_id}/{client_id}/activate": {
       "post": {
         "operationId": "activate_client_account_v1_account_invitations__business_id___client_id__activate_post",

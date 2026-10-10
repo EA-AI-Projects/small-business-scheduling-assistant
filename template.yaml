@@ -243,7 +243,11 @@ Resources:
           RequireNumbers: true
           RequireSymbols: true
           RequireUppercase: true
-      AdminCreateUserConfig: {AllowAdminCreateUserOnly: true}
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+        InviteMessageTemplate:
+          EmailSubject: 'Your Smart Scheduling Assistant invitation'
+          EmailMessage: !Sub 'You have been invited to Smart Scheduling Assistant. Visit ${OwnerAppOrigin}/client/ to sign in using username {username} and temporary password {####}. This invitation expires after 24 hours.'
   OwnerUserPoolDomain:
     Type: AWS::Cognito::UserPoolDomain
     Properties:
@@ -257,8 +261,10 @@ Resources:
       AllowedOAuthFlowsUserPoolClient: true
       AllowedOAuthFlows: [code]
       AllowedOAuthScopes: [openid]
-      CallbackURLs: [!Sub '${OwnerAppOrigin}/']
-      LogoutURLs: [!Sub '${OwnerAppOrigin}/']
+      # Do not let a signed-in user change the email bound to an active identity link.
+      WriteAttributes: [name]
+      CallbackURLs: [!Sub '${OwnerAppOrigin}/', !Sub '${OwnerAppOrigin}/client/']
+      LogoutURLs: [!Sub '${OwnerAppOrigin}/', !Sub '${OwnerAppOrigin}/client/']
       SupportedIdentityProviders: [COGNITO]
       PreventUserExistenceErrors: ENABLED
       ExplicitAuthFlows: [ALLOW_REFRESH_TOKEN_AUTH]

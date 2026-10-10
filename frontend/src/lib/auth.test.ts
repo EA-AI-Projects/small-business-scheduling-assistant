@@ -51,12 +51,13 @@ describe("completeSignIn", () => {
     return completeSignIn(config, new URL("https://app.example.test/?code=c&state=s"), storage, fetcher);
   }
 
-  it("returns the access token and only the email from the ID token", async () => {
-    const result = await setup({ access_token: "access", id_token: token({ email: "owner@example.test" }) });
-    expect(result).toEqual({ accessToken: "access", email: "owner@example.test" });
+  it("returns the access token and ephemeral ID token for activation", async () => {
+    const idToken = token({ email: "owner@example.test" });
+    const result = await setup({ access_token: "access", id_token: idToken });
+    expect(result).toEqual({ accessToken: "access", email: "owner@example.test", idToken });
   });
 
   it("returns a null email when the response has no ID token", async () => {
-    expect(await setup({ access_token: "access" })).toEqual({ accessToken: "access", email: null });
+    expect(await setup({ access_token: "access" })).toEqual({ accessToken: "access", email: null, idToken: null });
   });
 });

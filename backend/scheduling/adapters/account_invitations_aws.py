@@ -5,7 +5,7 @@ from datetime import datetime
 from hashlib import sha256
 from typing import Any
 
-from scheduling.account_invitations import ClientInvitation, InvitationDenied
+from scheduling.account_invitations import ClientInvitation, InvitationDenied, normalize_email
 from scheduling.identity_links import IdentityLink
 
 
@@ -220,10 +220,20 @@ class CognitoAccountDirectory:
             if "UserNotFoundException" not in str(exc):
                 raise
         else:
+            attributes = {entry.get("Name"): entry.get("Value")
+                          for entry in user.get("UserAttributes", ())}
+            if (user.get("Enabled") is not True
+                    or not isinstance(attributes.get("email"), str)
+                    or normalize_email(attributes["email"]) != normalize_email(email)
+                    or attributes.get("email_verified") != "true"):
+                raise InvitationDenied("Existing account email is not verified")
             return self._subject(user), False
         user = self._client.admin_create_user(
             UserPoolId=self._pool, Username=email,
-            UserAttributes=[{"Name": "email", "Value": email}],
+            # The temporary password is sent only to this address on RESEND. A new
+            # account cannot sign in and activate without receiving that email.
+            UserAttributes=[{"Name": "email", "Value": email},
+                            {"Name": "email_verified", "Value": "true"}],
             MessageAction="SUPPRESS",
         )["User"]
         return self._subject(user), True

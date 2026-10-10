@@ -139,6 +139,14 @@ class ClientAccountInvitations:
             raise InvitationDenied("Pending identity link is unavailable")
         self._store.activate_link(invite, link, instant)
 
+    def activate_pending(self, account: VerifiedAccount, now: datetime | None = None) -> None:
+        """Resolve the invitation from the verified subject, never browser-supplied IDs."""
+        link = self._links.read_link(account.subject)
+        if (link is None or link.role != LinkRole.CLIENT or link.state != LinkState.PENDING
+                or not link.client_id):
+            raise InvitationDenied("Pending invitation is unavailable")
+        self.activate(link.business_id, link.client_id, account, now)
+
     def revoke(self, business_id: str, client_id: str, owner_subject: str,
                now: datetime | None = None) -> None:
         instant = now or self._now()
