@@ -14,7 +14,7 @@ from scheduling.adapters.account_invitations_aws import (
     DynamoClientInvitations,
 )
 from scheduling.adapters.dynamodb import DynamoClient, DynamoDBCalendarRepository
-from scheduling.client_api import add_client_session_route
+from scheduling.client_api import add_client_portal_routes, add_client_session_route
 from scheduling.identity_links import DynamoIdentityLinkStore, IdentityLink, IdentityLinks, LinkRole
 from scheduling.owner_api import OwnerPrincipal, create_persisted_owner_app
 from scheduling.owner_auth import CognitoVerifiedAccountVerifier
@@ -85,4 +85,5 @@ def create_cognito_linked_app(
         client, table_name, owner, clock, cors_origins=cors_origins,
         account_invitations=invitations, verify_account=verify_account)
     add_client_session_route(app, verify)
+    add_client_portal_routes(app, verify, records, clock)
     return app

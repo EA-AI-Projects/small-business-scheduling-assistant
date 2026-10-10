@@ -369,6 +369,13 @@ class InMemoryCalendarRepository:
                 and appointment.hold_expires_at is not None
                 and appointment.hold_expires_at > now), key=lambda appointment: appointment.start_at))
 
+    def list_client_appointments(self, business_id: str, client_id: str) -> tuple[Appointment, ...]:
+        with self._lock:
+            return tuple(sorted((appointment for appointment in self._appointments.values()
+                if appointment.business_id == business_id
+                and appointment.client_id == client_id),
+                key=lambda appointment: appointment.start_at))
+
     def read_replacement_guard(
         self, business_id: str, original_id: str
     ) -> ReplacementGuard | None:

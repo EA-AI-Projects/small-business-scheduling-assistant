@@ -44,6 +44,127 @@
         "title": "BlockBody",
         "type": "object"
       },
+      "CalendarStatus": {
+        "enum": [
+          "PENDING_APPROVAL",
+          "CONFIRMED",
+          "DECLINED",
+          "CANCELLED",
+          "EXPIRED",
+          "UNAVAILABLE"
+        ],
+        "title": "CalendarStatus",
+        "type": "string"
+      },
+      "ClientAvailability": {
+        "description": "Bookable starts only; no reason is given for any time that is missing.",
+        "properties": {
+          "date": {
+            "format": "date",
+            "title": "Date",
+            "type": "string"
+          },
+          "duration_minutes": {
+            "title": "Duration Minutes",
+            "type": "integer"
+          },
+          "starts": {
+            "items": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "title": "Starts",
+            "type": "array"
+          },
+          "timezone": {
+            "title": "Timezone",
+            "type": "string"
+          }
+        },
+        "required": [
+          "date",
+          "timezone",
+          "duration_minutes",
+          "starts"
+        ],
+        "title": "ClientAvailability",
+        "type": "object"
+      },
+      "ClientBooking": {
+        "properties": {
+          "appointment_id": {
+            "title": "Appointment Id",
+            "type": "string"
+          },
+          "duration_minutes": {
+            "title": "Duration Minutes",
+            "type": "integer"
+          },
+          "end_at": {
+            "format": "date-time",
+            "title": "End At",
+            "type": "string"
+          },
+          "hold_expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hold Expires At"
+          },
+          "replaces_appointment_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replaces Appointment Id"
+          },
+          "start_at": {
+            "format": "date-time",
+            "title": "Start At",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/CalendarStatus"
+          }
+        },
+        "required": [
+          "appointment_id",
+          "start_at",
+          "end_at",
+          "status",
+          "hold_expires_at",
+          "replaces_appointment_id",
+          "duration_minutes"
+        ],
+        "title": "ClientBooking",
+        "type": "object"
+      },
+      "ClientBookings": {
+        "properties": {
+          "bookings": {
+            "items": {
+              "$ref": "#/components/schemas/ClientBooking"
+            },
+            "title": "Bookings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "bookings"
+        ],
+        "title": "ClientBookings",
+        "type": "object"
+      },
       "ClientNoteBody": {
         "additionalProperties": false,
         "properties": {
@@ -792,6 +913,74 @@
           }
         ],
         "summary": "Activate Client Account"
+      }
+    },
+    "/v1/client/availability": {
+      "get": {
+        "operationId": "client_availability_v1_client_availability_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "date",
+            "required": true,
+            "schema": {
+              "format": "date",
+              "title": "Date",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientAvailability"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Client Availability"
+      }
+    },
+    "/v1/client/bookings": {
+      "get": {
+        "operationId": "client_bookings_v1_client_bookings_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientBookings"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Client Bookings"
       }
     },
     "/v1/client/session": {

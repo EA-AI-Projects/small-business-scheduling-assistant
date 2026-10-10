@@ -8,7 +8,7 @@ import sys
 
 from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.adapters.sms_dynamodb import DynamoSmsIngressStore
-from scheduling.client_api import add_client_session_route
+from scheduling.client_api import add_client_portal_routes, add_client_session_route
 from scheduling.identity_links import IdentityLink
 from scheduling.owner_api import OwnerPrincipal, create_owner_app
 
@@ -28,6 +28,7 @@ def owner_schema() -> dict[str, object]:
         raise ValueError("Schema export never authenticates")
 
     add_client_session_route(app, reject_client)
+    add_client_portal_routes(app, reject_client, InMemoryCalendarRepository())
     return app.openapi()
 
 

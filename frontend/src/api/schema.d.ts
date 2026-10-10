@@ -38,6 +38,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/client/availability": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Client Availability */
+        get: operations["client_availability_v1_client_availability_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/client/bookings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Client Bookings */
+        get: operations["client_bookings_v1_client_bookings_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/client/session": {
         parameters: {
             query?: never;
@@ -465,6 +499,55 @@ export interface components {
              */
             start_at: string;
         };
+        /**
+         * CalendarStatus
+         * @enum {string}
+         */
+        CalendarStatus: "PENDING_APPROVAL" | "CONFIRMED" | "DECLINED" | "CANCELLED" | "EXPIRED" | "UNAVAILABLE";
+        /**
+         * ClientAvailability
+         * @description Bookable starts only; no reason is given for any time that is missing.
+         */
+        ClientAvailability: {
+            /**
+             * Date
+             * Format: date
+             */
+            date: string;
+            /** Duration Minutes */
+            duration_minutes: number;
+            /** Starts */
+            starts: string[];
+            /** Timezone */
+            timezone: string;
+        };
+        /** ClientBooking */
+        ClientBooking: {
+            /** Appointment Id */
+            appointment_id: string;
+            /** Duration Minutes */
+            duration_minutes: number;
+            /**
+             * End At
+             * Format: date-time
+             */
+            end_at: string;
+            /** Hold Expires At */
+            hold_expires_at: string | null;
+            /** Replaces Appointment Id */
+            replaces_appointment_id: string | null;
+            /**
+             * Start At
+             * Format: date-time
+             */
+            start_at: string;
+            status: components["schemas"]["CalendarStatus"];
+        };
+        /** ClientBookings */
+        ClientBookings: {
+            /** Bookings */
+            bookings: components["schemas"]["ClientBooking"][];
+        };
         /** ClientNoteBody */
         ClientNoteBody: {
             /** Appointment Id */
@@ -747,6 +830,57 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    client_availability_v1_client_availability_get: {
+        parameters: {
+            query: {
+                date: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClientAvailability"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    client_bookings_v1_client_bookings_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClientBookings"];
                 };
             };
         };
