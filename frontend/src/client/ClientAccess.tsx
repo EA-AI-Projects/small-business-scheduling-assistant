@@ -158,7 +158,7 @@ function CognitoClientAccess({ config, children }: { config: OwnerConfig; childr
     let current = true;
     callback.current ??= new URL(window.location.href);
     const url = callback.current;
-    if (url.search) window.history.replaceState(null, "", url.pathname);
+    if (url.search) window.history.replaceState(window.history.state, "", url.pathname);
     completion.current ??= completeSignIn(config, url);
     completion.current.then(async (result) => {
       if (!result || !current) return;

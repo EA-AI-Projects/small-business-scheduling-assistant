@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { parseConfig } from "@/lib/config";
 import { ClientAccess } from "@/client/ClientAccess";
 import ClientCalendarPage from "@/pages/client/index";
+import ClientAppointmentsPage from "@/pages/client/appointments";
 
 const auth = vi.hoisted(() => ({
   completeSignIn: vi.fn(), authorizeUrl: vi.fn(), logoutUrl: vi.fn(),
@@ -93,6 +94,17 @@ describe("client account entry", () => {
     expect(auth.authorizeUrl).toHaveBeenCalledWith(config, window.location.origin, sessionStorage, "/client/", true);
   });
 
+  it("keeps the router history state when it clears the Cognito callback query", async () => {
+    window.history.replaceState({ __N: true, url: "/client/?code=abc", as: "/client/?code=abc" }, "", "/client/?code=abc&state=xyz");
+    auth.completeSignIn.mockResolvedValue({ accessToken: "access", idToken: "id", email: "client@example.test" });
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async (url: string) => new Response(
+      url.endsWith("/session") ? '{"role":"client","business_id":"pilot","client_id":"synthetic","timezone":null}'
+        : url.includes("availability") ? '{"starts_at":[]}' : '{"bookings":[]}', { status: 200 })));
+    await act(async () => root.render(<ClientAccess config={config}>{page}</ClientAccess>));
+    expect(window.location.search).toBe("");
+    expect(window.history.state).toMatchObject({ __N: true });
+  });
+
   describe("local mode", () => {
     const local = parseConfig({ authMode: "local", apiBaseUrl: "http://127.0.0.1:8000", businessId: "pilot" });
     const submit = async (value: string) => {
@@ -129,6 +141,25 @@ describe("client account entry", () => {
       expect(JSON.stringify({ ...sessionStorage })).not.toContain(secret);
       expect(JSON.stringify([...store])).not.toContain(secret);
       expect(window.location.href).not.toContain(secret);
+    });
+
+    it("keeps one session and the header when the page child changes", async () => {
+      const fetcher = vi.fn().mockImplementation(async (url: string) => new Response(
+        url.endsWith("/session") ? '{"role":"client","business_id":"pilot","client_id":"client-1","timezone":"America/Los_Angeles"}'
+          : url.includes("availability") ? '{"starts_at":[]}' : '{"bookings":[]}', { status: 200 }));
+      vi.stubGlobal("fetch", fetcher);
+      await act(async () => root.render(<ClientAccess config={local}>{page}</ClientAccess>));
+      await submit("pasted-local-client-token");
+      const header = host.querySelector("header.app-header");
+      const sessionCalls = () => fetcher.mock.calls.filter(([url]) => String(url).endsWith("/v1/client/session")).length;
+      expect(header).not.toBeNull();
+      expect(sessionCalls()).toBe(1);
+      await act(async () => root.render(<ClientAccess config={local}><ClientAppointmentsPage /></ClientAccess>));
+      expect(host.querySelector("header.app-header")).toBe(header);
+      expect(sessionCalls()).toBe(1);
+      expect(auth.completeSignIn).not.toHaveBeenCalled();
+      await act(async () => host.querySelector<HTMLButtonElement>(".avatar-button")!.click());
+      expect(document.body.textContent).toContain("Local test client (synthetic)");
     });
 
     it("shows a denial and no client content for a rejected token", async () => {
