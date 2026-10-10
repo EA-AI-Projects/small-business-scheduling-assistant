@@ -55,6 +55,9 @@ class CreateHold:
     # counteroffer replaces: it must be that pending request at exactly this version.
     # Unset keeps the rule that a replacement targets a confirmed visit.
     replaces_pending_version: int | None = None
+    # Set by the portal for a confirmed original: the replacement is refused when the
+    # original is no longer at the version the client was shown (an edit or other change).
+    replaces_confirmed_version: int | None = None
 
     def __post_init__(self) -> None:
         if not all((self.business_id, self.actor_id, self.client_id, self.idempotency_key)):
@@ -64,6 +67,10 @@ class CreateHold:
         if self.replaces_pending_version is not None and (
                 self.replaces_appointment_id is None or self.replaces_pending_version <= 0):
             raise ValueError("A pending replacement names its original and version")
+        if self.replaces_confirmed_version is not None and (
+                self.replaces_appointment_id is None or self.replaces_confirmed_version <= 0
+                or self.replaces_pending_version is not None):
+            raise ValueError("A confirmed replacement names its original and version")
 
     def request_hash(self) -> str:
         payload: dict[str, object] = {
@@ -76,6 +83,8 @@ class CreateHold:
         }
         if self.replaces_pending_version is not None:
             payload["replaces_pending_version"] = self.replaces_pending_version
+        if self.replaces_confirmed_version is not None:
+            payload["replaces_confirmed_version"] = self.replaces_confirmed_version
         canonical = json.dumps(
             payload,
             sort_keys=True,
@@ -202,6 +211,8 @@ class HoldService:
                     or original.business_id != command.business_id
                     or original.client_id != command.client_id
                     or original.status != CalendarStatus.CONFIRMED
+                    or (command.replaces_confirmed_version is not None
+                        and original.version != command.replaces_confirmed_version)
                 ):
                     raise InvalidReplacement("Original confirmed appointment was not found")
                 guard = self._repository.read_replacement_guard(

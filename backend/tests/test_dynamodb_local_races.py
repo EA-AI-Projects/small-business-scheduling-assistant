@@ -36,6 +36,7 @@ from scheduling.domain.lifecycle import (
     Action,
     ActorRole,
     AppointmentCommand,
+    LifecycleService,
     TransitionCommit,
     TransitionResult,
 )
@@ -81,8 +82,8 @@ class RaceEnv:
     def scrub(self) -> None:
         """Delete only the items this run created (its business and appointment keys)."""
         partitions = [f"BUSINESS#{self.business}",
-                      DynamoDBCalendarRepository._visit_partition(
-                          self.business, "synthetic-client")]
+                      *(DynamoDBCalendarRepository._visit_partition(self.business, client)
+                        for client in ("synthetic-client", "portal-a", "portal-b"))]
         partitions += [f"BUSINESS#{other}" for other in self.extra_businesses]
         partitions += [f"APPOINTMENT#{identifier}" for identifier in self.appointment_ids]
         errors: list[str] = []
@@ -518,6 +519,161 @@ def test_concurrent_client_retries_with_one_key_create_one_request(race_env: Rac
     assert repo.read_revision(env.business) == revision_before + 1
     pending = [item for item in _business_items(env) if item["SK"]["S"].startswith("EVENT#")]
     assert len(pending) == 1
+
+
+PORTAL_NOW = datetime(2026, 9, 28, 15, tzinfo=UTC)
+
+
+def _portal_confirmed(env: RaceEnv, api: TestClient, repo: DynamoDBCalendarRepository,
+                      who: str, start: str, key: str) -> dict[str, Any]:
+    """A visit the owner approved, as the client's own booking list shows it."""
+    created = api.post("/v1/client/requests", json={"start_at": start},
+                       headers={"Authorization": f"Bearer token-{who}", "Idempotency-Key": key})
+    assert created.status_code == 200, created.text
+    env.appointment_ids.append(created.json()["appointment_id"])
+    LifecycleService(repo, lambda: PORTAL_NOW).apply(AppointmentCommand(
+        env.business, created.json()["appointment_id"], "synthetic-owner", ActorRole.OWNER,
+        Action.APPROVE, f"approve-{key}", 1))
+    listed = api.get("/v1/client/bookings", headers={"Authorization": f"Bearer token-{who}"})
+    return next(item for item in listed.json()["bookings"]
+                if item["appointment_id"] == created.json()["appointment_id"])
+
+
+def _portal_change(api: TestClient, who: str, booking: dict[str, Any], what: str, key: str,
+                   **body: Any) -> Any:
+    return api.post(f"/v1/client/bookings/{booking['appointment_id']}/{what}",
+                    json={"expected_version": booking["version"], **body},
+                    headers={"Authorization": f"Bearer token-{who}", "Idempotency-Key": key})
+
+
+def _portal_status(repo: DynamoDBCalendarRepository, appointment_id: str) -> str:
+    found = repo.read_appointment(appointment_id)
+    assert found is not None
+    return found.status.value
+
+
+def test_concurrent_client_cancels_of_one_visit_commit_exactly_one(race_env: RaceEnv) -> None:
+    env = race_env
+    api, repo = _client_portal(env)
+    booking = _portal_confirmed(env, api, repo, "a", "2026-09-29T16:00:00+00:00", "seed")
+    before = repo.read_revision(env.business)
+    barrier = Barrier(2)
+
+    def attempt(key: str) -> Any:
+        barrier.wait(timeout=5)
+        return _portal_change(api, "a", booking, "cancel", key)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(attempt, ("cancel-1", "cancel-2")))
+    assert sorted(item.status_code for item in results) == [200, 409]
+    assert _portal_status(repo, booking["appointment_id"]) == "CANCELLED"
+    assert repo.read_revision(env.business) == before + 1
+    items = _business_items(env)
+    cancels = [item for item in items if item["SK"]["S"].startswith("AUDIT#cancel#")]
+    assert len(cancels) == 1
+    assert repo.read_client_bookings(env.business, "portal-a", PORTAL_NOW) == ()
+
+
+def test_cancel_of_another_clients_visit_is_denied_and_writes_nothing(race_env: RaceEnv) -> None:
+    env = race_env
+    api, repo = _client_portal(env)
+    booking = _portal_confirmed(env, api, repo, "a", "2026-09-29T16:00:00+00:00", "seed")
+    before = repo.read_revision(env.business)
+    assert _portal_change(api, "b", booking, "cancel", "x").status_code == 404
+    assert _portal_change(api, "b", booking, "reschedule", "y",
+                          start_at="2026-09-30T16:00:00+00:00").status_code == 404
+    assert repo.read_revision(env.business) == before
+    assert _portal_status(repo, booking["appointment_id"]) == "CONFIRMED"
+
+
+def test_concurrent_reschedules_of_one_visit_create_exactly_one_replacement(
+    race_env: RaceEnv,
+) -> None:
+    env = race_env
+    api, repo = _client_portal(env)
+    booking = _portal_confirmed(env, api, repo, "a", "2026-09-29T16:00:00+00:00", "seed")
+    barrier = Barrier(2)
+
+    def attempt(args: tuple[str, str]) -> Any:
+        barrier.wait(timeout=5)
+        return _portal_change(api, "a", booking, "reschedule", args[0], start_at=args[1])
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(attempt, (("move-1", "2026-09-30T16:00:00+00:00"),
+                                          ("move-2", "2026-10-01T16:00:00+00:00"))))
+    env.appointment_ids.extend(item.json()["appointment_id"] for item in results
+                               if item.status_code == 200)
+    assert sorted(item.status_code for item in results) == [200, 409]
+    lost = next(item for item in results if item.status_code == 409)
+    assert lost.json()["detail"]["code"] in {"REPLACEMENT_PENDING", "CALENDAR_BUSY"}
+    assert _portal_status(repo, booking["appointment_id"]) == "CONFIRMED"
+    held = [item for item in _business_items(env) if item["SK"]["S"].startswith("EVENT#")
+            and item["status"]["S"] == "PENDING_APPROVAL"]
+    assert len(held) == 1
+    guard = _get(env, f"BUSINESS#{env.business}", f"REPLACEMENT#{booking['appointment_id']}")
+    assert guard is not None
+
+
+def test_owner_approval_of_a_replacement_swaps_and_refuses_the_racing_original_cancel(
+    race_env: RaceEnv,
+) -> None:
+    env = race_env
+    api, repo = _client_portal(env)
+    booking = _portal_confirmed(env, api, repo, "a", "2026-09-29T16:00:00+00:00", "seed")
+    moved = _portal_change(api, "a", booking, "reschedule", "move",
+                           start_at="2026-09-30T16:00:00+00:00")
+    assert moved.status_code == 200, moved.text
+    replacement = moved.json()
+    env.appointment_ids.append(replacement["appointment_id"])
+    barrier = Barrier(2)
+
+    def approve() -> Any:
+        barrier.wait(timeout=5)
+        return LifecycleService(repo, lambda: PORTAL_NOW).apply(AppointmentCommand(
+            env.business, replacement["appointment_id"], "synthetic-owner", ActorRole.OWNER,
+            Action.APPROVE, "approve-move", replacement["version"]))
+
+    def cancel() -> Any:
+        barrier.wait(timeout=5)
+        return _portal_change(api, "a", booking, "cancel", "racing-cancel")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        approval, cancellation = pool.submit(approve), pool.submit(cancel)
+        approved, cancelled = approval.result(), cancellation.result()
+    assert approved.appointment.status == CalendarStatus.CONFIRMED
+    assert cancelled.status_code == 409
+    assert _portal_status(repo, booking["appointment_id"]) == "CANCELLED"
+    assert _portal_status(repo, replacement["appointment_id"]) == "CONFIRMED"
+    visits = repo.read_client_bookings(env.business, "portal-a", PORTAL_NOW)
+    assert [item.appointment_id for item in visits] == [replacement["appointment_id"]]
+    assert _get(env, f"BUSINESS#{env.business}",
+                f"REPLACEMENT#{booking['appointment_id']}") is None
+
+
+def test_declined_or_expired_replacement_leaves_the_original_confirmed(race_env: RaceEnv) -> None:
+    env = race_env
+    api, repo = _client_portal(env)
+    booking = _portal_confirmed(env, api, repo, "a", "2026-09-29T16:00:00+00:00", "seed")
+    first = _portal_change(api, "a", booking, "reschedule", "move-1",
+                           start_at="2026-09-30T16:00:00+00:00").json()
+    env.appointment_ids.append(first["appointment_id"])
+    LifecycleService(repo, lambda: PORTAL_NOW).apply(AppointmentCommand(
+        env.business, first["appointment_id"], "synthetic-owner", ActorRole.OWNER,
+        Action.DECLINE, "decline-1", first["version"]))
+    assert _portal_status(repo, booking["appointment_id"]) == "CONFIRMED"
+    assert _get(env, f"BUSINESS#{env.business}",
+                f"REPLACEMENT#{booking['appointment_id']}") is None
+    second = _portal_change(api, "a", booking, "reschedule", "move-2",
+                            start_at="2026-10-01T16:00:00+00:00").json()
+    env.appointment_ids.append(second["appointment_id"])
+    due = datetime.fromisoformat(second["hold_expires_at"])
+    LifecycleService(repo, lambda: due).apply(AppointmentCommand(
+        env.business, second["appointment_id"], "system", ActorRole.SYSTEM,
+        Action.EXPIRE, "expire-2", second["version"]))
+    assert _portal_status(repo, second["appointment_id"]) == "EXPIRED"
+    assert _portal_status(repo, booking["appointment_id"]) == "CONFIRMED"
+    assert [item.appointment_id for item in repo.read_client_bookings(
+        env.business, "portal-a", PORTAL_NOW)] == [booking["appointment_id"]]
 
 
 def test_two_approvals_for_one_slot_commit_at_most_one(race_env: RaceEnv) -> None:

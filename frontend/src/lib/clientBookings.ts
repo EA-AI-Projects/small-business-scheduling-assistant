@@ -8,6 +8,10 @@ export interface ClientBooking {
   duration_minutes: number;
   hold_expires_at: string | null;
   requested_at: string | null;
+  /** The state the client saw; a cancel or move quotes it so a stale view is refused. */
+  version?: number;
+  /** On a pending replacement: the confirmed visit it would replace once the owner approves. */
+  replaces_appointment_id?: string | null;
 }
 
 export interface BookingState {
@@ -74,4 +78,15 @@ export function nextHoldExpiry(bookings: ClientBooking[], nowMs: number): number
   const times = bookings.filter((booking) => booking.status === "PENDING_APPROVAL" && booking.hold_expires_at)
     .map((booking) => Date.parse(booking.hold_expires_at ?? "")).filter((time) => time > nowMs);
   return times.length ? Math.min(...times) : null;
+}
+
+/** The pending replacement waiting on this visit, if the server lists one. */
+export function pendingReplacement(bookings: ClientBooking[], original: ClientBooking): ClientBooking | null {
+  return bookings.find((item) => item.status === "PENDING_APPROVAL"
+    && item.replaces_appointment_id === original.appointment_id) ?? null;
+}
+
+/** Whether a booking may be changed from the page: the server gave its version and it is live. */
+export function hasVersion(booking: ClientBooking): booking is ClientBooking & { version: number } {
+  return Number.isInteger(booking.version) && (booking.version ?? 0) > 0;
 }

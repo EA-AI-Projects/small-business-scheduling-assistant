@@ -18,7 +18,7 @@ function booking(id: string, status: string, hours: number, hold: string | null 
   const start = new Date(Date.now() + hours * 3_600_000);
   return { appointment_id: id, status, start_at: start.toISOString(),
     end_at: new Date(start.getTime() + 7_200_000).toISOString(), duration_minutes: 120,
-    hold_expires_at: hold, requested_at: null };
+    hold_expires_at: hold, requested_at: null, version: 1, replaces_appointment_id: null };
 }
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 
@@ -263,5 +263,161 @@ describe("client calendar and bookings", () => {
     expect(bookingState(pending, Date.now() + 120_000).label).toBe("Checking status…");
     expect(bookingState(pending, Date.now() + 120_000).tone).toBe("pending");
     expect(bookingState({ ...pending, status: "EXPIRED" }, 0).tone).toBe("ended");
+  });
+
+  describe("cancelling and moving an appointment", () => {
+    const original = { appointment_id: "visit-1", status: "CONFIRMED", start_at: "2026-10-12T21:00:00Z",
+      end_at: "2026-10-12T22:30:00Z", duration_minutes: 90, hold_expires_at: null, requested_at: null,
+      version: 3, replaces_appointment_id: null };
+    const replacement = { appointment_id: "hold-2", status: "PENDING_APPROVAL", start_at: START,
+      end_at: "2026-10-09T22:30:00Z", duration_minutes: 90, hold_expires_at: "2026-10-11T00:00:00Z",
+      requested_at: "2026-10-10T00:00:00Z", version: 1, replaces_appointment_id: "visit-1" };
+    const posts = (fetcher: ReturnType<typeof vi.fn>) => fetcher.mock.calls
+      .filter((call) => (call[1] as RequestInit | undefined)?.method === "POST") as [string, RequestInit][];
+    const button = (text: string) => Array.from(host.querySelectorAll("button"))
+      .find((b) => b.textContent?.includes(text));
+    const stub = (reads: unknown[], onPost: (url: string) => Response) => {
+      const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method === "POST") return onPost(url);
+        if (url.includes("availability")) return json({ day: TODAY, duration_minutes: 90, starts_at: [START] });
+        return json({ bookings: reads.length > 1 ? reads.shift() : reads[0] });
+      });
+      vi.stubGlobal("fetch", fetcher);
+      return fetcher;
+    };
+
+    it("shows the exact appointment and sends nothing until the separate confirm press", async () => {
+      const fetcher = stub([[original], []], () => json({ ...original, status: "CANCELLED", version: 4 }));
+      await render();
+      expect(host.textContent).toContain("Confirmed");
+      await act(async () => button("Cancel appointment")!.click());
+      const confirm = host.querySelector("[aria-label='Confirm cancellation']")!;
+      expect(confirm.textContent).toContain("2026-10-13 · 10:00 AM");
+      expect(confirm.textContent).toContain(ZONE);
+      expect(posts(fetcher)).toHaveLength(0);
+      await act(async () => button("No, keep it")!.click());
+      expect(host.querySelector("[aria-label='Confirm cancellation']")).toBeNull();
+      expect(posts(fetcher)).toHaveLength(0);
+
+      await act(async () => button("Cancel appointment")!.click());
+      await act(async () => button("Yes, cancel this appointment")!.click());
+      const [url, init] = posts(fetcher)[0]!;
+      expect(url).toBe("https://api.example.test/v1/client/bookings/visit-1/cancel");
+      expect(JSON.parse(init.body as string)).toEqual({ expected_version: 3 });
+      expect((init.headers as Record<string, string>)["Idempotency-Key"]).toBeTruthy();
+      expect(host.querySelector("[role=status]")?.textContent).toContain("Cancelled");
+      expect(host.querySelector("[role=status]")?.textContent).toContain("owner was told");
+      expect(host.textContent).toContain("no upcoming appointments");
+    });
+
+    it("reuses the key after a lost response and refuses a stale appointment without cancelling", async () => {
+      let attempts = 0;
+      const fetcher = stub([[original]], () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("offline");
+        return json({ detail: { code: "STALE_BOOKING", message: "x", alternatives: [] } }, 409);
+      });
+      await render();
+      await act(async () => button("Cancel appointment")!.click());
+      await act(async () => button("Yes, cancel this appointment")!.click());
+      expect(host.querySelector("[role=alert]")?.textContent).toContain("Could not tell whether this was sent");
+      await act(async () => button("Yes, cancel this appointment")!.click());
+      const keys = posts(fetcher).map(([, init]) => (init.headers as Record<string, string>)["Idempotency-Key"]);
+      expect(keys).toHaveLength(2);
+      expect(keys[0]).toBe(keys[1]);
+      expect(host.querySelector("[role=alert]")?.textContent).toContain("changed since you last looked");
+      expect(host.querySelector("[role=status]")).toBeNull();
+      expect(host.textContent).toContain("Confirmed");
+    });
+
+    it("moves with a pending replacement and never presents it as confirmed", async () => {
+      const fetcher = stub([[original], [original, replacement]], () => json(replacement));
+      await render();
+      await act(async () => button("Move to another time")!.click());
+      expect(host.querySelector("[aria-label='Moving this appointment']")?.textContent)
+        .toContain("stays confirmed until the owner approves");
+      await act(async () => host.querySelector<HTMLButtonElement>("[aria-label='Available start times'] button")!.click());
+      await act(async () => button("Send move request for owner approval")!.click());
+
+      const [url, init] = posts(fetcher)[0]!;
+      expect(url).toBe("https://api.example.test/v1/client/bookings/visit-1/reschedule");
+      expect(JSON.parse(init.body as string)).toEqual({ start_at: START, expected_version: 3 });
+      const status = host.querySelector("[role=status]")?.textContent ?? "";
+      expect(status).toContain("Move requested");
+      expect(status).toContain("not confirmed yet");
+      expect(status).toContain("original appointment is still confirmed");
+      const items = Array.from(host.querySelectorAll("li.card"));
+      expect(items).toHaveLength(2);
+      expect(items[0]!.textContent).toContain("Confirmed");
+      expect(items[0]!.textContent).toContain("waiting for the owner");
+      expect(items[0]!.textContent).not.toContain("Move to another time");
+      expect(items[0]!.textContent).not.toContain("Cancel appointment");
+      expect(items[1]!.textContent).toContain("Move request: waiting for approval");
+      expect(items[1]!.textContent).toContain("Not confirmed");
+      expect(items[1]!.textContent).toContain("stays confirmed until the owner approves");
+      expect(items[1]!.textContent).not.toMatch(/\bConfirmed\b/);
+      expect(items[1]!.textContent).toContain("Withdraw move request");
+    });
+
+    it("withdraws only the replacement, leaving the original", async () => {
+      const fetcher = stub([[original, replacement], [original]],
+        () => json({ ...replacement, status: "CANCELLED", version: 2 }));
+      await render();
+      await act(async () => button("Withdraw move request")!.click());
+      expect(host.querySelector("[aria-label='Confirm cancellation']")?.textContent)
+        .toContain("original appointment stays confirmed");
+      await act(async () => button("Yes, withdraw this request")!.click());
+      expect(posts(fetcher)[0]![0]).toBe("https://api.example.test/v1/client/bookings/hold-2/cancel");
+      expect(host.textContent).toContain("Confirmed");
+      expect(host.querySelectorAll("li.card")).toHaveLength(1);
+      expect(button("Move to another time")).toBeTruthy(); // declined, expired, or withdrawn: original intact
+    });
+
+    it("shows the open times and creates nothing when the new time was taken", async () => {
+      stub([[original]], () => json({ detail: { code: "SLOT_CONFLICT", message: "x",
+        alternatives: ["2026-10-09T23:00:00Z"] } }, 409));
+      await render();
+      await act(async () => button("Move to another time")!.click());
+      await act(async () => host.querySelector<HTMLButtonElement>("[aria-label='Available start times'] button")!.click());
+      await act(async () => button("Send move request for owner approval")!.click());
+      expect(host.querySelector("[role=alert]")?.textContent).toContain("no longer open");
+      expect(host.querySelector("[aria-label='Other open times']")).not.toBeNull();
+      expect(host.textContent).not.toContain("Move requested");
+    });
+
+    it("offers no change without a version from the server", async () => {
+      stub([[{ ...original, version: undefined }]], () => json({}));
+      await render();
+      expect(button("Cancel appointment")).toBeUndefined();
+      expect(button("Move to another time")).toBeUndefined();
+    });
+
+    it("uses cancel-appointment wording for a confirmed, already moved appointment", async () => {
+      stub([[{ ...replacement, status: "CONFIRMED", version: 2 }]], () => json({}));
+      await render();
+      expect(button("Withdraw")).toBeUndefined();
+      await act(async () => button("Cancel appointment")!.click());
+      const text = host.querySelector("[aria-label='Confirm cancellation']")!.textContent ?? "";
+      expect(text).toContain("Cancel this confirmed appointment?");
+      expect(button("Yes, cancel this appointment")).toBeTruthy();
+      expect(text).not.toContain("withdraw");
+    });
+
+    it("drops the cancel panel after a stale refusal and after Refresh, never resending the old version", async () => {
+      const fetcher = stub([[original]], () => json({ detail: { code: "STALE_BOOKING", message: "x", alternatives: [] } }, 409));
+      await render();
+      await act(async () => button("Cancel appointment")!.click());
+      await act(async () => button("Yes, cancel this appointment")!.click());
+      expect(host.querySelector("[aria-label='Confirm cancellation']")).toBeNull();
+      expect(host.querySelector("[role=alert]")?.textContent).toContain("changed since you last looked");
+      await act(async () => button("Move to another time")!.click());
+      expect(host.querySelector("[aria-label='Moving this appointment']")).not.toBeNull();
+      await act(async () => button("Refresh")!.click());
+      expect(host.querySelector("[aria-label='Moving this appointment']")).toBeNull();
+      await act(async () => button("Cancel appointment")!.click());
+      await act(async () => button("Refresh")!.click());
+      expect(host.querySelector("[aria-label='Confirm cancellation']")).toBeNull();
+      expect(posts(fetcher)).toHaveLength(1);
+    });
   });
 });
