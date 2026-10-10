@@ -14,7 +14,9 @@ vi.mock("@/lib/auth", async (importOriginal) => ({
   ...await importOriginal<typeof import("@/lib/auth")>(), ...auth,
 }));
 
-const nav = vi.hoisted(() => ({ push: vi.fn(), pathname: "/client" }));
+// replace mimics Next: it rewrites the history entry with its own url/as fields.
+const nav = vi.hoisted(() => ({ push: vi.fn(), pathname: "/client",
+  replace: vi.fn(async (url: string) => { window.history.replaceState({ __N: true, url, as: url }, "", url); return true; }) }));
 vi.mock("next/router", () => ({ useRouter: () => nav }));
 
 const page = <ClientCalendarPage />;
@@ -101,8 +103,13 @@ describe("client account entry", () => {
       url.endsWith("/session") ? '{"role":"client","business_id":"pilot","client_id":"synthetic","timezone":null}'
         : url.includes("availability") ? '{"starts_at":[]}' : '{"bookings":[]}', { status: 200 })));
     await act(async () => root.render(<ClientAccess config={config}>{page}</ClientAccess>));
-    expect(window.location.search).toBe("");
+    expect(window.location.href).not.toMatch(/code=|state=/);
     expect(window.history.state).toMatchObject({ __N: true });
+    const saved = window.history.state as { url?: string; as?: string };
+    expect(`${saved.url ?? ""}${saved.as ?? ""}`).not.toMatch(/code=|state=/);
+    expect(nav.replace).toHaveBeenCalledTimes(1);
+    expect(auth.completeSignIn).toHaveBeenCalledTimes(1);
+    expect(host.querySelector("header.app-header")).not.toBeNull();
   });
 
   describe("local mode", () => {

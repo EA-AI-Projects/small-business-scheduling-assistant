@@ -141,6 +141,9 @@ function CognitoClientAccess({ config, children }: { config: OwnerConfig; childr
   const [message, setMessage] = useState<string | null>(null);
   const callback = useRef<URL | null>(null);
   const completion = useRef<Promise<SignInResult | null> | null>(null);
+  const router = useRouter();
+  const routerRef = useRef(router);
+  useEffect(() => { routerRef.current = router; }, [router]);
 
   const end = useCallback((notice: string | null, hostedLogout: boolean) => {
     setSession(null);
@@ -158,7 +161,8 @@ function CognitoClientAccess({ config, children }: { config: OwnerConfig; childr
     let current = true;
     callback.current ??= new URL(window.location.href);
     const url = callback.current;
-    if (url.search) window.history.replaceState(window.history.state, "", url.pathname);
+    // Next owns the history entry: its saved url/as must lose the used code and state too.
+    if (url.search) void routerRef.current.replace(url.pathname, undefined, { shallow: true });
     completion.current ??= completeSignIn(config, url);
     completion.current.then(async (result) => {
       if (!result || !current) return;
