@@ -19,7 +19,7 @@ To try your own **fictional** messages, use the same subshell setup and run
 `/quit` to exit. The client preview uses two invented visit references
 (`a101a101`, `b202b202`) and prints the model's proposed interpretation, including
 any resolved dates and clarification question. It does not exercise the #298
-owner approval tool loop. It does not send an SMS, change the calendar, or apply
+owner approval or #299 owner calendar tool loop. It does not send an SMS, change the calendar, or apply
 the backend permission and availability checks.
 Do not enter real names, phone numbers, addresses, access codes, or customer
 messages. The preview rejects recognizable
@@ -131,14 +131,20 @@ On 2026-10-08 the owner authorized live runs of these cases against `gpt-6-luna`
 
 ### Historical owner reply drafts (#285)
 
-Before #298, `backend/evals/scheduling_messages.py --owner-drafts` defined seven synthetic cases for read-only owner replies. The flag and `valid_owner_draft` have been removed. The production adapter still drafts read-only calendar answers, while the new owner decision path uses the tool loop. **One historical live run** was separately authorized by Enrique on 2026-10-08 against `gpt-6-luna` (key read from the environment only; no SMS or scheduling action): **all seven passed** with no fallback. This one nondeterministic run does not validate the new tool loop. A small live tool-loop evaluation remains for a later issue and requires separate authorization.
+Before #298, `backend/evals/scheduling_messages.py --owner-drafts` defined seven synthetic cases for read-only owner replies. The flag and `valid_owner_draft` have been removed. The separate production read-only calendar drafter is also removed by #299; calendar answers now come from the owner tool loop's final message. **One historical live run** was separately authorized by Enrique on 2026-10-08 against `gpt-6-luna` (key read from the environment only; no SMS or scheduling action): **all seven passed** with no fallback. This one nondeterministic run validates neither the #298 decision tool loop nor the #299 calendar tool.
 
-Current offline checks in `test_owner_tool_loop.py`, `test_owner_reply_drafts.py`, and `test_client_reply_contract.py` cover the model continuation after tool results, stale and rejected writes, reply length and GSM limits, replay, crash recovery, and read-only calendar drafting. No live tool-loop call was made for #298.
+Current offline checks for #298 cover the model continuation after decision tool results, stale and rejected writes, reply length and GSM limits, replay, and crash recovery. No live tool-loop call was made for #298.
+
+### Owner calendar tool (#299)
+
+The owner loop now exposes `get_calendar(from, to, statuses, offset)`. The tool reads current business-scoped calendar and first-name client records on every call, including a follow-up or MORE; its JSON contains confirmed visits, unexpired pending requests, and unavailable blocks for the requested local range and page. The model uses the owner's sent-aware 24-hour transcript, local date, and timezone to interpret day/week, status, count, follow-up, and MORE wording, then writes the final SMS. The deterministic owner calendar matchers, stored follow-up and paging state, and second read-only drafter are gone. The model's prose can misstate a count or date; that residual risk is accepted and no #285 per-entry owner draft check is applied.
+
+Scripted offline cases should cover local date and status selection, current-data rereads for follow-ups and MORE, first-name scoping, ambiguous count clarification, retained open-counteroffer reminders, reply length/GSM failure, and duplicate receipt replay. They exercise the tool boundary with fictional data and do not measure live model reliability. **No live model evaluation or SMS was run for #299.** A future live run requires separate authorization.
 
 ### Cutover validation (#275)
 
 The model-led client path is the shipped path: #272 to #274 supply the typed tools, #282 their live evaluation, and #283 the validated reply drafts. #275 removed the superseded read-only drafter and added offline checks for opt-out (the model is not called) and an over-length draft. No new live model run was made for it. The live evidence is the 2026-10-08 runs above, so the open gaps are:
 - The minimal draft validator passed one live rerun (five of five); a single run is a sampling check, and status wording is not validated.
 - The 37-case tool run is a sampling check (two of four runs passed fully, with misses that cannot write).
-- The historical owner draft run (7/7) predates #298 and does not validate owner tool-loop replies.
+- The historical owner draft run (7/7) predates #298/#299 and does not validate owner tool-loop replies or calendar interpretation.
 - No deployment, live SMS, or real conversation was used; the AWS handoff stays disabled until Enrique separately authorizes it.

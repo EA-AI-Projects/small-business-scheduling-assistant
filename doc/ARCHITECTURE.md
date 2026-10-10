@@ -51,12 +51,19 @@ multiple visits; the owner chose freer wording with this fallback (#283, 2026-10
 This is the only client reply-drafting call (#275 removed the earlier read-only drafter); the backend sentence is its fallback. The same draft check covers client write results; a valid
 draft can attach to the existing pending notification intent, while a sender
 that already claimed the intent sends its safe template.
+The first model call asks the client to retry later on failure. Each model call
+has an eight-second timeout and no internal retry, keeping the two-call path
+inside the worker's 30-second limit. Receipt leases, stable outbox intents,
+sender rechecks, and no-history drafts keep replay and delivery idempotent.
+This client read path does not perform a calendar write; direct booking requests
+follow the separately scoped #272 work.
 Owner approval and decline (#298): after the owner phone, consent, and opt-out
-checks and the still-active exact-command, calendar, and counteroffer handlers,
+checks and the still-active exact-command and counteroffer handlers,
 the model receives the owner's bounded, sent-aware 24-hour SMS thread, the
 business-local date, and timezone. A read failure uses the fixed owner failure
 line. The model may call only strict JSON `list_pending_requests()`,
-`approve_request(ref, version)`, or `decline_request(ref, version)` tools. The
+`approve_request(ref, version)`, `decline_request(ref, version)`, or the #299
+`get_calendar(from, to, statuses, offset)` read tool. The pending-request
 read returns current business-scoped references, versions, client first names,
 local times, and statuses. A clear choice among several requests may act; the
 #177 short-reply allowlist, HIGH confidence gate, and sent-clarification-question
@@ -69,15 +76,25 @@ nonempty GSM-7 text of at most 480 septets, asks the model once to shorten an
 invalid final answer without calling another tool, then uses the fixed failure
 line if it remains invalid. A committed lifecycle write is not undone by a
 later reply failure. Audit and notification intents still use the transactional
-outbox; sender rechecks and receipt replay remain in force. Calendar and
-counteroffer behavior stays transitional until #299 and #300; no live SMS or
+outbox; sender rechecks and receipt replay remain in force. No live SMS or
 model call is part of #298. See [CONVERSATION.md](CONVERSATION.md#owner-approval-and-decline-tool-loop-298).
-The first model call asks the client to retry later on failure. Each model call
-has an eight-second timeout and no internal retry, keeping the two-call path
-inside the worker's 30-second limit. Receipt leases, stable outbox intents,
-sender rechecks, and no-history drafts keep replay and delivery idempotent.
-This path does not perform a calendar write; direct booking requests follow
-the separately scoped #272 work.
+
+Owner calendar reads (#299) now use that same loop. The model interprets local
+day/week, status, count, follow-up, and MORE requests from the owner's 24-hour
+sent-aware transcript, then supplies `from`, `to`, `statuses`, and `offset`.
+The backend derives the business from the verified owner and reads current
+calendar and first-name client records on every tool call, including later
+pages. Structured JSON includes only confirmed visits, unexpired pending
+requests, and unavailable blocks in the requested local range; cancelled,
+declined, and expired entries are absent. The model writes the single final SMS
+under the owner's GSM-7/480-septet check. It may misstate a count or date in
+prose; that residual risk is accepted without a second owner drafter or #285
+per-entry validator. The deterministic owner calendar question and MORE
+matchers, `OWNER_QUESTION#<phone>` follow-up state, and stored paging cursor
+are removed. A fresh page can differ after an intervening calendar write. The
+existing open counteroffer draft remains open across a calendar read and its
+YES/NO reminder, expiry, and send checks remain until #300. No live model
+evaluation or SMS was run for #299. See [CONVERSATION.md](CONVERSATION.md#owner-calendar-questions-299).
 
 This document makes the AWS deployment and technology choices for the SMS-first scheduling MVP. It uses the existing **NeuroSpineDx** project as a reference for the team's AWS/serverless patterns, but adapts the choices to a small, low-traffic scheduling workload and its most important correctness constraint: no overlapping appointments or active holds.
 

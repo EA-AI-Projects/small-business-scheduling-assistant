@@ -49,6 +49,17 @@ class Model:
     def run_owner_loop(self, body: str, today: date, timezone: str, history: Any,
                        tool: Any) -> str:
         self.loop_calls.append(body)
+        if body.startswith("What "):
+            first, last = (("2026-10-05", "2026-10-11")
+                           if "next week" in body else
+                           ("2026-10-02", "2026-10-02") if "Friday" in body else
+                           ("2026-10-01", "2026-10-01"))
+            result = tool("get_calendar", {"from": first, "to": last,
+                                           "statuses": [], "offset": 0})
+            text = f"Calendar {first} to {last}: {result['total']} items."
+            if result.get("open_offer"):
+                text += f" {result['open_offer']}"
+            return text
         if body == "Approve Avery, please":
             target = tool("list_pending_requests", {})["requests"][0]
             result = tool("approve_request", {"ref": target["ref"],
@@ -120,12 +131,13 @@ class Chat:
         return offer.state if offer is not None else None
 
 
-def test_calendar_question_uses_calendar_route_without_model() -> None:
+def test_calendar_question_uses_read_only_tool_loop() -> None:
     chat = Chat()
     request = chat.hold()
     answer = chat.ask("What is next week looking like?")
-    assert "next week" in answer.text.lower() or "Mon Oct 5" in answer.text
-    assert chat.model.loop_calls == [] and not answer.committed
+    assert "2026-10-05 to 2026-10-11" in answer.text
+    assert chat.model.loop_calls == ["What is next week looking like?"]
+    assert not answer.committed
     assert chat.status(request) == CalendarStatus.PENDING_APPROVAL
 
 
@@ -153,10 +165,12 @@ def test_calendar_answer_during_offer_keeps_offer_waiting() -> None:
     chat = Chat()
     chat.hold()
     chat.ask(ASK)
+    chat.model.transitions["What do I have on Friday?"] = OwnerTransitionProposal(
+        OwnerTransitionIntent.CALENDAR_QUESTION)
     answer = chat.ask("What do I have on Friday?")
-    assert "Fri Oct 2" in answer.text and "still waiting" in answer.text
+    assert "2026-10-02" in answer.text and "still waits for YES or NO" in answer.text
     assert chat.offer_state() == OfferState.PROPOSED
-    assert not chat.offers.outbox and chat.model.loop_calls == []
+    assert not chat.offers.outbox and chat.model.loop_calls == ["What do I have on Friday?"]
 
 
 def test_exact_command_bypasses_model_even_after_calendar_and_offer() -> None:
@@ -165,7 +179,7 @@ def test_exact_command_bypasses_model_even_after_calendar_and_offer() -> None:
     chat.ask("What do I have on Thursday?")
     chat.ask(ASK)
     answer = chat.ask(f"APPROVE {request[:8]}")
-    assert answer.committed and chat.model.loop_calls == []
+    assert answer.committed and chat.model.loop_calls == ["What do I have on Thursday?"]
     assert chat.status(request) == CalendarStatus.CONFIRMED
     assert not chat.offers.outbox
 

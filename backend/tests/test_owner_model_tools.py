@@ -28,6 +28,7 @@ from scheduling.domain.conversation import (
     MessageContext,
     MessageProposal,
 )
+from scheduling.domain.conversation_history import HistoryMessage
 from scheduling.domain.holds import CreateHold, HoldService
 from scheduling.domain.lifecycle import LifecycleService
 from scheduling.domain.owner_counteroffer import (
@@ -71,6 +72,10 @@ class Model:
     def run_owner_loop(self, body: str, today: date, timezone: str, history: Any,
                        tool: Any) -> str:
         self.loop_calls.append(body)
+        if body == "Is anything else on my plate that day?":
+            result = tool("get_calendar", {"from": "2026-10-01", "to": "2026-10-01",
+                                           "statuses": [], "offset": 0})
+            return f"Calendar has {result['total']} items. {result.get('open_offer', '')}"
         if body == "Approve the replacement":
             request = tool("list_pending_requests", {})["requests"][-1]
             result = tool("approve_request", {"ref": request["ref"],
@@ -179,10 +184,69 @@ def test_calendar_question_during_offer_preserves_draft(world: World) -> None:
     world.model.transitions["Is anything else on my plate that day?"] = transition(
         OwnerTransitionIntent.CALENDAR_QUESTION)
     answer = world.owner("Is anything else on my plate that day?")
-    assert "still waiting" in answer.text and "reply YES to send it" in answer.text
+    assert "still waits" in answer.text and "YES or NO" in answer.text
     assert world.offer_state() == OfferState.PROPOSED
     assert not world.store.outbox and world.state(request) == (PENDING, 1)
     assert world.owner("YES").text.startswith("Queued the offer")
+
+
+def test_history_failure_during_open_offer_uses_fixed_reply_without_sending(
+        world: World) -> None:
+    request = world.pending()
+    world.offer_for(request, ASK_THURSDAY_2PM)
+    world.owner(ASK_THURSDAY_2PM)
+
+    class BrokenHistory:
+        def read_conversation_history(self, receipt: InboundReceipt,
+                                      now: datetime) -> tuple[Any, ...]:
+            raise RuntimeError("history unavailable")
+
+    world.service._history_reader = BrokenHistory()  # type: ignore[assignment]
+    answer = world.owner("YES")
+    assert answer.text == "Something went wrong. Please try again."
+    assert world.offer_state() == OfferState.PROPOSED
+    assert not world.store.outbox and world.state(request) == (PENDING, 1)
+
+
+def test_draft_prompt_alone_keeps_natural_affirmative_offer_confirmation(
+        world: World) -> None:
+    request = world.pending()
+    world.offer_for(request, ASK_THURSDAY_2PM)
+    prompt = world.owner(ASK_THURSDAY_2PM)
+
+    class SentHistory:
+        def read_conversation_history(self, receipt: InboundReceipt,
+                                      now: datetime) -> tuple[HistoryMessage, ...]:
+            return (HistoryMessage("SM-prompt", "assistant", NOW + timedelta(seconds=1),
+                                   prompt.text),)
+
+    world.service._history_reader = SentHistory()
+    world.clock[0] = NOW + timedelta(seconds=2)
+    assert world.owner("Sure").text.startswith("Queued the offer")
+    assert world.state(request) == (PENDING, 1)
+
+
+def test_later_calendar_answer_makes_ambiguous_affirmative_leave_offer_open(
+        world: World) -> None:
+    request = world.pending()
+    world.offer_for(request, ASK_THURSDAY_2PM)
+    prompt = world.owner(ASK_THURSDAY_2PM)
+
+    class SentHistory:
+        def read_conversation_history(self, receipt: InboundReceipt,
+                                      now: datetime) -> tuple[HistoryMessage, ...]:
+            return (HistoryMessage("SM-prompt", "assistant", NOW + timedelta(seconds=1),
+                                   prompt.text),
+                    HistoryMessage("SM-calendar", "assistant", NOW + timedelta(seconds=2),
+                                   "Thursday has one pending request."))
+
+    world.service._history_reader = SentHistory()
+    world.model.transitions["Sure"] = transition(OwnerTransitionIntent.UNCLEAR)
+    world.clock[0] = NOW + timedelta(seconds=3)
+    answer = world.owner("Sure")
+    assert "still waiting" in answer.text
+    assert world.offer_state() == OfferState.PROPOSED
+    assert not world.store.outbox and world.state(request) == (PENDING, 1)
 
 
 def test_revised_model_offer_replaces_open_draft(world: World) -> None:
