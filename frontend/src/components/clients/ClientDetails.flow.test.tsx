@@ -7,11 +7,13 @@ import type { ClientProfile } from "@/api/types";
 import { ClientDetails } from "./ClientDetails";
 
 const request = vi.fn(async () => undefined);
+const get = vi.fn(async () => ({ state: "none", expires_at: null }));
+const api = { request, get };
 const refresh = vi.fn(async () => undefined);
 const notify = vi.fn();
 const selectClient = vi.fn();
 vi.mock("@/owner/OwnerContext", () => ({
-  useOwner: () => ({ api: { request }, refresh, notify, selectClient, stamp: { version: 1 } }),
+  useOwner: () => ({ api, refresh, notify, selectClient, stamp: { version: 1 } }),
 }));
 vi.mock("./ProfileForm", () => ({ ProfileForm: () => null }));
 vi.mock("./ConsentForm", () => ({ ConsentForm: () => null }));

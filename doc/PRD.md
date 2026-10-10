@@ -54,7 +54,7 @@ An AI-assisted SMS interface that identifies intent, gathers required details, e
 
 - Owner and client accounts have separate sign-in paths, sign-out, account recovery, and clear denied-access states. A signed-in client sees a minimal landing state; scheduling remains SMS-first. Client scheduling pages are outside this effort.
 - An owner may activate an account only after an invitation or administrator approval through the documented administrative process. The MVP has no administrator portal.
-- A client account may activate only for an existing owner-created client profile after the owner sends an email invitation for that profile and the client verifies control of the invited email address. An uninvited address cannot claim an existing profile.
+- A client account may activate only for an existing owner-created client profile after the owner sends an email invitation for that profile and the client verifies control of the invited email address. The invitation expires 24 hours after the owner sends it. An uninvited address cannot claim an existing profile.
 - A Cognito account alone grants no business or client access. The service links an approved owner identity to an authorized business and an invited client identity to its client profile. The owner can access only the authorized business; the client can access only their own client data and cannot use owner operations. The API enforces these boundaries, including after sign-in and recovery.
 - Account email verification and recovery establish control of the account email. They do not verify the profile phone, record in-person SMS consent, or remove an SMS opt-out. The existing phone and SMS rules in §6.2 still apply independently.
 

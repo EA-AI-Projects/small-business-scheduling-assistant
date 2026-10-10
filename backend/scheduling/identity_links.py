@@ -56,6 +56,9 @@ class IdentityLinks:
     def __init__(self, store: LinkStore) -> None:
         self._store = store
 
+    def read_link(self, subject: str) -> IdentityLink | None:
+        return self._store.read_link(subject)
+
     def resolve(self, subject: str) -> IdentityLink | None:
         if not subject:
             return None

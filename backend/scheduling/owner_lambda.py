@@ -13,5 +13,6 @@ app = create_cognito_linked_app(
     os.environ["COGNITO_ISSUER"],
     os.environ["COGNITO_CLIENT_ID"],
     cors_origins=(os.environ["OWNER_APP_ORIGIN"],),
+    cognito_client=boto3.client("cognito-idp"),
 )
 handler = Mangum(app, lifespan="off")
