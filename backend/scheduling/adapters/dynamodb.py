@@ -852,6 +852,11 @@ class DynamoDBCalendarRepository:
             for item in items:
                 pk = item["PK"]["S"]
                 sk = item["SK"]["S"]
+                if (pk.startswith("ACCOUNT#") and (sk == "LINK" or sk.startswith("EVENT#"))
+                        and item.get("business_id", {}).get("S") == business_id
+                        and item.get("client_id", {}).get("S") == client_id):
+                    linked.append(item)
+                    continue
                 if pk == fence_key["PK"]["S"] and sk in (
                         fence_key["SK"]["S"], f"ERASURE_PHONE#{phone}"):
                     continue
@@ -867,6 +872,7 @@ class DynamoDBCalendarRepository:
                 fields = {name: value.get("S") for name, value in item.items()
                           if isinstance(value, dict)}
                 if (sk == f"CLIENT#{client_id}" or sk == f"PHONE#{phone}"
+                        or sk == f"ACCOUNT_TARGET#CLIENT#{client_id}"
                         or sk == f"INVITATION_GUARD#{client_hash}"
                         or sk.startswith((f"NOTE#CLIENT#{client_hash}#",
                                           f"SMS_CONSENT#{phone}#",

@@ -7,6 +7,7 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 
+from scheduling.identity_links import LinkRole
 from scheduling.owner_auth import CognitoOwnerTokenVerifier
 
 ISSUER = "https://cognito-idp.us-west-1.amazonaws.com/us-west-1_pilot"
@@ -41,3 +42,25 @@ def test_cognito_verifier_rejects_wrong_claims_and_signature() -> None:
             verifier(signed(override))
     with pytest.raises(jwt.PyJWTError):
         verifier(signed(key=another_key))
+
+    class Links:
+        def __init__(self) -> None:
+            self.link: SimpleNamespace | None = None
+
+        def resolve(self, subject: str) -> SimpleNamespace | None:
+            assert subject == "owner-sub"
+            return self.link
+
+    links = Links()
+    gated = CognitoOwnerTokenVerifier(ISSUER, "client-1", "owner-sub", "pilot",
+                                      Keys(), links)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="link"):
+        gated(signed())
+    links.link = SimpleNamespace(role=LinkRole.CLIENT, business_id="pilot")
+    with pytest.raises(ValueError, match="link"):
+        gated(signed())
+    links.link = SimpleNamespace(role=LinkRole.OWNER, business_id="other")
+    with pytest.raises(ValueError, match="link"):
+        gated(signed())
+    links.link = SimpleNamespace(role=LinkRole.OWNER, business_id="pilot")
+    assert gated(signed()).business_id == "pilot"

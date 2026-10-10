@@ -57,7 +57,7 @@ class FakeDynamo:
 
 
 class FakeVerifier:
-    def __init__(self, *_args: Any) -> None:
+    def __init__(self, *_args: Any, **_kwargs: Any) -> None:
         pass
 
     def __call__(self, token: str) -> OwnerPrincipal:
