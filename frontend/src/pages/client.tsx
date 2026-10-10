@@ -46,6 +46,53 @@ export default function ClientPage() {
 }
 
 export function ClientAccess({ config }: { config: OwnerConfig }) {
+  return config.authMode === "local" ? <LocalClientAccess config={config} /> : <CognitoClientAccess config={config} />;
+}
+
+/** Local synthetic development only: paste a client token printed by the local backend. */
+function LocalClientAccess({ config }: { config: OwnerConfig }) {
+  const [token, setToken] = useState<string | null>(null);
+  const [session, setSession] = useState<ClientSession | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const end = useCallback((notice: string | null) => { setToken(null); setSession(null); setMessage(notice); }, []);
+
+  const signIn = useCallback((value: string) => {
+    setBusy(true);
+    setMessage(null);
+    confirmClient(config, value, null)
+      .then((confirmed) => { setToken(value); setSession(confirmed); })
+      .catch((error: unknown) => setMessage(error instanceof Error ? error.message : "Sign-in failed."))
+      .finally(() => setBusy(false));
+  }, [config]);
+
+  return <ClientFrame>
+    {message && <div className="notice error" role="alert"><p>{message}</p></div>}
+    {session && token ? <>
+      <section className="card"><h2>Welcome, local test client</h2>
+        <p>Synthetic local mode. Choosing a time asks the owner for approval. Nothing is booked until the owner approves it.</p>
+        <button type="button" className="primary" onClick={() => end(null)}>Sign out</button></section>
+      <ClientHome config={config} token={token} zone={session.timezone ?? null}
+        onSessionEnded={() => end("Your session ended. Sign in again.")} />
+    </> : <section className="welcome card">
+      <h2>Local client sign-in</h2>
+      <p className="hint">Synthetic local API only. Paste one of the client tokens printed when the local backend started.</p>
+      <form className="form-stack" onSubmit={(event) => {
+        event.preventDefault();
+        const value = String(new FormData(event.currentTarget).get("token") ?? "").trim();
+        event.currentTarget.reset();
+        if (value) signIn(value);
+      }}>
+        <label>Local client token <input name="token" type="password" autoComplete="off" required /></label>
+        <button className="primary" type="submit" disabled={busy}>{busy ? "Checking…" : "Sign in locally"}</button>
+      </form>
+      <p>Business owner? <Link href="/">Use owner sign-in</Link>.</p>
+    </section>}
+  </ClientFrame>;
+}
+
+function CognitoClientAccess({ config }: { config: OwnerConfig }) {
   const [session, setSession] = useState<ClientSession | null>(null);
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
