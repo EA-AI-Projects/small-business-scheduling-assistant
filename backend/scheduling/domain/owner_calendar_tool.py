@@ -31,7 +31,7 @@ def calendar_page(repository: OwnerCalendarRepository, business_id: str,
     Offsets are into the filtered list at the time of this call. Every result is read
     anew; a change between calls may shift offsets, which the model must explain.
     """
-    if (last < first or (last - first).days >= MAX_RANGE_DAYS
+    if (last < first or last == date.max or (last - first).days >= MAX_RANGE_DAYS
             or offset < 0 or any(status not in STATUSES for status in statuses)):
         return {"ok": False, "error": "invalid_arguments"}
     wanted = {STATUSES[status] for status in statuses} if statuses else set(STATUSES.values())

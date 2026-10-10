@@ -7,13 +7,27 @@ from typing import Any
 
 import pytest
 from test_owner_calendar_questions import Chat
+from test_owner_tool_loop import pending, receipt, world
 
-from scheduling.adapters.openai_messages import OpenAIMessageInterpreter
+from scheduling.adapters.openai_messages import OWNER_LOOP_INSTRUCTIONS, OpenAIMessageInterpreter
+from scheduling.domain.calendar import CalendarStatus
+
+
+def test_ambiguous_bookings_count_can_ask_without_reading_or_writing() -> None:
+    assert "bare count of 'bookings'" in OWNER_LOOP_INSTRUCTIONS
+    repository, model, service = world(
+        lambda _tool: "Do you mean confirmed visits, pending requests, or both?")
+    request = pending(repository, "ambiguous-count")
+    answer = service.handle(receipt("How many bookings Friday?"))
+    assert answer.text == "Do you mean confirmed visits, pending requests, or both?"
+    assert not answer.committed and model.calls == 1
+    assert repository.read_appointment(request).status == CalendarStatus.PENDING_APPROVAL  # type: ignore[union-attr]
 
 
 @pytest.mark.parametrize("query", [
     {"from": "20261001", "to": "2026-10-01", "statuses": [], "offset": 0},
     {"from": "2026-10-01", "to": "2026-11-02", "statuses": [], "offset": 0},
+    {"from": "9999-12-31", "to": "9999-12-31", "statuses": [], "offset": 0},
     {"from": "2026-10-01", "to": "2026-10-01", "statuses": ["declined"], "offset": 0},
     {"from": "2026-10-01", "to": "2026-10-01", "statuses": [], "offset": -1},
 ])

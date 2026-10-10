@@ -35,6 +35,8 @@ OWNER_LOOP_INSTRUCTIONS = (
     "the range and statuses; for MORE, use its next offset. Use the tool's current counts and "
     "entries, and mention next_offset when more entries remain. An open_offer in the result "
     "is still waiting for the owner's YES or NO; mention it without sending or cancelling it. "
+    "For a bare count of 'bookings' with no status named, ask whether to count confirmed "
+    "visits, pending requests, or both before calling get_calendar. "
     "To inspect requests, call list_pending_requests. To approve or "
     "decline, copy a ref and version from that tool's current result and call the matching "
     "tool. A clear choice among several requests may be acted on; ask one short question "
