@@ -113,6 +113,20 @@ describe("client calendar and bookings", () => {
       expect(host.querySelector("[aria-label='Request this time']")).toBeNull();
     });
 
+    it("does not call a replayed request waiting when it was already declined", async () => {
+      const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method === "POST") return json({ ...pending, status: "DECLINED" });
+        return url.includes("availability") ? json({ starts_at: [START] }) : json({ bookings: [] });
+      });
+      vi.stubGlobal("fetch", fetcher);
+      await render(); await pick();
+      await act(async () => send().click());
+      const text = host.querySelector("[role=status]")?.textContent ?? "";
+      expect(text).toContain("no longer waiting for approval");
+      expect(text).toContain("Declined");
+      expect(text).not.toContain("Request sent");
+    });
+
     it("reuses the key when a lost response is retried", async () => {
       let calls = 0;
       const fetcher = vi.fn(async (url: string, init?: RequestInit) => {

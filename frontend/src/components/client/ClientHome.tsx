@@ -180,7 +180,10 @@ function ClientCalendar({ config, token, zone, onSessionEnded }: {
         <button type="button" disabled={sending} onClick={() => void send()}>
           {sending ? "Sending…" : "Send request for owner approval"}</button>
       </div>}
-      {outcome?.kind === "sent" && <p role="status" className="notice">Request sent for{" "}
+      {outcome?.kind === "sent" && outcome.booking.status !== "PENDING_APPROVAL" && <p role="status" className="notice">
+        This request is no longer waiting for approval: {bookingState(outcome.booking, nowMs).label}.{" "}
+        {bookingState(outcome.booking, nowMs).detail}</p>}
+      {outcome?.kind === "sent" && outcome.booking.status === "PENDING_APPROVAL" && <p role="status" className="notice">Request sent for{" "}
         <strong>{localStamp(outcome.booking.start_at, zone)}</strong> to {localTime(outcome.booking.end_at, zone)}.
         Status: waiting for owner approval. It is not confirmed yet.</p>}
       {outcome?.kind === "conflict" && <div role="alert" className="notice error">

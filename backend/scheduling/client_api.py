@@ -95,15 +95,24 @@ class ClientRequest(BaseModel):
 
 
 class ClientBookingRepository(AvailabilityRepository, Protocol):
+    def read_appointment(self, appointment_id: str) -> Appointment | None: ...
+
     def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None: ...
 
     def read_client_bookings(self, business_id: str, client_id: str,
                              now: datetime) -> tuple[Appointment, ...]: ...
 
 
-def _booking(hold: PendingHold) -> ClientBooking:
+def _booking(hold: PendingHold, current: Appointment | None, at: datetime) -> ClientBooking:
+    """The request's state now: a replayed key must not report a stale pending hold."""
+    status = CalendarStatus.PENDING_APPROVAL
+    if current is not None:
+        status = current.status
+        if status == CalendarStatus.PENDING_APPROVAL and (
+                current.hold_expires_at is None or current.hold_expires_at <= at):
+            status = CalendarStatus.EXPIRED
     return ClientBooking(
-        appointment_id=hold.hold_id, status=CalendarStatus.PENDING_APPROVAL,
+        appointment_id=hold.hold_id, status=status,
         start_at=hold.start_at, end_at=hold.end_at, duration_minutes=hold.duration_minutes,
         hold_expires_at=hold.hold_expires_at, requested_at=hold.created_at)
 
@@ -212,19 +221,25 @@ def add_client_session_route(
         try:
             start = body.validated()
             hold = holds.create(CreateHold(
-                session.business_id, session.client_id, session.client_id, idempotency_key,
-                start, profile.default_duration_minutes), now())
+                session.business_id, session.client_id, session.client_id,
+                # Namespaced so a caller-chosen key can never meet the SMS path's provider IDs.
+                f"portal:{idempotency_key}", start, profile.default_duration_minutes), now())
         except SlotConflict as exc:
             raise _conflict("SLOT_CONFLICT", "That time is no longer open.",
                             exc.alternatives) from exc
         except TooManyConflicts as exc:
             # The calendar kept changing; nothing was held. Offer what is open right now.
-            day = start.astimezone(ZoneInfo(store.read_policy(session.business_id).timezone)).date()
+            try:
+                day = start.astimezone(
+                    ZoneInfo(store.read_policy(session.business_id).timezone)).date()
+                current = tuple(availability_service.find_starts(
+                    session.business_id, day, profile.default_duration_minutes, now())[:5])
+            except (InvalidDuration, InvalidPolicy, PolicyNotConfigured) as inner:
+                raise HTTPException(
+                    status_code=503, detail="Booking is unavailable") from inner
             raise _conflict(
                 "CALENDAR_BUSY", "The calendar changed while requesting. Please try again.",
-                tuple(availability_service.find_starts(
-                    session.business_id, day, profile.default_duration_minutes, now())[:5])
-            ) from exc
+                current) from exc
         except IdempotencyKeyReused as exc:
             raise HTTPException(status_code=409, detail={
                 "code": "IDEMPOTENCY_KEY_REUSED", "message": str(exc),
@@ -233,4 +248,4 @@ def add_client_session_route(
             raise HTTPException(status_code=503, detail="Booking is unavailable") from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return _booking(hold)
+        return _booking(hold, store.read_appointment(hold.hold_id), now())

@@ -481,10 +481,13 @@ def test_concurrent_client_requests_for_one_time_hold_exactly_one(race_env: Race
         results = list(pool.map(attempt, ("a", "b")))
     won = [item for item in results if item.status_code == 200]
     lost = [item for item in results if item.status_code == 409]
+    # Record IDs first so a failed assertion still lets dev-table cleanup find the hold.
+    env.appointment_ids.extend(item.json()["appointment_id"] for item in won)
     assert len(won) == 1 and len(lost) == 1
     assert lost[0].json()["detail"]["code"] in {"SLOT_CONFLICT", "CALENDAR_BUSY"}
-    assert START.isoformat() not in {value for value in lost[0].json()["detail"]["alternatives"]}
-    env.appointment_ids.append(won[0].json()["appointment_id"])
+    requested = datetime(2026, 9, 29, 16, tzinfo=UTC)
+    assert requested not in {datetime.fromisoformat(value)
+                             for value in lost[0].json()["detail"]["alternatives"]}
     items = _business_items(env)
     hold_id = won[0].json()["appointment_id"]
     # Seeding the policy queued its own notice; only the winner's two notices belong to a hold.
@@ -508,9 +511,10 @@ def test_concurrent_client_retries_with_one_key_create_one_request(race_env: Rac
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(attempt, (1, 2)))
+    env.appointment_ids.extend(item.json()["appointment_id"] for item in results
+                               if item.status_code == 200)
     assert [item.status_code for item in results] == [200, 200]
     assert results[0].json() == results[1].json()
-    env.appointment_ids.append(results[0].json()["appointment_id"])
     assert repo.read_revision(env.business) == revision_before + 1
     pending = [item for item in _business_items(env) if item["SK"]["S"].startswith("EVENT#")]
     assert len(pending) == 1

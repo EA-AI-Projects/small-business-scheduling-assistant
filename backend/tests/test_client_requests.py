@@ -12,6 +12,7 @@ from scheduling.client_api import add_client_session_route
 from scheduling.domain.calendar import CalendarStatus
 from scheduling.domain.client_records import ClientProfile, HomeSize
 from scheduling.domain.expiry import ExpiryService
+from scheduling.domain.holds import CreateHold, HoldService
 from scheduling.domain.lifecycle import LifecycleService
 from scheduling.identity_links import IdentityLink, LinkRole, LinkState
 from scheduling.owner_api import OwnerPrincipal, create_owner_app
@@ -212,3 +213,86 @@ def test_concurrent_requests_for_one_time_commit_exactly_one() -> None:
     assert codes == [200, 409]
     assert len(api.get(f"{BASE}/requests", headers=OWNER).json()) == 1
     assert repository.read_revision("business-1") == 1
+
+
+def test_replay_reports_the_current_state_not_a_stale_pending() -> None:
+    api, _, clock = setup()
+    created = request(api, "a", "k1").json()  # type: ignore[attr-defined]
+    api.post(f"{BASE}/requests/{created['appointment_id']}/decline", json={"expected_version": 1},
+             headers={**OWNER, "Idempotency-Key": "d"})
+    assert request(api, "a", "k1").json()["status"] == "DECLINED"  # type: ignore[attr-defined]
+    other = request(api, "b", "k2", START + timedelta(hours=4)).json()  # type: ignore[attr-defined]
+    api.post(f"{BASE}/requests/{other['appointment_id']}/approve", json={"expected_version": 1},
+             headers={**OWNER, "Idempotency-Key": "a"})
+    assert request(api, "b", "k2", START + timedelta(hours=4)).json()["status"] == "CONFIRMED"  # type: ignore[attr-defined]
+    third = request(api, "a", "k3", START + timedelta(days=1)).json()  # type: ignore[attr-defined]
+    clock[0] = datetime.fromisoformat(third["hold_expires_at"]) + timedelta(minutes=1)
+    # Unswept but past its hold: still not pending approval.
+    assert request(api, "a", "k3", START + timedelta(days=1)).json()["status"] == "EXPIRED"  # type: ignore[attr-defined]
+
+
+def test_portal_keys_cannot_collide_with_the_same_clients_text_keys() -> None:
+    api, repository, _ = setup()
+    HoldService(repository).create(
+        CreateHold("business-1", "client-a", "client-a", "provider-1", START, 60), NOW)
+    # The same raw key from the portal is a different command, not a replay or a reuse error.
+    response = request(api, "a", "provider-1", START + timedelta(hours=4))
+    assert response.status_code == 200  # type: ignore[attr-defined]
+    assert HoldService(repository).existing(
+        CreateHold("business-1", "client-a", "client-a", "provider-1", START, 60)) is not None
+
+
+def test_retry_whose_first_request_commits_mid_command_replays_not_conflicts() -> None:
+    class Interleaved(Repository):
+        """Commits the caller's first request after the retry's key check, before its calendar read."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.first: CreateHold | None = None
+
+        def read_revision(self, business_id: str) -> int:
+            if self.first is not None:
+                command, self.first = self.first, None
+                HoldService(self).create(command, NOW)
+            return super().read_revision(business_id)
+
+    _, repository, _ = setup()
+    interleaved = Interleaved()
+    app = create_owner_app(interleaved, lambda _t: OwnerPrincipal("o", "business-1"), lambda: NOW)
+    add_client_session_route(app, LINKS.__getitem__, interleaved, lambda: NOW)
+    interleaved.save_profile(repository.read_profile("business-1", "client-a"), 0, None)  # type: ignore[arg-type]
+    web = TestClient(app)
+    interleaved.first = CreateHold("business-1", "client-a", "client-a", "portal:k1", START, 60)
+    response = request(web, "a", "k1")
+    assert response.status_code == 200, response.text  # type: ignore[attr-defined]
+    assert response.json()["status"] == "PENDING_APPROVAL"  # type: ignore[attr-defined]
+    assert interleaved.read_revision("business-1") == 1
+
+
+def test_busy_calendar_with_a_bad_policy_is_503_not_500() -> None:
+    from scheduling.domain.holds import TooManyConflicts
+    from scheduling.domain.owner_policy import PolicyNotConfigured
+
+    class Busy(Repository):
+        broken = False
+
+        def read_policy(self, business_id: str):  # type: ignore[no-untyped-def]
+            if self.broken:
+                raise PolicyNotConfigured("gone")
+            return super().read_policy(business_id)
+
+    repository = Busy()
+    app = create_owner_app(repository, lambda _t: OwnerPrincipal("o", "business-1"), lambda: NOW)
+    add_client_session_route(app, LINKS.__getitem__, repository, lambda: NOW)
+
+    def fail(self: HoldService, command: CreateHold, now: datetime) -> None:
+        repository.broken = True
+        raise TooManyConflicts("busy")
+
+    repository.save_profile(setup()[1].read_profile("business-1", "client-a"), 0, None)  # type: ignore[arg-type]
+    original = HoldService.create
+    HoldService.create = fail  # type: ignore[method-assign,assignment]
+    try:
+        assert request(TestClient(app), "a", "k").status_code == 503  # type: ignore[attr-defined]
+    finally:
+        HoldService.create = original  # type: ignore[method-assign]
