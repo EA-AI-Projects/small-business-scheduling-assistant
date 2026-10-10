@@ -120,6 +120,7 @@ Manual invitations use the same eligibility and send-time checks but ignore the 
 
 - Provide a separate client sign-in path with sign-out, email recovery, denied-access state, and minimal signed-in landing state (#229). Client scheduling pages are outside MVP; SMS remains the scheduling interface.
 - The owner creates a client profile first, then sends an email invitation for that profile. Activation requires verification of the invited email; uninvited or different addresses cannot claim a profile (#227). A verified Cognito account has no data access until its identity is linked to that client profile (#226).
+- Read-only client API routes (#231) return bookable start times and the client's own pending and confirmed bookings, scoped by the identity link and built on the shared availability rules; see [ARCHITECTURE.md](ARCHITECTURE.md#identity-link-storage-and-lifecycle-226). Booking writes are not exposed.
 - Server authorization resolves the identity link and limits a client to their own profile data; a client token cannot call owner operations. An owner token is limited to its linked business. Check both the role and record scope on every route, including after recovery (#228).
 - Email verification and email-based account recovery establish account control only. They do not mark a phone verified, record in-person SMS consent, or clear opt-out. Those SMS gates continue independently.
 
