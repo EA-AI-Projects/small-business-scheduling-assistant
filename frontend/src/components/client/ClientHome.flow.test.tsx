@@ -2,7 +2,11 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
+import { useState } from "react";
+
+import { useCalendarState } from "@/calendar/useCalendarState";
 import { ClientHome } from "@/components/client/ClientHome";
+import type { ClientBooking } from "@/lib/clientBookings";
 import { bookingState } from "@/lib/clientBookings";
 import { parseConfig } from "@/lib/config";
 
@@ -22,19 +26,64 @@ function booking(id: string, status: string, hours: number, hold: string | null 
 }
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 
+const ended = vi.fn();
+/** Both client pages over one shell state, as the real shell shares them; `nav-*` buttons stand in for the menu. */
+function Shell({ start }: { start: "calendar" | "appointments" }) {
+  const [page, setPage] = useState(start);
+  const calendar = useCalendarState({ ready: true, zone: ZONE, maxDate: null });
+  const [moving, setMoving] = useState<ClientBooking | null>(null);
+  const move = { booking: moving, set: setMoving };
+  return <>
+    <button type="button" data-nav="calendar" onClick={() => setPage("calendar")}>nav calendar</button>
+    <button type="button" data-view="week" onClick={() => calendar.setView("week")}>week</button>
+    <button type="button" data-nav="appointments" onClick={() => setPage("appointments")}>nav appointments</button>
+    {page === "calendar"
+      ? <ClientHome key="calendar" config={config} token="access" zone={ZONE} calendar={calendar} move={move} onSessionEnded={ended} />
+      : <ClientHome key="appointments" config={config} token="access" zone={ZONE} move={move} onSessionEnded={ended}
+        onOpenCalendar={() => { calendar.setView("day"); calendar.goToday(); setPage("calendar"); }} />}
+  </>;
+}
+
 describe("client calendar and bookings", () => {
   let host: HTMLDivElement;
   let root: Root;
-  const ended = vi.fn();
   beforeEach(() => {
     (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     host = document.createElement("div"); document.body.append(host); root = createRoot(host); ended.mockReset();
     vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-10-10T00:00:00Z") });
   });
   afterEach(async () => { vi.useRealTimers(); await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
-  const render = () => act(async () => root.render(<ClientHome config={config} token="access" zone={ZONE} onSessionEnded={ended} />));
+  const render = (start: "calendar" | "appointments" = "appointments") => act(async () => root.render(<Shell start={start} />));
+  // The calendar view has its own status notes; the request outcome is the last one on the page.
+  const note = () => Array.from(host.querySelectorAll("[aria-labelledby=client-times] [role=status]")).at(-1) ?? null;
+  const nav = (page: string) => act(async () => host.querySelector<HTMLButtonElement>(`[data-nav=${page}]`)!.click());
 
-  it("lists starts in the business zone and moves a pending request to confirmed on refresh", async () => {
+  it("lists open starts in the business zone in Day view, without why other times are unavailable", async () => {
+    const fetcher = vi.fn(async (url: string) => url.includes("availability")
+      ? json({ day: TODAY, duration_minutes: 90, starts_at: [START] }) : json({ bookings: [] }));
+    vi.stubGlobal("fetch", fetcher);
+    await render("calendar");
+
+    expect(host.textContent).toContain("asks the owner for approval");
+    expect(host.textContent).toContain("Open times");
+    expect(host.querySelector("[aria-label='Available start times'] button")?.textContent).toBe("10:00 AM");
+    expect(host.textContent).toContain(ZONE);
+    expect(host.textContent).toContain("about 90 minutes");
+    const urls = fetcher.mock.calls.map(([url]) => url);
+    expect(urls).toContain("https://api.example.test/v1/client/availability?day=2026-10-10");
+    expect(urls.every((url) => url.startsWith("https://api.example.test/v1/client/"))).toBe(true);
+    expect(urls.some((url) => url.includes("duration_minutes"))).toBe(false);
+    expect(host.querySelector("select")).toBeNull();
+
+    await act(async () => host.querySelector<HTMLButtonElement>("[aria-label='Available start times'] button")!.click());
+    expect(host.textContent).toContain("2026-10-10 · 10:00 AM");
+    expect(host.textContent).toContain("not confirmed until the owner approves");
+    // Picking a time sends nothing; only the explicit send button does.
+    expect(fetcher.mock.calls.every((call) => (call as unknown[])[1] === undefined
+      || ((call as unknown[])[1] as RequestInit).method === undefined)).toBe(true);
+  });
+
+  it("moves a pending request to confirmed on refresh and keeps open times off the Appointments page", async () => {
     const bookingReads = [
       { bookings: [booking("a", "PENDING_APPROVAL", 30, new Date(Date.now() + 3_600_000).toISOString())] },
       { bookings: [booking("a", "CONFIRMED", 30)] },
@@ -45,36 +94,18 @@ describe("client calendar and bookings", () => {
       : json(bookingReads.shift() ?? { bookings: [] }));
     vi.stubGlobal("fetch", fetcher);
     await render();
-
-    expect(host.textContent).toContain("asks the owner for approval");
-    expect(host.querySelector("[aria-label='Available start times'] button")?.textContent).toBe("10:00 AM");
-    expect(host.textContent).toContain(ZONE);
-    expect(host.textContent).toContain("about 90 minutes");
     expect(host.textContent).toContain("Waiting for approval");
     expect(host.textContent).toContain("Not confirmed yet");
     expect(host.textContent).not.toContain("Confirmed");
-    const urls = fetcher.mock.calls.map(([url]) => url);
-    expect(urls).toContain("https://api.example.test/v1/client/availability?day=2026-10-10");
-    expect(urls.every((url) => url.startsWith("https://api.example.test/v1/client/"))).toBe(true);
-    expect(urls.some((url) => url.includes("duration_minutes"))).toBe(false);
-    expect(host.querySelector("select")).toBeNull();
+    expect(host.querySelector("[aria-label='Available start times']")).toBeNull();
+    expect(fetcher.mock.calls.some(([url]) => url.includes("availability"))).toBe(false);
 
     const refresh = () => Array.from(host.querySelectorAll("button")).find((b) => b.textContent === "Refresh")!;
-    const availabilityCalls = () => fetcher.mock.calls.filter(([url]) => url.includes("availability")).length;
-    const before = availabilityCalls();
     await act(async () => refresh().click());
-    expect(availabilityCalls()).toBe(before + 1);
     expect(host.textContent).toContain("The business has confirmed this visit.");
     expect(host.textContent).not.toContain("Waiting for approval");
     await act(async () => refresh().click());
     expect(host.textContent).toContain("no upcoming appointments");
-
-    await act(async () => host.querySelector<HTMLButtonElement>("[aria-label='Available start times'] button")!.click());
-    expect(host.textContent).toContain("2026-10-10 · 10:00 AM");
-    expect(host.textContent).toContain("not confirmed until the owner approves");
-    // Picking a time sends nothing; only the explicit send button does.
-    expect(fetcher.mock.calls.every((call) => (call as unknown[])[1] === undefined
-      || ((call as unknown[])[1] as RequestInit).method === undefined)).toBe(true);
   });
 
   describe("requesting a time", () => {
@@ -97,7 +128,7 @@ describe("client calendar and bookings", () => {
           : json({ bookings: sent ? [pending] : [] });
       });
       vi.stubGlobal("fetch", fetcher);
-      await render(); await pick();
+      await render("calendar"); await pick();
       await act(async () => send().click());
 
       const [url, init] = posts(fetcher)[0]!;
@@ -106,10 +137,9 @@ describe("client calendar and bookings", () => {
       const headers = init.headers as Record<string, string>;
       expect(headers["Idempotency-Key"]).toBeTruthy();
       expect(headers.Authorization).toBe("Bearer access");
-      expect(host.querySelector("[role=status]")?.textContent).toContain("2026-10-10 · 10:00 AM");
-      expect(host.querySelector("[role=status]")?.textContent).toContain("waiting for owner approval");
-      expect(host.textContent).toContain("Waiting for approval");
-      expect(host.textContent).not.toContain("Confirmed");
+      expect(note()?.textContent).toContain("2026-10-10 · 10:00 AM");
+      expect(note()?.textContent).toContain("waiting for owner approval");
+      expect(host.querySelector("[aria-labelledby=client-times]")!.textContent).not.toContain("Confirmed");
       expect(host.querySelector("[aria-label='Request this time']")).toBeNull();
     });
 
@@ -119,9 +149,9 @@ describe("client calendar and bookings", () => {
         return url.includes("availability") ? json({ starts_at: [START] }) : json({ bookings: [] });
       });
       vi.stubGlobal("fetch", fetcher);
-      await render(); await pick();
+      await render("calendar"); await pick();
       await act(async () => send().click());
-      const text = host.querySelector("[role=status]")?.textContent ?? "";
+      const text = note()?.textContent ?? "";
       expect(text).toContain("no longer waiting for approval");
       expect(text).toContain("Declined");
       expect(text).not.toContain("Request sent");
@@ -134,14 +164,14 @@ describe("client calendar and bookings", () => {
         return url.includes("availability") ? json({ starts_at: [START] }) : json({ bookings: [] });
       });
       vi.stubGlobal("fetch", fetcher);
-      await render(); await pick();
+      await render("calendar"); await pick();
       await act(async () => send().click());
       expect(host.querySelector("[role=alert]")?.textContent).toContain("will not create a second request");
       await act(async () => send().click());
       const keys = posts(fetcher).map(([, init]) => (init.headers as Record<string, string>)["Idempotency-Key"]);
       expect(keys).toHaveLength(2);
       expect(keys[0]).toBe(keys[1]);
-      expect(host.querySelector("[role=status]")?.textContent).toContain("waiting for owner approval");
+      expect(note()?.textContent).toContain("waiting for owner approval");
     });
 
     it("offers current alternatives after a stale choice and sends nothing else", async () => {
@@ -151,12 +181,12 @@ describe("client calendar and bookings", () => {
         return url.includes("availability") ? json({ starts_at: [START] }) : json({ bookings: [] });
       });
       vi.stubGlobal("fetch", fetcher);
-      await render(); await pick();
+      await render("calendar"); await pick();
       await act(async () => send().click());
       const alert = host.querySelector("[role=alert]")!;
       expect(alert.textContent).toContain("nothing was requested");
       expect(alert.querySelector("button")?.textContent).toBe("2026-10-10 · 11:00 AM");
-      expect(host.textContent).not.toContain("Waiting for approval");
+      expect(host.querySelector("[aria-labelledby=client-times]")!.textContent).not.toContain("Waiting for approval");
       expect(posts(fetcher)).toHaveLength(1);
       await act(async () => alert.querySelector<HTMLButtonElement>("button")!.click());
       expect(host.textContent).toContain("2026-10-10 · 11:00 AM");
@@ -169,30 +199,28 @@ describe("client calendar and bookings", () => {
           if (init?.method === "POST") return json({}, status);
           return url.includes("availability") ? json({ starts_at: [START] }) : json({ bookings: [] });
         }));
-        await render(); await pick();
+        await render("calendar"); await pick();
         await act(async () => send().click());
         if (message === null) expect(ended).toHaveBeenCalled();
         else expect(host.querySelector("[role=alert]")?.textContent).toContain(message);
-        expect(host.querySelector("[role=status]")).toBeNull();
+        expect(note()).toBeNull();
       });
   });
 
-  it("requests the picked business day", async () => {
+  it("requests the day the calendar is on", async () => {
     const fetcher = vi.fn(async (url: string) => url.includes("availability")
       ? json({ starts_at: [] }) : json({ bookings: [] }));
     vi.stubGlobal("fetch", fetcher);
-    await render();
-    const day = host.querySelector<HTMLElement>("[data-date='2026-10-12']")!;
-    await act(async () => day.click());
+    await render("calendar");
     expect(fetcher.mock.calls.map(([url]) => url)).toContain(
-      "https://api.example.test/v1/client/availability?day=2026-10-12");
+      "https://api.example.test/v1/client/availability?day=2026-10-10");
   });
 
   it.each([[403, null], [503, "not available right now"], [422, "Something went wrong"]])(
     "handles availability status %i", async (status, message) => {
       vi.stubGlobal("fetch", vi.fn(async (url: string) => url.includes("availability")
         ? json({}, status) : json({ bookings: [] })));
-      await render();
+      await render("calendar");
       if (message === null) expect(ended).toHaveBeenCalled();
       else {
         expect(ended).not.toHaveBeenCalled();
@@ -233,7 +261,6 @@ describe("client calendar and bookings", () => {
     expect(host.textContent).toContain("Cancelled");
     expect(host.textContent).not.toContain("Waiting for approval");
     expect(host.textContent).not.toContain("has confirmed");
-    expect(host.textContent).toContain("No times are available");
   });
 
   it("ends the session when credentials are rejected", async () => {
@@ -331,9 +358,9 @@ describe("client calendar and bookings", () => {
     });
 
     it("moves with a pending replacement and never presents it as confirmed", async () => {
-      const fetcher = stub([[original], [original, replacement]], () => json(replacement));
+      const fetcher = stub([[original], [original], [original, replacement]], () => json(replacement));
       await render();
-      await act(async () => button("Move to another time")!.click());
+      await act(async () => button("Move to another time")!.click()); // opens the Calendar's Day view
       expect(host.querySelector("[aria-label='Moving this appointment']")?.textContent)
         .toContain("stays confirmed until the owner approves");
       await act(async () => host.querySelector<HTMLButtonElement>("[aria-label='Available start times'] button")!.click());
@@ -342,10 +369,11 @@ describe("client calendar and bookings", () => {
       const [url, init] = posts(fetcher)[0]!;
       expect(url).toBe("https://api.example.test/v1/client/bookings/visit-1/reschedule");
       expect(JSON.parse(init.body as string)).toEqual({ start_at: START, expected_version: 3 });
-      const status = host.querySelector("[role=status]")?.textContent ?? "";
+      const status = note()?.textContent ?? "";
       expect(status).toContain("Move requested");
       expect(status).toContain("not confirmed yet");
       expect(status).toContain("original appointment is still confirmed");
+      await nav("appointments");
       const items = Array.from(host.querySelectorAll("li.card"));
       expect(items).toHaveLength(2);
       expect(items[0]!.textContent).toContain("Confirmed");
@@ -385,6 +413,63 @@ describe("client calendar and bookings", () => {
       expect(host.textContent).not.toContain("Move requested");
     });
 
+    describe("a move held while bookings are still loading", () => {
+      const slow = (second: unknown) => {
+        let release: (response: Response) => void = () => undefined;
+        let bookingReads = 0;
+        const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+          if (init?.method === "POST") return json(replacement);
+          if (url.includes("availability")) return json({ day: TODAY, duration_minutes: 90, starts_at: [START] });
+          bookingReads += 1;
+          if (bookingReads === 1) return json({ bookings: [original] });
+          return new Promise<Response>((resolve) => { release = resolve; });
+        });
+        vi.stubGlobal("fetch", fetcher);
+        return { fetcher, finish: () => act(async () => release(json({ bookings: second }))) };
+      };
+      const timeButtons = () => host.querySelectorAll("[aria-label='Available start times'] button");
+
+      it("offers no time and posts no new request until the booking is known", async () => {
+        const { fetcher, finish } = slow([original]);
+        await render();
+        await act(async () => button("Move to another time")!.click());
+        // Availability has resolved; the booking has not.
+        expect(timeButtons()).toHaveLength(0);
+        expect(host.textContent).toContain("Loading times");
+        await finish();
+        expect(timeButtons()).toHaveLength(1);
+        expect(host.querySelector("[aria-label='Moving this appointment']")).not.toBeNull();
+        await act(async () => (timeButtons()[0] as HTMLElement).click());
+        expect(button("Send request for owner approval")).toBeUndefined();
+        await act(async () => button("Send move request for owner approval")!.click());
+        expect(posts(fetcher).map(([url]) => url)).toEqual(["https://api.example.test/v1/client/bookings/visit-1/reschedule"]);
+      });
+
+      it("drops a move whose booking changed, says so, and sends nothing", async () => {
+        const { fetcher, finish } = slow([{ ...original, version: 4 }]);
+        await render();
+        await act(async () => button("Move to another time")!.click());
+        await finish();
+        expect(host.querySelector("[aria-label='Moving this appointment']")).toBeNull();
+        expect(host.querySelector("[role=alert]")?.textContent).toContain("move was cancelled and nothing was sent");
+        expect(posts(fetcher)).toHaveLength(0);
+      });
+
+      it("shows the moving notice outside Day view and on Appointments, each with a way to keep the appointment", async () => {
+        stub([[original]], () => json({}));
+        await render();
+        await act(async () => button("Move to another time")!.click());
+        await act(async () => host.querySelector<HTMLButtonElement>("[data-view=week]")!.click());
+        expect(host.textContent).toContain("You are moving your appointment");
+        await nav("appointments");
+        expect(host.textContent).toContain("You started moving your appointment");
+        await act(async () => button("Keep my current appointment")!.click());
+        expect(host.textContent).not.toContain("started moving");
+        await nav("calendar");
+        expect(host.textContent).not.toContain("You are moving");
+      });
+    });
+
     it("offers no change without a version from the server", async () => {
       stub([[{ ...original, version: undefined }]], () => json({}));
       await render();
@@ -410,10 +495,6 @@ describe("client calendar and bookings", () => {
       await act(async () => button("Yes, cancel this appointment")!.click());
       expect(host.querySelector("[aria-label='Confirm cancellation']")).toBeNull();
       expect(host.querySelector("[role=alert]")?.textContent).toContain("changed since you last looked");
-      await act(async () => button("Move to another time")!.click());
-      expect(host.querySelector("[aria-label='Moving this appointment']")).not.toBeNull();
-      await act(async () => button("Refresh")!.click());
-      expect(host.querySelector("[aria-label='Moving this appointment']")).toBeNull();
       await act(async () => button("Cancel appointment")!.click());
       await act(async () => button("Refresh")!.click());
       expect(host.querySelector("[aria-label='Confirm cancellation']")).toBeNull();
