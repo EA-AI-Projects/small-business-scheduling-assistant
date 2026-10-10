@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 
 import type { AvailabilityPolicy } from "@/api/types";
-import { itemKind, type CalendarItem } from "@/calendar/item";
+import { itemKind, itemLabel, type CalendarItem } from "@/calendar/item";
 import { closedRanges } from "@/lib/dateExceptions";
 import { layoutDay, MINUTES_PER_DAY, type PlacedEvent } from "@/lib/calendarLayout";
-import { dayTitle, localInput, localTime, statusLabel, todayKey } from "@/lib/time";
+import { dayTitle, localInput, localTime, todayKey } from "@/lib/time";
 
 /** Pixels per hour; also set as a CSS variable so the hour lines match. */
 const HOUR_PX = 56;
@@ -27,15 +27,17 @@ function eventLabel(placed: PlacedEvent, zone: string, day: string): string {
   const { event } = placed;
   const extra = `${placed.continuesBefore ? ", continues from previous day" : ""}${
     placed.continuesAfter ? ", continues to next day" : ""}`;
-  return `${localTime(event.start_at, zone)} to ${localTime(event.end_at, zone)}, ${statusLabel(event.status)}, ${
+  return `${localTime(event.start_at, zone)} to ${localTime(event.end_at, zone)}, ${itemLabel(event)}, ${
     dayTitle(day)}${extra}`;
 }
 
-export function CalendarGrid({ days, events, policy, zone, selectedId, onSelect, onSlotPress }: {
+export function CalendarGrid({ days, events, policy, zone, selectedId, onSelect, onSlotPress, onDay }: {
   days: string[]; events: CalendarItem[]; policy?: AvailabilityPolicy | null; zone: string; selectedId: string | null;
   onSelect: (id: string, element: HTMLElement) => void;
   /** A press on an empty part of a day column (not on an item, heading, or the gutter). */
   onSlotPress: (column: HTMLElement, x: number, y: number) => void;
+  /** When given, a weekday heading in the week grid opens that day. */
+  onDay?: (date: string) => void;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const [now, setNow] = useState(() => new Date());
@@ -69,8 +71,16 @@ export function CalendarGrid({ days, events, policy, zone, selectedId, onSelect,
             return (
               <div key={day} className={`cal-head-day${day === today ? " today" : ""}`}
                 aria-label={day === today ? `${dayTitle(day)}, today` : dayTitle(day)}>
-                <span className="cal-dow">{date.toLocaleDateString("en-US", { weekday: "short", timeZone: "UTC" })}</span>
-                <span className="cal-date">{date.getUTCDate()}</span>
+                {onDay && count > 1 ? (
+                  <button type="button" className="cal-head-button" aria-label={`${dayTitle(day)}${day === today ? ", today" : ""}, open Day view`}
+                    onClick={() => onDay(day)}>
+                    <span className="cal-dow">{date.toLocaleDateString("en-US", { weekday: "short", timeZone: "UTC" })}</span>
+                    <span className="cal-date">{date.getUTCDate()}</span>
+                  </button>
+                ) : (<>
+                  <span className="cal-dow">{date.toLocaleDateString("en-US", { weekday: "short", timeZone: "UTC" })}</span>
+                  <span className="cal-date">{date.getUTCDate()}</span>
+                </>)}
               </div>
             );
           })}
@@ -129,7 +139,7 @@ function EventBlock({ placed, zone, day, selected, onSelect }: {
         left: `${(lane / lanes) * 100}%`,
         width: `${100 / lanes}%`,
       }}>
-      <strong>{statusLabel(event.status)}</strong>
+      <strong>{itemLabel(event)}</strong>
       <span>{localTime(event.start_at, zone)}–{localTime(event.end_at, zone)}</span>
     </button>
   );

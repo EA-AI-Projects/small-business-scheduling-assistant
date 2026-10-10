@@ -1,11 +1,14 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/router";
 
 import { AccountMenu } from "@/components/shell/AccountMenu";
 import { AppHeader } from "@/components/shell/AppHeader";
+import { CalendarControls } from "@/components/shell/CalendarControls";
+import { useCalendarState, type CalendarState } from "@/calendar/useCalendarState";
 import { authorizeUrl, clearPendingSignIn, completeSignIn, logoutUrl, tokenExpiry, type SignInResult } from "@/lib/auth";
 import { ConfigError, parseConfig, rawConfigFromEnv, type OwnerConfig } from "@/lib/config";
+import { rangeAnnouncement, rangeTitle, rangeTitleShort, todayKey } from "@/lib/time";
 
 /** Client menu sections. Add an entry here (and a page under `pages/client/`) to extend the menu. */
 export const CLIENT_SECTIONS = [
@@ -14,7 +17,13 @@ export const CLIENT_SECTIONS = [
 ] as const;
 
 /** What a signed-in client page needs: the access token, the business zone and the end-of-session hook. */
-export interface ClientSessionValue { config: OwnerConfig; token: string; zone: string | null; onSessionEnded: () => void }
+export interface ClientSessionBase {
+  config: OwnerConfig; token: string; zone: string | null;
+  /** Days ahead the business takes bookings; null when the server did not say. */
+  horizonDays: number | null; onSessionEnded: () => void;
+}
+/** The signed-in shell adds the calendar state, so the header controls and the Calendar page share it. */
+export interface ClientSessionValue extends ClientSessionBase { calendar: CalendarState }
 const ClientSessionContext = createContext<ClientSessionValue | null>(null);
 export function useClientSession(): ClientSessionValue {
   const value = useContext(ClientSessionContext);
@@ -27,7 +36,8 @@ export const clientConfig = (() => {
   catch { return new ConfigError("Account sign-in is not configured."); }
 })();
 
-type ClientSession = { role: "client"; business_id: string; client_id: string; timezone: string | null };
+type ClientSession = { role: "client"; business_id: string; client_id: string; timezone: string | null;
+  booking_horizon_days?: number | null };
 
 async function accountRequest(config: OwnerConfig, path: string, credential: string, method = "GET"): Promise<Response> {
   try {
@@ -72,18 +82,28 @@ export function ClientAccess({ config, children }: { config: OwnerConfig; childr
 }
 
 /** Signed-in frame: the shared header with the client menu and the account menu, then the page. */
-function ClientShell({ value, email, local, onSignOut, notice, children }: {
-  value: ClientSessionValue; email: string | null; local: boolean; onSignOut: () => void;
+function ClientShell({ value: base, email, local, onSignOut, notice, children }: {
+  value: ClientSessionBase; email: string | null; local: boolean; onSignOut: () => void;
   notice?: ReactNode; children: ReactNode;
 }) {
   const router = useRouter();
+  const zone = base.zone;
+  const calendar = useCalendarState({ ready: Boolean(zone), zone: zone ?? "UTC" });
+  const value = useMemo<ClientSessionValue>(() => ({ ...base, calendar }), [base, calendar]);
   const section = CLIENT_SECTIONS.find((item) => item.pathname === router.pathname.replace(/\/$/, "")) ?? CLIENT_SECTIONS[0];
   return <ClientSessionContext.Provider value={value}>
     <AppHeader appName="Smart Scheduling Assistant" current={section.id}
       items={CLIENT_SECTIONS.map(({ id, label }) => ({ id, label }))}
       onSelect={(id) => { const next = CLIENT_SECTIONS.find((item) => item.id === id); if (next) void router.push(next.href); }}
       trailing={<AccountMenu email={email} local={local} localLabel="Local test client (synthetic)" onSignOut={onSignOut} />}>
-      <span className="range-title">{section.label}</span>
+      {section.id === "calendar" ? <CalendarControls
+        title={zone ? rangeTitle(calendar.date, calendar.view, calendar.scheduleDays) : "Calendar"}
+        announcement={zone ? rangeAnnouncement(calendar.date, calendar.view, calendar.scheduleDays) : "Calendar"}
+        shortTitle={zone ? rangeTitleShort(calendar.date, calendar.view, calendar.scheduleDays) : undefined}
+        view={calendar.view} disabled={!zone} date={calendar.date} today={zone ? todayKey(zone) : ""}
+        scheduleDays={calendar.scheduleDays} onToday={calendar.goToday} onPick={calendar.goToDate}
+        onStep={calendar.stepRange} onView={calendar.setView} />
+        : <span className="range-title">{section.label}</span>}
     </AppHeader>
     {notice}
     <main>{children}</main>
@@ -110,6 +130,7 @@ function LocalClientAccess({ config, children }: { config: OwnerConfig; children
   }, [config]);
 
   const signedIn = session && token ? { config, token, zone: session.timezone ?? null,
+    horizonDays: session.booking_horizon_days ?? null,
     onSessionEnded: () => end("Your session ended. Sign in again.") } : null;
   if (signedIn) return <ClientShell value={signedIn} email={null} local onSignOut={() => end(null)}
     notice={message ? <div className="notice error" role="alert"><p>{message}</p></div> : undefined}>{children}</ClientShell>;
@@ -194,6 +215,7 @@ function CognitoClientAccess({ config, children }: { config: OwnerConfig; childr
     <button type="button" onClick={() => end(null, true)}>Sign out and switch account</button></div> : undefined;
   if (!busy && session && accessToken) {
     const value = { config, token: accessToken, zone: session.timezone ?? null,
+      horizonDays: session.booking_horizon_days ?? null,
       onSessionEnded: () => end("Your session ended. Sign in again.", true) };
     return <ClientShell value={value} email={email} local={false} onSignOut={() => end(null, true)} notice={notice}>
       {children}</ClientShell>;

@@ -1,5 +1,7 @@
 /** Client-facing booking states. The API may add states, so unknown ones fall back safely. */
 
+import type { CalendarItem } from "@/calendar/item";
+
 export interface ClientBooking {
   appointment_id: string;
   status: string;
@@ -89,4 +91,26 @@ export function pendingReplacement(bookings: ClientBooking[], original: ClientBo
 /** Whether a booking may be changed from the page: the server gave its version and it is live. */
 export function hasVersion(booking: ClientBooking): booking is ClientBooking & { version: number } {
   return Number.isInteger(booking.version) && (booking.version ?? 0) > 0;
+}
+
+/** Whether a pending booking is a request to move a confirmed visit rather than a new request. */
+export function isMoveRequest(booking: ClientBooking): boolean {
+  return booking.status === "PENDING_APPROVAL" && Boolean(booking.replaces_appointment_id);
+}
+
+/**
+ * The client's own live bookings as neutral calendar items. Only confirmed visits and pending
+ * requests that have not ended are shown; the wording and colour keep a request from ever looking
+ * confirmed, and a move request from looking like either a confirmed visit or a new request.
+ */
+export function calendarItems(bookings: ClientBooking[], nowMs: number): CalendarItem[] {
+  return bookings.flatMap((booking): CalendarItem[] => {
+    if (booking.status !== "CONFIRMED" && booking.status !== "PENDING_APPROVAL") return [];
+    if (Date.parse(booking.end_at) <= nowMs) return [];
+    const base = { event_id: booking.appointment_id, start_at: booking.start_at, end_at: booking.end_at,
+      status: booking.status };
+    if (isMoveRequest(booking)) return [{ ...base, label: "Move request", kind: "move" }];
+    const state = bookingState(booking, nowMs);
+    return [{ ...base, label: state.label, kind: state.tone === "confirmed" ? "confirmed" : "pending" }];
+  });
 }

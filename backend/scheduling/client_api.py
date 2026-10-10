@@ -52,6 +52,8 @@ class ClientSession(BaseModel):
     client_id: str
     # Business IANA time zone for rendering times and choosing a day; None when unconfigured.
     timezone: str | None = None
+    # Days ahead the business takes bookings, so the app can stop offering times past it.
+    booking_horizon_days: int | None = None
 
 
 class ClientAvailabilityQuery(BaseModel):
@@ -207,10 +209,13 @@ def add_client_session_route(
         if store is None:
             return session
         try:
-            zone: str | None = store.read_policy(session.business_id).timezone
+            policy = store.read_policy(session.business_id)
+            zone: str | None = policy.timezone
+            horizon: int | None = policy.booking_horizon_days
         except (InvalidPolicy, PolicyNotConfigured):
             zone = None
-        return session.model_copy(update={"timezone": zone})
+            horizon = None
+        return session.model_copy(update={"timezone": zone, "booking_horizon_days": horizon})
 
     if store is None:
         return

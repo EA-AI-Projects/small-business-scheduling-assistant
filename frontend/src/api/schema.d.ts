@@ -493,6 +493,8 @@ export interface components {
         };
         /** ClientSession */
         ClientSession: {
+            /** Booking Horizon Days */
+            booking_horizon_days?: number | null;
             /** Business Id */
             business_id: string;
             /** Client Id */

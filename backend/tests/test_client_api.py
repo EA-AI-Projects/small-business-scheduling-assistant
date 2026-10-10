@@ -173,6 +173,7 @@ def test_session_reports_the_business_time_zone() -> None:
     api, _ = setup()
     body = api.get("/v1/client/session", headers=auth("a")).json()
     assert body["timezone"] == "America/Los_Angeles"
+    assert body["booking_horizon_days"] == 14
     assert body["client_id"] == "client-a"
 
 
