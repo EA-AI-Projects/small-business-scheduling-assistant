@@ -60,6 +60,7 @@ class RaceEnv:
     business: str
     run: str
     appointment_ids: list[str] = field(default_factory=list)
+    extra_businesses: list[str] = field(default_factory=list)
 
     def appointment_id(self, name: str) -> str:
         # Appointment keys are not business-scoped, so the run id keeps them unique.
@@ -72,6 +73,7 @@ class RaceEnv:
         partitions = [f"BUSINESS#{self.business}",
                       DynamoDBCalendarRepository._visit_partition(
                           self.business, "synthetic-client")]
+        partitions += [f"BUSINESS#{other}" for other in self.extra_businesses]
         partitions += [f"APPOINTMENT#{identifier}" for identifier in self.appointment_ids]
         errors: list[str] = []
         for pk in partitions:
@@ -393,6 +395,42 @@ def _wait_until(condition: Callable[[], bool], message: str, seconds: float = 30
         if monotonic() >= deadline:
             pytest.fail(message)
         sleep(0.25)
+
+
+def test_client_bookings_return_only_the_clients_live_pending_and_upcoming_confirmed(
+        race_env: RaceEnv) -> None:
+    env = race_env
+    now = EXPIRY - timedelta(hours=1)
+    other_business = f"{env.business}-other"
+    env.extra_businesses.append(other_business)
+
+    def make(name: str, status: CalendarStatus, start: datetime, *, client: str = "client-a",
+             business: str | None = None, hold: datetime | None = None) -> Appointment:
+        return Appointment(
+            env.appointment_id(name), business or env.business, client, start,
+            start + timedelta(hours=1), status,
+            hold if status == CalendarStatus.PENDING_APPROVAL else None, 60, 30, 1)
+
+    pending = make("pending", CalendarStatus.PENDING_APPROVAL, START, hold=EXPIRY)
+    confirmed = make("confirmed", CalendarStatus.CONFIRMED, START + timedelta(days=1))
+    declined = make("declined", CalendarStatus.DECLINED, START + timedelta(days=2))
+    expired = make("expired", CalendarStatus.PENDING_APPROVAL, START + timedelta(days=3),
+                   hold=now - timedelta(hours=1))
+    ended = make("ended", CalendarStatus.CONFIRMED, now - timedelta(hours=5))
+    other_client = make("other-client", CalendarStatus.CONFIRMED, START + timedelta(days=4),
+                        client="client-b")
+    elsewhere = make("elsewhere", CalendarStatus.CONFIRMED, START + timedelta(days=5),
+                     business=other_business)
+    _seed(env, (pending, confirmed, declined, expired, ended, other_client))
+    repo = DynamoDBCalendarRepository(env.client, env.table)
+    for appointment in (elsewhere,):
+        env.client.put_item(TableName=env.table, Item=repo._appointment_item(appointment))
+        env.client.put_item(TableName=env.table, Item=repo._event_item(appointment))
+
+    found = repo.read_client_bookings(env.business, "client-a", now)
+
+    assert [item.appointment_id for item in found] == [
+        pending.appointment_id, confirmed.appointment_id]
 
 
 def test_two_approvals_for_one_slot_commit_at_most_one(race_env: RaceEnv) -> None:

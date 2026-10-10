@@ -84,5 +84,5 @@ def create_cognito_linked_app(
     app = create_persisted_owner_app(
         client, table_name, owner, clock, cors_origins=cors_origins,
         account_invitations=invitations, verify_account=verify_account)
-    add_client_session_route(app, verify)
+    add_client_session_route(app, verify, records, clock)
     return app

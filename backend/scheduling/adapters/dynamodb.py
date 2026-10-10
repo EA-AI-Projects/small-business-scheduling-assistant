@@ -1559,6 +1559,29 @@ class DynamoDBCalendarRepository:
                 pending.append(appointment)
         return tuple(sorted(pending, key=lambda appointment: appointment.start_at))
 
+    def read_client_bookings(self, business_id: str, client_id: str,
+                             now: datetime) -> tuple[Appointment, ...]:
+        # Projections only narrow the candidates; metadata is strongly reread and
+        # matched to the client so a stale projection cannot leak another record.
+        events = self._query(business_id, "PK = :pk AND begins_with(SK, :prefix)",
+                             {":prefix": {"S": "EVENT#"}})
+        found: list[Appointment] = []
+        for item in events:
+            if (item["status"]["S"] not in (CalendarStatus.PENDING_APPROVAL.value,
+                                            CalendarStatus.CONFIRMED.value)
+                    or datetime.fromisoformat(item["end_at"]["S"]) <= now):
+                continue
+            appointment = self.read_appointment(item["event_id"]["S"])
+            if (appointment is not None and appointment.business_id == business_id
+                    and appointment.client_id == client_id
+                    and appointment.end_at > now
+                    and appointment.status in (CalendarStatus.PENDING_APPROVAL,
+                                               CalendarStatus.CONFIRMED)
+                    and (appointment.status == CalendarStatus.CONFIRMED
+                         or appointment.occupies_time(now))):
+                found.append(appointment)
+        return tuple(sorted(found, key=lambda appointment: appointment.start_at))
+
     def due_hold_ids(self, now: datetime, limit: int) -> tuple[str, ...]:
         """Use the eventual index for wake-up only; callers strongly reread metadata."""
         if limit <= 0:

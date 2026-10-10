@@ -369,6 +369,20 @@ class InMemoryCalendarRepository:
                 and appointment.hold_expires_at is not None
                 and appointment.hold_expires_at > now), key=lambda appointment: appointment.start_at))
 
+    def read_client_bookings(self, business_id: str, client_id: str,
+                             now: datetime) -> tuple[Appointment, ...]:
+        """Upcoming live pending holds and confirmed visits for one client only."""
+        with self._lock:
+            return tuple(sorted((appointment for appointment in self._appointments.values()
+                if appointment.business_id == business_id
+                and appointment.client_id == client_id
+                and appointment.end_at > now
+                and appointment.status in (CalendarStatus.PENDING_APPROVAL,
+                                           CalendarStatus.CONFIRMED)
+                and (appointment.status == CalendarStatus.CONFIRMED
+                     or appointment.occupies_time(now))),
+                key=lambda appointment: appointment.start_at))
+
     def read_replacement_guard(
         self, business_id: str, original_id: str
     ) -> ReplacementGuard | None:
