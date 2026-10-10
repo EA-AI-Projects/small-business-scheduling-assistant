@@ -391,5 +391,33 @@ describe("client calendar and bookings", () => {
       expect(button("Cancel appointment")).toBeUndefined();
       expect(button("Move to another time")).toBeUndefined();
     });
+
+    it("uses cancel-appointment wording for a confirmed, already moved appointment", async () => {
+      stub([[{ ...replacement, status: "CONFIRMED", version: 2 }]], () => json({}));
+      await render();
+      expect(button("Withdraw")).toBeUndefined();
+      await act(async () => button("Cancel appointment")!.click());
+      const text = host.querySelector("[aria-label='Confirm cancellation']")!.textContent ?? "";
+      expect(text).toContain("Cancel this confirmed appointment?");
+      expect(button("Yes, cancel this appointment")).toBeTruthy();
+      expect(text).not.toContain("withdraw");
+    });
+
+    it("drops the cancel panel after a stale refusal and after Refresh, never resending the old version", async () => {
+      const fetcher = stub([[original]], () => json({ detail: { code: "STALE_BOOKING", message: "x", alternatives: [] } }, 409));
+      await render();
+      await act(async () => button("Cancel appointment")!.click());
+      await act(async () => button("Yes, cancel this appointment")!.click());
+      expect(host.querySelector("[aria-label='Confirm cancellation']")).toBeNull();
+      expect(host.querySelector("[role=alert]")?.textContent).toContain("changed since you last looked");
+      await act(async () => button("Move to another time")!.click());
+      expect(host.querySelector("[aria-label='Moving this appointment']")).not.toBeNull();
+      await act(async () => button("Refresh")!.click());
+      expect(host.querySelector("[aria-label='Moving this appointment']")).toBeNull();
+      await act(async () => button("Cancel appointment")!.click());
+      await act(async () => button("Refresh")!.click());
+      expect(host.querySelector("[aria-label='Confirm cancellation']")).toBeNull();
+      expect(posts(fetcher)).toHaveLength(1);
+    });
   });
 });

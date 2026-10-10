@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
-from test_client_requests import BASE, OWNER, START, auth, request, setup
+from test_client_requests import BASE, LINKS, OWNER, START, auth, request, setup
 
 from scheduling.domain.calendar import CalendarStatus
 from scheduling.domain.expiry import ExpiryService
@@ -248,3 +248,37 @@ def test_owner_approval_racing_the_clients_cancel_of_the_original_never_loses_th
         codes = (first.result(), second.result())
     assert codes == (200, 409)  # the active replacement refuses the cancel, in either order
     assert [item["status"] for item in mine(api)] == ["CONFIRMED"]
+
+
+def test_owner_tokens_are_forbidden_on_both_routes() -> None:
+    from scheduling.identity_links import IdentityLink, LinkRole, LinkState
+
+    api, repository, _ = setup()
+    booking = confirmed(api)
+    revision = repository.read_revision("business-1")
+    LINKS["token-o"] = IdentityLink("sub-o", LinkRole.OWNER, "business-1", None,
+                                    LinkState.ACTIVE, 1, START, "synthetic-admin", "test")
+    try:
+        assert cancel(api, "o", booking).status_code == 403
+        assert move(api, "o", booking).status_code == 403
+    finally:
+        del LINKS["token-o"]
+    assert repository.read_revision("business-1") == revision
+
+
+def test_reschedule_replay_after_owner_approval_reports_current_state() -> None:
+    api, repository, _ = setup()
+    original = confirmed(api)
+    first = move(api, "a", original, key="same").json()
+    assert first["status"] == "PENDING_APPROVAL"
+    done = api.post(f"{BASE}/requests/{first['appointment_id']}/approve",
+                    json={"expected_version": 1}, headers={**OWNER, "Idempotency-Key": "ap"})
+    assert done.status_code == 200, done.text
+    revision = repository.read_revision("business-1")
+    again = move(api, "a", original, key="same")
+    assert again.status_code == 200, again.text
+    body = again.json()
+    assert body["appointment_id"] == first["appointment_id"]
+    assert body["status"] == "CONFIRMED" and body["version"] == 2
+    assert body["replaces_appointment_id"] == original["appointment_id"]
+    assert repository.read_revision("business-1") == revision

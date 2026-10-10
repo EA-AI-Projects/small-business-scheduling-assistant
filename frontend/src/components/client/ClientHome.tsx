@@ -25,7 +25,7 @@ async function read(config: OwnerConfig, token: string, path: string): Promise<u
 type Outcome =
   | { kind: "sent"; booking: ClientBooking }
   | { kind: "conflict"; alternatives: string[] }
-  | { kind: "error"; message: string };
+  | { kind: "error"; message: string; stale?: boolean };
 
 const REFUSALS: Record<string, string> = {
   STALE_BOOKING: "That appointment changed since you last looked, so nothing was changed. Refresh and review it first.",
@@ -64,7 +64,8 @@ async function write(config: OwnerConfig, token: string, path: string, payload: 
       ? body.detail.alternatives.filter((item): item is string => typeof item === "string" && !Number.isNaN(Date.parse(item))) : [];
     return { kind: "conflict", alternatives };
   }
-  if (response.status === 409 && code && code in REFUSALS) return { kind: "error", message: REFUSALS[code]! };
+  if (response.status === 409 && code && code in REFUSALS) return { kind: "error", message: REFUSALS[code]!,
+    stale: code === "STALE_BOOKING" || code === "BOOKING_NOT_ACTIVE" || code === "BOOKING_NOT_RESCHEDULABLE" };
   if (response.status === 404) return { kind: "error", message: "That appointment was not found. Refresh to see your appointments." };
   if (response.status === 503) return { kind: "error", message: timed ? "Online requests are not available right now." : "Online changes are not available right now." };
   return { kind: "error", message: timed ? "Your request was not sent. Please try again."
@@ -95,9 +96,9 @@ function ClientCalendar({ config, token, zone, onSessionEnded }: {
   // One key per chosen time, reused on a retry so a lost response cannot create a second request.
   const attempt = useRef<{ id: string; key: string } | null>(null);
   // A visit being moved: the confirmed original stays booked until the owner approves the replacement.
-  const [moving, setMoving] = useState<ClientBooking | null>(null);
+  const [heldMoving, setMoving] = useState<ClientBooking | null>(null);
   // A booking whose cancellation is waiting for the separate, explicit confirm press.
-  const [confirming, setConfirming] = useState<ClientBooking | null>(null);
+  const [heldConfirming, setConfirming] = useState<ClientBooking | null>(null);
   const cancelAttempt = useRef<{ id: string; key: string } | null>(null);
   const [changing, setChanging] = useState(false);
   const [changeOutcome, setChangeOutcome] = useState<{ kind: "cancelled"; booking: ClientBooking }
@@ -162,6 +163,11 @@ function ClientCalendar({ config, token, zone, onSessionEnded }: {
     return () => { current = false; };
   }, [config, token, date, availabilityKey, fail]);
 
+  // A re-read that changed a booking's version drops any panel still holding the old one.
+  const stillCurrent = (held: ClientBooking | null) => held && bookings?.some((item) =>
+    item.appointment_id === held.appointment_id && item.version === held.version) ? held : null;
+  const moving = stillCurrent(heldMoving);
+  const confirming = stillCurrent(heldConfirming);
   const choose = (start: string | null) => { setChosen(start); setOutcome(null); };
   const send = async () => {
     if (!chosen || sending) return;
@@ -174,7 +180,10 @@ function ClientCalendar({ config, token, zone, onSessionEnded }: {
           { start_at: chosen, expected_version: moving.version }, attempt.current.key, true)
         : await write(config, token, "/v1/client/requests", { start_at: chosen }, attempt.current.key, true);
       if (result.kind !== "error") { attempt.current = null; setChosen(null); setRefresh((count) => count + 1); }
-      if (result.kind === "sent") setMoving(null);
+      if (result.kind === "sent" || (result.kind === "error" && result.stale)) {
+        // A refused or finished move never leaves an old version in the panel.
+        setMoving(null); setChosen(null); attempt.current = null; setRefresh((count) => count + 1);
+      }
       setOutcome(result);
     } catch (error) { fail(error, (message) => setOutcome({ kind: "error", message })); }
     finally { setSending(false); }
@@ -194,7 +203,10 @@ function ClientCalendar({ config, token, zone, onSessionEnded }: {
       if (result.kind === "sent") {
         cancelAttempt.current = null; setConfirming(null); setChangeOutcome({ kind: "cancelled", booking: result.booking });
         setRefresh((count) => count + 1);
-      } else if (result.kind === "error") setChangeOutcome(result);
+      } else if (result.kind === "error") {
+        setChangeOutcome(result);
+        if (result.stale) { setConfirming(null); cancelAttempt.current = null; setRefresh((count) => count + 1); }
+      }
     } catch (error) { fail(error, (message) => setChangeOutcome({ kind: "error", message })); }
     finally { setChanging(false); }
   };
@@ -257,7 +269,7 @@ function ClientCalendar({ config, token, zone, onSessionEnded }: {
 
     <section className="card" aria-labelledby="client-bookings">
       <h2 id="client-bookings">Your appointments</h2>
-      <button type="button" onClick={() => { choose(null); setRefresh((count) => count + 1); }}>Refresh</button>
+      <button type="button" onClick={() => { choose(null); setConfirming(null); setMoving(null); setRefresh((count) => count + 1); }}>Refresh</button>
       {bookingsError ? <p className="notice error" role="alert">{bookingsError}</p>
         : bookings === null ? <p>Loading your appointments…</p>
         : bookings.length === 0 ? <p>You have no upcoming appointments or pending requests.</p>
@@ -268,6 +280,7 @@ function ClientCalendar({ config, token, zone, onSessionEnded }: {
           const original = booking.replaces_appointment_id
             ? bookings.find((item) => item.appointment_id === booking.replaces_appointment_id) : undefined;
           const canChange = live && hasVersion(booking);
+          const isMove = Boolean(booking.replaces_appointment_id) && booking.status === "PENDING_APPROVAL";
           return <li key={booking.appointment_id} className="card" data-status={state.tone}>
             <strong>{localStamp(booking.start_at, zone)}</strong> to {localTime(booking.end_at, zone)}{" "}
             <span className="badge">{booking.replaces_appointment_id && booking.status === "PENDING_APPROVAL"
@@ -284,17 +297,17 @@ function ClientCalendar({ config, token, zone, onSessionEnded }: {
               {booking.status === "CONFIRMED" && replacement ? <span className="meta">To cancel, first withdraw the move request.</span>
                 : <button type="button" onClick={() => startCancel(booking)}>
                   {booking.status === "CONFIRMED" ? "Cancel appointment"
-                    : booking.replaces_appointment_id ? "Withdraw move request" : "Cancel request"}</button>}
+                    : isMove ? "Withdraw move request" : "Cancel request"}</button>}
             </div>}
             {confirming?.appointment_id === booking.appointment_id && <div role="group" aria-label="Confirm cancellation" className="notice">
-              <p>{booking.status === "CONFIRMED" ? "Cancel this confirmed appointment?" : booking.replaces_appointment_id
+              <p>{booking.status === "CONFIRMED" ? "Cancel this confirmed appointment?" : isMove
                 ? "Withdraw this move request? Your original appointment stays confirmed." : "Cancel this request?"}
                 {" "}<strong>{localStamp(booking.start_at, zone)}</strong> to {localTime(booking.end_at, zone)} ({zone}).
                 {booking.status === "CONFIRMED" ? " The time is released and the owner is told." : ""}</p>
               <button type="button" disabled={changing} onClick={() => void confirmCancel()}>
-                {changing ? "Cancelling…" : booking.replaces_appointment_id ? "Yes, withdraw this request" : "Yes, cancel this " + (booking.status === "CONFIRMED" ? "appointment" : "request")}</button>
+                {changing ? "Cancelling…" : isMove ? "Yes, withdraw this request" : "Yes, cancel this " + (booking.status === "CONFIRMED" ? "appointment" : "request")}</button>
               <button type="button" disabled={changing} onClick={() => { setConfirming(null); setChangeOutcome(null); }}>
-                {booking.replaces_appointment_id ? "No, keep the request" : "No, keep it"}</button>
+                {isMove ? "No, keep the request" : "No, keep it"}</button>
             </div>}
           </li>;
         })}</ul>}

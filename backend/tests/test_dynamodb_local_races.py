@@ -82,8 +82,8 @@ class RaceEnv:
     def scrub(self) -> None:
         """Delete only the items this run created (its business and appointment keys)."""
         partitions = [f"BUSINESS#{self.business}",
-                      DynamoDBCalendarRepository._visit_partition(
-                          self.business, "synthetic-client")]
+                      *(DynamoDBCalendarRepository._visit_partition(self.business, client)
+                        for client in ("synthetic-client", "portal-a", "portal-b"))]
         partitions += [f"BUSINESS#{other}" for other in self.extra_businesses]
         partitions += [f"APPOINTMENT#{identifier}" for identifier in self.appointment_ids]
         errors: list[str] = []
