@@ -287,7 +287,7 @@ def test_owner_loop_can_rewrite_after_two_tools_within_worker_bound(
         lambda name, _args: {"ok": True, "requests": [{"ref": "abcd1234", "version": 1}]}
         if name == "list_pending_requests" else {"ok": True, "status": "confirmed"})
     assert reply == "Approved Avery's request."
-    assert len(calls) == OWNER_LOOP_MAX_CALLS == 4
+    assert len(calls) == 4 < OWNER_LOOP_MAX_CALLS
     assert all(0 < timeout <= 8 for _, timeout in calls)
     assert calls[-1][0]["tool_choice"] == "none"
     worker = Path(__file__).resolve().parents[2].joinpath("template.yaml").read_text()
@@ -295,6 +295,37 @@ def test_owner_loop_can_rewrite_after_two_tools_within_worker_bound(
         "  SmsConversationLogGroup:\n", 1)[0]
     assert "      Timeout: 60\n" in worker
     assert OWNER_LOOP_BUDGET_SECONDS < 60
+
+
+def test_owner_loop_reserves_rewrite_after_three_tool_calls(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    responses = iter([
+        {"output": [{"type": "function_call", "name": "list_pending_requests",
+                     "call_id": "first", "arguments": "{}"}]},
+        {"output": [{"type": "function_call", "name": "list_pending_requests",
+                     "call_id": "second", "arguments": "{}"}]},
+        {"output": [{"type": "function_call", "name": "approve_request",
+                     "call_id": "decision", "arguments": '{"ref":"abcd1234","version":1}'}]},
+        {"output": [{"type": "message", "content": [
+            {"type": "output_text", "text": "Approved 😀"}]}]},
+        {"output": [{"type": "message", "content": [
+            {"type": "output_text", "text": "Approved Avery's request."}]}]},
+    ])
+    payloads: list[dict[str, Any]] = []
+
+    def fake_urlopen(request: Any, timeout: float) -> BytesIO:
+        payloads.append(json.loads(request.data))
+        return BytesIO(json.dumps(next(responses)).encode())
+
+    monkeypatch.setattr("scheduling.adapters.openai_messages.urlopen", fake_urlopen)
+    reply = OpenAIMessageInterpreter("synthetic-key", timeout_seconds=8).run_owner_loop(
+        "Approve", date(2026, 10, 1), "America/Los_Angeles", (),
+        lambda name, _args: {"ok": True, "requests": [{"ref": "abcd1234", "version": 1}]}
+        if name == "list_pending_requests" else {"ok": True, "status": "confirmed"})
+    assert reply == "Approved Avery's request."
+    assert len(payloads) == OWNER_LOOP_MAX_CALLS == 5
+    assert [payload["tool_choice"] for payload in payloads] == [
+        "auto", "auto", "auto", "none", "none"]
 
 
 def test_owner_loop_stops_at_total_deadline_for_fixed_failure(

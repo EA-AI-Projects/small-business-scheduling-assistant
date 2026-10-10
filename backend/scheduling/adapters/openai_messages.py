@@ -20,7 +20,8 @@ from scheduling.domain.owner_transitional import (
 )
 
 MODEL = "gpt-6-luna"
-OWNER_LOOP_MAX_CALLS = 4
+OWNER_LOOP_MAX_CALLS = 5
+OWNER_LOOP_MAX_TOOL_CALLS = 3
 OWNER_LOOP_BUDGET_SECONDS = 36
 DATE_SHAPE = re.compile(r"\d{4}-\d{2}-\d{2}")
 TIME_SHAPE = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
@@ -256,6 +257,7 @@ class OpenAIMessageInterpreter:
             f"{transcript_lines(history) or 'none'}\n"
             f"Owner message: {body}")}]
         revised = False
+        tool_calls = 0
         deadline = monotonic() + OWNER_LOOP_BUDGET_SECONDS
         for _ in range(OWNER_LOOP_MAX_CALLS):
             remaining = deadline - monotonic()
@@ -264,7 +266,8 @@ class OpenAIMessageInterpreter:
             payload = {
                 "model": MODEL, "instructions": OWNER_LOOP_INSTRUCTIONS,
                 "input": conversation, "tools": OWNER_LOOP_TOOLS,
-                "tool_choice": "none" if revised else "auto",
+                "tool_choice": "none" if (revised or tool_calls >= OWNER_LOOP_MAX_TOOL_CALLS)
+                else "auto",
                 "parallel_tool_calls": False, "reasoning": {"effort": "none"},
                 "max_output_tokens": 512, "store": False,
             }
@@ -282,8 +285,9 @@ class OpenAIMessageInterpreter:
             calls = [item for item in output if isinstance(item, dict)
                      and item.get("type") == "function_call"]
             if calls:
-                if revised or len(calls) != 1:
+                if revised or len(calls) != 1 or tool_calls >= OWNER_LOOP_MAX_TOOL_CALLS:
                     raise ValueError("Model returned an unexpected tool call")
+                tool_calls += 1
                 call = calls[0]
                 name, call_id, raw_args = (call.get("name"), call.get("call_id"),
                                            call.get("arguments"))
