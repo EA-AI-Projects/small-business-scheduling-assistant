@@ -242,6 +242,11 @@ class HoldService:
                     ),
                     now,
                 )
+                # A retry may have raced its own first request: if that committed after the
+                # key check above, this slot is taken by the caller's own hold, so replay it.
+                committed = self._repository.read_idempotency(command)
+                if committed is not None:
+                    return self._replay(committed, request_hash)
                 raise SlotConflict(alternatives[:5])
             result = PendingHold(
                 hold_id=hold_id,
@@ -277,6 +282,9 @@ class HoldService:
                 existing = self._repository.read_idempotency(command)
                 if existing is not None:
                     return self._replay(existing, request_hash)
+        committed = self._repository.read_idempotency(command)
+        if committed is not None:
+            return self._replay(committed, request_hash)
         raise TooManyConflicts("Calendar changed during every hold attempt")
 
     @staticmethod

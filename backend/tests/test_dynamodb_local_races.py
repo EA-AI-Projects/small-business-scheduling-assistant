@@ -15,14 +15,21 @@ from uuid import uuid4
 import boto3
 import pytest
 from botocore.exceptions import BotoCoreError, ClientError
+from fastapi.testclient import TestClient
 
 from scheduling.adapters.conversation_state_dynamodb import DynamoConversationStates
 from scheduling.adapters.dynamodb import DynamoDBCalendarRepository, _command_sort_key
 from scheduling.adapters.outbox_aws import DynamoOutboxStore, due_keys
 from scheduling.adapters.sms_dynamodb import DynamoSmsIngressStore
+from scheduling.client_api import add_client_session_route
 from scheduling.domain.appointments import Appointment
 from scheduling.domain.calendar import CalendarStatus
-from scheduling.domain.client_records import ClientRecordService, HomeSize, RecordConflict
+from scheduling.domain.client_records import (
+    ClientProfile,
+    ClientRecordService,
+    HomeSize,
+    RecordConflict,
+)
 from scheduling.domain.conversation_state import ConversationState, PromptKind
 from scheduling.domain.holds import OutboxIntent, RevisionConflict
 from scheduling.domain.lifecycle import (
@@ -39,8 +46,11 @@ from scheduling.domain.outbox import (
     DispatchService,
     OutboxRecord,
 )
+from scheduling.domain.owner_policy import OwnerPolicyService
 from scheduling.domain.sms_ingress import ConsentEvidence, record_in_person_consent
 from scheduling.domain.sms_status import SmsDeliveryStatus
+from scheduling.identity_links import IdentityLink, LinkRole, LinkState
+from scheduling.owner_api import OwnerPrincipal, create_owner_app
 
 DEV_TABLE = "scheduling-dev"
 DEV_REGION = "us-west-1"
@@ -431,6 +441,83 @@ def test_client_bookings_return_only_the_clients_live_pending_and_upcoming_confi
 
     assert [item.appointment_id for item in found] == [
         pending.appointment_id, confirmed.appointment_id]
+
+
+def _client_portal(env: RaceEnv) -> tuple[TestClient, DynamoDBCalendarRepository]:
+    """The deployed client routes over this table, with a seeded policy and two clients."""
+    now = datetime(2026, 9, 28, 15, tzinfo=UTC)
+    repo = DynamoDBCalendarRepository(env.client, env.table)
+    OwnerPolicyService(repo, lambda: now).seed(env.business, "synthetic-owner", "seed")
+    links = {}
+    for number, name in enumerate(("a", "b"), start=1):
+        client_id = f"portal-{name}"
+        repo.save_profile(ClientProfile(
+            env.business, client_id, "Synthetic Client", f"+1555010000{number}",
+            "1 Test Street", HomeSize.MEDIUM, 60, True, 1, now, now, now), 0, None)
+        links[f"token-{name}"] = IdentityLink(
+            f"sub-{name}", LinkRole.CLIENT, env.business, client_id, LinkState.ACTIVE, 1, now,
+            "synthetic-admin", "test")
+    app = create_owner_app(repo, lambda _t: OwnerPrincipal("o", env.business), lambda: now)
+    add_client_session_route(app, links.__getitem__, repo, lambda: now)
+    return TestClient(app), repo
+
+
+def _portal_request(api: TestClient, who: str, key: str) -> Any:
+    return api.post("/v1/client/requests", json={"start_at": "2026-09-29T16:00:00+00:00"},
+                    headers={"Authorization": f"Bearer token-{who}", "Idempotency-Key": key})
+
+
+def test_concurrent_client_requests_for_one_time_hold_exactly_one(race_env: RaceEnv) -> None:
+    env = race_env
+    api, repo = _client_portal(env)
+    revision_before = repo.read_revision(env.business)
+    barrier = Barrier(2)
+
+    def attempt(who: str) -> Any:
+        barrier.wait(timeout=5)
+        return _portal_request(api, who, f"race-{who}")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(attempt, ("a", "b")))
+    won = [item for item in results if item.status_code == 200]
+    lost = [item for item in results if item.status_code == 409]
+    # Record IDs first so a failed assertion still lets dev-table cleanup find the hold.
+    env.appointment_ids.extend(item.json()["appointment_id"] for item in won)
+    assert len(won) == 1 and len(lost) == 1
+    assert lost[0].json()["detail"]["code"] in {"SLOT_CONFLICT", "CALENDAR_BUSY"}
+    requested = datetime(2026, 9, 29, 16, tzinfo=UTC)
+    assert requested not in {datetime.fromisoformat(value)
+                             for value in lost[0].json()["detail"]["alternatives"]}
+    items = _business_items(env)
+    hold_id = won[0].json()["appointment_id"]
+    # Seeding the policy queued its own notice; only the winner's two notices belong to a hold.
+    outbox = [item["SK"]["S"] for item in items
+              if item["SK"]["S"].startswith("OUTBOX#") and hold_id in item["SK"]["S"]]
+    assert sorted(key.rsplit("#", 1)[-1] for key in outbox) == ["client", "owner"]
+    audits = [item["SK"]["S"] for item in items if item["SK"]["S"] == f"AUDIT#hold-created#{hold_id}"]
+    assert len(audits) == 1
+    assert repo.read_revision(env.business) == revision_before + 1
+
+
+def test_concurrent_client_retries_with_one_key_create_one_request(race_env: RaceEnv) -> None:
+    env = race_env
+    api, repo = _client_portal(env)
+    revision_before = repo.read_revision(env.business)
+    barrier = Barrier(2)
+
+    def attempt(_: int) -> Any:
+        barrier.wait(timeout=5)
+        return _portal_request(api, "a", "same-key")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(attempt, (1, 2)))
+    env.appointment_ids.extend(item.json()["appointment_id"] for item in results
+                               if item.status_code == 200)
+    assert [item.status_code for item in results] == [200, 200]
+    assert results[0].json() == results[1].json()
+    assert repo.read_revision(env.business) == revision_before + 1
+    pending = [item for item in _business_items(env) if item["SK"]["S"].startswith("EVENT#")]
+    assert len(pending) == 1
 
 
 def test_two_approvals_for_one_slot_commit_at_most_one(race_env: RaceEnv) -> None:

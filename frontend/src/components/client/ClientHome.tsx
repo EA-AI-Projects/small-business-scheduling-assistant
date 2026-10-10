@@ -22,9 +22,44 @@ async function read(config: OwnerConfig, token: string, path: string): Promise<u
   return response.json().catch(() => null);
 }
 
+type Outcome =
+  | { kind: "sent"; booking: ClientBooking }
+  | { kind: "conflict"; alternatives: string[] }
+  | { kind: "error"; message: string };
+
+/** Submit one request. The body names only the start; the server fixes client, business, and length. */
+async function submitRequest(config: OwnerConfig, token: string, start: string, key: string): Promise<Outcome> {
+  let response: Response;
+  try {
+    response = await fetch(`${config.apiBaseUrl}/v1/client/requests`, { method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "Idempotency-Key": key },
+      body: JSON.stringify({ start_at: start }),
+      credentials: "omit", cache: "no-store", referrerPolicy: "no-referrer" });
+  } catch { return { kind: "error", message: "Could not tell whether your request was sent. Check Your appointments, "
+    + "or send it again; sending again will not create a second request." }; }
+  if (response.status === 401 || response.status === 403) throw new Unauthorized();
+  const body = await response.json().catch(() => null) as { detail?: { code?: string; alternatives?: unknown } } | null;
+  if (response.ok) {
+    const list = parseBookings({ bookings: [body] });
+    const [booking] = list;
+    return list.length === 1 && booking ? { kind: "sent", booking }
+      : { kind: "error", message: "Unexpected response. Check Your appointments before trying again." };
+  }
+  if (response.status === 409 && (body?.detail?.code === "SLOT_CONFLICT" || body?.detail?.code === "CALENDAR_BUSY")) {
+    const alternatives = Array.isArray(body.detail.alternatives)
+      ? body.detail.alternatives.filter((item): item is string => typeof item === "string" && !Number.isNaN(Date.parse(item))) : [];
+    return { kind: "conflict", alternatives };
+  }
+  if (response.status === 409 && body?.detail?.code === "PROFILE_INCOMPLETE") return { kind: "error",
+    message: "Your profile needs the owner's attention before you can request online. Please contact the business." };
+  if (response.status === 503) return { kind: "error", message: "Online requests are not available right now." };
+  return { kind: "error", message: "Your request was not sent. Please try again." };
+}
+
 /**
- * Read-only client calendar and own bookings, in the business time zone. Selecting a time submits
- * nothing yet. The visit length is the owner-set length on the client's profile, chosen by the server.
+ * Client calendar and own bookings, in the business time zone. Choosing a time and confirming sends a
+ * request for owner approval; it is never an appointment until the owner approves. The visit length is
+ * the owner-set length on the client's profile, chosen by the server.
  */
 export function ClientHome({ config, token, zone, onSessionEnded }: {
   config: OwnerConfig; token: string; zone: string | null; onSessionEnded: () => void;
@@ -42,6 +77,10 @@ function ClientCalendar({ config, token, zone, onSessionEnded }: {
   const [bookingsError, setBookingsError] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [chosen, setChosen] = useState<string | null>(null);
+  // One key per chosen time, reused on a retry so a lost response cannot create a second request.
+  const attempt = useRef<{ start: string; key: string } | null>(null);
+  const [sending, setSending] = useState(false);
+  const [outcome, setOutcome] = useState<Outcome | null>(null);
   const [refresh, setRefresh] = useState(0);
   const [availability, setAvailability] = useState<{ key: string; starts: string[] | null;
     minutes: number | null; error: string | null } | null>(null);
@@ -100,6 +139,19 @@ function ClientCalendar({ config, token, zone, onSessionEnded }: {
     return () => { current = false; };
   }, [config, token, date, availabilityKey, fail]);
 
+  const choose = (start: string | null) => { setChosen(start); setOutcome(null); };
+  const send = async () => {
+    if (!chosen || sending) return;
+    if (attempt.current?.start !== chosen) attempt.current = { start: chosen, key: crypto.randomUUID() };
+    setSending(true);
+    try {
+      const result = await submitRequest(config, token, chosen, attempt.current.key);
+      if (result.kind !== "error") { attempt.current = null; setChosen(null); setRefresh((count) => count + 1); }
+      setOutcome(result);
+    } catch (error) { fail(error, (message) => setOutcome({ kind: "error", message })); }
+    finally { setSending(false); }
+  };
+
   const settled = availability?.key === availabilityKey ? availability : null;
   const starts = settled?.starts ?? null;
   const startsError = settled?.error ?? null;
@@ -111,7 +163,7 @@ function ClientCalendar({ config, token, zone, onSessionEnded }: {
       <p className="notice">Choosing a time asks the owner for approval. A time shown here is open, not booked,
         and a request is not a confirmed appointment until the owner approves it.</p>
       <MiniCalendar date={date} today={todayKey(zone)} view="day"
-        onPick={(day) => { setChosen(null); setDate(day); }} />
+        onPick={(day) => { choose(null); setDate(day); }} />
       <p className="meta">Times are shown in the business time zone ({zone}).
         {settled?.minutes ? ` Visits are about ${settled.minutes} minutes.` : ""}</p>
       {startsError ? <p className="notice error" role="alert">{startsError}</p>
@@ -119,17 +171,35 @@ function ClientCalendar({ config, token, zone, onSessionEnded }: {
         : shown.length === 0 ? <p>No times are available on this day. Try another day.</p>
         : <ul className="card-list" aria-label="Available start times">
           {shown.map((start) => <li key={start}>
-            <button type="button" aria-pressed={chosen === start} onClick={() => setChosen(start)}>{localTime(start, zone)}</button>
+            <button type="button" aria-pressed={chosen === start} onClick={() => choose(start)}>{localTime(start, zone)}</button>
           </li>)}
         </ul>}
-      {chosen && <p role="status" className="notice">You picked {localStamp(chosen, zone)}. Requesting a time is
-        not available in the app yet; nothing has been sent or held. Text the business to request it. Any request
-        needs owner approval before it is confirmed.</p>}
+      {chosen && <div role="group" aria-label="Request this time" className="notice">
+        <p>You picked <strong>{localStamp(chosen, zone)}</strong> ({zone}). Sending asks the owner for approval.
+          This time is not booked and is not confirmed until the owner approves it.</p>
+        <button type="button" disabled={sending} onClick={() => void send()}>
+          {sending ? "Sending…" : "Send request for owner approval"}</button>
+      </div>}
+      {outcome?.kind === "sent" && outcome.booking.status !== "PENDING_APPROVAL" && <p role="status" className="notice">
+        This request is no longer waiting for approval: {bookingState(outcome.booking, nowMs).label}.{" "}
+        {bookingState(outcome.booking, nowMs).detail}</p>}
+      {outcome?.kind === "sent" && outcome.booking.status === "PENDING_APPROVAL" && <p role="status" className="notice">Request sent for{" "}
+        <strong>{localStamp(outcome.booking.start_at, zone)}</strong> to {localTime(outcome.booking.end_at, zone)}.
+        Status: waiting for owner approval. It is not confirmed yet.</p>}
+      {outcome?.kind === "conflict" && <div role="alert" className="notice error">
+        <p>That time is no longer open, so nothing was requested.
+          {outcome.alternatives.length ? " These times are open now:" : " Please pick another time or day."}</p>
+        {outcome.alternatives.length > 0 && <ul className="card-list" aria-label="Other open times">
+          {outcome.alternatives.map((start) => <li key={start}>
+            <button type="button" onClick={() => { setDate(dayKey(start, zone)); choose(start); }}>{localStamp(start, zone)}</button>
+          </li>)}</ul>}
+      </div>}
+      {outcome?.kind === "error" && <p role="alert" className="notice error">{outcome.message}</p>}
     </section>
 
     <section className="card" aria-labelledby="client-bookings">
       <h2 id="client-bookings">Your appointments</h2>
-      <button type="button" onClick={() => { setChosen(null); setRefresh((count) => count + 1); }}>Refresh</button>
+      <button type="button" onClick={() => { choose(null); setRefresh((count) => count + 1); }}>Refresh</button>
       {bookingsError ? <p className="notice error" role="alert">{bookingsError}</p>
         : bookings === null ? <p>Loading your appointments…</p>
         : bookings.length === 0 ? <p>You have no upcoming appointments or pending requests.</p>
