@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 
+import { ClientHome } from "@/components/client/ClientHome";
 import { authorizeUrl, clearPendingSignIn, completeSignIn, logoutUrl, tokenExpiry, type SignInResult } from "@/lib/auth";
 import { ConfigError, parseConfig, rawConfigFromEnv, type OwnerConfig } from "@/lib/config";
 
@@ -98,11 +99,13 @@ export function ClientAccess({ config }: { config: OwnerConfig }) {
   return <ClientFrame>
     {message && <div className="notice error" role="alert"><p>{message}</p>
       <button type="button" onClick={() => end(null, true)}>Sign out and switch account</button></div>}
-    {busy ? <p>Checking sign-in…</p> : session ? <section className="welcome card">
-      <h2>Welcome to your client account</h2>
-      <p>Your account is active. Scheduling is currently handled by text message with the business.</p>
-      <button type="button" className="primary" onClick={() => end(null, true)}>Sign out</button>
-    </section> : <section className="welcome card">
+    {busy ? <p>Checking sign-in…</p> : session && accessToken ? <>
+      <section className="card"><h2>Welcome to your client account</h2>
+        <p>Choosing a time asks the owner for approval. Nothing is booked until the owner approves it.</p>
+        <button type="button" className="primary" onClick={() => end(null, true)}>Sign out</button></section>
+      <ClientHome config={config} token={accessToken}
+        onSessionEnded={() => end("Your session ended. Sign in again.", true)} />
+    </> : <section className="welcome card">
       <h2>Client sign-in</h2>
       <p>Use the email invitation from the business to set your password and sign in. Invitations are valid for 24 hours after they are sent.</p>
       <button type="button" className="primary" onClick={() => redirect(false)}>Sign in or accept invitation</button>

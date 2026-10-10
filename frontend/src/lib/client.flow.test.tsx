@@ -30,11 +30,13 @@ describe("client account entry", () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(new Response("{}", { status: 401 }))
       .mockResolvedValueOnce(new Response('{"activated":true}', { status: 200 }))
-      .mockResolvedValueOnce(new Response('{"role":"client","business_id":"pilot","client_id":"synthetic"}', { status: 200 }));
+      .mockResolvedValueOnce(new Response('{"role":"client","business_id":"pilot","client_id":"synthetic"}', { status: 200 }))
+      .mockImplementation(async (url: string) => new Response(
+        url.includes("availability") ? '{"starts_at":[]}' : '{"bookings":[]}', { status: 200 }));
     vi.stubGlobal("fetch", fetcher);
     await act(async () => root.render(<StrictMode><ClientAccess config={config} /></StrictMode>));
     expect(host.textContent).toContain("Welcome to your client account");
-    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+    expect(fetcher.mock.calls.map(([url]) => url).slice(0, 3)).toEqual([
       "https://api.example.test/v1/client/session",
       "https://api.example.test/v1/account/invitations/activate",
       "https://api.example.test/v1/client/session",
