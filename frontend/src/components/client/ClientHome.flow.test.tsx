@@ -70,10 +70,97 @@ describe("client calendar and bookings", () => {
     expect(host.textContent).toContain("no upcoming appointments");
 
     await act(async () => host.querySelector<HTMLButtonElement>("[aria-label='Available start times'] button")!.click());
-    expect(host.textContent).toContain("nothing has been sent or held");
     expect(host.textContent).toContain("2026-10-10 · 10:00 AM");
+    expect(host.textContent).toContain("not confirmed until the owner approves");
+    // Picking a time sends nothing; only the explicit send button does.
     expect(fetcher.mock.calls.every((call) => (call as unknown[])[1] === undefined
       || ((call as unknown[])[1] as RequestInit).method === undefined)).toBe(true);
+  });
+
+  describe("requesting a time", () => {
+    const pending = { appointment_id: "hold-1", status: "PENDING_APPROVAL", start_at: START,
+      end_at: "2026-10-09T22:30:00Z", duration_minutes: 90, hold_expires_at: "2026-10-11T00:00:00Z",
+      requested_at: "2026-10-10T00:00:00Z" };
+    const posts = (fetcher: ReturnType<typeof vi.fn>) => fetcher.mock.calls
+      .filter((call) => (call[1] as RequestInit | undefined)?.method === "POST") as [string, RequestInit][];
+    const pick = async () => {
+      await act(async () => host.querySelector<HTMLButtonElement>("[aria-label='Available start times'] button")!.click());
+    };
+    const send = () => Array.from(host.querySelectorAll("button"))
+      .find((b) => b.textContent?.includes("Send request for owner approval"))!;
+
+    it("sends only the start with an idempotency key and shows pending, never confirmed", async () => {
+      let sent = false;
+      const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method === "POST") { sent = true; return json(pending); }
+        return url.includes("availability") ? json({ day: TODAY, duration_minutes: 90, starts_at: [START] })
+          : json({ bookings: sent ? [pending] : [] });
+      });
+      vi.stubGlobal("fetch", fetcher);
+      await render(); await pick();
+      await act(async () => send().click());
+
+      const [url, init] = posts(fetcher)[0]!;
+      expect(url).toBe("https://api.example.test/v1/client/requests");
+      expect(JSON.parse(init.body as string)).toEqual({ start_at: START });
+      const headers = init.headers as Record<string, string>;
+      expect(headers["Idempotency-Key"]).toBeTruthy();
+      expect(headers.Authorization).toBe("Bearer access");
+      expect(host.querySelector("[role=status]")?.textContent).toContain("2026-10-10 · 10:00 AM");
+      expect(host.querySelector("[role=status]")?.textContent).toContain("waiting for owner approval");
+      expect(host.textContent).toContain("Waiting for approval");
+      expect(host.textContent).not.toContain("Confirmed");
+      expect(host.querySelector("[aria-label='Request this time']")).toBeNull();
+    });
+
+    it("reuses the key when a lost response is retried", async () => {
+      let calls = 0;
+      const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method === "POST") { calls += 1; if (calls === 1) throw new Error("offline"); return json(pending); }
+        return url.includes("availability") ? json({ starts_at: [START] }) : json({ bookings: [] });
+      });
+      vi.stubGlobal("fetch", fetcher);
+      await render(); await pick();
+      await act(async () => send().click());
+      expect(host.querySelector("[role=alert]")?.textContent).toContain("will not create a second request");
+      await act(async () => send().click());
+      const keys = posts(fetcher).map(([, init]) => (init.headers as Record<string, string>)["Idempotency-Key"]);
+      expect(keys).toHaveLength(2);
+      expect(keys[0]).toBe(keys[1]);
+      expect(host.querySelector("[role=status]")?.textContent).toContain("waiting for owner approval");
+    });
+
+    it("offers current alternatives after a stale choice and sends nothing else", async () => {
+      const alternative = "2026-10-09T22:00:00Z";
+      const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method === "POST") return json({ detail: { code: "SLOT_CONFLICT", message: "x", alternatives: [alternative] } }, 409);
+        return url.includes("availability") ? json({ starts_at: [START] }) : json({ bookings: [] });
+      });
+      vi.stubGlobal("fetch", fetcher);
+      await render(); await pick();
+      await act(async () => send().click());
+      const alert = host.querySelector("[role=alert]")!;
+      expect(alert.textContent).toContain("nothing was requested");
+      expect(alert.querySelector("button")?.textContent).toBe("2026-10-10 · 11:00 AM");
+      expect(host.textContent).not.toContain("Waiting for approval");
+      expect(posts(fetcher)).toHaveLength(1);
+      await act(async () => alert.querySelector<HTMLButtonElement>("button")!.click());
+      expect(host.textContent).toContain("2026-10-10 · 11:00 AM");
+      expect(host.querySelector("[aria-label='Request this time']")).not.toBeNull();
+    });
+
+    it.each([[403, null], [503, "not available right now"], [500, "was not sent"]])(
+      "handles request status %i", async (status, message) => {
+        vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+          if (init?.method === "POST") return json({}, status);
+          return url.includes("availability") ? json({ starts_at: [START] }) : json({ bookings: [] });
+        }));
+        await render(); await pick();
+        await act(async () => send().click());
+        if (message === null) expect(ended).toHaveBeenCalled();
+        else expect(host.querySelector("[role=alert]")?.textContent).toContain(message);
+        expect(host.querySelector("[role=status]")).toBeNull();
+      });
   });
 
   it("requests the picked business day", async () => {
