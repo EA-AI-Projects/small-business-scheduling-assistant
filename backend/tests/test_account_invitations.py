@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,7 +13,10 @@ from scheduling.account_invitations import (
     InvitationDenied,
     VerifiedAccount,
 )
-from scheduling.adapters.account_invitations_aws import CognitoAccountDirectory
+from scheduling.adapters.account_invitations_aws import (
+    CognitoAccountDirectory,
+    DynamoClientInvitations,
+)
 from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.domain.client_records import ClientRecordService, HomeSize
 from scheduling.identity_links import IdentityLink, IdentityLinks, LinkConflict, LinkRole, LinkState
@@ -297,3 +301,22 @@ def test_existing_cognito_invitee_needs_matching_verified_email() -> None:
         assert not cognito.sent
     directory = CognitoAccountDirectory(Cognito("CLIENT@example.test", "true"), "synthetic-pool")
     assert directory.create_or_find_invitee("client@example.test") == ("existing-sub", False)
+
+
+def test_dynamo_activation_escapes_reserved_role_attribute() -> None:
+    """The deployed activation transaction must be valid for DynamoDB's reserved words."""
+    dynamo = Mock()
+    invitation = ClientInvitation(
+        "pilot", "client-a", "sub-1", "email-hash", NOW + timedelta(hours=24),
+        NOW, "owner-sub", sent_at=NOW)
+    pending = IdentityLink(
+        "sub-1", LinkRole.CLIENT, "pilot", "client-a", LinkState.PENDING,
+        1, NOW, "owner-sub", "client invited")
+
+    DynamoClientInvitations(dynamo, "synthetic-table", object()).activate_link(
+        invitation, pending, NOW + timedelta(minutes=1))
+
+    writes = dynamo.transact_write_items.call_args.kwargs["TransactItems"]
+    link_update = writes[1]["Update"]
+    assert "#role = :role" in link_update["ConditionExpression"]
+    assert link_update["ExpressionAttributeNames"]["#role"] == "role"
