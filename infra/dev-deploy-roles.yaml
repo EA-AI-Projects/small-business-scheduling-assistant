@@ -100,9 +100,10 @@ Parameters:
     Default: ''
     AllowedPattern: '|[a-z0-9-]+_[A-Za-z0-9]+'
     Description: >-
-      Optional. After the dev stack exists, update this stack with the user
-      pool ID to pin the Cognito admin actions to that one pool. Empty means
-      "any pool tagged with this CloudFormation stack".
+      Set after the dev stack creates its user pool and before sending client
+      account invitations. It pins Cognito admin actions to that pool and
+      enables those actions in the Lambda permissions boundary. Empty leaves
+      invitation delivery unavailable.
   AmplifyAppId:
     Type: String
     Default: ''
@@ -187,6 +188,13 @@ Resources:
             Effect: Allow
             Action: ssm:GetParameter
             Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/scheduling/${Environment}/*'
+          - !If
+            - HasUserPoolId
+            - Sid: ClientAccountInvitations
+              Effect: Allow
+              Action: [cognito-idp:AdminGetUser, cognito-idp:AdminCreateUser]
+              Resource: !Sub 'arn:${AWS::Partition}:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${OwnerUserPoolId}'
+            - !Ref AWS::NoValue
 
   # ---------------------------------------------------------------------------
   # CloudFormation execution role
