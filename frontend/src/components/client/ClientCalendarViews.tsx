@@ -2,10 +2,10 @@ import { useCallback, useRef, useState } from "react";
 
 import type { CalendarItem } from "@/calendar/item";
 import type { CalendarState } from "@/calendar/useCalendarState";
-import { bookingState, isMoveRequest, type ClientBooking } from "@/lib/clientBookings";
+import { bookingState, hasVersion, isMoveRequest, pendingReplacement, type ClientBooking } from "@/lib/clientBookings";
 import { addMonths, monthStart } from "@/lib/monthGrid";
 import { scheduleEvents } from "@/lib/scheduleEvents";
-import { addDays, datesForView, dayKey, todayKey, type CalendarView } from "@/lib/time";
+import { addDays, datesForView, dayKey, localStamp, localTime, todayKey, type CalendarView } from "@/lib/time";
 
 import { CalendarGrid } from "../schedule/CalendarGrid";
 import { EventCard } from "../schedule/EventCard";
@@ -30,7 +30,8 @@ const noSlot = () => undefined;
  * Tapping a day in Month, Year, or a Week heading opens Day.
  */
 export function ClientCalendarViews({ items, bookings, calendar, zone, nowMs, loading, error, maxDate = null,
-  availableStarts = [], selectedStart = null, onAvailableSelect, onEventSelect }: {
+  availableStarts = [], selectedStart = null, onAvailableSelect, onEventSelect, confirming, changing = false,
+  changeError, onCancel, onConfirmCancel, onDismissCancel, onMove }: {
   items: CalendarItem[]; bookings: ClientBooking[]; calendar: CalendarState; zone: string; nowMs: number;
   loading: boolean; error: string | null;
   /** Last browsable date (booking horizon); Schedule offers no Load more past it. */
@@ -38,6 +39,10 @@ export function ClientCalendarViews({ items, bookings, calendar, zone, nowMs, lo
   availableStarts?: string[]; selectedStart?: string | null;
   onAvailableSelect?: (start: string, element: HTMLElement) => void;
   onEventSelect?: () => void;
+  confirming?: ClientBooking | null; changing?: boolean; changeError?: string | null;
+  onCancel?: (booking: ClientBooking) => void;
+  onConfirmCancel?: () => void; onDismissCancel?: () => void;
+  onMove?: (booking: ClientBooking) => void;
 }) {
   const { date, view, scheduleDays } = calendar;
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -50,7 +55,7 @@ export function ClientCalendarViews({ items, bookings, calendar, zone, nowMs, lo
     if (origin.current?.isConnected) return origin.current;
     return document.querySelector<HTMLElement>(`[data-event-id="${CSS.escape(id)}"]`);
   }, []);
-  const close = useCallback(() => setSelectedId(null), []);
+  const close = useCallback(() => { setSelectedId(null); onDismissCancel?.(); }, [onDismissCancel]);
   const select = (id: string, element: HTMLElement) => {
     onEventSelect?.();
     origin.current = element;
@@ -66,6 +71,11 @@ export function ClientCalendarViews({ items, bookings, calendar, zone, nowMs, lo
 
   const selectedItem = selectedId ? items.find((item) => item.event_id === selectedId) : undefined;
   const selectedBooking = selectedId ? bookings.find((item) => item.appointment_id === selectedId) : undefined;
+  const replacement = selectedBooking?.status === "CONFIRMED"
+    ? pendingReplacement(bookings, selectedBooking) : null;
+  const canChange = selectedBooking && hasVersion(selectedBooking)
+    && (selectedBooking.status === "CONFIRMED" || selectedBooking.status === "PENDING_APPROVAL")
+    && Date.parse(selectedBooking.end_at) > nowMs;
   // The booking vanished on a refresh: close its card.
   if (selectedId && !loading && !selectedItem) setSelectedId(null);
 
@@ -117,7 +127,29 @@ export function ClientCalendarViews({ items, bookings, calendar, zone, nowMs, lo
           refocusKey={`${selectedBooking.appointment_id}|${selectedBooking.version ?? 0}`}>
           <p className="meta">Times are in the business time zone ({zone}).</p>
           <p className="meta">{detail}</p>
-          <p className="meta">To move or cancel, use Appointments in the menu.</p>
+          {replacement && <p className="meta">A move request for {localStamp(replacement.start_at, zone)} is waiting for the owner.
+            This appointment stays confirmed until then. Withdraw the move request in Appointments before changing it.</p>}
+          {canChange && !replacement && <div className="actions">
+            {selectedBooking.status === "CONFIRMED" && <button type="button" onClick={() => {
+              onMove?.(selectedBooking); close();
+            }}>Move to another time</button>}
+            <button type="button" onClick={() => onCancel?.(selectedBooking)}>
+              {selectedBooking.status === "CONFIRMED" ? "Cancel appointment"
+                : isMoveRequest(selectedBooking) ? "Withdraw move request" : "Cancel request"}</button>
+          </div>}
+          {confirming?.appointment_id === selectedBooking.appointment_id && <div role="group" aria-label="Confirm cancellation" className="notice">
+            <p>{selectedBooking.status === "CONFIRMED" ? "Cancel this confirmed appointment?"
+              : isMoveRequest(selectedBooking) ? "Withdraw this move request? Your original appointment stays confirmed."
+                : "Cancel this request?"}{" "}
+              <strong>{localStamp(selectedBooking.start_at, zone)}</strong> to {localTime(selectedBooking.end_at, zone)} ({zone}).
+              {selectedBooking.status === "CONFIRMED" ? " The time is released and the owner is told." : ""}</p>
+            <button type="button" disabled={changing} onClick={onConfirmCancel}>
+              {changing ? "Cancelling…" : isMoveRequest(selectedBooking) ? "Yes, withdraw this request"
+                : `Yes, cancel this ${selectedBooking.status === "CONFIRMED" ? "appointment" : "request"}`}</button>
+            <button type="button" disabled={changing} onClick={onDismissCancel}>
+              {isMoveRequest(selectedBooking) ? "No, keep the request" : "No, keep it"}</button>
+          </div>}
+          {changeError && <p role="alert" className="notice error">{changeError}</p>}
         </EventCard>
       )}
     </div>

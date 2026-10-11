@@ -538,4 +538,102 @@ describe("client calendar and bookings", () => {
       expect(posts(fetcher)).toHaveLength(1);
     });
   });
+
+  describe("calendar appointment actions", () => {
+    const original = { appointment_id: "calendar-visit", status: "CONFIRMED", start_at: "2026-10-10T02:00:00Z",
+      end_at: "2026-10-10T03:30:00Z", duration_minutes: 90, hold_expires_at: null, requested_at: null,
+      version: 7, replaces_appointment_id: null };
+    const replacement = { ...original, appointment_id: "calendar-move", status: "PENDING_APPROVAL",
+      start_at: START, end_at: "2026-10-09T22:30:00Z", version: 1,
+      hold_expires_at: "2026-10-11T00:00:00Z", replaces_appointment_id: original.appointment_id };
+    const action = (text: string) => Array.from(document.body.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes(text));
+    const open = () => act(async () => host.querySelector<HTMLElement>("[data-event-id='calendar-visit']")!.click());
+    const posts = (fetcher: ReturnType<typeof vi.fn>) => fetcher.mock.calls
+      .filter((call) => (call[1] as RequestInit | undefined)?.method === "POST") as [string, RequestInit][];
+    const stub = (bookings: () => unknown[], onPost: (url: string) => Response) => {
+      const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method === "POST") return onPost(url);
+        if (url.includes("availability")) return json({ starts_at: [START], duration_minutes: 90 });
+        return json({ bookings: bookings() });
+      });
+      vi.stubGlobal("fetch", fetcher);
+      return fetcher;
+    };
+
+    it("confirms the exact local visit before cancelling and refreshes the calendar", async () => {
+      let cancelled = false;
+      const fetcher = stub(() => cancelled ? [] : [original], () => {
+        cancelled = true; return json({ ...original, status: "CANCELLED", version: 8 });
+      });
+      await render("calendar"); await open();
+      expect(document.body.querySelector("[role=dialog]")?.textContent).toContain("Confirmed");
+      await act(async () => action("Cancel appointment")!.click());
+      const confirm = document.body.querySelector("[aria-label='Confirm cancellation']")!;
+      expect(confirm.textContent).toContain("2026-10-10 · 3:00 PM");
+      expect(confirm.textContent).toContain(ZONE);
+      expect(posts(fetcher)).toHaveLength(0);
+      await act(async () => action("No, keep it")!.click());
+      expect(posts(fetcher)).toHaveLength(0);
+      await act(async () => action("Cancel appointment")!.click());
+      await act(async () => action("Yes, cancel this appointment")!.click());
+      expect(posts(fetcher)).toHaveLength(1);
+      expect(posts(fetcher)[0]![0]).toContain("/v1/client/bookings/calendar-visit/cancel");
+      expect(JSON.parse(posts(fetcher)[0]![1].body as string)).toEqual({ expected_version: 7 });
+      expect(host.querySelector("[data-event-id='calendar-visit']")).toBeNull();
+      expect(host.textContent).toContain("Cancelled:");
+    });
+
+    it("moves the selected version through a calendar start and restricts changes while replacement waits", async () => {
+      let moved = false;
+      const fetcher = stub(() => moved ? [original, replacement] : [original], () => {
+        moved = true; return json(replacement);
+      });
+      await render("calendar"); await open();
+      await act(async () => action("Move to another time")!.click());
+      expect(host.textContent).toContain("You are moving your appointment");
+      expect(posts(fetcher)).toHaveLength(0);
+      await act(async () => host.querySelector<HTMLButtonElement>("[data-available-start]")!.click());
+      await act(async () => action("Send move request for owner approval")!.click());
+      expect(posts(fetcher)[0]![0]).toContain("/v1/client/bookings/calendar-visit/reschedule");
+      expect(JSON.parse(posts(fetcher)[0]![1].body as string)).toEqual({ start_at: START, expected_version: 7 });
+      expect(host.textContent).toContain("original appointment is still confirmed");
+      await open();
+      const card = document.body.querySelector("[role=dialog]")!;
+      expect(card.textContent).toContain("Withdraw the move request in Appointments");
+      expect(card.textContent).not.toContain("Cancel appointment");
+      expect(card.textContent).not.toContain("Move to another time");
+    });
+
+    it("lets the client keep the original without posting a move", async () => {
+      const fetcher = stub(() => [original], () => json(replacement));
+      await render("calendar"); await open();
+      await act(async () => action("Move to another time")!.click());
+      await act(async () => action("keep my current appointment")!.click());
+      expect(host.textContent).not.toContain("You are moving your appointment");
+      expect(posts(fetcher)).toHaveLength(0);
+      await open();
+      expect(document.body.querySelector("[role=dialog]")?.textContent).toContain("Confirmed");
+    });
+
+    it("reuses a cancellation key after a lost response and refuses stale booking state", async () => {
+      let tries = 0;
+      const fetcher = stub(() => [original], () => {
+        tries += 1;
+        if (tries === 1) throw new Error("offline");
+        return json({ detail: { code: "STALE_BOOKING" } }, 409);
+      });
+      await render("calendar"); await open();
+      await act(async () => action("Cancel appointment")!.click());
+      await act(async () => action("Yes, cancel this appointment")!.click());
+      expect(document.body.querySelector("[role=dialog]")?.textContent).toContain("Could not tell whether this was sent");
+      await act(async () => action("Yes, cancel this appointment")!.click());
+      const requests = posts(fetcher);
+      expect(requests).toHaveLength(2);
+      expect((requests[0]![1].headers as Record<string, string>)["Idempotency-Key"])
+        .toBe((requests[1]![1].headers as Record<string, string>)["Idempotency-Key"]);
+      expect(document.body.textContent).toContain("changed since you last looked");
+      expect(document.body.querySelector("[aria-label='Confirm cancellation']")).toBeNull();
+    });
+  });
 });
