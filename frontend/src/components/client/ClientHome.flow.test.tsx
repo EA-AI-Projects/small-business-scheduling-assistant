@@ -573,7 +573,9 @@ describe("client calendar and bookings", () => {
       expect(confirm.textContent).toContain("2026-10-10 · 3:00 PM");
       expect(confirm.textContent).toContain(ZONE);
       expect(posts(fetcher)).toHaveLength(0);
+      action("No, keep it")!.focus();
       await act(async () => action("No, keep it")!.click());
+      expect(document.body.querySelector("[role=dialog]")?.contains(document.activeElement)).toBe(true);
       expect(posts(fetcher)).toHaveLength(0);
       await act(async () => action("Cancel appointment")!.click());
       await act(async () => action("Yes, cancel this appointment")!.click());
@@ -627,6 +629,7 @@ describe("client calendar and bookings", () => {
       await act(async () => action("Cancel appointment")!.click());
       await act(async () => action("Yes, cancel this appointment")!.click());
       expect(document.body.querySelector("[role=dialog]")?.textContent).toContain("Could not tell whether this was sent");
+      action("Yes, cancel this appointment")!.focus();
       await act(async () => action("Yes, cancel this appointment")!.click());
       const requests = posts(fetcher);
       expect(requests).toHaveLength(2);
@@ -634,6 +637,18 @@ describe("client calendar and bookings", () => {
         .toBe((requests[1]![1].headers as Record<string, string>)["Idempotency-Key"]);
       expect(document.body.textContent).toContain("changed since you last looked");
       expect(document.body.querySelector("[aria-label='Confirm cancellation']")).toBeNull();
+      expect(document.body.querySelector("[role=dialog]")?.contains(document.activeElement)).toBe(true);
+    });
+
+    it("does not offer cancellation for a pending hold whose status is being checked", async () => {
+      const pending = { ...replacement, appointment_id: "checking-request", replaces_appointment_id: null,
+        start_at: original.start_at, end_at: original.end_at, hold_expires_at: "2026-10-09T23:00:00Z" };
+      const fetcher = stub(() => [pending], () => json({ ...pending, status: "CANCELLED" }));
+      await render("calendar");
+      await act(async () => host.querySelector<HTMLElement>("[data-event-id='checking-request']")!.click());
+      expect(document.body.querySelector("[role=dialog]")?.textContent).toContain("Checking status");
+      expect(action("Cancel request")).toBeUndefined();
+      expect(posts(fetcher)).toHaveLength(0);
     });
   });
 });

@@ -73,8 +73,9 @@ export function ClientCalendarViews({ items, bookings, calendar, zone, nowMs, lo
   const selectedBooking = selectedId ? bookings.find((item) => item.appointment_id === selectedId) : undefined;
   const replacement = selectedBooking?.status === "CONFIRMED"
     ? pendingReplacement(bookings, selectedBooking) : null;
+  const selectedState = selectedBooking ? bookingState(selectedBooking, nowMs) : null;
   const canChange = selectedBooking && hasVersion(selectedBooking)
-    && (selectedBooking.status === "CONFIRMED" || selectedBooking.status === "PENDING_APPROVAL")
+    && (selectedState?.tone === "confirmed" || selectedState?.label === "Waiting for approval")
     && Date.parse(selectedBooking.end_at) > nowMs;
   // The booking vanished on a refresh: close its card.
   if (selectedId && !loading && !selectedItem) setSelectedId(null);
@@ -124,7 +125,7 @@ export function ClientCalendarViews({ items, bookings, calendar, zone, nowMs, lo
       {selectedItem && selectedBooking && (
         <EventCard item={selectedItem} zone={zone} title={itemTitle(selectedItem)} getAnchor={getAnchor}
           onClose={close} onAnchorPress={pressItem} onSlotPress={noSlot} returnFocus={returnFocus}
-          refocusKey={`${selectedBooking.appointment_id}|${selectedBooking.version ?? 0}`}>
+          refocusKey={`${selectedBooking.appointment_id}|${selectedBooking.version ?? 0}|${confirming?.appointment_id === selectedBooking.appointment_id ? "confirm" : "detail"}`}>
           <p className="meta">Times are in the business time zone ({zone}).</p>
           <p className="meta">{detail}</p>
           {replacement && <p className="meta">A move request for {localStamp(replacement.start_at, zone)} is waiting for the owner.
