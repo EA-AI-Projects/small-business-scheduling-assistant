@@ -31,13 +31,18 @@ function eventLabel(placed: PlacedEvent, zone: string, day: string): string {
     dayTitle(day)}${extra}`;
 }
 
-export function CalendarGrid({ days, events, policy, zone, selectedId, onSelect, onSlotPress, onDay }: {
+export function CalendarGrid({ days, events, policy, zone, selectedId, onSelect, onSlotPress, onDay,
+  availableStarts, selectedStart, onAvailableSelect }: {
   days: string[]; events: CalendarItem[]; policy?: AvailabilityPolicy | null; zone: string; selectedId: string | null;
   onSelect: (id: string, element: HTMLElement) => void;
   /** A press on an empty part of a day column (not on an item, heading, or the gutter). */
   onSlotPress: (column: HTMLElement, x: number, y: number) => void;
   /** When given, a weekday heading in the week grid opens that day. */
   onDay?: (date: string) => void;
+  /** Client-scoped starts returned by availability; omitted for the owner calendar. */
+  availableStarts?: string[];
+  selectedStart?: string | null;
+  onAvailableSelect?: (start: string, element: HTMLElement) => void;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const [now, setNow] = useState(() => new Date());
@@ -106,6 +111,17 @@ export function CalendarGrid({ days, events, policy, zone, selectedId, onSelect,
                   <span>{range.wholeDay ? "Closed (date exception)" : "Closed (date exception hours)"}</span>
                 </div>
               ))}
+              {availableStarts?.filter((start) => localInput(start, zone).slice(0, 10) === day).map((start) => {
+                const local = localInput(start, zone);
+                const minute = Number(local.slice(11, 13)) * 60 + Number(local.slice(14, 16));
+                return <button key={start} type="button" className="cal-available" data-popover-anchor=""
+                  data-available-start={start} aria-haspopup="dialog" aria-pressed={selectedStart === start}
+                  aria-label={`Available ${localTime(start, zone)}, ${dayTitle(day)}; request owner approval`}
+                  style={{ top: `${(minute / MINUTES_PER_DAY) * 100}%` }}
+                  onClick={(click) => onAvailableSelect?.(start, click.currentTarget)}>
+                  {localTime(start, zone)}
+                </button>;
+              })}
               {layoutDay(events, day, zone).map((placed) => (
                 <EventBlock key={placed.event.event_id} placed={placed} zone={zone} day={day}
                   selected={placed.event.event_id === selectedId} onSelect={onSelect} />

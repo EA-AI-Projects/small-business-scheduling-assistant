@@ -55,7 +55,7 @@ describe("client calendar and bookings", () => {
   afterEach(async () => { vi.useRealTimers(); await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
   const render = (start: "calendar" | "appointments" = "appointments") => act(async () => root.render(<Shell start={start} />));
   // The calendar view has its own status notes; the request outcome is the last one on the page.
-  const note = () => Array.from(host.querySelectorAll("[aria-labelledby=client-times] [role=status]")).at(-1) ?? null;
+  const note = () => Array.from(host.querySelectorAll(".notice[role=status]")).at(-1) ?? null;
   const nav = (page: string) => act(async () => host.querySelector<HTMLButtonElement>(`[data-nav=${page}]`)!.click());
 
   it("lists open starts in the business zone in Day view, without why other times are unavailable", async () => {
@@ -64,9 +64,9 @@ describe("client calendar and bookings", () => {
     vi.stubGlobal("fetch", fetcher);
     await render("calendar");
 
-    expect(host.textContent).toContain("asks the owner for approval");
-    expect(host.textContent).toContain("Open times");
-    expect(host.querySelector("[aria-label='Available start times'] button")?.textContent).toBe("10:00 AM");
+    expect(host.textContent).toContain("A request is not an appointment until the owner approves it");
+    expect(host.textContent).not.toContain("Open times");
+    expect(host.querySelector("[data-available-start]")?.textContent).toBe("10:00 AM");
     expect(host.textContent).toContain(ZONE);
     expect(host.textContent).toContain("about 90 minutes");
     const urls = fetcher.mock.calls.map(([url]) => url);
@@ -75,9 +75,9 @@ describe("client calendar and bookings", () => {
     expect(urls.some((url) => url.includes("duration_minutes"))).toBe(false);
     expect(host.querySelector("select")).toBeNull();
 
-    await act(async () => host.querySelector<HTMLButtonElement>("[aria-label='Available start times'] button")!.click());
-    expect(host.textContent).toContain("2026-10-10 · 10:00 AM");
-    expect(host.textContent).toContain("not confirmed until the owner approves");
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-available-start]")!.click());
+    expect(document.body.textContent).toContain("2026-10-10 · 10:00 AM");
+    expect(document.body.textContent).toContain("not confirmed until the owner approves");
     // Picking a time sends nothing; only the explicit send button does.
     expect(fetcher.mock.calls.every((call) => (call as unknown[])[1] === undefined
       || ((call as unknown[])[1] as RequestInit).method === undefined)).toBe(true);
@@ -97,7 +97,7 @@ describe("client calendar and bookings", () => {
     expect(host.textContent).toContain("Waiting for approval");
     expect(host.textContent).toContain("Not confirmed yet");
     expect(host.textContent).not.toContain("Confirmed");
-    expect(host.querySelector("[aria-label='Available start times']")).toBeNull();
+    expect(host.querySelector("[data-available-start]")).toBeNull();
     expect(fetcher.mock.calls.some(([url]) => url.includes("availability"))).toBe(false);
 
     const refresh = () => Array.from(host.querySelectorAll("button")).find((b) => b.textContent === "Refresh")!;
@@ -121,9 +121,9 @@ describe("client calendar and bookings", () => {
     });
     vi.stubGlobal("fetch", fetcher);
     await render("calendar");
-    const times = "[aria-label='Available start times']";
-    await act(async () => host.querySelector<HTMLButtonElement>(`${times} button`)!.click());
-    await act(async () => Array.from(host.querySelectorAll("button"))
+    const times = "[data-available-start]";
+    await act(async () => host.querySelector<HTMLButtonElement>(times)!.click());
+    await act(async () => Array.from(document.body.querySelectorAll("button"))
       .find((b) => b.textContent?.includes("Send request for owner approval"))!.click());
     expect(note()?.textContent).toContain("waiting for owner approval");
 
@@ -152,9 +152,9 @@ describe("client calendar and bookings", () => {
     const posts = (fetcher: ReturnType<typeof vi.fn>) => fetcher.mock.calls
       .filter((call) => (call[1] as RequestInit | undefined)?.method === "POST") as [string, RequestInit][];
     const pick = async () => {
-      await act(async () => host.querySelector<HTMLButtonElement>("[aria-label='Available start times'] button")!.click());
+      await act(async () => host.querySelector<HTMLButtonElement>("[data-available-start]")!.click());
     };
-    const send = () => Array.from(host.querySelectorAll("button"))
+    const send = () => Array.from(document.body.querySelectorAll("button"))
       .find((b) => b.textContent?.includes("Send request for owner approval"))!;
 
     it("sends only the start with an idempotency key and shows pending, never confirmed", async () => {
@@ -176,8 +176,8 @@ describe("client calendar and bookings", () => {
       expect(headers.Authorization).toBe("Bearer access");
       expect(note()?.textContent).toContain("2026-10-10 · 10:00 AM");
       expect(note()?.textContent).toContain("waiting for owner approval");
-      expect(host.querySelector("[aria-labelledby=client-times]")!.textContent).not.toContain("Confirmed");
-      expect(host.querySelector("[aria-label='Request this time']")).toBeNull();
+      expect(note()?.textContent).not.toContain("Confirmed");
+      expect(document.body.querySelector("[role=dialog]")).toBeNull();
     });
 
     it("does not call a replayed request waiting when it was already declined", async () => {
@@ -223,11 +223,11 @@ describe("client calendar and bookings", () => {
       const alert = host.querySelector("[role=alert]")!;
       expect(alert.textContent).toContain("nothing was requested");
       expect(alert.querySelector("button")?.textContent).toBe("2026-10-10 · 11:00 AM");
-      expect(host.querySelector("[aria-labelledby=client-times]")!.textContent).not.toContain("Waiting for approval");
+      expect(alert.textContent).not.toContain("Waiting for approval");
       expect(posts(fetcher)).toHaveLength(1);
       await act(async () => alert.querySelector<HTMLButtonElement>("button")!.click());
-      expect(host.textContent).toContain("2026-10-10 · 11:00 AM");
-      expect(host.querySelector("[aria-label='Request this time']")).not.toBeNull();
+      expect(document.body.textContent).toContain("2026-10-10 · 11:00 AM");
+      expect(document.body.querySelector("[role=dialog]")).not.toBeNull();
     });
 
     it.each([[403, null], [503, "not available right now"], [500, "was not sent"]])(
@@ -263,7 +263,7 @@ describe("client calendar and bookings", () => {
         expect(ended).not.toHaveBeenCalled();
         expect(host.querySelector("[role=alert]")?.textContent).toContain(message);
       }
-      expect(host.querySelector("[aria-label='Available start times']")).toBeNull();
+      expect(host.querySelector("[data-available-start]")).toBeNull();
     });
 
   it("shows no times without a business time zone", async () => {
@@ -338,7 +338,7 @@ describe("client calendar and bookings", () => {
       requested_at: "2026-10-10T00:00:00Z", version: 1, replaces_appointment_id: "visit-1" };
     const posts = (fetcher: ReturnType<typeof vi.fn>) => fetcher.mock.calls
       .filter((call) => (call[1] as RequestInit | undefined)?.method === "POST") as [string, RequestInit][];
-    const button = (text: string) => Array.from(host.querySelectorAll("button"))
+    const button = (text: string) => Array.from(document.body.querySelectorAll("button"))
       .find((b) => b.textContent?.includes(text));
     const stub = (reads: unknown[], onPost: (url: string) => Response) => {
       const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
@@ -398,9 +398,9 @@ describe("client calendar and bookings", () => {
       const fetcher = stub([[original], [original], [original, replacement]], () => json(replacement));
       await render();
       await act(async () => button("Move to another time")!.click()); // opens the Calendar's Day view
-      expect(host.querySelector("[aria-label='Moving this appointment']")?.textContent)
+      expect(host.querySelector(".client-home > [role=status]")?.textContent)
         .toContain("stays confirmed until the owner approves");
-      await act(async () => host.querySelector<HTMLButtonElement>("[aria-label='Available start times'] button")!.click());
+      await act(async () => host.querySelector<HTMLButtonElement>("[data-available-start]")!.click());
       await act(async () => button("Send move request for owner approval")!.click());
 
       const [url, init] = posts(fetcher)[0]!;
@@ -443,7 +443,7 @@ describe("client calendar and bookings", () => {
         alternatives: ["2026-10-09T23:00:00Z"] } }, 409));
       await render();
       await act(async () => button("Move to another time")!.click());
-      await act(async () => host.querySelector<HTMLButtonElement>("[aria-label='Available start times'] button")!.click());
+      await act(async () => host.querySelector<HTMLButtonElement>("[data-available-start]")!.click());
       await act(async () => button("Send move request for owner approval")!.click());
       expect(host.querySelector("[role=alert]")?.textContent).toContain("no longer open");
       expect(host.querySelector("[aria-label='Other open times']")).not.toBeNull();
@@ -464,7 +464,7 @@ describe("client calendar and bookings", () => {
         vi.stubGlobal("fetch", fetcher);
         return { fetcher, finish: () => act(async () => release(json({ bookings: second }))) };
       };
-      const timeButtons = () => host.querySelectorAll("[aria-label='Available start times'] button");
+      const timeButtons = () => host.querySelectorAll("[data-available-start]");
 
       it("offers no time and posts no new request until the booking is known", async () => {
         const { fetcher, finish } = slow([original]);
@@ -475,7 +475,7 @@ describe("client calendar and bookings", () => {
         expect(host.textContent).toContain("Loading times");
         await finish();
         expect(timeButtons()).toHaveLength(1);
-        expect(host.querySelector("[aria-label='Moving this appointment']")).not.toBeNull();
+        expect(host.querySelector(".client-home > [role=status]")).not.toBeNull();
         await act(async () => (timeButtons()[0] as HTMLElement).click());
         expect(button("Send request for owner approval")).toBeUndefined();
         await act(async () => button("Send move request for owner approval")!.click());
@@ -487,7 +487,7 @@ describe("client calendar and bookings", () => {
         await render();
         await act(async () => button("Move to another time")!.click());
         await finish();
-        expect(host.querySelector("[aria-label='Moving this appointment']")).toBeNull();
+        expect(host.querySelector(".client-home > [role=status]")).toBeNull();
         expect(host.querySelector("[role=alert]")?.textContent).toContain("move was cancelled and nothing was sent");
         expect(posts(fetcher)).toHaveLength(0);
       });

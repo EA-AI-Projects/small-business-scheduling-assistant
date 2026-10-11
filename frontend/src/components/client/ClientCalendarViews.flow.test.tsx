@@ -75,16 +75,44 @@ describe("client calendar views", () => {
   const availabilityCalls = () => fetcher.mock.calls.filter(([url]) => String(url).includes("availability")).length;
   const eventLabels = () => Array.from(host.querySelectorAll("[data-event-id]")).map((node) => node.getAttribute("aria-label") ?? "");
 
-  it("switches views and dates, showing only the client's own bookings and open times only in Day", async () => {
+  it("requests a Week start from its business-local column after an explicit popover press", async () => {
+    const pendingStart = openStart("2026-10-11");
+    fetcher.mockImplementation(async (url: string, init?: RequestInit) => init?.method === "POST"
+      ? json(booking("new", "PENDING_APPROVAL", pendingStart))
+      : url.includes("availability")
+        ? json({ day: new URL(url).searchParams.get("day"), duration_minutes: 90,
+          starts_at: [openStart(new URL(url).searchParams.get("day")!)] })
+        : json({ bookings: [] }));
+    await setView("week");
+    const column = host.querySelector<HTMLElement>('[data-day="2026-10-11"]')!;
+    const start = column.querySelector<HTMLButtonElement>('[data-available-start]')!;
+    expect(start).toBeTruthy();
+    expect(start.getAttribute("style")).toContain("41.666");
+    expect(start.getAttribute("aria-label")).toContain("Sunday, Oct 11");
+    expect(start.tabIndex).toBe(0);
+    await act(async () => start.click());
+    const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]')!;
+    expect(dialog.textContent).toContain("2026-10-11 · 10:00 AM");
+    expect(dialog.textContent).toContain(ZONE);
+    expect(dialog.textContent).toContain("not confirmed until the owner approves");
+    expect(fetcher.mock.calls.some((call) => (call[1] as RequestInit | undefined)?.method === "POST")).toBe(false);
+    await act(async () => Array.from(dialog.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Send request for owner approval"))!.click());
+    expect(fetcher.mock.calls.filter((call) => (call[1] as RequestInit | undefined)?.method === "POST")).toHaveLength(1);
+    expect(host.textContent).toContain("waiting for owner approval");
+  });
+
+  it("switches views and dates, showing only the client's own bookings and open times in Day and Week", async () => {
     // Day (default): today has nothing booked, open times are offered, the legend names all three states.
     expect(host.textContent).toContain("You have no appointments or requests in this day");
-    expect(host.querySelector("[aria-label='Available start times']")).not.toBeNull();
+    expect(host.querySelector("[data-available-start]")).not.toBeNull();
     expect(host.textContent).toContain("Move request (not confirmed)");
     expect(availabilityCalls()).toBe(1);
 
-    // Week: this week is empty; next week shows all three states, distinctly, with no open times.
+    // Week: this week has an available start; next week shows all three states, distinctly.
     await setView("week");
-    expect(host.querySelector("[aria-label='Available start times']")).toBeNull();
+    expect(host.querySelector("[data-available-start]")).not.toBeNull();
+    expect(availabilityCalls()).toBe(3);
     await press("Next week");
     const labels = eventLabels();
     expect(labels).toHaveLength(3);
@@ -103,44 +131,44 @@ describe("client calendar views", () => {
 
     // Tapping a weekday heading opens Day for that date, with its open times.
     await press("Tuesday, Oct 13, open Day view");
-    expect(host.querySelector("[aria-label='Available start times']")).not.toBeNull();
+    expect(host.querySelector("[data-available-start]")).not.toBeNull();
     expect(eventLabels()).toHaveLength(1);
-    expect(availabilityCalls()).toBe(2);
+    expect(availabilityCalls()).toBe(11);
 
     // Month and tapping a day: chips only, no open times, then Day again.
     await setView("month");
-    expect(host.querySelector("[aria-label='Available start times']")).toBeNull();
+    expect(host.querySelector("[data-available-start]")).toBeNull();
     expect(host.querySelectorAll(".month-item")).toHaveLength(3);
     await press("Monday, Oct 12, open Day view");
     expect(eventLabels()[0]).toContain("Confirmed");
-    expect(host.querySelector("[aria-label='Available start times']")).not.toBeNull();
+    expect(host.querySelector("[data-available-start]")).not.toBeNull();
 
     // Schedule lists the upcoming items; Year counts them; neither offers times.
     await setView("schedule");
     expect(host.querySelectorAll(".schedule-item")).toHaveLength(3);
     expect(host.textContent).toContain("Your move request");
-    expect(host.querySelector("[aria-label='Available start times']")).toBeNull();
+    expect(host.querySelector("[data-available-start]")).toBeNull();
     await setView("year");
-    expect(host.querySelector("[aria-label='Available start times']")).toBeNull();
+    expect(host.querySelector("[data-available-start]")).toBeNull();
     // Browsing stops at the horizon: the year holding it is the last one.
     expect(host.querySelector<HTMLButtonElement>("[aria-label='Next year']")!.disabled).toBe(true);
 
-    // Only Day views asked for open times; the other views never did.
-    expect(availabilityCalls()).toBe(3);
+    // Day and Week views asked only for dates in the horizon.
+    expect(availabilityCalls()).toBe(12);
     expect(fetcher.mock.calls.every(([url]) => String(url).startsWith("https://api.example.test/v1/client/"))).toBe(true);
   }, SLOW);
 
   it("shows an empty calendar with a short note for past dates", async () => {
     await press("Previous day");
     expect(host.textContent).toContain("Past visits are not shown.");
-    expect(host.querySelector("[aria-label='Available start times']")).toBeNull();
+    expect(host.querySelector("[data-available-start]")).toBeNull();
     expect(eventLabels()).toHaveLength(0);
     expect(availabilityCalls()).toBe(1);
   });
   it("stops browsing at the booking horizon and explains a day beyond it", async () => {
     // Today is Oct 10 in Auckland; the horizon day is Oct 24.
     for (let step = 0; step < 14; step += 1) await press("Next day");
-    expect(host.querySelector("[aria-label='Available start times']")).not.toBeNull();
+    expect(host.querySelector("[data-available-start]")).not.toBeNull();
     const next = host.querySelector<HTMLButtonElement>("[aria-label='Next day']")!;
     expect(next.disabled).toBe(true);
     await act(async () => next.click());
@@ -148,7 +176,10 @@ describe("client calendar views", () => {
     expect(host.textContent).not.toContain("We only book up to");
 
     // Switching views at the edge does not crash; the period holding the horizon is the last one.
-    for (const view of ["week", "month", "schedule", "year", "day"]) await setView(view);
+    await setView("week");
+    expect(host.querySelector('[data-day="2026-10-24"] [data-available-start]')).not.toBeNull();
+    expect(host.querySelector('[data-day="2026-10-25"] [data-available-start]')).toBeNull();
+    for (const view of ["month", "schedule", "year", "day"]) await setView(view);
     await setView("month");
     expect(host.querySelector<HTMLButtonElement>("[aria-label='Next month']")!.disabled).toBe(true);
     await setView("year");
@@ -177,7 +208,7 @@ describe("client calendar views", () => {
     await setView("month");
     await press("Wednesday, Oct 28, open Day view");
     expect(host.textContent).toContain("We only book up to 14 days ahead.");
-    expect(host.querySelector("[aria-label='Available start times']")).toBeNull();
+    expect(host.querySelector("[data-available-start]")).toBeNull();
     const asked = fetcher.mock.calls.map(([url]) => String(url));
     expect(asked.some((url) => url.endsWith("day=2026-10-25"))).toBe(false);
     expect(host.querySelector<HTMLButtonElement>("[aria-label='Next day']")!.disabled).toBe(true);
@@ -218,15 +249,15 @@ describe("client calendar views", () => {
     expect(host.textContent).not.toContain("We only book up to");
   });
   it("drops a chosen time when the date or view changes", async () => {
-    const pick = () => act(async () => host.querySelector<HTMLButtonElement>("[aria-label='Available start times'] button")!.click());
+    const pick = () => act(async () => host.querySelector<HTMLButtonElement>("[data-available-start]")!.click());
     await pick();
-    expect(host.querySelector("[aria-label='Request this time']")).not.toBeNull();
+    expect(document.body.querySelector("[role=dialog]")).not.toBeNull();
     await press("Next day");
-    expect(host.querySelector("[aria-label='Request this time']")).toBeNull();
+    expect(document.body.querySelector("[role=dialog]")).toBeNull();
     await pick();
-    expect(host.querySelector("[aria-label='Request this time']")).not.toBeNull();
+    expect(document.body.querySelector("[role=dialog]")).not.toBeNull();
     await setView("week");
     await setView("day");
-    expect(host.querySelector("[aria-label='Request this time']")).toBeNull();
+    expect(document.body.querySelector("[role=dialog]")).toBeNull();
   });
 });
