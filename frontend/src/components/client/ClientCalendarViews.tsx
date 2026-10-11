@@ -26,14 +26,18 @@ const noSlot = () => undefined;
 
 /**
  * The client's own appointments and pending requests in the shared Day, Week, Month, Schedule and
- * Year views. These views show no open times; the Day view's request flow lives beside them.
+ * Year views. Day and Week also place client-scoped available starts in their time grids.
  * Tapping a day in Month, Year, or a Week heading opens Day.
  */
-export function ClientCalendarViews({ items, bookings, calendar, zone, nowMs, loading, error, maxDate = null }: {
+export function ClientCalendarViews({ items, bookings, calendar, zone, nowMs, loading, error, maxDate = null,
+  availableStarts = [], selectedStart = null, onAvailableSelect, onEventSelect }: {
   items: CalendarItem[]; bookings: ClientBooking[]; calendar: CalendarState; zone: string; nowMs: number;
   loading: boolean; error: string | null;
   /** Last browsable date (booking horizon); Schedule offers no Load more past it. */
   maxDate?: string | null;
+  availableStarts?: string[]; selectedStart?: string | null;
+  onAvailableSelect?: (start: string, element: HTMLElement) => void;
+  onEventSelect?: () => void;
 }) {
   const { date, view, scheduleDays } = calendar;
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -48,6 +52,7 @@ export function ClientCalendarViews({ items, bookings, calendar, zone, nowMs, lo
   }, []);
   const close = useCallback(() => setSelectedId(null), []);
   const select = (id: string, element: HTMLElement) => {
+    onEventSelect?.();
     origin.current = element;
     setSelectedId((current) => (current === id ? null : id));
   };
@@ -99,7 +104,8 @@ export function ClientCalendarViews({ items, bookings, calendar, zone, nowMs, lo
             onDismiss={close} onNavigate={calendar.goToDate} onDay={goDay} />
         ) : (
           <CalendarGrid days={days} events={items} zone={zone} selectedId={selectedId} onSelect={select}
-            onSlotPress={noSlot} onDay={goDay} />
+            onSlotPress={noSlot} onDay={goDay} availableStarts={availableStarts} selectedStart={selectedStart}
+            onAvailableSelect={(start, element) => { setSelectedId(null); onAvailableSelect?.(start, element); }} />
         )}
       </div>
       {!loading && !error && !anyInRange && (view === "day" || view === "week") && (

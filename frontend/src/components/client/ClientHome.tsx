@@ -3,7 +3,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { CalendarState } from "@/calendar/useCalendarState";
 import { bookingState, calendarItems, hasStalePending, hasVersion, nextHoldExpiry, parseAvailability, parseBookings, pendingReplacement, type ClientBooking } from "@/lib/clientBookings";
 import type { OwnerConfig } from "@/lib/config";
-import { addDays, dayKey, localStamp, localTime, todayKey } from "@/lib/time";
+import { addDays, datesForView, dayKey, localStamp, localTime, todayKey } from "@/lib/time";
+import { PopoverCard } from "@/components/PopoverCard";
 
 import { ClientCalendarViews } from "./ClientCalendarViews";
 
@@ -79,7 +80,7 @@ export interface MoveState { booking: ClientBooking | null; set: (booking: Clien
 
 /**
  * Client pages, in the business time zone. With `calendar` (the Calendar page) it shows the client's own
- * bookings in the shared views and, in Day view, the open times; choosing one and confirming sends a
+ * bookings and open times in the shared Day and Week views; choosing one and confirming sends a
  * request for owner approval, never an appointment until the owner approves. Without it (the Appointments
  * page) it lists the bookings with cancel, withdraw and move. The visit length is the owner-set length on
  * the client's profile, chosen by the server.
@@ -108,15 +109,18 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
 }) {
   const date = calendar ? calendar.date : "";
   const setDate = (day: string) => calendar?.goToDate(day);
-  // The Calendar page asks for open times only in Day view, and never for a past day or past the booking horizon.
+  // Availability is queried only for visible days within the booking horizon.
   const today = todayKey(zone);
   const maxDate = horizonDays === null ? null : addDays(today, horizonDays);
   const beyondHorizon = maxDate !== null && date > maxDate;
-  const wantTimes = Boolean(calendar) && calendar?.view === "day" && date >= today && !beyondHorizon;
+  const availabilityDays = calendar && (calendar.view === "day" || calendar.view === "week")
+    ? datesForView(date, calendar.view).filter((day) => day >= today && (maxDate === null || day <= maxDate)) : [];
+  const availabilityDaysKey = availabilityDays.join(",");
   const [bookings, setBookings] = useState<ClientBooking[] | null>(null);
   const [bookingsError, setBookingsError] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [chosen, setChosen] = useState<string | null>(null);
+  const chosenAnchor = useRef<HTMLElement | null>(null);
   // One key per chosen time, reused on a retry so a lost response cannot create a second request.
   const attempt = useRef<{ id: string; key: string } | null>(null);
   // A visit being moved: the confirmed original stays booked until the owner approves the replacement.
@@ -138,7 +142,7 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
   const [refresh, setRefresh] = useState(0);
   const [availability, setAvailability] = useState<{ key: string; starts: string[] | null;
     minutes: number | null; error: string | null } | null>(null);
-  const availabilityKey = `${date}|${refresh}`;
+  const availabilityKey = `${availabilityDaysKey}|${refresh}`;
 
   const fail = useCallback((error: unknown, set: (message: string) => void) => {
     if (error instanceof Unauthorized) onSessionEnded();
@@ -185,19 +189,21 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
   }, [bookings]);
 
   useEffect(() => {
-    if (!wantTimes) return;
+    if (!availabilityDaysKey) return;
     let current = true;
     const key = availabilityKey;
-    read(config, token, `/v1/client/availability?day=${date}`)
+    Promise.all(availabilityDaysKey.split(",").map((day) =>
+      read(config, token, `/v1/client/availability?day=${day}`)))
       .then((data) => {
         if (!current) return;
-        const parsed = parseAvailability(data);
-        setAvailability({ key, starts: parsed.starts, minutes: parsed.durationMinutes, error: null });
+        const parsed = data.map(parseAvailability);
+        setAvailability({ key, starts: parsed.flatMap((result) => result.starts),
+          minutes: parsed[0]?.durationMinutes ?? null, error: null });
       })
       .catch((error: unknown) => { if (current) fail(error, (message) =>
         setAvailability({ key, starts: null, minutes: null, error: message })); });
     return () => { current = false; };
-  }, [config, token, date, availabilityKey, fail, wantTimes]);
+  }, [config, token, availabilityDaysKey, availabilityKey, fail]);
 
   // A re-read that changed a booking's version drops any panel still holding the old one.
   const stillCurrent = (held: ClientBooking | null) => held && bookings?.some((item) =>
@@ -213,9 +219,11 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
   useEffect(() => {
     if (!calendar) return;
     if (lastSeen.current.date === date && lastSeen.current.view === calendarView) return;
+    const keepAlternative = lastSeen.current.view === "day" && calendarView === "day"
+      && chosen !== null && dayKey(chosen, zone) === date;
     lastSeen.current = { date, view: calendarView };
-    setChosen(null); setOutcome(null); attempt.current = null;
-  }, [calendar, date, calendarView]);
+    if (!keepAlternative) { setChosen(null); setOutcome(null); attempt.current = null; }
+  }, [calendar, date, calendarView, chosen, zone]);
   const send = async () => {
     if (!chosen || sending || moveLoading || (heldMoving && !moving)) return;
     const id = `${moving?.appointment_id ?? "new"}|${moving?.version ?? 0}|${chosen}`;
@@ -265,37 +273,13 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
   const settled = availability?.key === availabilityKey ? availability : null;
   const starts = settled?.starts ?? null;
   const startsError = settled?.error ?? null;
-  const shown = (starts ?? []).filter((start) => dayKey(start, zone) === date);
-
-  const timesSection = (
-    <section className="card" aria-labelledby="client-times">
-        <h2 id="client-times">Open times</h2>
-        <p className="notice">Choosing a time asks the owner for approval. A time shown here is open, not booked,
-          and a request is not a confirmed appointment until the owner approves it.</p>
-        <p className="meta">Times are shown in the business time zone ({zone}).
-          {settled?.minutes ? ` Visits are about ${settled.minutes} minutes.` : ""}</p>
-        {beyondHorizon ? <p role="status">We only book up to {horizonDays} days ahead.</p>
-          : startsError ? <p className="notice error" role="alert">{startsError}</p>
-          : starts === null || moveLoading ? <p>Loading times…</p>
-          : shown.length === 0 ? <p>No times are available on this day. Try another day.</p>
-          : <ul className="card-list" aria-label="Available start times">
-            {shown.map((start) => <li key={start}>
-              <button type="button" aria-pressed={chosen === start} onClick={() => choose(start)}>{localTime(start, zone)}</button>
-            </li>)}
-          </ul>}
-        {moving && <div role="group" aria-label="Moving this appointment" className="notice">
-          <p>You are asking to move your appointment on <strong>{localStamp(moving.start_at, zone)}</strong>.
-            Pick a new time above. Your current appointment stays confirmed until the owner approves the new time;
-            if the owner declines or does not answer, nothing changes.</p>
-          <button type="button" onClick={() => { setMoving(null); choose(null); }}>Keep my current appointment</button>
-        </div>}
-        {chosen && <div role="group" aria-label="Request this time" className="notice">
-          <p>You picked <strong>{localStamp(chosen, zone)}</strong> ({zone}). Sending asks the owner for approval.
-            This time is not booked and is not confirmed until the owner approves it.
-            {moving ? ` Your appointment on ${localStamp(moving.start_at, zone)} stays confirmed until then.` : ""}</p>
-          <button type="button" disabled={sending || moveLoading} onClick={() => void send()}>
-            {sending ? "Sending…" : moving ? "Send move request for owner approval" : "Send request for owner approval"}</button>
-        </div>}
+  const shown = (starts ?? []).filter((start) => availabilityDays.includes(dayKey(start, zone)));
+  const selectStart = (start: string, element: HTMLElement) => {
+    chosenAnchor.current = element;
+    choose(start);
+  };
+  const requestFeedback = (
+    <>
         {outcome?.kind === "sent" && outcome.booking.status !== "PENDING_APPROVAL" && <p role="status" className="notice">
           This request is no longer waiting for approval: {bookingState(outcome.booking, nowMs).label}.{" "}
           {bookingState(outcome.booking, nowMs).detail}</p>}
@@ -312,7 +296,7 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
             </li>)}</ul>}
         </div>}
         {outcome?.kind === "error" && <p role="alert" className="notice error">{outcome.message}</p>}
-      </section>
+    </>
   );
   if (calendar) {
     const items = bookings ? calendarItems(bookings, nowMs) : [];
@@ -322,16 +306,34 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
           A request is not an appointment until the owner approves it.</p>
         <ClientCalendarViews items={items} bookings={bookings ?? []} calendar={calendar} zone={zone} nowMs={nowMs}
           loading={bookings === null && !bookingsError} error={bookingsError}
-          maxDate={maxDate} />
+          maxDate={maxDate} availableStarts={moveLoading ? [] : shown} selectedStart={chosen}
+          onAvailableSelect={selectStart} onEventSelect={() => choose(null)} />
+        {beyondHorizon && calendar.view === "day" && <p role="status">We only book up to {horizonDays} days ahead.</p>}
+        {availabilityDays.length > 0 && (startsError ? <p className="notice error" role="alert">{startsError}</p>
+          : starts === null || moveLoading ? <p role="status">Loading times…</p>
+          : shown.length === 0 ? <p role="status">No times are available in this view. Try another day.</p> : null)}
+        {settled?.minutes && <p className="meta">Visits are about {settled.minutes} minutes.</p>}
+        {requestFeedback}
       </section>
+      {chosen && <PopoverCard title="Request this time" getAnchor={() => chosenAnchor.current?.isConnected
+        ? chosenAnchor.current : document.querySelector<HTMLElement>("[data-calendar-scroll]")}
+        onClose={() => choose(null)} returnFocus={() => chosenAnchor.current?.isConnected
+          ? chosenAnchor.current : document.querySelector<HTMLElement>("[data-calendar-scroll]")}
+        refocusKey={chosen}>
+        <p>You picked <strong>{localStamp(chosen, zone)}</strong> ({zone}). Sending asks the owner for approval.
+          This time is not booked and is not confirmed until the owner approves it.
+          {moving ? ` Your appointment on ${localStamp(moving.start_at, zone)} stays confirmed until then.` : ""}</p>
+        <button type="button" disabled={sending || moveLoading} onClick={() => void send()}>
+          {sending ? "Sending…" : moving ? "Send move request for owner approval" : "Send request for owner approval"}</button>
+        {outcome?.kind === "error" && <p role="alert" className="notice error">{outcome.message}</p>}
+      </PopoverCard>}
       {moveDropped && !moving && <p className="notice error" role="alert">
         The appointment you were moving changed or is no longer there, so the move was cancelled and nothing was sent.
         Open Appointments to review it.</p>}
-      {moving && !(calendar.view === "day" && date >= today) && <p className="notice" role="status">
-        You are moving your appointment on <strong>{localStamp(moving.start_at, zone)}</strong>. Open Day view
-        on a day to pick a new time, or{" "}
+      {moving && <p className="notice" role="status">
+        You are moving your appointment on <strong>{localStamp(moving.start_at, zone)}</strong>. Pick a time in Day or Week view.
+        Your current appointment stays confirmed until the owner approves the new time. You can also{" "}
         <button type="button" onClick={() => { setMoving(null); choose(null); }}>keep my current appointment</button>.</p>}
-      {calendar.view === "day" && date >= today && timesSection}
     </div>;
   }
   return <div className="stack client-home">
