@@ -8,6 +8,8 @@ import { dayTitle, localInput, localTime, todayKey } from "@/lib/time";
 
 /** Pixels per hour; also set as a CSS variable so the hour lines match. */
 const HOUR_PX = 56;
+/** Available-start buttons need this much vertical space to keep their targets distinct. */
+const START_PX = 26;
 /** The grid is a full 24 hours and opens scrolled to this hour. */
 const OPEN_HOUR = 7;
 const HOURS = Array.from({ length: 24 }, (_, hour) => hour);
@@ -29,6 +31,24 @@ function eventLabel(placed: PlacedEvent, zone: string, day: string): string {
     placed.continuesAfter ? ", continues to next day" : ""}`;
   return `${localTime(event.start_at, zone)} to ${localTime(event.end_at, zone)}, ${itemLabel(event)}, ${
     dayTitle(day)}${extra}`;
+}
+
+/** Starts keep their exact wall-clock top; close starts use separate horizontal lanes. */
+function placeStarts(starts: string[], day: string, zone: string) {
+  const onDay = starts.map((start) => {
+    const local = localInput(start, zone);
+    const minute = Number(local.slice(11, 13)) * 60 + Number(local.slice(14, 16));
+    return { start, day: local.slice(0, 10), minute };
+  }).filter((slot) => slot.day === day).sort((a, b) => a.minute - b.minute);
+  const laneEnds: number[] = [];
+  const placed = onDay.map((slot) => {
+    const top = slot.minute * HOUR_PX / 60;
+    let lane = laneEnds.findIndex((end) => end <= top);
+    if (lane < 0) { lane = laneEnds.length; laneEnds.push(0); }
+    laneEnds[lane] = top + START_PX;
+    return { ...slot, lane };
+  });
+  return placed.map((slot) => ({ ...slot, lanes: laneEnds.length }));
 }
 
 export function CalendarGrid({ days, events, policy, zone, selectedId, onSelect, onSlotPress, onDay,
@@ -111,15 +131,15 @@ export function CalendarGrid({ days, events, policy, zone, selectedId, onSelect,
                   <span>{range.wholeDay ? "Closed (date exception)" : "Closed (date exception hours)"}</span>
                 </div>
               ))}
-              {availableStarts?.filter((start) => localInput(start, zone).slice(0, 10) === day).map((start) => {
-                const local = localInput(start, zone);
-                const minute = Number(local.slice(11, 13)) * 60 + Number(local.slice(14, 16));
+              {placeStarts(availableStarts ?? [], day, zone).map(({ start, minute, lane, lanes }) => {
+                const label = localTime(start, zone);
                 return <button key={start} type="button" className="cal-available" data-popover-anchor=""
                   data-available-start={start} aria-haspopup="dialog" aria-pressed={selectedStart === start}
-                  aria-label={`Available ${localTime(start, zone)}, ${dayTitle(day)}; request owner approval`}
-                  style={{ top: `${(minute / MINUTES_PER_DAY) * 100}%` }}
+                  aria-label={`Available ${label}, ${dayTitle(day)}; request owner approval`}
+                  style={{ top: `${(minute / MINUTES_PER_DAY) * 100}%`,
+                    left: `calc(${lane / lanes * 100}% + .15rem)`, width: `calc(${100 / lanes}% - .3rem)`, right: "auto" }}
                   onClick={(click) => onAvailableSelect?.(start, click.currentTarget)}>
-                  {localTime(start, zone)}
+                  {count > 1 ? label.replace(" AM", "a").replace(" PM", "p") : label}
                 </button>;
               })}
               {layoutDay(events, day, zone).map((placed) => (

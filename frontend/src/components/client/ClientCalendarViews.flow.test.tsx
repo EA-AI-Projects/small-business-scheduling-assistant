@@ -102,6 +102,31 @@ describe("client calendar views", () => {
     expect(host.textContent).toContain("waiting for owner approval");
   });
 
+  it("keeps adjacent 15-minute starts distinct and reachable in Day and Week", async () => {
+    fetcher.mockImplementation(async (url: string) => url.includes("availability")
+      ? json({ day: new URL(url).searchParams.get("day"), duration_minutes: 90,
+        starts_at: [openStart(new URL(url).searchParams.get("day")!),
+          new Date(Date.parse(openStart(new URL(url).searchParams.get("day")!)) + 15 * 60_000).toISOString()] })
+      : json({ bookings: [] }));
+    await setView("week");
+    const adjacent = (day: string) => [...host.querySelectorAll<HTMLButtonElement>(`[data-day="${day}"] [data-available-start]`)];
+    const week = adjacent("2026-10-11");
+    expect(week).toHaveLength(2);
+    expect(week.map((slot) => slot.tabIndex)).toEqual([0, 0]);
+    expect(week[0]!.style.top).toBe("41.66666666666667%");
+    expect(week[1]!.style.top).toBe("42.70833333333333%");
+    expect(week[0]!.style.left).not.toBe(week[1]!.style.left);
+    await act(async () => week[1]!.click());
+    expect(document.body.querySelector('[role="dialog"]')?.textContent).toContain("10:15 AM");
+    await act(async () => document.body.querySelector<HTMLButtonElement>('[aria-label="Close"]')!.click());
+    await setView("day");
+    const day = adjacent("2026-10-10");
+    expect(day).toHaveLength(2);
+    expect(day[0]!.style.left).not.toBe(day[1]!.style.left);
+    await act(async () => day[0]!.click());
+    expect(document.body.querySelector('[role="dialog"]')?.textContent).toContain("10:00 AM");
+  });
+
   it("switches views and dates, showing only the client's own bookings and open times in Day and Week", async () => {
     // Day (default): today has nothing booked, open times are offered, the legend names all three states.
     expect(host.textContent).toContain("You have no appointments or requests in this day");
