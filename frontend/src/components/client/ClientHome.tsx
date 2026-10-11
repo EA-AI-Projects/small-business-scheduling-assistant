@@ -267,6 +267,9 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
   };
   const startMove = (booking: ClientBooking) => {
     setMoveDropped(false); setMoving(booking); setConfirming(null); setChangeOutcome(null); choose(null);
+    if (calendar && calendar.view !== "day" && calendar.view !== "week") {
+      calendar.setView("day"); calendar.goToday();
+    }
     onOpenCalendar?.();
   };
 
@@ -307,13 +310,23 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
         <ClientCalendarViews items={items} bookings={bookings ?? []} calendar={calendar} zone={zone} nowMs={nowMs}
           loading={bookings === null && !bookingsError} error={bookingsError}
           maxDate={maxDate} availableStarts={moveLoading ? [] : shown} selectedStart={chosen}
-          onAvailableSelect={selectStart} onEventSelect={() => choose(null)} />
+          onAvailableSelect={selectStart} onEventSelect={() => choose(null)}
+          confirming={confirming} changing={changing}
+          changeError={changeOutcome?.kind === "error" ? changeOutcome.message : null}
+          onCancel={startCancel} onConfirmCancel={() => void confirmCancel()}
+          onDismissCancel={() => { setConfirming(null); setChangeOutcome(null); }} onMove={startMove} />
         {beyondHorizon && calendar.view === "day" && <p role="status">We only book up to {horizonDays} days ahead.</p>}
         {availabilityDays.length > 0 && (startsError ? <p className="notice error" role="alert">{startsError}</p>
           : starts === null || moveLoading ? <p role="status">Loading times…</p>
           : shown.length === 0 ? <p role="status">No times are available in this view. Try another day.</p> : null)}
         {settled?.minutes && <p className="meta">Visits are about {settled.minutes} minutes.</p>}
         {requestFeedback}
+        {changeOutcome?.kind === "cancelled" && <p role="status" className="notice">
+          {changeOutcome.booking.status === "CANCELLED"
+            ? <>Cancelled: <strong>{localStamp(changeOutcome.booking.start_at, zone)}</strong> to {localTime(changeOutcome.booking.end_at, zone)}.
+              The time was released and the owner was told.</>
+            : `This is no longer active: ${bookingState(changeOutcome.booking, nowMs).label}.`}</p>}
+        {changeOutcome?.kind === "error" && <p role="alert" className="notice error">{changeOutcome.message}</p>}
       </section>
       {chosen && <PopoverCard title="Request this time" getAnchor={() => chosenAnchor.current?.isConnected
         ? chosenAnchor.current : document.querySelector<HTMLElement>("[data-calendar-scroll]")}
