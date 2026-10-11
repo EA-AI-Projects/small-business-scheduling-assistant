@@ -135,9 +135,10 @@ class DynamoClientInvitations:
                     "UpdateExpression": "SET #state = :active, #version = :next, "
                                         "updated_at = :now, changed_by = :sub, reason = :reason",
                     "ConditionExpression": "#state = :pending AND #version = :old "
-                                           "AND subject = :sub AND role = :role "
+                                           "AND subject = :sub AND #role = :role "
                                            "AND business_id = :business AND client_id = :client",
-                    "ExpressionAttributeNames": {"#state": "state", "#version": "version"},
+                    "ExpressionAttributeNames": {
+                        "#state": "state", "#version": "version", "#role": "role"},
                     "ExpressionAttributeValues": {
                         ":active": {"S": "active"}, ":pending": {"S": "pending"},
                         ":old": {"N": str(pending.version)},
