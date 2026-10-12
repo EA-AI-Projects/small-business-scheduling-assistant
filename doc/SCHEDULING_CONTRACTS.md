@@ -106,4 +106,6 @@ Content-Type: application/json
 {"error":{"code":"SLOT_CONFLICT","message":"The longer visit conflicts with another reservation."},"current":{"appointment_id":"appt-9","status":"CONFIRMED","duration_minutes":120,"version":4}}
 ```
 
+Business profile (#336): `GET`/`PUT /v1/owner/businesses/{business_id}/profile` reads and edits the single versioned, owner-managed business profile (not a calendar write; it does not advance the calendar revision). `PUT` requires `expected_version` and an `Idempotency-Key`, follows the same `STALE_VERSION` and `IDEMPOTENCY_KEY_REUSED` mapping, and is scoped to the verified owner's business. Field limits and storage are in `doc/ARCHITECTURE.md`.
+
 Adapters map domain errors consistently: `CLARIFICATION_REQUIRED`/`POLICY_NOT_CONFIGURED` to a question or setup prompt, `SLOT_CONFLICT` to 409 with fresh options, `STALE_VERSION` to 409 with current state, `HOLD_EXPIRED` to 409, `REPLACEMENT_PENDING` to 409 (an active replacement from the same client must be approved, declined, or withdrawn first), `INVALID_TARGET` to 409, `RECORD_CONFLICT` to 409, `FORBIDDEN` to 403, and `IDEMPOTENCY_KEY_REUSED` to 409. Internal expiry does not use an HTTP route. No API accepts an arbitrary notification destination or a caller-supplied `approved_by`.

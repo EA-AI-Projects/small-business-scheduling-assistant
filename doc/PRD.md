@@ -63,6 +63,7 @@ Implementation follows [#226](https://github.com/EA-AI-Projects/small-business-s
 
 ### 6.1 Scheduling and availability
 
+- The owner maintains one versioned business profile (#336): display name, short description, support contact, one bookable service (name and description), and a default booking duration. It is the trusted source of business information for the owner UI, client UI, backend, and future SMS tools; a model never authors business facts. The pilot has one service and no service catalog. One configured service is required before new booking flows rely on the profile. Edits use an expected version and are audited. Details are in [ARCHITECTURE.md](ARCHITECTURE.md).
 - Configure business operating hours; pilot baseline is Monday–Friday, 8:00 a.m. to 5:00 p.m. in `America/Los_Angeles` with daylight saving.
 - Use configurable 15-minute start-time increments for the pilot.
 - Observed US federal holidays are unbookable by default. The owner can edit holiday closures and add manual exceptions in the admin view. Use the [US Office of Personnel Management schedule](https://www.opm.gov/policy-data-oversight/pay-leave/federal-holidays/) as the baseline; this is a business closure setting, not a payroll rule.

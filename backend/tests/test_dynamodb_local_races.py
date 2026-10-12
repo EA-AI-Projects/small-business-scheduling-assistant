@@ -23,6 +23,7 @@ from scheduling.adapters.outbox_aws import DynamoOutboxStore, due_keys
 from scheduling.adapters.sms_dynamodb import DynamoSmsIngressStore
 from scheduling.client_api import add_client_session_route
 from scheduling.domain.appointments import Appointment
+from scheduling.domain.business_profile import BusinessProfile
 from scheduling.domain.calendar import CalendarStatus
 from scheduling.domain.client_records import (
     ClientProfile,
@@ -1308,3 +1309,46 @@ def _owner_edge_cases(env: RaceEnv, store: DynamoSmsIngressStore, owner: str,
     assert read("owner-held")["body"]["S"] == "Synthetic owner-held"
     assert read("owner-racing")["reply_text"]["S"] == "Synthetic reply"
     assert "body" in read("owner-racing")
+
+
+def _profile(name: str) -> BusinessProfile:
+    return BusinessProfile(name, "Synthetic home cleaning.", "help@example.test",
+                           "Standard clean", "Whole-home visit.", 120)
+
+
+def test_concurrent_first_business_profile_saves_commit_at_most_one(race_env: RaceEnv) -> None:
+    env = race_env
+    repo = DynamoDBCalendarRepository(env.client, env.table)
+    barrier = Barrier(2)
+
+    def attempt(key: str) -> bool:
+        barrier.wait(timeout=5)
+        try:
+            repo.save_business_profile(env.business, "owner-1", key, 0, _profile(key))
+        except RevisionConflict:
+            return False
+        return True
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [future.result() for future in [pool.submit(attempt, "key-a"),
+                                                  pool.submit(attempt, "key-b")]]
+    # Both read version 0; one conditional write wins. On a real table both may be
+    # cancelled by an overlapping-transaction conflict, but never both committed.
+    assert results.count(True) <= 1
+    record = repo.read_business_profile(env.business)
+    audits = [item for item in _business_items(env) if item["SK"]["S"].startswith("AUDIT#profile#")]
+    assert len(audits) == results.count(True)
+    assert record.version == results.count(True)
+    if results.count(True) == 0:
+        assert record.profile is None
+
+
+def test_same_key_business_profile_retry_returns_the_stored_result(race_env: RaceEnv) -> None:
+    env = race_env
+    repo = DynamoDBCalendarRepository(env.client, env.table)
+    first = repo.save_business_profile(env.business, "owner-1", "retry", 0, _profile("one"))
+    assert first.version == 1
+    assert repo.save_business_profile(env.business, "owner-1", "retry", 0, _profile("one")) == first
+    assert repo.read_business_profile(env.business) == first
+    assert len([item for item in _business_items(env)
+                if item["SK"]["S"].startswith("AUDIT#profile#")]) == 1
