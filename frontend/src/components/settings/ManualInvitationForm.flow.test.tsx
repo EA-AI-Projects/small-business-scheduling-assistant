@@ -44,13 +44,13 @@ describe("Manual booking invitation form", () => {
     expect(host.textContent).not.toMatch(/cleaning/i);
   });
 
-  it.each([[1, "one week"], [2, "two weeks"]] as const)(
+  it.each([[1, "week"], [2, "two weeks"]] as const)(
     "prefills the approved %s-week copy after settings load", async (weeks, window) => {
     outreach = { settings: { enabled: true, weekday: 0,
       local_time: "09:00", lookahead_weeks: weeks }, version: 1 };
     await act(async () => root.render(<OutreachForm />));
     expect(host.querySelector("textarea")?.value).toBe(
-      "Example Pet Care: Would you like to book a visit for Dog grooming in the next "
+      "Smart Scheduling Assistant: Would you like to book a visit for Dog grooming with Example Pet Care in the next "
       + `${window}? Reply with a day and time that works for you, or STOP to opt out.`);
     expect(host.textContent).toContain("3 of 4 clients currently eligible");
     expect([...host.querySelectorAll("button")].find((button) =>

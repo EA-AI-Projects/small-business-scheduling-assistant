@@ -55,8 +55,8 @@ describe("Booking invitation settings", () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(time, "09:00");
       time.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    expect(host.querySelector("textarea")?.value).toBe("Example Pet Care: Would you like to book a visit for "
-      + "Dog grooming in the next two weeks? Reply with a day and time that works for you, or STOP to opt out.");
+    expect(host.querySelector("textarea")?.value).toBe("Smart Scheduling Assistant: Would you like to book a visit for "
+      + "Dog grooming with Example Pet Care in the next two weeks? Reply with a day and time that works for you, or STOP to opt out.");
     await act(async () => [...host.querySelectorAll<HTMLButtonElement>("button")]
       .find((button) => button.textContent === "Save invitation settings")!.click());
     expect(change).toHaveBeenCalledWith("/booking-outreach", "PUT", {

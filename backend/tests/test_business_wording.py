@@ -143,7 +143,7 @@ def test_notifications_without_a_saved_profile_stay_neutral() -> None:
 
 def test_invitation_text_names_the_saved_business_and_service() -> None:
     assert approved_invitation_message(2, PROFILE) == (
-        f"{NAME}: Would you like to book a visit for {SERVICE} in the next two weeks? "
+        f"Smart Scheduling Assistant: Would you like to book a visit for {SERVICE} with {NAME} in the next two weeks? "
         "Reply with a day and time that works for you, or STOP to opt out.")
     assert invitation_message(OutreachSettings(message="Custom text."), None) == "Custom text."
     legacy = ("Smart Scheduling Assistant: Would you like to book a cleaning visit in the next "
@@ -185,7 +185,7 @@ def test_sender_uses_the_saved_names_in_the_default_invitation() -> None:
     sender, messages, outbox = queued_invitation(True)
     assert sender.deliver(outbox) == "SM-synthetic-invitation"  # type: ignore[arg-type]
     assert messages.bodies == [(
-        f"{NAME}: Would you like to book a visit for {SERVICE} in the next one week? "
+        f"Smart Scheduling Assistant: Would you like to book a visit for {SERVICE} with {NAME} in the next week? "
         "Reply with a day and time that works for you, or STOP to opt out.")]
 
 

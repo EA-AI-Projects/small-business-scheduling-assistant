@@ -35,18 +35,23 @@ class OutreachSettings:
             raise ValueError("Invitation message must be 1 to 500 characters")
 
 
+# The registered program name stays the prefix so the text is generic across businesses and
+# matches the A2P-approved sample; the saved business and service names appear in the body.
+PROGRAM_NAME = "Smart Scheduling Assistant"
+
+
 def approved_invitation_message(lookahead_weeks: int, business: BusinessProfile | None) -> str:
-    """The default invitation, naming the saved business and service (#348).
+    """The default invitation, naming the saved service and business (#348).
 
     A custom message is the owner's own text. The default needs the saved profile, so with
     none it cannot be built and booking stays blocked.
     """
     if business is None:
         raise ValueError("Save the business profile before inviting clients to book")
-    window = "one week" if lookahead_weeks == 1 else "two weeks"
-    return (f"{business.display_name}: Would you like to book a visit for "
-            f"{business.service_name} in the next {window}? Reply with a day and time that works for you, or STOP "
-            "to opt out.")
+    window = "week" if lookahead_weeks == 1 else "two weeks"
+    return (f"{PROGRAM_NAME}: Would you like to book a visit for {business.service_name} with "
+            f"{business.display_name} in the next {window}? Reply with a day and time that works for you, "
+            "or STOP to opt out.")
 
 
 # The owner-approved default text before #348. Owner Settings used to store it as a

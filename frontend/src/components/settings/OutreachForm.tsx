@@ -16,9 +16,9 @@ const LEGACY_DEFAULTS = ["one week", "two weeks"].map((window) =>
 /** The default invitation, built from the saved business details; null until they are saved. */
 function approvedMessage(weeks: number, profile: BusinessProfileBody | null): string | null {
   if (!profile) return null;
-  const window = weeks === 1 ? "one week" : "two weeks";
-  return `${profile.display_name}: Would you like to book a visit for ${profile.service_name} in the next `
-    + `${window}? Reply with a day and time that works for you, or STOP to opt out.`;
+  const window = weeks === 1 ? "week" : "two weeks";
+  return `Smart Scheduling Assistant: Would you like to book a visit for ${profile.service_name} with `
+    + `${profile.display_name} in the next ${window}? Reply with a day and time that works for you, or STOP to opt out.`;
 }
 
 export function OutreachForm() {
