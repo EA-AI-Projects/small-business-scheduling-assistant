@@ -83,6 +83,17 @@ describe("client calendar and bookings", () => {
       || ((call as unknown[])[1] as RequestInit).method === undefined)).toBe(true);
   });
 
+  it("shows the saved service and business name, and nothing cleaning-specific", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json({ bookings: [] })));
+    await act(async () => root.render(<ClientHome config={config} token="access" zone={ZONE}
+      onSessionEnded={ended} visitLabel="Dog grooming with Example Pet Care" />));
+    expect(host.textContent).toContain("Dog grooming with Example Pet Care");
+    expect(host.textContent).not.toMatch(/clean/i);
+    await act(async () => root.render(<ClientHome config={config} token="access" zone={ZONE}
+      onSessionEnded={ended} />));
+    expect(host.textContent).not.toContain("Example Pet Care");
+  });
+
   it("moves a pending request to confirmed on refresh and keeps open times off the Appointments page", async () => {
     const bookingReads = [
       { bookings: [booking("a", "PENDING_APPROVAL", 30, new Date(Date.now() + 3_600_000).toISOString())] },

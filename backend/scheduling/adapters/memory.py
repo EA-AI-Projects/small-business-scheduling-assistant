@@ -617,13 +617,15 @@ class InMemoryCalendarRepository:
             self._revisions[business_id] += 1
 
     def set_business_profile_for_test(self, business_id: str,
-                                      default_duration_minutes: int = 120) -> None:
+                                      default_duration_minutes: int = 120,
+                                      business_name: str = "Example Cleaning Co.",
+                                      service_name: str = "Standard cleaning") -> None:
         """Seed a synthetic configured business profile with this default duration."""
         with self._lock:
             self._profiles[business_id] = BusinessProfileRecord(BusinessProfile(
-                "Example Cleaning Co.", "A synthetic small cleaning business.",
-                "support@example.invalid", "Standard cleaning",
-                "A synthetic standard cleaning visit.", default_duration_minutes),
+                business_name, "A synthetic small business.",
+                "support@example.invalid", service_name,
+                "A synthetic service visit.", default_duration_minutes),
                 self._profiles.get(business_id, BusinessProfileRecord(None, 0)).version + 1)
 
     def set_policy_for_test(self, business_id: str, policy: AvailabilityPolicy) -> None:

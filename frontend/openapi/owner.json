@@ -199,6 +199,17 @@
             "title": "Business Id",
             "type": "string"
           },
+          "business_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Business Name"
+          },
           "client_id": {
             "title": "Client Id",
             "type": "string"
@@ -207,6 +218,17 @@
             "default": "client",
             "title": "Role",
             "type": "string"
+          },
+          "service_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Name"
           },
           "timezone": {
             "anyOf": [

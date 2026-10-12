@@ -28,6 +28,7 @@ const api = {
     ];
     if (path === "/policy") return { record: { policy: { timezone: "America/Los_Angeles" } } };
     if (path === "/booking-outreach") return {};
+    if (path === "/profile") return { profile: null, version: 0 };
     if (path.startsWith("/appointments/")) return {
       appointment_id: path.slice("/appointments/".length), client_id: "confirmed-client",
       start_at: events[0]!.start_at, end_at: events[0]!.end_at, status: "CONFIRMED",

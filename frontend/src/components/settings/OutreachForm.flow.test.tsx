@@ -11,11 +11,14 @@ const get = vi.fn(async () => ({ eligible: 3, examined: 4, delivery_enabled: tru
 const api = { businessId: "pilot", get, request: vi.fn(async (_path: string, options: {
   body: { settings: OutreachState["settings"] }
 }) => ({ settings: options.body.settings, version: 2 })) };
+const profile = { display_name: "Example Pet Care", description: "A synthetic pet business.",
+  support_contact: "help@example.invalid", service_name: "Dog grooming",
+  service_description: "A synthetic grooming visit.", default_duration_minutes: 60 };
 let outreach: OutreachState = { settings: { enabled: false, weekday: null,
   local_time: null, lookahead_weeks: null }, version: 0 };
 vi.mock("@/owner/OwnerContext", () => ({
   useOwner: () => ({ api, change, notify: vi.fn(), refresh: vi.fn(),
-    data: { outreach, zone: "America/Los_Angeles" } }),
+    data: { outreach, businessProfile: { profile, version: 1 }, zone: "America/Los_Angeles" } }),
 }));
 
 describe("Booking invitation settings", () => {
@@ -50,13 +53,14 @@ describe("Booking invitation settings", () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(time, "09:00");
       time.dispatchEvent(new Event("input", { bubbles: true }));
     });
+    expect(host.querySelector("textarea")?.value).toBe("Example Pet Care: Would you like to book a visit for "
+      + "Dog grooming in the next two weeks? Reply with a day and time that works for you, or STOP to opt out.");
     await act(async () => [...host.querySelectorAll<HTMLButtonElement>("button")]
       .find((button) => button.textContent === "Save invitation settings")!.click());
     expect(change).toHaveBeenCalledWith("/booking-outreach", "PUT", {
       expected_version: 0, settings: { enabled: true, weekday: 0,
         local_time: "09:00", lookahead_weeks: 2,
-        message: "Smart Scheduling Assistant: Would you like to book a cleaning visit in the next "
-          + "two weeks? Reply with a day and time that works for you, or STOP to opt out." },
+        message: null },
     }, "Booking invitation settings saved");
   });
 

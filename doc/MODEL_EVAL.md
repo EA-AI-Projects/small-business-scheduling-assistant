@@ -158,3 +158,7 @@ The model-led client path is the shipped path: #272 to #274 supply the typed too
 - The 37-case tool run is a sampling check (two of four runs passed fully, with misses that cannot write).
 - The historical owner draft run (7/7) predates #298–#300 and does not validate the current owner tool loop.
 - No deployment, live SMS, or real conversation was used; the AWS handoff stays disabled until Enrique separately authorizes it.
+
+## Instructions changed by #348
+
+The SMS instructions no longer say "home-cleaning business" or use "cleaning" in their intent rules; they refer to "the service" and read the saved `Business:` and `Service:` context lines. The recorded 20-case results above were run on the earlier wording. The eval harness now passes a synthetic business and service (`evals/scheduling_messages.py`). Rerun the suite before relying on the new instructions; that is a live model call and needs the owner's separate authorization.

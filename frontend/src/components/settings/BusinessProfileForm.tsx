@@ -66,7 +66,7 @@ function Field({ name, label, error, shown, extra, children }: {
 }
 
 export function BusinessProfileForm() {
-  const { api, data, notify } = useOwner();
+  const { api, data, notify, refresh } = useOwner();
   const [saved, setSaved] = useState<BusinessProfileState | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft>(EMPTY);
@@ -137,6 +137,8 @@ export function BusinessProfileForm() {
       setStale(false);
       setShown(false);
       notify("Business details saved");
+      // Owner texts that name the business and service (invitation wording) read it from there.
+      void refresh(true).catch(() => undefined);
     } catch (error) {
       if (error instanceof ApiError && error.status === 409 && error.code === "STALE_VERSION") {
         const current = error.current as BusinessProfileState | undefined;

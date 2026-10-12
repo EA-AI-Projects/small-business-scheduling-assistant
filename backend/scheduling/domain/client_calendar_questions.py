@@ -49,7 +49,7 @@ class ClientQuestion:
     first: date | None  # None with last: every upcoming visit.
     last: date | None
     statuses: frozenset[CalendarStatus]
-    ambiguous_booking: bool = False  # Check visits, or request a new cleaning?
+    ambiguous_booking: bool = False  # Check visits, or request a new visit?
 
 
 # Write guards. A calendar answer offers nothing to pick or confirm, so these replies
@@ -99,24 +99,24 @@ def _line(visit: Appointment, zone: ZoneInfo) -> str:
             f"(ref {visit.appointment_id[:8]})")
 
 
-def booking_choice(question: ClientQuestion) -> str:
+def booking_choice(question: ClientQuestion, visit: str = "visit") -> str:
     """Ask whether a bare "booking" means existing visits or a new request. Writes nothing."""
     if (question.first is not None and question.last is not None
             and question.first <= question.last):
         when = (day_text(question.first) if question.first == question.last
                 else f"{day_text(question.first)} to {day_text(question.last)}")
         return (f"Do you want to check the visits you already have for {when}, or request "
-                f"a new cleaning? Ask \"Do I have a visit {when}?\" or \"What times are "
+                f"a new {visit}? Ask \"Do I have a visit {when}?\" or \"What times are "
                 f"open {when}?\"")
-    return ("Do you want to check the visits you already have, or request a new cleaning? "
-            "Ask \"When is my next visit?\" or tell me what day you'd like a cleaning.")
+    return (f"Do you want to check the visits you already have, or request a new {visit}? "
+            "Ask \"When is my next visit?\" or tell me what day you'd like to book.")
 
 
 def answer(question: ClientQuestion, visits: tuple[Appointment, ...], now: datetime,
-           zone: ZoneInfo) -> str:
+           zone: ZoneInfo, visit: str = "visit") -> str:
     """Reply text from ``visits``: the client's own current visits, read for this message."""
     if question.ambiguous_booking:
-        return booking_choice(question)
+        return booking_choice(question, visit)
     today = now.astimezone(zone).date()
     first, last = question.first, question.last
     if first is not None and last is not None:
@@ -158,7 +158,7 @@ def answer(question: ClientQuestion, visits: tuple[Appointment, ...], now: datet
         if question.view == View.LIST:
             text += "\n" + "\n".join(f"- {_line(visit, zone)}" for visit in others)
     elif not shown and question.view == View.LIST:
-        text += " To ask for a cleaning, tell me what day works."
+        text += f" To request a new {visit}, tell me what day works."
     return text
 
 

@@ -203,7 +203,7 @@ def test_ambiguous_booking_asks_whether_to_check_or_request() -> None:
     reply = asked(chat, "Booking for Friday?", cal("2026-10-02", intent="clarify_booking"))
     assert reply.text == (
         "Do you want to check the visits you already have for Fri Oct 2, or request a new "
-        "cleaning? Ask \"Do I have a visit Fri Oct 2?\" or \"What times are open Fri Oct 2?\"")
+        "Standard cleaning visit? Ask \"Do I have a visit Fri Oct 2?\" or \"What times are open Fri Oct 2?\"")
     assert asked(chat, "About that booking thing", cal(intent="clarify_booking")).text \
         .startswith("Do you want to check the visits you already have, or request a new")
     unchanged(chat, before)
@@ -213,7 +213,7 @@ def test_no_matching_visits_says_so_and_how_to_ask_for_one() -> None:
     chat, _, _ = week_with_visits()
     assert asked(chat, "Do I have a cleaning tomorrow?", cal("2026-09-30")).text == (
         "You have no confirmed visits or pending requests on Wed Sep 30. "
-        "To ask for a cleaning, tell me what day works.")
+        "To request a new Standard cleaning visit, tell me what day works.")
 
 
 def test_status_filters_never_hide_or_promote_a_pending_request() -> None:
@@ -252,7 +252,7 @@ def test_owner_blocks_are_not_shown_to_a_client() -> None:
         "block-1", block_start, block_start + timedelta(hours=2), CalendarStatus.UNAVAILABLE),))
     assert asked(chat, "Do I have anything Thursday?", cal("2026-10-01")).text == (
         "You have no confirmed visits or pending requests on Thu Oct 1. "
-        "To ask for a cleaning, tell me what day works.")
+        "To request a new Standard cleaning visit, tell me what day works.")
 
 
 def test_each_answer_reads_the_calendar_as_it_is_now() -> None:

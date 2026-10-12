@@ -40,6 +40,21 @@ class BusinessProfile:
             raise ValueError("Default booking duration must be 1 minute to 24 hours")
 
 
+def visit_phrase(profile: BusinessProfile | None) -> str:
+    """The saved service name as a visit ("Dog grooming visit"), or a plain "visit".
+
+    Client and owner texts name the service only from the saved profile (#348). With no
+    saved profile the wording stays neutral; a text that would invite a booking is blocked
+    instead (see ``service_duration``).
+    """
+    return f"{profile.service_name} visit" if profile is not None else "visit"
+
+
+def sentence_case(text: str) -> str:
+    """Start a sentence with ``text`` without changing the rest of its capitals."""
+    return text[:1].upper() + text[1:]
+
+
 @dataclass(frozen=True)
 class BusinessProfileRecord:
     profile: BusinessProfile | None

@@ -97,6 +97,7 @@ describe("Year calendar owner flow", () => {
       if (path === "/requests" || path === "/clients") return [];
       if (path === "/policy") return { record: { policy: { timezone: "America/Los_Angeles" } } };
       if (path === "/booking-outreach") return {};
+      if (path === "/profile") return { profile: null, version: 0 };
       if (path === "/appointments/leap") return {
         appointment_id: "leap", client_id: "synthetic-client", status: "CONFIRMED",
         start_at: "2028-02-29T18:00:00Z", end_at: "2028-02-29T19:00:00Z",

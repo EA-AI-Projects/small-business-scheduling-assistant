@@ -465,7 +465,7 @@ def test_original_expiry_text_still_goes_out_and_mentions_the_waiting_request(
         world.appointment(request).version))
     (intent,) = world.outbox("expire-replacement-waiting")
     text = render(world, intent)
-    assert text.startswith("Cleaning visit expired: Thu Oct 1 at 9:00 AM.")
+    assert text.startswith("Standard cleaning visit expired: Thu Oct 1 at 9:00 AM.")
     assert "request for Thu Oct 1 at 2:00 PM" in text and "still pending owner approval" in text
     assert "confirmed" not in text
 

@@ -182,7 +182,7 @@ def test_specific_open_time_is_a_single_option_confirmed_by_yes() -> None:
     chat.model.replies["Can you do tomorrow at 1pm?"] = ask(
         "request_booking", TOMORROW, TOMORROW, "13:00", "13:00")
     offer = chat.text("Can you do tomorrow at 1pm?")
-    assert offer.text.startswith("Wed Sep 30 at 1:00 PM is open for your 2-hour cleaning. "
+    assert offer.text.startswith("Wed Sep 30 at 1:00 PM is open for your 2-hour Standard cleaning visit. "
                                  "Reply YES to request it.")
     assert chat.calendar() == ()
     booked = chat.text("Yes please")
@@ -571,7 +571,7 @@ def test_exact_time_after_invitation_is_offered_and_only_yes_requests_it(intent:
     chat = Harness()
     invited(chat)
     offer = chat.text(f"Oct 13 at 1 pm ({intent})")
-    assert not offer.committed and "is open for your 2-hour cleaning. Reply YES" in offer.text
+    assert not offer.committed and "is open for your 2-hour Standard cleaning visit. Reply YES" in offer.text
     assert chat.calendar() == ()  # Offering writes nothing.
     booked = chat.text("YES")
     assert booked.committed and booked.appointment_id is not None

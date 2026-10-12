@@ -87,8 +87,10 @@ export interface MoveState { booking: ClientBooking | null; set: (booking: Clien
  * page) it lists the bookings with cancel, withdraw and move. The visit length is the business's saved default
  * duration, chosen by the server.
  */
-export function ClientHome({ config, token, zone, onSessionEnded, calendar, horizonDays, move, onOpenCalendar }: {
+export function ClientHome({ config, token, zone, onSessionEnded, calendar, horizonDays, move, onOpenCalendar, visitLabel }: {
   config: OwnerConfig; token: string; zone: string | null; onSessionEnded: () => void;
+  /** The saved service and business name, shown where the page describes the visit. */
+  visitLabel?: string | null;
   /** Given on the Calendar page: its shared view state drives Day to Year views. Omitted on Appointments. */
   calendar?: CalendarState;
   /** Days ahead the business takes bookings, when the server said. */
@@ -101,11 +103,12 @@ export function ClientHome({ config, token, zone, onSessionEnded, calendar, hori
   if (!zone) return <section className="card"><p className="notice error" role="alert">
     Online times are not available right now. Please text the business.</p></section>;
   return <ClientCalendar config={config} token={token} zone={zone} onSessionEnded={onSessionEnded}
-    calendar={calendar} horizonDays={horizonDays ?? null} move={move} onOpenCalendar={onOpenCalendar} />;
+    calendar={calendar} horizonDays={horizonDays ?? null} move={move} onOpenCalendar={onOpenCalendar}
+    visitLabel={visitLabel ?? null} />;
 }
 
-function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizonDays, move, onOpenCalendar }: {
-  config: OwnerConfig; token: string; zone: string; onSessionEnded: () => void;
+function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizonDays, move, onOpenCalendar, visitLabel }: {
+  config: OwnerConfig; token: string; zone: string; onSessionEnded: () => void; visitLabel: string | null;
   calendar: CalendarState | undefined; horizonDays: number | null;
   move: MoveState | undefined; onOpenCalendar: (() => void) | undefined;
 }) {
@@ -309,6 +312,7 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
     const items = bookings ? calendarItems(bookings, nowMs) : [];
     return <div className="stack client-home">
       <section className="card" aria-label="Your calendar">
+        {visitLabel && <p className="meta">Booking: {visitLabel}.</p>}
         <p className="meta">Only your own appointments and requests are shown. Times are shown in the business time zone ({zone}).
           A request is not an appointment until the owner approves it.</p>
         <ClientCalendarViews items={items} bookings={bookings ?? []} calendar={calendar} zone={zone} nowMs={nowMs}
@@ -337,7 +341,7 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
         onClose={() => choose(null)} returnFocus={() => chosenAnchor.current?.isConnected
           ? chosenAnchor.current : document.querySelector<HTMLElement>("[data-calendar-scroll]")}
         refocusKey={chosen}>
-        <p>You picked <strong>{localStamp(chosen, zone)}</strong> ({zone}). Sending asks the owner for approval.
+        <p>You picked <strong>{localStamp(chosen, zone)}</strong> ({zone}){visitLabel ? ` for ${visitLabel}` : ""}. Sending asks the owner for approval.
           This time is not booked and is not confirmed until the owner approves it.
           {moving ? ` Your appointment on ${localStamp(moving.start_at, zone)} stays confirmed until then.` : ""}</p>
         <button type="button" disabled={sending || moveLoading} onClick={() => void send()}>
@@ -360,6 +364,7 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
       <button type="button" onClick={() => setMoving(null)}>Keep my current appointment</button></p>}
     <section className="card" aria-labelledby="client-bookings">
       <h2 id="client-bookings">Your appointments</h2>
+      {visitLabel && <p className="meta">{visitLabel}</p>}
       <button type="button" onClick={() => { setConfirming(null); setMoving(null); setRefresh((count) => count + 1); }}>Refresh</button>
       {bookingsError ? <p className="notice error" role="alert">{bookingsError}</p>
         : bookings === null ? <p>Loading your appointments…</p>

@@ -20,7 +20,7 @@ from scheduling.domain.availability import (
     InvalidPolicy,
     available_starts,
 )
-from scheduling.domain.business_profile import BusinessProfileRecord
+from scheduling.domain.business_profile import BusinessProfile, BusinessProfileRecord, visit_phrase
 from scheduling.domain.calendar import CalendarSnapshot, CalendarStatus
 from scheduling.domain.client_calendar_questions import (
     BOTH,
@@ -134,6 +134,9 @@ class MessageContext:
     calendar_answer: str | None = None
     history: tuple[HistoryMessage, ...] = ()
     prompt_kind: str = "none"
+    # The saved business and service names (#348); None until the owner saves the profile.
+    business_name: str | None = None
+    service_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -261,6 +264,8 @@ class ConversationService:
                 policy.timezone, (), policy.booking_horizon_days,
                 history=(self._history_reader.read_conversation_history(receipt, now)
                          if self._history_reader is not None else ()),
+                business_name=self._names(receipt.business_id)[0],
+                service_name=self._names(receipt.business_id)[1],
             )
             result = outcome.reply_result
             draft = self._interpreter.draft_client_reply(receipt.body, context, result)
@@ -337,6 +342,8 @@ class ConversationService:
                  else ()),
                 (prompt.kind.value if prompt is not None and not prompt.expired(now)
                  else "none"),
+                business_name=self._names(receipt.business_id)[0],
+                service_name=self._names(receipt.business_id)[1],
             )
             proposal = self._exact_command(receipt.body, context, targets)
         except (OSError, ValueError, TypeError, KeyError, RuntimeError):
@@ -371,7 +378,7 @@ class ConversationService:
                     "I only listed your visits, so nothing was booked or cancelled. "
                     "To change one, tell me which visit and what you'd like (for "
                     "example, cancel my Friday visit), or tell me a day to request "
-                    "a new cleaning."))
+                    f"a new {self._visit(receipt.business_id)}."))
             try:
                 proposal = self._interpreter.propose(receipt.body, context)
             except (OSError, ValueError, TypeError, KeyError, RuntimeError):
@@ -392,7 +399,7 @@ class ConversationService:
             self._forget(prompt)  # A calendar answer below replaces the prompt itself.
         if unclear:
             outcome = ConversationOutcome(self._clarify(
-                receipt.role, proposal.intent, receipt.body or "", targets))
+                receipt.business_id, receipt.role, proposal.intent, receipt.body or "", targets))
             return (self._with_result(outcome, "clarification", "none",
                                       reason="needs_clarification", detail=outcome.text)
                     if receipt.role == SenderRole.CLIENT else outcome)
@@ -409,7 +416,7 @@ class ConversationService:
         # From here on the proposal came from the model: it can lead to an offer, a question,
         # or request_booking for a time this client was just offered; nothing else writes.
         if receipt.role != SenderRole.CLIENT:
-            return ConversationOutcome(self._clarify(receipt.role, "clarify"))
+            return ConversationOutcome(self._clarify(receipt.business_id, receipt.role, "clarify"))
         if proposal.intent in ("calendar_question", "clarify_booking"):
             # The model reads the question in any wording or language: range, statuses, and
             # list or count. What it leaves unset keeps the open conversation's value. The
@@ -564,8 +571,24 @@ class ConversationService:
                              and appointment.end_at > now and appointment.occupies_time(now)),
                             key=lambda appointment: appointment.start_at))
 
-    @staticmethod
-    def _clarify(role: SenderRole, intent: str, body: str = "",
+    def _profile(self, business_id: str) -> BusinessProfile | None:
+        """The saved business profile, or None when unsaved or unreadable."""
+        try:
+            return self._repository.read_business_profile(business_id).profile
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+            return None
+
+    def _names(self, business_id: str) -> tuple[str | None, str | None]:
+        """The saved business and service names the model prompt may quote."""
+        profile = self._profile(business_id)
+        return ((profile.display_name, profile.service_name) if profile is not None
+                else (None, None))
+
+    def _visit(self, business_id: str) -> str:
+        """The saved service as a visit, or a plain "visit" when no profile is saved."""
+        return visit_phrase(self._profile(business_id))
+
+    def _clarify(self, business_id: str, role: SenderRole, intent: str, body: str = "",
                  targets: tuple[Appointment, ...] = ()) -> str:
         if role == SenderRole.OWNER:
             return f"I wasn't sure what you meant. {CAPABILITIES}"
@@ -583,10 +606,15 @@ class ConversationService:
             return "Which visit would you like to move, and to what day?"
         if re.search(r"\bcancel\b", body, re.IGNORECASE):
             return "Which visit would you like to cancel? Tell me its day."
+        profile = self._profile(business_id)
+        if profile is None:
+            # Booking is blocked until the owner saves the business profile.
+            return "Please contact the owner to schedule this visit."
         if intent == "unsupported":
-            return "I can help you book, reschedule, or cancel a cleaning. What would you like to do?"
-        return ("What day would you like a cleaning? You can say something like "
-                "'tomorrow morning' or 'Friday afternoon'.")
+            return (f"I can help you book, reschedule, or cancel a visit with "
+                    f"{profile.display_name}. What would you like to do?")
+        return (f"What day would you like to book your {visit_phrase(profile)}? You can say "
+                "something like 'tomorrow morning' or 'Friday afternoon'.")
 
     @staticmethod
     def _exact_command(body: str, context: MessageContext,
@@ -728,10 +756,10 @@ class ConversationService:
             date_text = command.group(1)
         if not isinstance(date_text, str):
             return ConversationOutcome(self._clarify(
-                receipt.role, "clarify", receipt.body or "", targets))
+                receipt.business_id, receipt.role, "clarify", receipt.body or "", targets))
         if proposal.date_text != date_text:
             return ConversationOutcome(self._clarify(
-                receipt.role, "clarify", receipt.body or "", targets))
+                receipt.business_id, receipt.role, "clarify", receipt.body or "", targets))
         if EXPLICIT_DATE.fullmatch(date_text):
             try:
                 day = date.fromisoformat(date_text)
@@ -741,7 +769,7 @@ class ConversationService:
             return self._offer(receipt, policy, now, day, day, None, None, original)
         if not EXPLICIT_START.fullmatch(date_text):
             return ConversationOutcome(self._clarify(
-                receipt.role, "clarify", receipt.body or "", targets))
+                receipt.business_id, receipt.role, "clarify", receipt.body or "", targets))
         try:
             wall = datetime.fromisoformat(date_text.replace(" ", "T"))
         except ValueError:
@@ -865,7 +893,8 @@ class ConversationService:
         if prompt is not None and prompt.kind != PromptKind.CALENDAR:
             self._forget(prompt)  # An offer or confirmation is closed; the reply says so.
         zone = ZoneInfo(policy.timezone)
-        text = answer_client_question(question, targets, now, zone)
+        text = answer_client_question(question, targets, now, zone,
+                                      self._visit(receipt.business_id))
         closed_note = ""
         if (prompt is not None and not prompt.expired(now)
                 and prompt.kind != PromptKind.CALENDAR):
@@ -1328,7 +1357,7 @@ class ConversationService:
         if proposal.date_from is None:
             if original is not None:
                 self._remember(receipt, PromptKind.RESCHEDULE_DAY, now, appointment=original)
-            outcome = ConversationOutcome(self._clarify(SenderRole.CLIENT, "clarify"))
+            outcome = ConversationOutcome(self._clarify(receipt.business_id, SenderRole.CLIENT, "clarify"))
             facts = ((self._client_fact(original.start_at, ZoneInfo(policy.timezone),
                                         "confirmed", original.appointment_id[:8]),)
                      if original is not None else ())
@@ -1437,8 +1466,9 @@ class ConversationService:
         lead = (f"To move your {when_text(original.start_at, zone)} visit: "
                 if original is not None else "")
         length = f"{minutes // 60}-hour" if minutes % 60 == 0 else f"{minutes}-minute"
+        visit = self._visit(receipt.business_id)
         if len(chosen) == 1:
-            body = (f"{when_text(chosen[0], zone)} is open for your {length} cleaning. "
+            body = (f"{when_text(chosen[0], zone)} is open for your {length} {visit}. "
                     "Reply YES to request it.")
         else:
             days = {start.astimezone(zone).date() for start in chosen}
@@ -1449,7 +1479,7 @@ class ConversationService:
             else:
                 listed = ", ".join(f"{number}) {when_text(start, zone)}"
                                    for number, start in enumerate(chosen, 1))
-                body = f"Open times for your {length} cleaning: {listed}."
+                body = f"Open times for your {length} {visit}: {listed}."
             body += " Reply with the number or time you want."
         keeps = " Your current visit stays booked until then." if original is not None else ""
         outcome = ConversationOutcome(

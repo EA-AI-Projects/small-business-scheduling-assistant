@@ -117,7 +117,7 @@ def test_text_booking_appears_in_owner_api_and_owner_app_approval_notifies_clien
     assert not bodies(booked, "reply")  # Production texts only the notifications.
     assert bodies(booked, "note")[0].startswith("Not texted: Requested Mon Oct 5 at 9:00 AM")
     notifications = bodies(booked, "notification")
-    assert any(body.startswith("New cleaning request from Avery Example") for body in notifications)
+    assert any(body.startswith("New Standard cleaning visit request from Avery Example") for body in notifications)
     assert any("is pending owner approval" in body for body in notifications)
     pending = [request for request in client.get(f"{BASE}/requests", headers=AUTH).json()
                if request["client_id"] == "client-1"]
@@ -258,12 +258,12 @@ def test_plain_language_booking_and_owner_yes_in_the_simulator() -> None:
     booked = text(client, "client-1", f"{first} works")
     assert bodies(booked, "note")[0].startswith(f"Not texted: Requested Wed Sep 30 at {first}")
     assert not bodies(booked, "reply")
-    assert any(body.startswith("New cleaning request from Avery Example")
+    assert any(body.startswith("New Standard cleaning visit request from Avery Example")
                for body in bodies(booked, "notification"))
 
     approved = text(client, "owner", "yes")
     assert bodies(approved, "note")[0].startswith(
         f"Not texted: Approved: Avery Example, Wed Sep 30 at {first}")
-    assert any(f"Cleaning visit confirmed: Wed Sep 30 at {first}" in body
+    assert any(f"Standard cleaning visit confirmed: Wed Sep 30 at {first}" in body
                for body in bodies(approved, "notification"))
     assert client.get(f"{BASE}/requests", headers=AUTH).json() == []

@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.client_api import add_client_session_route
 from scheduling.domain.availability import AvailabilityPolicy
+from scheduling.domain.business_profile import BusinessProfileRecord
 from scheduling.domain.calendar import CalendarStatus
 from scheduling.domain.client_records import ClientProfile
 from scheduling.domain.holds import CreateHold, HoldService
@@ -189,6 +190,16 @@ def test_session_reports_the_business_time_zone() -> None:
     assert body["timezone"] == "America/Los_Angeles"
     assert body["booking_horizon_days"] == 14
     assert body["client_id"] == "client-a"
+
+
+def test_session_reports_the_saved_business_and_service_names() -> None:
+    api, repository = setup()
+    repository.set_business_profile_for_test("business-1", 60, "Example Pet Care", "Dog grooming")
+    body = api.get("/v1/client/session", headers=auth("a")).json()
+    assert (body["business_name"], body["service_name"]) == ("Example Pet Care", "Dog grooming")
+    repository._profiles["business-1"] = BusinessProfileRecord(None, 0)
+    unsaved = api.get("/v1/client/session", headers=auth("a")).json()
+    assert (unsaved["business_name"], unsaved["service_name"]) == (None, None)
 
 
 def test_bookings_list_only_the_callers_pending_and_confirmed_visits() -> None:
