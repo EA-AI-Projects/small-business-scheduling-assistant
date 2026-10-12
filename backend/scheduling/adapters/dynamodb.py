@@ -1,6 +1,7 @@
 """Strong-read and conditional-transaction adapter for the single-crew calendar."""
 
 import json
+from dataclasses import asdict
 from datetime import UTC, date, datetime, time, timedelta
 from hashlib import sha256
 from typing import Any, Protocol
@@ -16,6 +17,7 @@ from scheduling.domain.booking_invitations import (
     invitation_outbox_id,
 )
 from scheduling.domain.booking_outreach import OutreachRecord, OutreachSettings
+from scheduling.domain.business_profile import BusinessProfile, BusinessProfileRecord
 from scheduling.domain.calendar import CalendarEvent, CalendarSnapshot, CalendarStatus
 from scheduling.domain.client_records import (
     ClientNote,
@@ -207,6 +209,67 @@ class DynamoDBCalendarRepository:
         self._client = client
         self._table = table_name
         self._sms_sender_guard = sms_sender_guard
+
+    def read_business_profile(self, business_id: str) -> BusinessProfileRecord:
+        item = self._get(self._business_key(business_id, "PROFILE#BUSINESS"))
+        if item is None:
+            return BusinessProfileRecord(None, 0)
+        return BusinessProfileRecord(BusinessProfile(**json.loads(item["payload"]["S"])),
+                                     int(item["version"]["N"]))
+
+    def save_business_profile(self, business_id: str, actor_id: str, key: str,
+                              expected_version: int,
+                              profile: BusinessProfile) -> BusinessProfileRecord:
+        identity = self._business_key(business_id,
+            _command_sort_key(actor_id, "edit_business_profile", key))
+        payload = json.dumps(asdict(profile), sort_keys=True)
+        request_hash = sha256(json.dumps([expected_version, payload]).encode()).hexdigest()
+
+        def replay() -> BusinessProfileRecord | None:
+            old = self._get(identity)
+            if old is None:
+                return None
+            if old["request_hash"]["S"] != request_hash:
+                raise IdempotencyKeyReused("Key already used for another profile edit")
+            return BusinessProfileRecord(profile, int(old["version"]["N"]))
+
+        existing = replay()
+        if existing is not None:
+            return existing
+        next_version = expected_version + 1
+        put: dict[str, Any] = {"TableName": self._table,
+            "Item": {**self._business_key(business_id, "PROFILE#BUSINESS"),
+                     "payload": {"S": payload}, "version": {"N": str(next_version)}},
+            "ConditionExpression": "attribute_not_exists(PK)" if expected_version == 0
+                                   else "#version = :old"}
+        if expected_version:
+            put["ExpressionAttributeNames"] = {"#version": "version"}
+            put["ExpressionAttributeValues"] = {":old": {"N": str(expected_version)}}
+        audit_key = sha256(json.dumps([business_id, actor_id, key]).encode()).hexdigest()
+        try:
+            self._client.transact_write_items(TransactItems=[
+                {"Put": put},
+                {"Put": {"TableName": self._table,
+                    "Item": {**identity, "request_hash": {"S": request_hash},
+                             "version": {"N": str(next_version)}},
+                    "ConditionExpression": "attribute_not_exists(PK)"}},
+                {"Put": {"TableName": self._table,
+                    "Item": {**self._business_key(business_id, f"AUDIT#profile#{audit_key}"),
+                             "action": {"S": "edit_business_profile"},
+                             "actor_id": {"S": actor_id},
+                             "source": {"S": "owner_api"},
+                             "created_at": {"S": _instant(datetime.now(UTC))},
+                             "version": {"N": str(next_version)}},
+                    "ConditionExpression": "attribute_not_exists(PK)"}},
+            ])
+        except Exception as exc:
+            if not _record_transaction_conflict(exc):
+                raise
+            existing = replay()
+            if existing is not None:
+                return existing
+            raise RevisionConflict("Business profile version changed") from exc
+        return BusinessProfileRecord(profile, next_version)
 
     def read_outreach(self, business_id: str) -> OutreachRecord:
         item = self._get(self._business_key(business_id, "SETTINGS#BOOKING_OUTREACH"))

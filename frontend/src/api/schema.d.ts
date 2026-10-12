@@ -372,6 +372,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/owner/businesses/{business_id}/profile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Business Profile */
+        get: operations["get_business_profile_v1_owner_businesses__business_id__profile_get"];
+        /** Edit Business Profile */
+        put: operations["edit_business_profile_v1_owner_businesses__business_id__profile_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/owner/businesses/{business_id}/requests": {
         parameters: {
             query?: never;
@@ -464,6 +482,27 @@ export interface components {
              * Format: date-time
              */
             start_at: string;
+        };
+        /** BusinessProfileBody */
+        BusinessProfileBody: {
+            /** Default Duration Minutes */
+            default_duration_minutes: number;
+            /** Description */
+            description: string;
+            /** Display Name */
+            display_name: string;
+            /** Service Description */
+            service_description: string;
+            /** Service Name */
+            service_name: string;
+            /** Support Contact */
+            support_contact: string;
+        };
+        /** BusinessProfileEditBody */
+        BusinessProfileEditBody: {
+            /** Expected Version */
+            expected_version: number;
+            profile: components["schemas"]["BusinessProfileBody"];
         };
         /** ClientNoteBody */
         ClientNoteBody: {
@@ -1748,6 +1787,74 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_business_profile_v1_owner_businesses__business_id__profile_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                business_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    edit_business_profile_v1_owner_businesses__business_id__profile_put: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                business_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BusinessProfileEditBody"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

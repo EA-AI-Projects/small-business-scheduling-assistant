@@ -38,6 +38,11 @@ from scheduling.domain.booking_invitations import (
     ManualRunKeyConflict,
 )
 from scheduling.domain.booking_outreach import OutreachRepository, OutreachSettings, update_outreach
+from scheduling.domain.business_profile import (
+    BusinessProfile,
+    BusinessProfileRepository,
+    update_business_profile,
+)
 from scheduling.domain.client_records import (
     ClientRecordRepository,
     ClientRecordService,
@@ -105,6 +110,7 @@ class OwnerRepository(Protocol):
     def read_block(self, business_id: str, block_id: str) -> UnavailableBlock | None: ...
     def read_policy_record(self, business_id: str) -> PolicyRecord | None: ...
     def read_outreach(self, business_id: str) -> object: ...
+    def read_business_profile(self, business_id: str) -> object: ...
 
 
 class StrictModel(BaseModel):
@@ -187,6 +193,23 @@ class OutreachSettingsBody(StrictModel):
 class OutreachEditBody(StrictModel):
     expected_version: int = Field(ge=0)
     settings: OutreachSettingsBody
+
+
+class BusinessProfileBody(StrictModel):
+    display_name: str = Field(min_length=1, max_length=100)
+    description: str = Field(min_length=1, max_length=300)
+    support_contact: str = Field(min_length=1, max_length=200)
+    service_name: str = Field(min_length=1, max_length=100)
+    service_description: str = Field(min_length=1, max_length=300)
+    default_duration_minutes: int = Field(gt=0, le=1440)
+
+    def profile(self) -> BusinessProfile:
+        return BusinessProfile(**self.model_dump())
+
+
+class BusinessProfileEditBody(StrictModel):
+    expected_version: int = Field(ge=0)
+    profile: BusinessProfileBody
 
 
 class ManualInvitationBody(StrictModel):
@@ -623,6 +646,27 @@ def create_owner_app(
         if record is None:
             raise _error("POLICY_NOT_CONFIGURED", "Persist the pilot policy first", 404)
         return {"record": record, "calendar_revision": store.read_revision(business_id)}
+
+    @app.get("/v1/owner/businesses/{business_id}/profile")
+    def get_business_profile(business_id: str,
+                             owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:
+        del owner
+        return cast(BusinessProfileRepository, repository).read_business_profile(business_id)
+
+    @app.put("/v1/owner/businesses/{business_id}/profile")
+    def edit_business_profile(business_id: str, body: BusinessProfileEditBody,
+                              owner: Annotated[OwnerPrincipal, Depends(principal)],
+                              request_key: Annotated[str, Depends(key)]) -> object:
+        profiles = cast(BusinessProfileRepository, repository)
+        policy_record = store.read_policy_record(business_id)
+        if (policy_record is not None and body.profile.default_duration_minutes
+                > policy_record.policy.maximum_visit_minutes):
+            raise _error("INVALID_REQUEST",
+                         "Default duration exceeds the scheduling policy's visit maximum", 422)
+        return run(lambda: update_business_profile(profiles, business_id, owner.actor_id,
+                                                   request_key, body.expected_version,
+                                                   body.profile.profile()),
+                   lambda: jsonable_encoder(profiles.read_business_profile(business_id)))
 
     @app.get("/v1/owner/businesses/{business_id}/booking-outreach")
     def get_booking_outreach(business_id: str,

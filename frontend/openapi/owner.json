@@ -44,6 +44,76 @@
         "title": "BlockBody",
         "type": "object"
       },
+      "BusinessProfileBody": {
+        "additionalProperties": false,
+        "properties": {
+          "default_duration_minutes": {
+            "exclusiveMinimum": 0.0,
+            "maximum": 1440.0,
+            "title": "Default Duration Minutes",
+            "type": "integer"
+          },
+          "description": {
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Description",
+            "type": "string"
+          },
+          "display_name": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Display Name",
+            "type": "string"
+          },
+          "service_description": {
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Service Description",
+            "type": "string"
+          },
+          "service_name": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Service Name",
+            "type": "string"
+          },
+          "support_contact": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Support Contact",
+            "type": "string"
+          }
+        },
+        "required": [
+          "display_name",
+          "description",
+          "support_contact",
+          "service_name",
+          "service_description",
+          "default_duration_minutes"
+        ],
+        "title": "BusinessProfileBody",
+        "type": "object"
+      },
+      "BusinessProfileEditBody": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_version": {
+            "minimum": 0.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "profile": {
+            "$ref": "#/components/schemas/BusinessProfileBody"
+          }
+        },
+        "required": [
+          "expected_version",
+          "profile"
+        ],
+        "title": "BusinessProfileEditBody",
+        "type": "object"
+      },
       "ClientNoteBody": {
         "additionalProperties": false,
         "properties": {
@@ -2507,6 +2577,112 @@
           }
         ],
         "summary": "Seed Policy"
+      }
+    },
+    "/v1/owner/businesses/{business_id}/profile": {
+      "get": {
+        "operationId": "get_business_profile_v1_owner_businesses__business_id__profile_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "business_id",
+            "required": true,
+            "schema": {
+              "title": "Business Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Get Business Profile V1 Owner Businesses  Business Id  Profile Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Business Profile"
+      },
+      "put": {
+        "operationId": "edit_business_profile_v1_owner_businesses__business_id__profile_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "business_id",
+            "required": true,
+            "schema": {
+              "title": "Business Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BusinessProfileEditBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Edit Business Profile V1 Owner Businesses  Business Id  Profile Put"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Edit Business Profile"
       }
     },
     "/v1/owner/businesses/{business_id}/requests": {
