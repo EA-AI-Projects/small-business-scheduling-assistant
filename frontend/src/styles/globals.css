@@ -357,3 +357,10 @@ code { font-size: .9em; }
 .client-legend .move { background: var(--color-move-bg); border: 2px dotted var(--color-move-edge); }
 .cal-head-button { display: flex; flex-direction: column; align-items: center; width: 100%; min-height: 2.75rem; padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; }
 .cal-head-button:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
+
+/* ---- Scheduling policy settings (#338) ---- */
+.plain-list { list-style: none; margin: 0 0 .5rem; padding: 0; display: grid; gap: .15rem; }
+.weekly-hours { border: 1px solid var(--color-border); border-radius: 8px; padding: .7rem; display: grid; gap: .7rem; }
+.weekday-row { display: grid; gap: .4rem; }
+.weekday-row .two-col { align-items: end; }
+.advanced-policy-card summary { cursor: pointer; }
