@@ -538,7 +538,7 @@ Keep the synthetic `dev` environment running indefinitely, within the $10/month 
 | Deployment | Stack `scheduling-dev` has 61 resources, deployed through the scoped deployer and execution roles. SMS was off and schedules were disabled at creation. |
 | Alarms | The SNS subscription was confirmed and a synthetic alarm delivery was received. |
 | Owner app | Hosted UI sign-in with authorization code and PKCE. Amplify security headers present. CORS allowed from the app origin and denied from a foreign origin. An unauthenticated request returns 401 with the allow-origin header. |
-| Owner API | Policy seed, client save, and rejection of a different subject. |
+| Owner API | Policy seed, business profile save (service and default duration; required before booking), client save, and rejection of a different subject. |
 | Transaction races | Against the deployed table, 3 runs, 15 of 15 passed (#80/#81). |
 | Due GSIs and IAM | Verified. |
 | Hold-expiry proof | Report of 4 examined, 3 expired, 1 stale (#84/#85). |
