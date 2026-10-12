@@ -574,4 +574,5 @@ Read-only reading at 2026-10-01T00:27Z (posted on #43): the AWS Budget `scheduli
 ### 5.7 Open follow-ups
 
 - #79.
+- The business profile save (service and default duration, required before booking, #339) has not been run on the deployed stack. The next `dev` redeploy must save the business profile beside the policy seed.
 - #67, which is required before `pilot`.
