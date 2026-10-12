@@ -4,15 +4,15 @@ import { useOwner } from "@/owner/OwnerContext";
 
 import { BusyButton } from "../BusyButton";
 import { PolicyField } from "./PolicyField";
-import { applyRegular, regularDraft, regularErrors, WEEKDAYS, type RegularDraft } from "./policyDraft";
-import { FailureAlert } from "./FailureAlert";
+import { applyRegular, dayKey, normalizeRegular, regularDraft, regularErrors, REGULAR_LABELS, WEEKDAYS, type RegularDraft } from "./policyDraft";
+import { ConflictNotice, FailureAlert } from "./FailureAlert";
 import { usePolicySave } from "./usePolicySave";
 import { useSyncedDraft } from "./useSyncedDraft";
 
 export function RegularPolicyForm() {
   const { data } = useOwner();
   const policy = data.policy?.record.policy ?? null;
-  const { draft, setDraft, dirty, reset } = useSyncedDraft<RegularDraft>(policy ? regularDraft(policy) : null);
+  const { draft, setDraft, dirty, reset, conflicts } = useSyncedDraft<RegularDraft>(policy ? regularDraft(policy) : null);
   const { save, failure, clearFailure } = usePolicySave("Regular scheduling settings saved");
   const [shown, setShown] = useState(false);
   const [summary, setSummary] = useState<string | null>(null);
@@ -26,8 +26,8 @@ export function RegularPolicyForm() {
     clearFailure();
   }
   function editWindow(day: number, index: number, field: "opens" | "closes", value: string) {
-    edit((current) => ({ ...current, weekly: current.weekly.map((windows, d) => d !== day ? windows
-      : windows.map((window, i) => i === index ? { ...window, [field]: value } : window)) }));
+    edit((current) => ({ ...current, [dayKey(day)]: current[dayKey(day)]
+      .map((window, i) => i === index ? { ...window, [field]: value } : window) }));
   }
 
   async function submit() {
@@ -39,8 +39,11 @@ export function RegularPolicyForm() {
       return;
     }
     if (!draft || !policy) return;
-    // Input typed while the save is in flight stays: the draft only follows the saved policy when unedited.
-    if (await save((saved) => applyRegular(saved, draft))) setShown(false);
+    // Store the draft as the server will, so it matches the saved value afterwards; input typed while
+    // the save is in flight stays.
+    const sent = normalizeRegular(draft);
+    setDraft(() => sent);
+    if (await save((saved) => applyRegular(saved, sent))) setShown(false);
   }
 
   return <section className="card regular-policy-card">
@@ -53,8 +56,8 @@ export function RegularPolicyForm() {
         <legend>Weekly hours</legend>
         {WEEKDAYS.map((name, day) => <div key={name} className="weekday-row" role="group" aria-label={name}>
           <strong>{name}</strong>
-          {draft.weekly[day]!.length === 0 && <span className="meta"> Closed</span>}
-          {draft.weekly[day]!.map((window, index) => {
+          {draft[dayKey(day)].length === 0 && <span className="meta"> Closed</span>}
+          {draft[dayKey(day)].map((window, index) => {
             const id = `regular-policy-weekly-${day}-${index}`;
             const error = found[`weekly-${day}-${index}`];
             const showError = shown && error !== undefined;
@@ -69,13 +72,12 @@ export function RegularPolicyForm() {
                   onChange={(event) => editWindow(day, index, "closes", event.target.value)} /></label>
               {showError && <p id={`${id}-error`} className="field-error">{error}</p>}
               <button type="button" onClick={() => edit((current) => ({ ...current,
-                weekly: current.weekly.map((windows, d) => d === day ? windows.filter((_, i) => i !== index) : windows) }))}
+                [dayKey(day)]: current[dayKey(day)].filter((_, i) => i !== index) }))}
                 aria-label={`Remove ${name} hours ${index + 1}`}>Remove</button>
             </div>;
           })}
           <button type="button" onClick={() => edit((current) => ({ ...current,
-            weekly: current.weekly.map((windows, d) => d === day
-              ? [...windows, { opens: "08:00", closes: "17:00" }] : windows) }))}
+            [dayKey(day)]: [...current[dayKey(day)], { opens: "08:00", closes: "17:00" }] }))}
             aria-label={`Add ${name} hours`}>Add hours</button>
         </div>)}
       </fieldset>
@@ -94,6 +96,7 @@ export function RegularPolicyForm() {
           onChange={(event) => edit((current) => ({ ...current, horizon: event.target.value }))} />}
       </PolicyField>
       {summary && <p className="field-error" role="alert">{summary}</p>}
+      <ConflictNotice labels={conflicts.map((key) => REGULAR_LABELS[key as keyof typeof REGULAR_LABELS])} />
       <FailureAlert failure={failure} />
       {dirty && <p className="meta" role="status">You have unsaved changes.</p>}
       <div className="row-actions">

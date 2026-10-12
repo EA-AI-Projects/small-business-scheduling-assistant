@@ -22,9 +22,11 @@ const BASE = {
 let policy: typeof BASE;
 let version: number;
 let revision: number;
+let failPolicyLoad = false;
 const request = vi.fn();
 const api = {
   get: vi.fn(async (path: string) => {
+    if (path === "/policy" && failPolicyLoad) throw new Error("offline");
     if (path === "/policy") return { record: { version, policy }, calendar_revision: revision };
     if (path === "/calendar") return { revision, events: [] };
     return [];
@@ -58,7 +60,7 @@ describe("Scheduling policy settings", () => {
   const alerts = () => [...host.querySelectorAll('[role="alert"]')].map((node) => node.textContent);
 
   beforeEach(async () => {
-    policy = structuredClone(BASE); version = 1; revision = 7;
+    policy = structuredClone(BASE); version = 1; revision = 7; failPolicyLoad = false;
     request.mockReset();
     (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     host = document.createElement("div");
@@ -190,5 +192,80 @@ describe("Scheduling policy settings", () => {
     await click("Save advanced settings");
     expect(request).not.toHaveBeenCalled();
     expect(host.textContent).toContain("Enter a valid timezone name");
+  });
+
+  const elsewhere = (change: Partial<typeof BASE>) => {
+    policy = { ...policy, ...change }; version = 2; revision = 8;
+    throw new ApiError("Policy version changed", 409, "STALE_VERSION", undefined);
+  };
+
+  it("does not revert another session's regular changes after a stale save", async () => {
+    await act(async () => setValue(field("Booking horizon"), "21"));
+    request.mockImplementationOnce(async () => elsewhere({ holiday_calendar: null as never,
+      weekly_windows: { ...policy.weekly_windows, "5": [{ opens: "09:00:00", closes: "12:00:00" }] } }));
+    await click("Save regular settings");
+    expect(field("Booking horizon").value).toBe("21");
+    expect(field("Saturday opens").value).toBe("09:00");
+    expect(field("Holidays").value).toBe("none");
+    expect(host.textContent).not.toContain("Also changed elsewhere");
+    request.mockResolvedValueOnce(undefined);
+    await click("Save regular settings");
+    const sent = request.mock.calls[1]![1].body;
+    expect(sent.expected_version).toBe(2);
+    expect(sent.policy.weekly_windows["5"]).toEqual([{ opens: "09:00", closes: "12:00" }]);
+    expect(sent.policy.holiday_calendar).toBeNull();
+    expect(sent.policy.booking_horizon_days).toBe(21);
+  });
+
+  it("flags a regular field changed both here and elsewhere and keeps the owner's value", async () => {
+    await act(async () => setValue(field("Monday closes"), "16:00"));
+    request.mockImplementationOnce(async () => elsewhere({
+      weekly_windows: { ...policy.weekly_windows, "0": [{ opens: "08:00:00", closes: "15:00:00" }] } }));
+    await click("Save regular settings");
+    expect(field("Monday closes").value).toBe("16:00");
+    expect(host.textContent).toContain("Also changed elsewhere, still showing your value: Monday hours");
+  });
+
+  it("does not revert another session's advanced changes, including the timezone", async () => {
+    await act(async () => setValue(field("Hold duration"), "600"));
+    request.mockImplementationOnce(async () => elsewhere({ timezone: "America/Denver",
+      maximum_visit_minutes: 240, slot_increment_minutes: 30 }));
+    await click("Save advanced settings");
+    expect(field("Hold duration").value).toBe("600");
+    expect(field("Business timezone").value).toBe("America/Denver");
+    expect(field("Maximum visit length").value).toBe("240");
+    request.mockResolvedValueOnce(undefined);
+    await click("Save advanced settings");
+    expect(request.mock.calls[1]![1].body).toMatchObject({ expected_version: 2, policy: {
+      timezone: "America/Denver", maximum_visit_minutes: 240, slot_increment_minutes: 30, hold_minutes: 600 } });
+  });
+
+  it("flags an advanced field changed on both sides", async () => {
+    await act(async () => setValue(field("Hold duration"), "600"));
+    request.mockImplementationOnce(async () => elsewhere({ hold_minutes: 720 }));
+    await click("Save advanced settings");
+    expect(field("Hold duration").value).toBe("600");
+    expect(host.textContent).toContain("still showing your value: Hold duration");
+  });
+
+  it("does not claim the newer policy loaded when the reload fails", async () => {
+    await act(async () => setValue(field("Booking horizon"), "21"));
+    request.mockImplementationOnce(async () => { failPolicyLoad = true; throw new ApiError("Policy version changed", 409, "STALE_VERSION", undefined); });
+    await click("Save regular settings");
+    expect(host.textContent).toContain("newer policy could not be loaded");
+    expect(host.textContent).not.toContain("now show the newer saved values");
+  });
+
+  it("treats a draft the server normalizes as saved", async () => {
+    request.mockImplementation(async (_path: string, options: { body: { policy: typeof BASE } }) => {
+      policy = { ...policy, ...options.body.policy } as typeof BASE; version = 2; revision = 8;
+    });
+    await act(async () => setValue(field("Booking horizon"), "021"));
+    await click("Save regular settings");
+    expect(field("Booking horizon").value).toBe("21");
+    await act(async () => setValue(field("Business timezone"), "  America/Denver "));
+    await click("Save advanced settings");
+    expect(field("Business timezone").value).toBe("America/Denver");
+    expect(host.textContent).not.toContain("unsaved changes");
   });
 });

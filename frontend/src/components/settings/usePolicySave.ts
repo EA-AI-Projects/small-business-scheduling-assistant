@@ -4,7 +4,7 @@ import type { AvailabilityPolicy, PolicyBody, PolicyEditBody, PolicyState } from
 import { ApiError } from "@/lib/api";
 import { useOwner } from "@/owner/OwnerContext";
 
-export type SaveFailure = { kind: "conflict" | "stale" | "other"; message: string } | null;
+export type SaveFailure = { kind: "conflict" | "stale" | "other"; message: string; reloaded?: boolean } | null;
 
 /**
  * One policy write for a Settings form. The caller keeps its own unsaved input; this hook only
@@ -33,8 +33,8 @@ export function usePolicySave(success: string) {
       const message = error instanceof Error ? error.message : String(error);
       if (error instanceof ApiError && error.status === 409 && error.code === "STALE_VERSION") {
         // The saved policy or calendar changed; show the newer values and keep the owner's input.
-        await refresh(true).catch(() => undefined);
-        setFailure({ kind: "stale", message });
+        const reloaded = await refresh(true).then(() => true, () => false);
+        setFailure({ kind: "stale", message, reloaded });
       } else if (error instanceof ApiError && error.status === 409 && error.code === "SLOT_CONFLICT") {
         setFailure({ kind: "conflict", message });
       } else {

@@ -5,11 +5,14 @@ import { shortTime, toPolicyBody } from "./policyEdit";
 export const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"] as const;
 
 /** Weekdays use the API numbering: 0 is Monday, 6 is Sunday. */
-export interface RegularDraft {
-  weekly: LocalWindow[][];
+export type DayKey = "day0" | "day1" | "day2" | "day3" | "day4" | "day5" | "day6";
+export const dayKey = (day: number): DayKey => `day${day}` as DayKey;
+
+/** One top-level entry per field, so a merge can follow newer saved values field by field. */
+export type RegularDraft = Record<DayKey, LocalWindow[]> & {
   holidays: "US_FEDERAL" | "none";
   horizon: string;
-}
+};
 
 export const ADVANCED_FIELDS = ["slot_increment_minutes", "maximum_visit_minutes", "maximum_buffer_minutes",
   "minimum_visit_gap_minutes", "opening_buffer_minutes", "closing_buffer_minutes", "hold_minutes"] as const;
@@ -19,12 +22,37 @@ export type AdvancedDraft = Record<AdvancedField, string> & { timezone: string }
 export type Errors = Record<string, string>;
 
 export function regularDraft(policy: AvailabilityPolicy): RegularDraft {
-  return {
-    weekly: WEEKDAYS.map((_, day) => (policy.weekly_windows[String(day)] ?? [])
-      .map((window) => ({ opens: shortTime(window.opens), closes: shortTime(window.closes) }))),
+  const draft = {
     holidays: policy.holiday_calendar === "US_FEDERAL" ? "US_FEDERAL" : "none",
     horizon: String(policy.booking_horizon_days),
-  };
+  } as RegularDraft;
+  WEEKDAYS.forEach((_, day) => {
+    draft[dayKey(day)] = (policy.weekly_windows[String(day)] ?? [])
+      .map((window) => ({ opens: shortTime(window.opens), closes: shortTime(window.closes) }));
+  });
+  return draft;
+}
+
+/** Labels for the fields a stale-save merge can flag. */
+export const REGULAR_LABELS: Record<keyof RegularDraft, string> = {
+  day0: "Monday hours", day1: "Tuesday hours", day2: "Wednesday hours", day3: "Thursday hours",
+  day4: "Friday hours", day5: "Saturday hours", day6: "Sunday hours", holidays: "Holidays",
+  horizon: "Booking horizon",
+};
+
+/** The draft as the server will store it, so a saved draft matches the saved value exactly. */
+export function normalizeRegular(draft: RegularDraft): RegularDraft {
+  const horizon = wholeNumber(draft.horizon);
+  return { ...draft, horizon: horizon === null ? draft.horizon : String(horizon) };
+}
+
+export function normalizeAdvanced(draft: AdvancedDraft): AdvancedDraft {
+  const next = { ...draft, timezone: draft.timezone.trim() };
+  for (const key of ADVANCED_FIELDS) {
+    const value = wholeNumber(draft[key]);
+    if (value !== null) next[key] = String(value);
+  }
+  return next;
 }
 
 export function advancedDraft(policy: AvailabilityPolicy): AdvancedDraft {
@@ -43,7 +71,7 @@ export function regularErrors(draft: RegularDraft): Errors {
   const found: Errors = {};
   const horizon = wholeNumber(draft.horizon);
   if (horizon === null || horizon < 1) found.horizon = "Booking horizon must be a whole number of days, 1 or more.";
-  draft.weekly.forEach((windows, day) => windows.forEach((window, index) => {
+  WEEKDAYS.forEach((_, day) => draft[dayKey(day)].forEach((window, index) => {
     const name = `${WEEKDAYS[day]} hours`;
     if (!window.opens || !window.closes) found[`weekly-${day}-${index}`] = `${name}: enter both an opening and a closing time.`;
     else if (window.closes <= window.opens) found[`weekly-${day}-${index}`] = `${name}: closing time must be after opening time.`;
@@ -64,7 +92,7 @@ export { ADVANCED_LABELS };
 
 export function validTimezone(value: string): boolean {
   try {
-    new Intl.DateTimeFormat("en-US", { timeZone: value });
+    new Intl.DateTimeFormat("en-US", { timeZone: value.trim() });
     return value.trim() !== "";
   } catch {
     return false;
@@ -92,7 +120,8 @@ export function advancedErrors(draft: AdvancedDraft): Errors {
 /** The saved policy with the regular fields replaced by the form's values. */
 export function applyRegular(policy: AvailabilityPolicy, draft: RegularDraft): PolicyBody {
   const weekly_windows: PolicyBody["weekly_windows"] = {};
-  draft.weekly.forEach((windows, day) => {
+  WEEKDAYS.forEach((_, day) => {
+    const windows = draft[dayKey(day)];
     if (windows.length) weekly_windows[day] = windows.map(({ opens, closes }) => ({ opens, closes }));
   });
   return { ...toPolicyBody(policy), weekly_windows,

@@ -1,7 +1,8 @@
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 
 import { useOwner } from "@/owner/OwnerContext";
 
+import { BusyButton } from "../BusyButton";
 import { withDateException, type ExceptionMode } from "./policyEdit";
 import { FailureAlert } from "./FailureAlert";
 import { usePolicySave } from "./usePolicySave";
@@ -11,9 +12,10 @@ export function ExceptionForm() {
   const { save, failure, clearFailure } = usePolicySave("Date exception saved");
   const [error, setError] = useState<string | null>(null);
 
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const form = event.currentTarget;
+  const formRef = useRef<HTMLFormElement>(null);
+  const snapshot = (form: HTMLFormElement) => JSON.stringify([...new FormData(form).entries()]);
+
+  async function submit(form: HTMLFormElement) {
     setError(null);
     clearFailure();
     const values = new FormData(form);
@@ -25,8 +27,9 @@ export function ExceptionForm() {
       setError("Closing time must be after opening time.");
       return;
     }
-    // A failed save leaves the form as typed; only a committed save clears it.
-    if (await save((policy) => withDateException(policy, date, mode, window))) form.reset();
+    // A failed save leaves the form as typed; a committed save clears it unless the owner typed more meanwhile.
+    const sent = snapshot(form);
+    if (await save((policy) => withDateException(policy, date, mode, window)) && snapshot(form) === sent) form.reset();
   }
 
   const exceptions = Object.keys(data.policy?.record.policy.date_exceptions ?? {}).length;
@@ -36,7 +39,8 @@ export function ExceptionForm() {
       <p className="hint">Close one date or set custom hours, including opening a holiday. Existing appointments
         may block the change. {exceptions} saved {exceptions === 1 ? "exception is" : "exceptions are"} listed in
         the current policy.</p>
-      <form className="form-stack" aria-label="Date exception" onSubmit={submit}>
+      <form ref={formRef} className="form-stack" aria-label="Date exception"
+        onSubmit={(event: FormEvent<HTMLFormElement>) => { event.preventDefault(); void submit(event.currentTarget); }}>
         <label>Date <input name="date" type="date" required aria-invalid={error !== null && error.includes("date")}
           aria-describedby={error ? "date-exception-error" : undefined} /></label>
         <label>Hours <select name="mode" defaultValue="closed">
@@ -52,7 +56,7 @@ export function ExceptionForm() {
         </div>
         {error && <p id="date-exception-error" className="field-error" role="alert">{error}</p>}
         <FailureAlert failure={failure} />
-        <button className="primary" type="submit">Save exception</button>
+        <BusyButton className="primary" onClick={() => submit(formRef.current!)}>Save exception</BusyButton>
       </form>
     </section>
   );

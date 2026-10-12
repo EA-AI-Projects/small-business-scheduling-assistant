@@ -1,25 +1,48 @@
 import { useState } from "react";
 
+interface State<T> { base: T | null; draft: T | null; conflicts: string[] }
+
 /**
- * A form draft that follows the saved value while the owner has not edited it, and keeps the
- * owner's input when the saved value changes underneath (a save of another form, a refresh, or a
- * newer version after a stale save).
+ * A form draft that starts from the saved value and remembers it as the base. When a newer saved
+ * value arrives (a save elsewhere, a refresh, a stale rejection), fields the owner has not touched
+ * follow the newer saved value, fields the owner changed are kept, and fields changed both by the
+ * owner and by the newer save are kept but flagged in `conflicts` instead of silently overwritten.
  */
-export function useSyncedDraft<T>(saved: T | null): {
+export function useSyncedDraft<T extends object>(saved: T | null): {
   draft: T | null; setDraft: (update: (current: T) => T) => void; dirty: boolean; reset: () => void;
+  conflicts: string[];
 } {
   const savedKey = JSON.stringify(saved);
-  const [synced, setSynced] = useState<string>(savedKey);
-  const [draft, setDraftState] = useState<T | null>(saved);
-  if (savedKey !== synced) {
-    // Adjusting state during render: only follow the saved value when nothing was edited.
-    setSynced(savedKey);
-    if (JSON.stringify(draft) === synced) setDraftState(saved);
+  const [state, setState] = useState<State<T>>({ base: saved, draft: saved, conflicts: [] });
+  if (savedKey !== JSON.stringify(state.base)) {
+    setState(merge(state, saved));
   }
+  const draft = state.draft ?? saved;
+  const live = state.conflicts.filter((key) =>
+    saved !== null && draft !== null && same(draft, saved, key) === false);
   return {
-    draft: draft ?? saved,
-    setDraft: (update) => setDraftState((current) => update((current ?? saved) as T)),
-    dirty: saved !== null && JSON.stringify(draft ?? saved) !== savedKey,
-    reset: () => setDraftState(saved),
+    draft,
+    setDraft: (update) => setState((current) => current.draft === null ? current
+      : { ...current, draft: update(current.draft) }),
+    dirty: saved !== null && JSON.stringify(draft) !== savedKey,
+    reset: () => setState({ base: saved, draft: saved, conflicts: [] }),
+    conflicts: live,
   };
+}
+
+function same<T extends object>(a: T, b: T, key: string): boolean {
+  return JSON.stringify(a[key as keyof T]) === JSON.stringify(b[key as keyof T]);
+}
+
+function merge<T extends object>(state: State<T>, saved: T | null): State<T> {
+  const { base, draft } = state;
+  if (saved === null || base === null || draft === null) return { base: saved, draft: saved, conflicts: [] };
+  const next = { ...draft };
+  const conflicts = new Set(state.conflicts);
+  for (const key of Object.keys(saved) as (keyof T & string)[]) {
+    if (same(draft, saved, key)) continue;
+    if (same(draft, base, key)) next[key] = saved[key];
+    else if (!same(saved, base, key)) conflicts.add(key);
+  }
+  return { base: saved, draft: next, conflicts: [...conflicts] };
 }

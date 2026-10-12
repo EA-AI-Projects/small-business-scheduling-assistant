@@ -4,9 +4,9 @@ import { useOwner } from "@/owner/OwnerContext";
 
 import { BusyButton } from "../BusyButton";
 import { PolicyField } from "./PolicyField";
-import { ADVANCED_FIELDS, ADVANCED_LABELS, advancedDraft, advancedErrors, applyAdvanced, type AdvancedDraft,
+import { ADVANCED_FIELDS, ADVANCED_LABELS, advancedDraft, advancedErrors, applyAdvanced, normalizeAdvanced, type AdvancedDraft,
   type AdvancedField } from "./policyDraft";
-import { FailureAlert } from "./FailureAlert";
+import { ConflictNotice, FailureAlert } from "./FailureAlert";
 import { usePolicySave } from "./usePolicySave";
 import { useSyncedDraft } from "./useSyncedDraft";
 
@@ -28,7 +28,7 @@ function timezoneNames(): string[] {
 export function AdvancedPolicyForm() {
   const { data } = useOwner();
   const policy = data.policy?.record.policy ?? null;
-  const { draft, setDraft, dirty, reset } = useSyncedDraft<AdvancedDraft>(policy ? advancedDraft(policy) : null);
+  const { draft, setDraft, dirty, reset, conflicts } = useSyncedDraft<AdvancedDraft>(policy ? advancedDraft(policy) : null);
   const { save, failure, clearFailure } = usePolicySave("Advanced scheduling settings saved");
   const [shown, setShown] = useState(false);
   const [summary, setSummary] = useState<string | null>(null);
@@ -52,8 +52,10 @@ export function AdvancedPolicyForm() {
       return;
     }
     if (!draft) return;
-    const current = draft;
-    if (await save((saved) => applyAdvanced(saved, current))) setShown(false);
+    // Store the draft as the server will, so it matches the saved value afterwards.
+    const sent = normalizeAdvanced(draft);
+    setDraft(() => sent);
+    if (await save((saved) => applyAdvanced(saved, sent))) setShown(false);
   }
 
   return <section className="card advanced-policy-card">
@@ -84,6 +86,8 @@ export function AdvancedPolicyForm() {
           pending request is rejected.
         </p>
         {summary && <p className="field-error" role="alert">{summary}</p>}
+        <ConflictNotice labels={conflicts.map((key) => key === "timezone" ? "Business timezone"
+          : ADVANCED_LABELS[key as AdvancedField].label)} />
         <FailureAlert failure={failure} />
         {dirty && <p className="meta" role="status">You have unsaved changes.</p>}
         <div className="row-actions">
