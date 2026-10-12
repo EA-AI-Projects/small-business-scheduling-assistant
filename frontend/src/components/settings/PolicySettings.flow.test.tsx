@@ -35,8 +35,9 @@ const api = {
 } as unknown as OwnerApi;
 
 function Page() {
-  const { loaded, data } = useOwner();
+  const { loaded, data, refresh } = useOwner();
   return loaded ? <>
+    <button type="button" onClick={() => refresh()}>Reload</button>
     <PolicySummary policy={data.policy} />
     <RegularPolicyForm /><ExceptionForm /><AdvancedPolicyForm />
   </> : null;
@@ -324,6 +325,23 @@ describe("Scheduling policy settings", () => {
     await click("Save advanced settings");
     expect(host.textContent).not.toContain("Also changed elsewhere");
     expect(host.textContent).not.toContain("unsaved changes");
+    await act(async () => setValue(field("Hold duration"), "700"));
+    expect(host.textContent).not.toContain("Also changed elsewhere");
+    expect(host.textContent).toContain("unsaved changes");
+  });
+
+  it("follows another device that restores the pre-save value (A-B-A)", async () => {
+    await act(async () => setValue(field("Booking horizon"), "21"));
+    request.mockImplementationOnce(async (_path: string, options: { body: { policy: typeof BASE } }) => {
+      policy = { ...policy, ...options.body.policy } as typeof BASE; version = 2; revision = 8;
+    });
+    await click("Save regular settings");
+    expect(field("Booking horizon").value).toBe("21");
+    policy = { ...policy, booking_horizon_days: 14 }; version = 3; revision = 9; // other device restores 14
+    await click("Reload");
+    expect(field("Booking horizon").value).toBe("14");
+    expect(host.textContent).not.toContain("unsaved changes");
+    expect(host.textContent).not.toContain("Also changed elsewhere");
   });
 
   it("merges again after a second stale rejection", async () => {

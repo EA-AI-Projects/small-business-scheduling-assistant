@@ -15,8 +15,11 @@ export function useSyncedDraft<T extends object>(saved: T | null): {
   const savedKey = JSON.stringify(saved);
   const [state, setState] = useState<State<T>>({ base: saved, draft: saved, conflicts: [] });
   // While the owner's own committed save is still loading back, the old saved value is not a newer change.
-  if (savedKey !== JSON.stringify(state.base) && state.settling !== savedKey) {
-    setState(merge(state, saved));
+  const differs = savedKey !== JSON.stringify(state.base);
+  const settling = state.settling === savedKey;
+  if (!settling && (differs || state.settling !== undefined)) {
+    // Once the saved value moves off the pre-save one, the settling window is over (even if it moves back).
+    setState(differs ? merge(state, saved) : { ...state, settling: undefined });
   }
   const draft = state.draft ?? saved;
   const live = state.conflicts.filter((key) =>
