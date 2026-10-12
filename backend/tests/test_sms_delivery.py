@@ -8,6 +8,7 @@ import pytest
 
 from scheduling.adapters.sms_twilio import FICTIONAL_NUMBER, TwilioSmsSender
 from scheduling.domain.appointments import Appointment
+from scheduling.domain.business_profile import BusinessProfile, BusinessProfileRecord
 from scheduling.domain.calendar import CalendarStatus
 from scheduling.domain.client_records import ClientProfile, RecordConflict, RecordNotFound
 from scheduling.domain.outbox import (
@@ -43,6 +44,11 @@ class Records:
 
     def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None:
         return self.profile if business_id == "pilot" and client_id == "client-1" else None
+
+    def read_business_profile(self, business_id: str) -> BusinessProfileRecord:
+        return BusinessProfileRecord(BusinessProfile(
+            "Example Cleaning Co.", "A synthetic business.", "support@example.invalid",
+            "Standard cleaning", "A synthetic visit.", 60), 1)
 
     def acquire_client_send(self, business_id: str, client_id: str) -> str:
         assert business_id == "pilot" and client_id == "client-1"

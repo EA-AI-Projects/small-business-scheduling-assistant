@@ -23,6 +23,8 @@ export interface ClientSessionBase {
   config: OwnerConfig; token: string; zone: string | null;
   /** Days ahead the business takes bookings; null when the server did not say. */
   horizonDays: number | null; onSessionEnded: () => void;
+  /** The saved service and business ("Dog grooming with Example Pet Care"); null until the owner saves them. */
+  visitLabel: string | null;
 }
 /** The signed-in shell adds the calendar state, so the header controls and the Calendar page share it. */
 export interface ClientSessionValue extends ClientSessionBase { calendar: CalendarState; move: MoveState }
@@ -39,7 +41,12 @@ export const clientConfig = (() => {
 })();
 
 type ClientSession = { role: "client"; business_id: string; client_id: string; timezone: string | null;
-  booking_horizon_days?: number | null };
+  booking_horizon_days?: number | null; business_name?: string | null; service_name?: string | null };
+
+function visitLabel(session: ClientSession): string | null {
+  return session.service_name && session.business_name
+    ? `${session.service_name} with ${session.business_name}` : null;
+}
 
 async function accountRequest(config: OwnerConfig, path: string, credential: string, method = "GET"): Promise<Response> {
   try {
@@ -137,7 +144,7 @@ function LocalClientAccess({ config, children }: { config: OwnerConfig; children
   }, [config]);
 
   const signedIn = session && token ? { config, token, zone: session.timezone ?? null,
-    horizonDays: session.booking_horizon_days ?? null,
+    horizonDays: session.booking_horizon_days ?? null, visitLabel: visitLabel(session),
     onSessionEnded: () => end("Your session ended. Sign in again.") } : null;
   if (signedIn) return <ClientShell value={signedIn} email={null} local onSignOut={() => end(null)}
     notice={message ? <div className="notice error" role="alert"><p>{message}</p></div> : undefined}>{children}</ClientShell>;
@@ -222,7 +229,7 @@ function CognitoClientAccess({ config, children }: { config: OwnerConfig; childr
     <button type="button" onClick={() => end(null, true)}>Sign out and switch account</button></div> : undefined;
   if (!busy && session && accessToken) {
     const value = { config, token: accessToken, zone: session.timezone ?? null,
-      horizonDays: session.booking_horizon_days ?? null,
+      horizonDays: session.booking_horizon_days ?? null, visitLabel: visitLabel(session),
       onSessionEnded: () => end("Your session ended. Sign in again.", true) };
     return <ClientShell value={value} email={email} local={false} onSignOut={() => end(null, true)} notice={notice}>
       {children}</ClientShell>;

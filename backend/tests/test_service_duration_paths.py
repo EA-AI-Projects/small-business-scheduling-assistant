@@ -33,7 +33,7 @@ def test_sms_portal_and_owner_requests_all_take_the_one_saved_duration() -> None
     api, repository, texts = both()
     repository.set_business_profile_for_test("business-1", 90)
     offer = texts.text("b", BOOK)
-    assert "90-minute cleaning" in offer.text
+    assert "90-minute Standard cleaning visit" in offer.text
     text_hold = texts.text("b", "Yes please")
     assert text_hold.committed and text_hold.appointment_id is not None
     assert minutes(repository, text_hold.appointment_id) == 90

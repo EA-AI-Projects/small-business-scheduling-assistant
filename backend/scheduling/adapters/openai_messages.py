@@ -92,18 +92,20 @@ OWNER_LOOP_TOOLS: list[dict[str, Any]] = [
                          ("cancel_counteroffer", "Cancel"))],
 ]
 INSTRUCTIONS = (
-    "Interpret one text message sent to a home-cleaning business. The text may be in any "
+    "Interpret one text message sent to a small appointment business. The Business and Service "
+    "lines of the context name it; they are saved facts, so never guess or invent either. "
+    "The text may be in any "
     "language or wording; read what the sender means. You only propose an "
     "interpretation. The backend checks the calendar, offers real open times, and changes "
     "nothing until the sender picks an offered option or confirms. "
     "Resolve relative dates such as today, tomorrow, Friday, this week, or next week using "
     "Today and its weekday in the context. A weekday name alone means its next occurrence "
     "on or after tomorrow. Write dates as YYYY-MM-DD and times as HH:MM in 24-hour local time. "
-    "Intents: availability when a client asks for open times or wants to book a cleaning, "
-    "with or without a time. A text that asks to get, book, schedule, or have a cleaning "
-    "(\"Could you squeeze in a cleaning on Monday?\", \"I'd like one next week\") is "
+    "Intents: availability when a client asks for open times or wants to book a visit for the service, "
+    "with or without a time. A text that asks to get, book, schedule, or have the service "
+    "(\"Could you squeeze one in on Monday?\", \"I'd like one next week\") is "
     "availability, also during a calendar conversation. But do not assume a request: a "
-    "short question that only names a booking, appointment, cleaning, or visit and a day is "
+    "short question that only names a booking, appointment, the service, or a visit and a day is "
     "clarify_booking, not availability. Set date_from and date_to to the inclusive requested day range "
     "(the same day for one day). Set time_from and time_to for a time preference: the same "
     "value for one specific time, 08:00 to 12:00 for morning, 12:00 to 17:00 for afternoon, "
@@ -114,7 +116,7 @@ INSTRUCTIONS = (
     "cancel when a client wants to cancel or cannot make a visit: target_date is the day of "
     "that visit if the text names it. "
     "calendar_question when a client asks about visits or requests they already have "
-    "rather than open times: whether they have bookings, when the cleaners are coming, how "
+    "rather than open times: whether they have bookings, when the staff are coming, how "
     "many visits, whether one is confirmed, or a summary of their schedule or itinerary. "
     "Set range_scope to dates with date_from and date_to for an asked day range, to "
     "all_upcoming (dates null) when the client asks about all upcoming visits or names no "
@@ -130,7 +132,7 @@ INSTRUCTIONS = (
     "so the backend keeps the shown value. "
     "clarify_booking, with date_from and date_to if a day is named, when the text could "
     "mean either checking an existing booking or requesting a new one: only a booking, "
-    "appointment, cleaning, or visit and a day, with nothing else (a request verb, how many, "
+    "appointment, the service, or a visit and a day, with nothing else (a request verb, how many, "
     "confirmed, my, when) showing which (\"Appointment Monday?\", \"A visit tomorrow?\"). "
     "For every other intent, statuses, view, and range_scope are null. "
     "owner_decision when the owner approves or declines a request. "
@@ -232,6 +234,8 @@ def model_input(body: str, context: MessageContext) -> str:
                 if context.calendar_answer else "")
     transcript = transcript_lines(context.history)
     return (
+        f"Business: {context.business_name or 'not saved'}\n"
+        f"Service: {context.service_name or 'not saved'}\n"
         f"Actor: {context.actor.value}\n"
         f"Today: {context.today.isoformat()} ({context.today.strftime('%A')})\n"
         f"Timezone: {context.timezone}\n"

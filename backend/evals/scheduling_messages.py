@@ -299,7 +299,8 @@ def context_for(case: Case, today: date = TODAY) -> MessageContext:
                     for number, (role, text) in enumerate(case.history))
     return MessageContext(SenderRole(case.actor), case.today or today, TIMEZONE, case.references,
                           calendar_answer=case.calendar_answer, history=history,
-                          prompt_kind=case.prompt_kind)
+                          prompt_kind=case.prompt_kind, business_name="Example Cleaning Co.",
+                          service_name="Standard cleaning")
 
 
 def request_payload(case: Case, today: date = TODAY) -> dict[str, Any]:

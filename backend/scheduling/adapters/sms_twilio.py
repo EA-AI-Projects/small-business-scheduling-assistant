@@ -17,9 +17,16 @@ from scheduling.domain.booking_invitations import (
     invitation_problem,
 )
 from scheduling.domain.booking_outreach import (
+    LEGACY_DEFAULT_MESSAGES,
     OutreachRecord,
     approved_invitation_message,
     invitation_message,
+)
+from scheduling.domain.business_profile import (
+    BusinessProfile,
+    BusinessProfileRecord,
+    sentence_case,
+    visit_phrase,
 )
 from scheduling.domain.calendar import CalendarSnapshot, CalendarStatus
 from scheduling.domain.client_records import ClientProfile, RecordConflict, RecordNotFound
@@ -62,6 +69,7 @@ class SchedulingRecords(Protocol):
     def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None: ...
     def read_policy(self, business_id: str) -> AvailabilityPolicy: ...
     def read_outreach(self, business_id: str) -> OutreachRecord: ...
+    def read_business_profile(self, business_id: str) -> BusinessProfileRecord: ...
     def read_confirmed_for_client(self, business_id: str, client_id: str,
                                   run_at: datetime, end_at: datetime) -> tuple[int, tuple[Appointment, ...]]: ...
     def read_last_invitation_sent(self, business_id: str, client_id: str) -> datetime | None: ...
@@ -175,8 +183,8 @@ class TwilioSmsSender:
         except PermanentDeliveryFailure:
             self._records.complete_invitation(intent, None)
             raise
-        if not self._records.claim_invitation_handoff(intent):
-            raise PermanentDeliveryFailure("INVITATION_NOT_SENDABLE")
+        # Every read and the profile-missing decision come before the durable SENDING
+        # claim, so a transient read failure leaves the invitation in OUTBOX to retry.
         profile = self._records.read_profile(intent.business_id, intent.client_id)
         if profile is None:
             self._records.complete_invitation(intent, None)
@@ -184,10 +192,20 @@ class TwilioSmsSender:
         to = normalize_phone(profile.phone_e164)
         if intent.manual_message is not None:
             body = intent.manual_message
-        elif intent.outreach_version is not None:
-            body = invitation_message(self._records.read_outreach(intent.business_id).settings)
         else:
-            body = approved_invitation_message(intent.lookahead_weeks)
+            settings = (self._records.read_outreach(intent.business_id).settings
+                        if intent.outreach_version is not None else None)
+            saved = self._records.read_business_profile(intent.business_id).profile
+            if saved is None and (settings is None or not settings.message
+                                  or settings.message in LEGACY_DEFAULT_MESSAGES):
+                # The approved wording names the saved business and service; with no
+                # saved profile booking is blocked, so nothing is sent.
+                self._records.complete_invitation(intent, None)
+                raise PermanentDeliveryFailure("INVITATION_PROFILE_MISSING")
+            body = (invitation_message(settings, saved) if settings is not None
+                    else approved_invitation_message(intent.lookahead_weeks, saved))
+        if not self._records.claim_invitation_handoff(intent):
+            raise PermanentDeliveryFailure("INVITATION_NOT_SENDABLE")
         try:
             provider_id = self._send(record, to, body, intent.client_id, pre_send=check)
         except PermanentDeliveryFailure:
@@ -379,8 +397,10 @@ class TwilioSmsSender:
                 record.business_id, appointment.appointment_id)
             original = (self._records.read_appointment(guard.replacement_id)
                         if guard is not None else None)
+        saved = (self._records.read_business_profile(record.business_id).profile
+                 if appointment is not None else None)
         return render_notification(record.template, record.recipient, appointment, profile,
-                                   self._timezone, original, self._clock())
+                                   self._timezone, original, self._clock(), saved)
 
 
 COUNTEROFFER_TEMPLATES = frozenset({
@@ -388,9 +408,15 @@ COUNTEROFFER_TEMPLATES = frozenset({
     COUNTEROFFER_DECLINED_TEMPLATE})
 
 
+def _help_tail(business: BusinessProfile | None) -> str:
+    who = business.display_name if business is not None else "business"
+    return f"Reply to the {who} number for help."
+
+
 def _counteroffer_text(template: str, recipient: str, appointment: Appointment,
                        profile: ClientProfile | None, timezone: ZoneInfo,
-                       original: Appointment | None, now: datetime | None) -> str:
+                       original: Appointment | None, now: datetime | None,
+                       business: BusinessProfile | None = None) -> str:
     """Wording for a request created by accepting an owner counteroffer."""
     when = _when(appointment.start_at.astimezone(timezone))
     reference = appointment.appointment_id[:8]
@@ -410,19 +436,22 @@ def _counteroffer_text(template: str, recipient: str, appointment: Appointment,
             return (f"Accepted counteroffer approved: {name}, {when}. Ref {reference}. "
                     f"Both requests are resolved: their request for {earlier}{earlier_ref} "
                     "is closed.")
-        return f"Cleaning visit confirmed: {when}. Ref {reference}. Reply to the business number for help."
+        return (f"{sentence_case(visit_phrase(business))} confirmed: {when}. Ref {reference}. "
+                f"{_help_tail(business)}")
     live = (original is not None and original.status == CalendarStatus.PENDING_APPROVAL
             and original.hold_expires_at is not None and now is not None
             and original.hold_expires_at > now)
     tail = (f" The earlier request for {earlier}{earlier_ref} is still pending owner approval."
             if live else "")
-    return f"Cleaning request declined: {when}. Ref {reference}.{tail}"
+    return (f"{sentence_case(visit_phrase(business))} request declined: {when}. "
+            f"Ref {reference}.{tail}")
 
 
 def render_notification(template: str, recipient: str, appointment: Appointment | None,
                         profile: ClientProfile | None, timezone: ZoneInfo,
                         original: Appointment | None = None,
-                        now: datetime | None = None) -> str:
+                        now: datetime | None = None,
+                        business: BusinessProfile | None = None) -> str:
     """Render a notification body from trusted records; callers check event freshness."""
     if template in BLOCK_TEMPLATES:
         raise PermanentDeliveryFailure("ENTITY_UNAVAILABLE")
@@ -435,7 +464,8 @@ def render_notification(template: str, recipient: str, appointment: Appointment 
     if template == EXPIRED_REPLACEMENT_WAITING_TEMPLATE:
         # The normal expiry text, plus the accepted counteroffer request still waiting
         # (``original`` carries that replacement here).
-        text = render_notification("expire", recipient, appointment, profile, timezone)
+        text = render_notification("expire", recipient, appointment, profile, timezone,
+                                   business=business)
         if (original is not None and original.status == CalendarStatus.PENDING_APPROVAL
                 and original.hold_expires_at is not None and now is not None
                 and original.hold_expires_at > now):
@@ -450,7 +480,7 @@ def render_notification(template: str, recipient: str, appointment: Appointment 
         raise PermanentDeliveryFailure("TEMPLATE_UNKNOWN")
     if template in COUNTEROFFER_TEMPLATES:
         return _counteroffer_text(
-            template, recipient, appointment, profile, timezone, original, now)
+            template, recipient, appointment, profile, timezone, original, now, business)
     if template == "hold-request" and recipient != "owner":
         raise PermanentDeliveryFailure("TEMPLATE_RECIPIENT_MISMATCH")
     if template == "hold-pending" and recipient != "client":
@@ -460,10 +490,11 @@ def render_notification(template: str, recipient: str, appointment: Appointment 
     reference = appointment.appointment_id[:8]
     if template == "hold-request":
         name = profile.name if profile else "client"
-        return (f"New cleaning request from {name}: {when}, "
+        return (f"New {visit_phrase(business)} request from {name}: {when}, "
                 f"{appointment.duration_minutes} min. Ref {reference}. Review before approval.")
     if template == "hold-pending":
-        return f"Your cleaning request for {when} is pending owner approval. Ref {reference}."
+        return (f"Your {visit_phrase(business)} request for {when} is pending owner approval. "
+                f"Ref {reference}.")
     # A later state may have superseded this intent before delivery. The
     # event-version check in the sender prevents a stale status announcement.
     status = {
@@ -472,8 +503,8 @@ def render_notification(template: str, recipient: str, appointment: Appointment 
         "replacement-approved": "confirmed", "replacement-original-retained": "not changed",
         "create_owner_appointment": "confirmed",
     }[template]
-    return (f"Cleaning visit {status}: {when}. Ref {reference}. "
-            "Reply to the business number for help.")
+    return (f"{sentence_case(visit_phrase(business))} {status}: {when}. Ref {reference}. "
+            f"{_help_tail(business)}")
 
 def _when(local: datetime) -> str:
     return f"{local.strftime('%a %b')} {local.day} at {local.strftime('%I:%M %p').lstrip('0')}"

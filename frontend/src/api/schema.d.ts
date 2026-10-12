@@ -533,6 +533,8 @@ export interface components {
             booking_horizon_days?: number | null;
             /** Business Id */
             business_id: string;
+            /** Business Name */
+            business_name?: string | null;
             /** Client Id */
             client_id: string;
             /**
@@ -540,6 +542,8 @@ export interface components {
              * @default client
              */
             role: string;
+            /** Service Name */
+            service_name?: string | null;
             /** Timezone */
             timezone?: string | null;
         };

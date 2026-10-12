@@ -11,6 +11,7 @@ from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.adapters.sms_dynamodb import DynamoSmsIngressStore
 from scheduling.adapters.sms_twilio import TwilioSmsSender
 from scheduling.domain.appointments import Appointment
+from scheduling.domain.business_profile import BusinessProfile, BusinessProfileRecord
 from scheduling.domain.calendar import CalendarStatus
 from scheduling.domain.client_records import (
     ClientProfile,
@@ -129,6 +130,11 @@ class Records:
 
     def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None:
         return self.repository.read_profile(business_id, client_id)
+
+    def read_business_profile(self, business_id: str) -> BusinessProfileRecord:
+        return BusinessProfileRecord(BusinessProfile(
+            "Example Cleaning Co.", "A synthetic business.", "support@example.invalid",
+            "Standard cleaning", "A synthetic visit.", 60), 1)
 
     def acquire_client_send(self, business_id: str, client_id: str) -> str:
         return "synthetic-token"

@@ -44,7 +44,7 @@ describe("session rejection notice", () => {
     await act(async () => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
     expect(started).toBe(1);
     await act(async () => reads[0]!.resolve(new Response("{}", { status: 200 })));
-    expect(started).toBe(6);
+    expect(started).toBe(7);
 
     await act(async () => reads[1]!.resolve(new Response('{"error":{"message":"Unauthorized"}}', { status: 401 })));
     const message = "Your session ended or this account cannot access the owner workspace. Sign in with an approved owner account.";
@@ -62,7 +62,7 @@ describe("session rejection notice", () => {
   });
 
   it("ignores a late 401 from the previous token after a new local sign-in", async () => {
-    const reads = Array.from({ length: 12 }, () => pending<Response>());
+    const reads = Array.from({ length: 14 }, () => pending<Response>());
     let started = 0;
     const fetcher = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       expect(input).toBeTruthy();
@@ -81,16 +81,16 @@ describe("session rejection notice", () => {
     await signIn("synthetic-old-token");
     expect(started).toBe(1);
     await act(async () => reads[0]!.resolve(new Response("{}", { status: 200 })));
-    expect(started).toBe(6);
+    expect(started).toBe(7);
     await act(async () => reads[1]!.resolve(new Response("{}", { status: 401 })));
     expect(host.querySelector("form")).not.toBeNull();
 
     await signIn("synthetic-new-token");
-    expect(started).toBe(7);
-    await act(async () => reads[6]!.resolve(new Response("{}", { status: 200 })));
-    expect(started).toBe(12);
+    expect(started).toBe(8);
+    await act(async () => reads[7]!.resolve(new Response("{}", { status: 200 })));
+    expect(started).toBe(14);
     expect(host.textContent).toContain("Workspace");
-    expect(fetcher.mock.calls[6]?.[1]?.headers).toEqual({ Authorization: "Bearer synthetic-new-token" });
+    expect(fetcher.mock.calls[7]?.[1]?.headers).toEqual({ Authorization: "Bearer synthetic-new-token" });
 
     await act(async () => reads[2]!.resolve(new Response("{}", { status: 401 })));
     expect(host.textContent).toContain("Workspace");

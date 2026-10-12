@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import time
 from typing import Protocol
 
+from scheduling.domain.business_profile import BusinessProfile
+
 
 @dataclass(frozen=True)
 class OutreachSettings:
@@ -33,14 +35,38 @@ class OutreachSettings:
             raise ValueError("Invitation message must be 1 to 500 characters")
 
 
-def approved_invitation_message(lookahead_weeks: int) -> str:
-    window = "one week" if lookahead_weeks == 1 else "two weeks"
-    return ("Smart Scheduling Assistant: Would you like to book a cleaning visit in the next "
-            f"{window}? Reply with a day and time that works for you, or STOP to opt out.")
+# The registered program name stays the prefix so the text is generic across businesses and
+# matches the A2P-approved sample; the saved business and service names appear in the body.
+PROGRAM_NAME = "Smart Scheduling Assistant"
 
 
-def invitation_message(settings: OutreachSettings) -> str:
-    return settings.message or approved_invitation_message(settings.lookahead_weeks or 1)
+def approved_invitation_message(lookahead_weeks: int, business: BusinessProfile | None) -> str:
+    """The default invitation, naming the saved service and business (#348).
+
+    A custom message is the owner's own text. The default needs the saved profile, so with
+    none it cannot be built and booking stays blocked.
+    """
+    if business is None:
+        raise ValueError("Save the business profile before inviting clients to book")
+    window = "week" if lookahead_weeks == 1 else "two weeks"
+    return (f"{PROGRAM_NAME}: Would you like to book a visit for {business.service_name} with "
+            f"{business.display_name} in the next {window}? Reply with a day and time that works for you, "
+            "or STOP to opt out.")
+
+
+# The owner-approved default text before #348. Owner Settings used to store it as a
+# custom message, so a stored copy is treated as "no custom message" and the current
+# default names the saved business and service instead.
+LEGACY_DEFAULT_MESSAGES = frozenset(
+    "Smart Scheduling Assistant: Would you like to book a cleaning visit in the next "
+    f"{window}? Reply with a day and time that works for you, or STOP to opt out."
+    for window in ("one week", "two weeks"))
+
+
+def invitation_message(settings: OutreachSettings, business: BusinessProfile | None) -> str:
+    if settings.message and settings.message not in LEGACY_DEFAULT_MESSAGES:
+        return settings.message
+    return approved_invitation_message(settings.lookahead_weeks or 1, business)
 
 
 @dataclass(frozen=True)

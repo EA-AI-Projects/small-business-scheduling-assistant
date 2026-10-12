@@ -244,8 +244,9 @@ class TextSimulator:
         else:
             party, label = OWNER, "Owner"
         try:
-            body = render_notification(intent.template, intent.recipient, appointment,
-                                       profile, zone)
+            body = render_notification(
+                intent.template, intent.recipient, appointment, profile, zone,
+                business=self._repository.read_business_profile(self._business_id).profile)
         except PermanentDeliveryFailure as failure:
             self._append(party, label, "note", "note",
                          f"A {intent.template} notification would not be sent "

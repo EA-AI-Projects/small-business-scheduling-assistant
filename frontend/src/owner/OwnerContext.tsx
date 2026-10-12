@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
   type ReactNode } from "react";
 
-import type { Appointment, CalendarSnapshot, ClientProfile, OutreachState, PolicyState } from "@/api/types";
+import type { Appointment, BusinessProfileState, CalendarSnapshot, ClientProfile, OutreachState, PolicyState } from "@/api/types";
 import { useCalendarState } from "@/calendar/useCalendarState";
 import { ApiError, type OwnerApi, type RequestOptions } from "@/lib/api";
 import type { CalendarView } from "@/lib/time";
@@ -14,6 +14,8 @@ export interface OwnerData {
   clients: ClientProfile[];
   policy: PolicyState | null;
   outreach: OutreachState | null;
+  /** Saved business details; `profile` is null until the owner first saves them. */
+  businessProfile: BusinessProfileState | null;
   /** Business timezone; UTC until the policy has loaded. */
   zone: string;
 }
@@ -73,7 +75,7 @@ export function useOwner(): OwnerContextValue {
   return value;
 }
 
-const EMPTY: OwnerData = { calendar: null, requests: [], clients: [], policy: null, outreach: null, zone: "UTC" };
+const EMPTY: OwnerData = { calendar: null, requests: [], clients: [], policy: null, outreach: null, businessProfile: null, zone: "UTC" };
 
 export function OwnerProvider({ api, notify, children }: {
   api: OwnerApi; notify: Notify; children: ReactNode;
@@ -101,7 +103,7 @@ export function OwnerProvider({ api, notify, children }: {
 
   const refresh = useCallback(async (preserveSelection = false) => {
     const request = ++latestRefresh.current;
-    const [calendar, requests, clients, policy, outreach] = await Promise.all([
+    const [calendar, requests, clients, policy, outreach, businessProfile] = await Promise.all([
       api.get<CalendarSnapshot>("/calendar"),
       api.get<Appointment[]>("/requests"),
       api.get<ClientProfile[]>("/clients"),
@@ -110,9 +112,10 @@ export function OwnerProvider({ api, notify, children }: {
         throw error;
       }),
       api.get<OutreachState>("/booking-outreach"),
+      api.get<BusinessProfileState>("/profile"),
     ]);
     if (!alive.current || request !== latestRefresh.current) return;
-    setData({ calendar, requests, clients, policy, outreach, zone: policy?.record.policy.timezone ?? "UTC" });
+    setData({ calendar, requests, clients, policy, outreach, businessProfile, zone: policy?.record.policy.timezone ?? "UTC" });
     setLoaded(true);
     setStamp((current) => ({ version: current.version + 1, preserveSelection }));
   }, [api]);

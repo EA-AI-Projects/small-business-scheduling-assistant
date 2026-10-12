@@ -61,6 +61,9 @@ class ClientSession(BaseModel):
     timezone: str | None = None
     # Days ahead the business takes bookings, so the app can stop offering times past it.
     booking_horizon_days: int | None = None
+    # The saved business and service names (#348); None until the owner saves the profile.
+    business_name: str | None = None
+    service_name: str | None = None
 
 
 class ClientAvailabilityQuery(BaseModel):
@@ -225,7 +228,14 @@ def add_client_session_route(
         except (InvalidPolicy, PolicyNotConfigured):
             zone = None
             horizon = None
-        return session.model_copy(update={"timezone": zone, "booking_horizon_days": horizon})
+        try:
+            saved = store.read_business_profile(session.business_id).profile
+        except (OSError, ValueError, KeyError, RuntimeError):
+            saved = None
+        return session.model_copy(update={
+            "timezone": zone, "booking_horizon_days": horizon,
+            "business_name": saved.display_name if saved is not None else None,
+            "service_name": saved.service_name if saved is not None else None})
 
     if store is None:
         return

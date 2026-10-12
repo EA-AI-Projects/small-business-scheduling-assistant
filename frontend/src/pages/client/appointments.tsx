@@ -6,9 +6,9 @@ import { clientLayout, useClientSession } from "@/client/ClientAccess";
 
 /** Appointments: the client's own bookings, with Cancel, Withdraw and Move. Move continues in the Calendar's Day view. */
 export default function ClientAppointmentsPage() {
-  const { config, token, zone, onSessionEnded, calendar, move } = useClientSession();
+  const { config, token, zone, onSessionEnded, calendar, move, visitLabel } = useClientSession();
   const router = useRouter();
-  return <ClientHome config={config} token={token} zone={zone} onSessionEnded={onSessionEnded} move={move}
+  return <ClientHome config={config} token={token} zone={zone} onSessionEnded={onSessionEnded} move={move} visitLabel={visitLabel}
     onOpenCalendar={() => { calendar.setView("day"); calendar.goToday(); void router.push("/client/"); }} />;
 }
 

@@ -5,9 +5,9 @@ import { clientLayout, useClientSession } from "@/client/ClientAccess";
 
 /** Calendar: the client's own appointments and requests in Day, Week, Month, Schedule and Year views. */
 export default function ClientCalendarPage() {
-  const { config, token, zone, horizonDays, calendar, move, onSessionEnded } = useClientSession();
+  const { config, token, zone, horizonDays, calendar, move, onSessionEnded, visitLabel } = useClientSession();
   return <ClientHome config={config} token={token} zone={zone} horizonDays={horizonDays} calendar={calendar}
-    move={move} onSessionEnded={onSessionEnded} />;
+    move={move} onSessionEnded={onSessionEnded} visitLabel={visitLabel} />;
 }
 
 ClientCalendarPage.getLayout = (page: ReactNode) => clientLayout(page);

@@ -417,8 +417,8 @@ def test_invitation_promotes_once_and_sender_uses_exact_copy() -> None:
                              invitation_send_enabled=lambda: True)
     assert sender.deliver(outbox) == "SM-synthetic-invitation"
     assert messages.calls[0]["body"] == (
-        "Smart Scheduling Assistant: Would you like to book a cleaning visit in the next "
-        "one week? Reply with a day and time that works for you, or STOP to opt out.")
+        "Smart Scheduling Assistant: Would you like to book a visit for Standard cleaning with "
+        "Example Cleaning Co. in the next week? Reply with a day and time that works for you, or STOP to opt out.")
     assert "Synthetic Client" not in messages.calls[0]["body"]
     assert consent.outbound == ["SM-synthetic-invitation"]
     assert records.read_last_invitation_sent(BUSINESS, "synthetic-501") == RUN
