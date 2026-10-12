@@ -22,6 +22,14 @@ export type ManualAppointmentBody = Schemas["ManualAppointmentBody"];
 export type PolicyEditBody = Schemas["PolicyEditBody"];
 export type PolicyBody = Schemas["PolicyBody"];
 export type OutreachEditBody = Schemas["OutreachEditBody"];
+export type BusinessProfileBody = Schemas["BusinessProfileBody"];
+export type BusinessProfileEditBody = Schemas["BusinessProfileEditBody"];
+
+/** Saved business profile; `profile` is null until the owner first saves (version 0). */
+export interface BusinessProfileState {
+  profile: BusinessProfileBody | null;
+  version: number;
+}
 
 export interface OutreachState {
   settings: {
