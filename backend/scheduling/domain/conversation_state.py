@@ -49,12 +49,17 @@ class ConversationState:
     calendar_last: date | None = None
     calendar_statuses: tuple[str, ...] = ()
     calendar_view: str | None = None
+    # The visit length an offer quoted (#339). A reply after the owner changed the
+    # saved default is refused instead of booking a length the client never saw.
+    duration_minutes: int | None = None
 
     def __post_init__(self) -> None:
         if self.created_at.tzinfo is None or self.expires_at.tzinfo is None:
             raise ValueError("Conversation state times must be timezone-aware")
         if not self.state_id or self.expires_at <= self.created_at:
             raise ValueError("Conversation state identity or lifetime is invalid")
+        if self.duration_minutes is not None and self.duration_minutes <= 0:
+            raise ValueError("An offered duration must be positive")
         if any(option.tzinfo is None for option in self.options):
             raise ValueError("Offered starts must be timezone-aware")
         if self.kind in CHOICE_KINDS and not 0 < len(self.options) <= MAX_OPTIONS:

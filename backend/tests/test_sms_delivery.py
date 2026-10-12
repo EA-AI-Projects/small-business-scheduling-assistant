@@ -9,7 +9,7 @@ import pytest
 from scheduling.adapters.sms_twilio import FICTIONAL_NUMBER, TwilioSmsSender
 from scheduling.domain.appointments import Appointment
 from scheduling.domain.calendar import CalendarStatus
-from scheduling.domain.client_records import ClientProfile, HomeSize, RecordConflict, RecordNotFound
+from scheduling.domain.client_records import ClientProfile, RecordConflict, RecordNotFound
 from scheduling.domain.outbox import (
     DeliveryFailure,
     DeliveryState,
@@ -29,7 +29,7 @@ class Records:
         self.appointment = Appointment("visit-12345678", "pilot", "client-1", NOW, NOW.replace(hour=18),
                                        CalendarStatus.PENDING_APPROVAL, NOW.replace(hour=19), 60, 0, 1)
         self.profile = ClientProfile("pilot", "client-1", "Synthetic Client", "+15005550006",
-                                     "123 Test Street", HomeSize.SMALL, 60, True, 1,
+                                     "123 Test Street", True, 1,
                                      NOW, NOW, NOW)
         self.send_claimed = False
         self.block: UnavailableBlock | None = None

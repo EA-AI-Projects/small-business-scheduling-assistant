@@ -11,7 +11,7 @@ from evals.scheduling_messages import CASES
 from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.adapters.openai_messages import OpenAIMessageInterpreter
 from scheduling.domain.calendar import CalendarStatus
-from scheduling.domain.client_records import ClientProfile, HomeSize
+from scheduling.domain.client_records import ClientProfile
 from scheduling.domain.conversation import (
     ConversationService,
     MessageContext,
@@ -74,7 +74,8 @@ def setup(proposal: MessageProposal) -> tuple[
     store = InMemoryCalendarRepository()
     store.save_profile(ClientProfile(
         "pilot", "client-1", "Synthetic Client", "+14155550101", "123 Test Street",
-        HomeSize.MEDIUM, 120, True, 1, NOW, NOW, NOW), 0, None)
+        True, 1, NOW, NOW, NOW), 0, None)
+    store.set_business_profile_for_test("pilot", 120)
     interpreter = Interpreter(proposal)
     consent = Consent()
     return (ConversationService(store, interpreter, HoldService(store),
@@ -364,15 +365,15 @@ def test_client_without_owner_verified_profile_is_refused_without_model_or_write
     unverified = InMemoryCalendarRepository()
     unverified.save_profile(ClientProfile(
         "pilot", "client-1", "Synthetic Client", "+14155550101", "123 Test Street",
-        HomeSize.MEDIUM, 120, True, 1, NOW, NOW), 0, None)
+        True, 1, NOW, NOW), 0, None)
     inactive = InMemoryCalendarRepository()
     inactive.save_profile(ClientProfile(
         "pilot", "client-1", "Synthetic Client", "+14155550101", "123 Test Street",
-        HomeSize.MEDIUM, 120, False, 1, NOW, NOW, NOW), 0, None)
+        False, 1, NOW, NOW, NOW), 0, None)
     other_phone = InMemoryCalendarRepository()
     other_phone.save_profile(ClientProfile(
         "pilot", "client-1", "Synthetic Client", "+14155550102", "123 Test Street",
-        HomeSize.MEDIUM, 120, True, 1, NOW, NOW, NOW), 0, None)
+        True, 1, NOW, NOW, NOW), 0, None)
     variants = [(unverified, Consent()), (inactive, Consent()), (store, NoConsent()),
                 (store, OtherClientConsent()), (other_phone, Consent())]
     for repository, consent in variants:

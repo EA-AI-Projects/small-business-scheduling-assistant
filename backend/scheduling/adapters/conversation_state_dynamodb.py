@@ -48,6 +48,7 @@ class DynamoConversationStates:
             date.fromisoformat(item["calendar_last"]["S"]) if "calendar_last" in item else None,
             tuple(value["S"] for value in item.get("calendar_statuses", {}).get("L", ())),
             item.get("calendar_view", {}).get("S"),
+            int(item["duration_minutes"]["N"]) if "duration_minutes" in item else None,
         )
 
     def put_state(self, state: ConversationState) -> None:
@@ -74,6 +75,8 @@ class DynamoConversationStates:
             item["calendar_statuses"] = {"L": [{"S": value} for value in state.calendar_statuses]}
         if state.calendar_view is not None:
             item["calendar_view"] = {"S": state.calendar_view}
+        if state.duration_minutes is not None:
+            item["duration_minutes"] = {"N": str(state.duration_minutes)}
         checks: list[dict[str, Any]] = []
         if state.client_id is not None:
             checks.append({"ConditionCheck": {

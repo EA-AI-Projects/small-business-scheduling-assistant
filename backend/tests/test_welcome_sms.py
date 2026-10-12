@@ -10,7 +10,6 @@ from scheduling.adapters.sms_twilio import TwilioSmsSender
 from scheduling.domain.client_records import (
     ClientProfile,
     ClientRecordService,
-    HomeSize,
     RecordConflict,
 )
 from scheduling.domain.outbox import OutboxRecord, PermanentDeliveryFailure
@@ -80,7 +79,7 @@ def world() -> tuple[InMemoryCalendarRepository, ClientRecordService, Store, Mes
     repository = SendableRecords()
     clients = ClientRecordService(repository)
     clients.save_profile("pilot", "client-1", "Synthetic Client", PHONE, "123 Test Street",
-                         HomeSize.SMALL, 60, True, 0, 180, NOW)
+                         True, 0, NOW)
     store = Store(repository)
     messages = Messages()
     sender = TwilioSmsSender(messages, repository, store,  # type: ignore[arg-type]
@@ -142,7 +141,7 @@ def test_welcome_is_refused_for_opt_out_changed_phone_and_missing_consent() -> N
         sender.deliver(welcome)
     store.opted_out = False
     clients.save_profile("pilot", "client-1", "Synthetic Client", "+14155550102",
-                         "123 Test Street", HomeSize.SMALL, 60, True, 2, 180, NOW)
+                         "123 Test Street", True, 2, NOW)
     with pytest.raises(PermanentDeliveryFailure, match="CONSENT_REQUIRED"):
         sender.deliver(welcome)
     store.consent.clear()
@@ -155,7 +154,7 @@ def test_non_phone_edit_between_queue_and_delivery_still_sends_the_welcome() -> 
     repository, clients, store, messages, sender = world()
     consent(repository, store)
     clients.save_profile("pilot", "client-1", "Synthetic Client", PHONE, "456 Fixed Street",
-                         HomeSize.SMALL, 60, True, 2, 180, NOW)
+                         True, 2, NOW)
     assert sender.deliver(store.outbox["welcome#client-1"]) == "SM-1"
     assert messages.calls[0]["body"] == WELCOME_TEXT
 
@@ -165,7 +164,7 @@ def test_welcome_for_an_old_number_is_superseded_after_phone_change_and_reconsen
     consent(repository, store)
     welcome = store.outbox["welcome#client-1"]
     clients.save_profile("pilot", "client-1", "Synthetic Client", "+14155550102",
-                         "123 Test Street", HomeSize.SMALL, 60, True, 2, 180, NOW)
+                         "123 Test Street", True, 2, NOW)
     consent(repository, store, "+14155550102", NOW + timedelta(minutes=1))
     assert len(store.outbox) == 1  # the same client is never welcomed twice
     with pytest.raises(PermanentDeliveryFailure, match="EVENT_SUPERSEDED"):
@@ -187,6 +186,6 @@ def test_client_verified_before_welcome_texts_existed_is_not_welcomed_after_phon
     store.put_consent_verifying_phone(old, _verified(repository, NOW))
     store.outbox.clear()
     clients.save_profile("pilot", "client-1", "Synthetic Client", "+14155550102",
-                         "123 Test Street", HomeSize.SMALL, 60, True, 2, 180, NOW)
+                         "123 Test Street", True, 2, NOW)
     consent(repository, store, "+14155550102", NOW + timedelta(days=9))
     assert store.outbox == {}

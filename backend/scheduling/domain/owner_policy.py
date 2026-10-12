@@ -14,6 +14,7 @@ from scheduling.domain.availability import (
     available_starts,
     pilot_policy,
 )
+from scheduling.domain.business_profile import BusinessProfileRecord
 from scheduling.domain.calendar import CalendarSnapshot, CalendarStatus
 from scheduling.domain.holds import IdempotencyKeyReused, RevisionConflict
 
@@ -99,6 +100,10 @@ class PolicyCommit:
     result: PolicyResult
     decision_at: datetime
     audit_id: str
+    # The business profile version this edit was validated against (0 when none is
+    # saved). The commit requires it unchanged, so a profile save cannot slip a
+    # default duration above the new maximum in between (#339).
+    profile_version: int = 0
 
 
 @dataclass(frozen=True)
@@ -113,6 +118,8 @@ class PolicyRepository(Protocol):
     def read_policy_record(self, business_id: str) -> PolicyRecord | None: ...
 
     def read_calendar(self, business_id: str) -> CalendarSnapshot: ...
+
+    def read_business_profile(self, business_id: str) -> BusinessProfileRecord: ...
 
     def read_policy_replay(self, command: PolicyCommand) -> PolicyReplay | None: ...
 
@@ -166,13 +173,19 @@ class OwnerPolicyService:
             if snapshot.revision != revision:
                 raise RevisionConflict("Calendar changed during policy validation")
             self._validate_reservations(command.policy, snapshot, now)
+        profile = self._repository.read_business_profile(command.business_id)
+        if (profile.profile is not None and profile.profile.default_duration_minutes
+                > command.policy.maximum_visit_minutes):
+            raise PolicyConflict(
+                "The saved default booking duration is longer than this maximum visit; "
+                "lower the default duration in the business profile first")
         result = PolicyResult(PolicyRecord(command.policy, version), revision + 1)
         identity = json.dumps(
             [command.business_id, command.actor_id, command.operation, command.idempotency_key],
             separators=(",", ":"),
         )
         audit_id = f"{command.operation}#{sha256(identity.encode()).hexdigest()}"
-        commit = PolicyCommit(command, request_hash, result, now, audit_id)
+        commit = PolicyCommit(command, request_hash, result, now, audit_id, profile.version)
         self._repository.commit_policy(revision, commit)
         return result
 

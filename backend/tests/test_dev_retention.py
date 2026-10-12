@@ -31,7 +31,6 @@ from scheduling.domain.client_records import (
     ClientNote,
     ClientProfile,
     ClientRecordService,
-    HomeSize,
     note_expired,
 )
 from scheduling.domain.sms_ingress import ConsentEvidence, InboundReceipt, Keyword, SenderRole
@@ -221,7 +220,7 @@ def purge_risks(items: dict[Key, Item], real_now: datetime,
 
 def _profile(client_id: str, phone: str, now: datetime) -> ClientProfile:
     return ClientProfile(BUSINESS, client_id, "Synthetic Retention Client", phone,
-                         "1 Synthetic Way", HomeSize.SMALL, 60, True, 1, now, now)
+                         "1 Synthetic Way", True, 1, now, now)
 
 
 def _phone(rng: random.Random) -> str:

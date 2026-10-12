@@ -86,7 +86,7 @@ The SMS provider is an external dependency. The LLM is called only from the conv
 
 Owns all business rules and state transitions:
 - Working-hours and booking-horizon enforcement.
-- Duration selection from client defaults and appointment overrides.
+- Duration selection from the one saved service default (business profile) and owner appointment overrides (#339).
 - Buffer application.
 - Availability queries.
 - Pending request creation and hold expiration.
@@ -137,7 +137,7 @@ Manual invitations use the same eligibility and send-time checks but ignore the 
 - `id`, `name`, `timezone`, `working_hours`, `booking_horizon_days`, `default_buffer_minutes`, `default_hold_minutes`, `owner_phone`
 
 ### Client
-- `id`, `name`, `phone_e164` (unique per business unless shared-number handling is added), `service_address`, `home_size_category`, `default_duration_minutes`, `active`, timestamps
+- `id`, `name`, `phone_e164` (unique per business unless shared-number handling is added), `service_address`, `active`, timestamps (no home size or duration; the visit length is the business profile's default duration, #339)
 
 ### Account identity links
 - Cognito subject from a verified access token, role, approved business ID for an owner or existing business/client ID for a client, invitation/approval state, and timestamps. Resolve access from these server-side links, never from browser parameters or an email display claim (#226).
@@ -194,7 +194,7 @@ Rules:
 ## 6. Availability and conflict handling
 
 For an appointment candidate:
-1. Determine the candidate’s duration from appointment override, otherwise client default.
+1. Determine the candidate’s duration from the owner's per-appointment override, otherwise the business's saved default service duration (checked against the policy maximum).
 2. Select the applicable buffer policy (MVP default: configured fixed buffer between homes).
 3. Validate the candidate start is within configured business hours and the 14-day booking horizon.
 4. Compute the occupied interval according to the agreed buffer semantics.
@@ -202,7 +202,7 @@ For an appointment candidate:
 6. Return only valid candidate start times.
 7. On request creation and approval, repeat validation inside a transaction to handle races.
 
-Use the single-crew DynamoDB calendar-revision transaction described in [ARCHITECTURE.md](ARCHITECTURE.md#5-data-architecture-and-conflict-correctness). The owner confirmed one crew, configurable 1/2/3-hour category defaults, a current 3-hour maximum, and 15-minute start increments. The maximum duration and buffer are configured before booking writes; they bound the lookback query. The 30-minute travel buffer applies between visits only, with no opening or closing boundary buffer. All calendar mutations, including edits, expiry, and reschedule swaps, follow the same transaction discipline.
+Use the single-crew DynamoDB calendar-revision transaction described in [ARCHITECTURE.md](ARCHITECTURE.md#5-data-architecture-and-conflict-correctness). The owner confirmed one crew, one saved service default duration (replacing the earlier 1/2/3-hour home-size categories, #339), a current 3-hour maximum, and 15-minute start increments. The maximum duration and buffer are configured before booking writes; they bound the lookback query. The 30-minute travel buffer applies between visits only, with no opening or closing boundary buffer. All calendar mutations, including edits, expiry, and reschedule swaps, follow the same transaction discipline.
 
 All timestamps should be stored in UTC and rendered in the configured business timezone. Daylight-saving transitions, local working hours, and date-only client phrases require explicit timezone-aware parsing and tests.
 
@@ -270,7 +270,7 @@ Operational essentials:
 - Health/readiness endpoint and structured, redacted logs.
 - Alerts for inbound webhook outage, outbound SMS failures, and worker backlog.
 - DynamoDB schema evolution and rollback/backup plan.
-- Configuration for business timezone, hours, hold duration, buffer, and category durations.
+- Configuration for business timezone, hours, hold duration, buffer, and the service default duration.
 - Manual emergency procedure for pausing the assistant and reverting to ordinary owner texting.
 
 ## 11. Testing strategy
@@ -292,7 +292,7 @@ Operational essentials:
 | Owner reply applied to wrong request | Explicit request references, ambiguity detection, confirmation, audit log |
 | AI claims a booking without a successful write | Only confirm after scheduling service returns persisted result |
 | One-day holds block useful availability | Configurable expiry, owner visibility, automatic release and client notice; review pilot metrics |
-| Duration estimates are inaccurate | Owner-configurable mapping and per-appointment override; collect corrections |
+| Duration estimates are inaccurate | Owner-configurable service default and per-appointment override; collect corrections |
 | Travel buffer insufficient for distant homes | Fixed configurable MVP buffer; dynamic travel estimate is a later phase |
 | Owner cannot use admin UI | SMS-first workflow plus usability-tested minimal calendar; emergency manual fallback |
 | Sensitive entry details exposed | Exclude credentials from ordinary notes; define dedicated controls before any storage |

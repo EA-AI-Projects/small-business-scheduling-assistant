@@ -18,7 +18,7 @@ from scheduling.adapters.account_invitations_aws import (
     DynamoClientInvitations,
 )
 from scheduling.adapters.memory import InMemoryCalendarRepository
-from scheduling.domain.client_records import ClientRecordService, HomeSize
+from scheduling.domain.client_records import ClientRecordService
 from scheduling.identity_links import IdentityLink, IdentityLinks, LinkConflict, LinkRole, LinkState
 from scheduling.owner_api import OwnerPrincipal, create_owner_app
 
@@ -122,7 +122,7 @@ def test_owner_invite_activation_and_rejected_claims() -> None:
     profiles = InMemoryCalendarRepository()
     ClientRecordService(profiles).save_profile(
         "pilot", "client-a", "Synthetic Client", "+14155550101",
-        "123 Test Street", HomeSize.SMALL, 60, True, 0, 180, NOW)
+        "123 Test Street", True, 0, NOW)
     records = Records(profiles)
     directory = Directory()
     links = IdentityLinks(records)
@@ -182,7 +182,7 @@ def test_expired_deleted_and_changed_email_invitations_fail_closed() -> None:
     profiles = InMemoryCalendarRepository()
     ClientRecordService(profiles).save_profile(
         "pilot", "client-a", "Synthetic Client", "+14155550101",
-        "123 Test Street", HomeSize.SMALL, 60, True, 0, 180, NOW)
+        "123 Test Street", True, 0, NOW)
     records = Records(profiles)
     directory = Directory()
     links = IdentityLinks(records)
@@ -219,7 +219,7 @@ def test_failed_send_retried_after_provisional_expiry_gets_full_24_hours() -> No
     profiles = InMemoryCalendarRepository()
     ClientRecordService(profiles).save_profile(
         "pilot", "client-a", "Synthetic Client", "+14155550101",
-        "123 Test Street", HomeSize.SMALL, 60, True, 0, 180, NOW)
+        "123 Test Street", True, 0, NOW)
     records = Records(profiles)
     directory = Directory()
     links = IdentityLinks(records)

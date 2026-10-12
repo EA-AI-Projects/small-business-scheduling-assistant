@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.domain.calendar import CalendarStatus
-from scheduling.domain.client_records import ClientProfile, HomeSize
+from scheduling.domain.client_records import ClientProfile
 from scheduling.domain.conversation import ConversationService, MessageContext, MessageProposal
 from scheduling.domain.conversation_history import HistoryMessage
 from scheduling.domain.conversation_state import InMemoryConversationStates
@@ -110,7 +110,7 @@ class Chat:
         for number, name in ((1, "Avery Example"), (2, "Blake Sample")):
             self.store.save_profile(ClientProfile(
                 "pilot", f"c{number}", name, f"+1415555010{number}",
-                "1 Test Street", HomeSize.MEDIUM, 120, True, 1, NOW, NOW, NOW), 0, None)
+                "1 Test Street", True, 1, NOW, NOW, NOW), 0, None)
         self.service = ConversationService(
             self.store, self.model, HoldService(self.store),
             LifecycleService(self.store, lambda: self.now), self.consent, lambda: self.now,

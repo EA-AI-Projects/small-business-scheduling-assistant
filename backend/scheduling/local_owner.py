@@ -33,7 +33,8 @@ from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.adapters.openai_messages import OpenAIMessageInterpreter
 from scheduling.client_api import add_client_session_route
 from scheduling.domain.availability import AvailabilityService
-from scheduling.domain.client_records import ClientRecordService, HomeSize
+from scheduling.domain.business_profile import BusinessProfile
+from scheduling.domain.client_records import ClientRecordService
 from scheduling.domain.conversation import MessageInterpreter
 from scheduling.domain.holds import CreateHold, HoldService
 from scheduling.domain.lifecycle import Action, ActorRole, AppointmentCommand, LifecycleService
@@ -58,11 +59,12 @@ TOKEN_ENV = "LOCAL_OWNER_TOKEN"
 MIN_TOKEN_LENGTH = 16
 LOCAL_APP_ORIGINS = ("http://localhost:3000", "http://127.0.0.1:3000")
 SYNTHETIC_CLIENTS = (
-    ("client-1", "Avery Example", "+14155550101", "101 Fictional Lane", HomeSize.SMALL, 90),
-    ("client-2", "Blake Sample", "+14155550102", "202 Placeholder Ave", HomeSize.MEDIUM, 120),
-    ("client-3", "Casey Demo", "+14155550103", "303 Synthetic Court", HomeSize.LARGE, 180),
+    ("client-1", "Avery Example", "+14155550101", "101 Fictional Lane"),
+    ("client-2", "Blake Sample", "+14155550102", "202 Placeholder Ave"),
+    ("client-3", "Casey Demo", "+14155550103", "303 Synthetic Court"),
 )
 # Casey stays unverified to show that production ignores texts without verification.
+LOCAL_DEFAULT_MINUTES = 90
 VERIFIED_CLIENTS = ("client-1", "client-2")
 
 
@@ -131,11 +133,14 @@ def seed_synthetic_data(repository: InMemoryCalendarRepository, now: datetime) -
     """Seed the pilot policy and a few fictional records within the next few days."""
     clock: Callable[[], datetime] = lambda: now
     policy = OwnerPolicyService(repository, clock).seed(BUSINESS_ID, OWNER_ACTOR, "local-seed")
-    maximum = policy.record.policy.maximum_visit_minutes
+    repository.save_business_profile(
+        BUSINESS_ID, OWNER_ACTOR, "local-profile", 0, BusinessProfile(
+            "Example Cleaning Co.", "A synthetic small cleaning business.",
+            "support@example.invalid", "Standard cleaning",
+            "A synthetic standard cleaning visit.", LOCAL_DEFAULT_MINUTES))
     clients = ClientRecordService(repository)
-    for client_id, name, phone, address, size, minutes in SYNTHETIC_CLIENTS:
-        clients.save_profile(BUSINESS_ID, client_id, name, phone, address, size,
-                             minutes, True, 0, maximum, now)
+    for client_id, name, phone, address in SYNTHETIC_CLIENTS:
+        clients.save_profile(BUSINESS_ID, client_id, name, phone, address, True, 0, now)
         if client_id in VERIFIED_CLIENTS:
             # Stands in for the trusted verification step; never an owner route.
             clients.verify_phone(BUSINESS_ID, client_id, phone, now)
@@ -146,11 +151,11 @@ def seed_synthetic_data(repository: InMemoryCalendarRepository, now: datetime) -
     holds = HoldService(repository)
     lifecycle = LifecycleService(repository, clock)
 
-    starts = _open_starts(availability, tomorrow, 90, now, 3)
+    starts = _open_starts(availability, tomorrow, LOCAL_DEFAULT_MINUTES, now, 3)
     if len(starts) < 3:
         return
     confirmed = holds.create(CreateHold(
-        BUSINESS_ID, OWNER_ACTOR, "client-1", "local-confirmed", starts[0], 90), now)
+        BUSINESS_ID, OWNER_ACTOR, "client-1", "local-confirmed", starts[0], LOCAL_DEFAULT_MINUTES), now)
     lifecycle.apply(AppointmentCommand(
         BUSINESS_ID, confirmed.hold_id, OWNER_ACTOR, ActorRole.OWNER, Action.APPROVE,
         "local-approve", 1))

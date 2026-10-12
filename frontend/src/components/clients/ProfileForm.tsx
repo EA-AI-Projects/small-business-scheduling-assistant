@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 
-import type { ClientProfile, ClientProfileBody, HomeSize } from "@/api/types";
+import type { ClientProfile, ClientProfileBody } from "@/api/types";
 import { path } from "@/lib/api";
 import { isE164, normalizePhone } from "@/lib/phone";
 import { useOwner } from "@/owner/OwnerContext";
@@ -39,8 +39,6 @@ export function ProfileForm({ client, onCreated, onPhoneDraft }: {
       name: text(form, "name"),
       phone_e164: phone,
       service_address: text(form, "service_address"),
-      home_size: String(form.get("home_size")) as HomeSize,
-      default_duration_minutes: Number(form.get("default_duration_minutes")),
       active: form.get("active") === "on",
     };
     if (await change(path`/clients/${id}`, "PUT", body, "Client profile saved", false)) {
@@ -69,13 +67,6 @@ export function ProfileForm({ client, onCreated, onPhoneDraft }: {
         {phoneError && <span id="phone-error" role="alert" className="field-error">{phoneError}</span>}
         <label>Service address <input name="service_address" required maxLength={500}
           defaultValue={client?.service_address ?? ""} /></label>
-        <label>Home size <select name="home_size" defaultValue={client?.home_size ?? "small"}>
-          <option value="small">Small</option>
-          <option value="medium">Medium</option>
-          <option value="large">Large</option>
-        </select></label>
-        <label>Default minutes <input name="default_duration_minutes" type="number" min={1} required
-          defaultValue={client?.default_duration_minutes ?? ""} /></label>
         <label className="inline"><input name="active" type="checkbox"
           defaultChecked={client?.active ?? true} /> Active</label>
         <button className="primary" type="submit">Save profile</button>

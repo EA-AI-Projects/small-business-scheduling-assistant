@@ -83,16 +83,12 @@ export interface UnavailableBlock {
   version: number;
 }
 
-export type HomeSize = "small" | "medium" | "large";
-
 export interface ClientProfile {
   business_id: string;
   client_id: string;
   name: string;
   phone_e164: string;
   service_address: string;
-  home_size: HomeSize;
-  default_duration_minutes: number;
   active: boolean;
   version: number;
   created_at: string;

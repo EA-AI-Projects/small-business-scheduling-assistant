@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.client_api import add_client_session_route
 from scheduling.domain.calendar import CalendarStatus
-from scheduling.domain.client_records import ClientProfile, HomeSize
+from scheduling.domain.client_records import ClientProfile
 from scheduling.domain.expiry import ExpiryService
 from scheduling.domain.holds import CreateHold, HoldService
 from scheduling.domain.lifecycle import LifecycleService
@@ -57,8 +57,9 @@ def setup(verified: bool = True) -> tuple[TestClient, Repository, list[datetime]
         phone = f"+1555010000{name == 'b' and 2 or 1}"
         repository.save_profile(ClientProfile(
             "business-1", f"client-{name}", "Synthetic Client", phone, "1 Test Street",
-            HomeSize.MEDIUM, minutes, True, 1, NOW, NOW,
+            True, 1, NOW, NOW,
             NOW if verified else None), 0, None)
+    repository.set_business_profile_for_test("business-1", 60)
     return TestClient(app), repository, clock
 
 
@@ -144,7 +145,7 @@ def test_identity_and_length_come_only_from_the_link_and_profile() -> None:
                     json={"start_at": START.isoformat()}).status_code == 422  # no key
     assert api.post("/v1/client/requests", headers=auth("a", "k"),
                     json={"start_at": "2026-09-29T09:00:00"}).status_code == 422  # naive
-    assert request(api, "b", "k9", START).json()["duration_minutes"] == 120  # type: ignore[attr-defined]
+    assert request(api, "b", "k9", START).json()["duration_minutes"] == 60  # type: ignore[attr-defined]
     assert api.get(f"{BASE}/requests", headers=OWNER).json()[0]["client_id"] == "client-b"
 
 
@@ -262,6 +263,7 @@ def test_retry_whose_first_request_commits_mid_command_replays_not_conflicts() -
     app = create_owner_app(interleaved, lambda _t: OwnerPrincipal("o", "business-1"), lambda: NOW)
     add_client_session_route(app, LINKS.__getitem__, interleaved, lambda: NOW)
     interleaved.save_profile(repository.read_profile("business-1", "client-a"), 0, None)  # type: ignore[arg-type]
+    interleaved.set_business_profile_for_test("business-1", 60)
     web = TestClient(app)
     interleaved.first = CreateHold("business-1", "client-a", "client-a", "portal:k1", START, 60)
     response = request(web, "a", "k1")
@@ -291,6 +293,7 @@ def test_busy_calendar_with_a_bad_policy_is_503_not_500() -> None:
         raise TooManyConflicts("busy")
 
     repository.save_profile(setup()[1].read_profile("business-1", "client-a"), 0, None)  # type: ignore[arg-type]
+    repository.set_business_profile_for_test("business-1", 60)
     original = HoldService.create
     HoldService.create = fail  # type: ignore[method-assign,assignment]
     try:

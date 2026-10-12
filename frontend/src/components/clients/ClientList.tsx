@@ -15,7 +15,7 @@ export function ClientList({ clients, onSelect }: {
             onClick={() => onSelect(client.client_id)}>
             <span className="client-name">{client.name}</span>
             <span className="meta">
-              {`${client.phone_e164} · ${client.home_size} · ${client.active ? "active" : "inactive"}`}
+              {`${client.phone_e164} · ${client.active ? "active" : "inactive"}`}
             </span>
           </button>
         ))}

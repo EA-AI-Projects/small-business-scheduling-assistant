@@ -10,7 +10,9 @@ from zoneinfo import ZoneInfo
 
 from scheduling.domain.appointments import Appointment, ReplacementGuard
 from scheduling.domain.availability import AvailabilityPolicy, available_starts
+from scheduling.domain.business_profile import BusinessProfileRecord
 from scheduling.domain.calendar import CalendarEvent, CalendarSnapshot, CalendarStatus
+from scheduling.domain.service_duration import ServiceDurationChanged, service_duration
 
 # Owner notification for a request a client created by accepting an owner counteroffer.
 COUNTEROFFER_REQUEST_TEMPLATE = "counteroffer-request"
@@ -58,12 +60,21 @@ class CreateHold:
     # Set by the portal for a confirmed original: the replacement is refused when the
     # original is no longer at the version the client was shown (an edit or other change).
     replaces_confirmed_version: int | None = None
+    # Set when the duration is the saved service default (#339): the commit then
+    # also requires that default to be unchanged, so a settings edit between the
+    # read and the write refuses the request instead of booking a stale length.
+    # Unset for an owner's explicit per-appointment duration. Not part of the
+    # idempotency hash: a replay returns the hold that was already created.
+    service_duration_minutes: int | None = None
 
     def __post_init__(self) -> None:
         if not all((self.business_id, self.actor_id, self.client_id, self.idempotency_key)):
             raise ValueError("Hold identity fields are required")
         if self.start_at.tzinfo is None:
             raise ValueError("Start must be timezone-aware")
+        if (self.service_duration_minutes is not None
+                and self.service_duration_minutes != self.duration_minutes):
+            raise ValueError("The service duration guard must match the hold duration")
         if self.replaces_pending_version is not None and (
                 self.replaces_appointment_id is None or self.replaces_pending_version <= 0):
             raise ValueError("A pending replacement names its original and version")
@@ -151,6 +162,8 @@ class HoldRepository(Protocol):
 
     def read_policy(self, business_id: str) -> AvailabilityPolicy: ...
 
+    def read_business_profile(self, business_id: str) -> BusinessProfileRecord: ...
+
     def read_calendar(self, business_id: str) -> CalendarSnapshot: ...
 
     def read_calendar_for_hold(
@@ -191,6 +204,10 @@ class HoldService:
             # Revision is intentionally read before the policy and event snapshot.
             revision = self._repository.read_revision(command.business_id)
             policy = self._repository.read_policy(command.business_id)
+            if command.service_duration_minutes is not None and (
+                    service_duration(self._repository, command.business_id, policy)
+                    != command.service_duration_minutes):
+                raise ServiceDurationChanged("The default visit duration changed")
             original: Appointment | None = None
             if command.replaces_appointment_id is not None:
                 original = self._repository.read_appointment(command.replaces_appointment_id)
