@@ -28,7 +28,7 @@ function timezoneNames(): string[] {
 export function AdvancedPolicyForm() {
   const { data } = useOwner();
   const policy = data.policy?.record.policy ?? null;
-  const { draft, setDraft, dirty, reset, conflicts } = useSyncedDraft<AdvancedDraft>(policy ? advancedDraft(policy) : null);
+  const { draft, setDraft, dirty, reset, conflicts, rebase } = useSyncedDraft<AdvancedDraft>(policy ? advancedDraft(policy) : null);
   const { save, failure, clearFailure } = usePolicySave("Advanced scheduling settings saved");
   const [shown, setShown] = useState(false);
   const [summary, setSummary] = useState<string | null>(null);
@@ -55,7 +55,7 @@ export function AdvancedPolicyForm() {
     // Store the draft as the server will, so it matches the saved value afterwards.
     const sent = normalizeAdvanced(draft);
     setDraft(() => sent);
-    if (await save((saved) => applyAdvanced(saved, sent))) setShown(false);
+    if (await save((saved) => applyAdvanced(saved, sent), () => rebase(sent))) setShown(false);
   }
 
   return <section className="card advanced-policy-card">

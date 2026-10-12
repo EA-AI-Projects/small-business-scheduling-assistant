@@ -12,7 +12,7 @@ import { useSyncedDraft } from "./useSyncedDraft";
 export function RegularPolicyForm() {
   const { data } = useOwner();
   const policy = data.policy?.record.policy ?? null;
-  const { draft, setDraft, dirty, reset, conflicts } = useSyncedDraft<RegularDraft>(policy ? regularDraft(policy) : null);
+  const { draft, setDraft, dirty, reset, conflicts, rebase } = useSyncedDraft<RegularDraft>(policy ? regularDraft(policy) : null);
   const { save, failure, clearFailure } = usePolicySave("Regular scheduling settings saved");
   const [shown, setShown] = useState(false);
   const [summary, setSummary] = useState<string | null>(null);
@@ -43,7 +43,7 @@ export function RegularPolicyForm() {
     // the save is in flight stays.
     const sent = normalizeRegular(draft);
     setDraft(() => sent);
-    if (await save((saved) => applyRegular(saved, sent))) setShown(false);
+    if (await save((saved) => applyRegular(saved, sent), () => rebase(sent))) setShown(false);
   }
 
   return <section className="card regular-policy-card">

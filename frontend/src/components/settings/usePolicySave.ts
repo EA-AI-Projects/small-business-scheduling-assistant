@@ -16,7 +16,7 @@ export function usePolicySave(success: string) {
   const [failure, setFailure] = useState<SaveFailure>(null);
   const attempt = useRef<{ signature: string; key: string } | null>(null);
 
-  async function save(build: (policy: AvailabilityPolicy) => PolicyBody): Promise<boolean> {
+  async function save(build: (policy: AvailabilityPolicy) => PolicyBody, committed?: () => void): Promise<boolean> {
     setFailure(null);
     const state: PolicyState | null = data.policy;
     if (!state) {
@@ -44,6 +44,7 @@ export function usePolicySave(success: string) {
       return false;
     }
     attempt.current = null;
+    committed?.(); // before the refresh, so the owner's own save is not read as someone else's change
     try {
       await refresh();
       notify(success);

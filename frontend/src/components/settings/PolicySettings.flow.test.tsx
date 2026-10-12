@@ -268,4 +268,93 @@ describe("Scheduling policy settings", () => {
     expect(field("Business timezone").value).toBe("America/Denver");
     expect(host.textContent).not.toContain("unsaved changes");
   });
+
+  /** A save whose response the test releases later, so the owner can type while it is in flight. */
+  function pending() {
+    let finish!: () => void;
+    request.mockImplementationOnce((_path: string, options: { body: { policy: typeof BASE } }) =>
+      new Promise<void>((resolve) => { finish = () => {
+        policy = { ...policy, ...options.body.policy } as typeof BASE; version += 1; revision += 1; resolve();
+      }; }));
+    return () => act(async () => finish());
+  }
+
+  it("keeps regular text typed during a save, even when it returns to the old value", async () => {
+    for (const [typed, expected] of [["14", "14"], ["210", "210"]] as const) {
+      policy = structuredClone(BASE); version = 1; revision = 7;
+      await act(async () => root.render(<OwnerProvider api={api} notify={() => undefined}><Page /></OwnerProvider>));
+      await act(async () => setValue(field("Booking horizon"), "21"));
+      const release = pending();
+      await click("Save regular settings");
+      await act(async () => setValue(field("Booking horizon"), typed));
+      await release();
+      expect(field("Booking horizon").value).toBe(expected);
+      expect(host.textContent).not.toContain("Also changed elsewhere");
+      expect(host.textContent).toContain("Booking horizon: 21 days ahead");
+      expect(host.textContent).toContain("unsaved changes");
+      await act(async () => root.render(null));
+    }
+  });
+
+  it("keeps advanced text typed during a save, even when it returns to the old value", async () => {
+    for (const typed of ["1440", "6000"]) {
+      policy = structuredClone(BASE); version = 1; revision = 7;
+      await act(async () => root.render(<OwnerProvider api={api} notify={() => undefined}><Page /></OwnerProvider>));
+      await act(async () => setValue(field("Hold duration"), "600"));
+      const release = pending();
+      await click("Save advanced settings");
+      await act(async () => setValue(field("Hold duration"), typed));
+      await release();
+      expect(field("Hold duration").value).toBe(typed);
+      expect(host.textContent).not.toContain("Also changed elsewhere");
+      expect(host.textContent).toContain("Hold: 600 minutes");
+      expect(host.textContent).toContain("unsaved changes");
+      await act(async () => root.render(null));
+    }
+  });
+
+  it("clears an 'also changed elsewhere' flag once the owner's value is saved", async () => {
+    await act(async () => setValue(field("Hold duration"), "600"));
+    request.mockImplementationOnce(async () => elsewhere({ hold_minutes: 720 }));
+    await click("Save advanced settings");
+    expect(host.textContent).toContain("still showing your value: Hold duration");
+    request.mockImplementation(async (_path: string, options: { body: { policy: typeof BASE } }) => {
+      policy = { ...policy, ...options.body.policy } as typeof BASE; version += 1; revision += 1;
+    });
+    await click("Save advanced settings");
+    expect(host.textContent).not.toContain("Also changed elsewhere");
+    expect(host.textContent).not.toContain("unsaved changes");
+  });
+
+  it("merges again after a second stale rejection", async () => {
+    await act(async () => setValue(field("Booking horizon"), "21"));
+    request.mockImplementationOnce(async () => elsewhere({ holiday_calendar: null as never }));
+    await click("Save regular settings");
+    request.mockImplementationOnce(async () => {
+      policy = { ...policy, weekly_windows: { ...policy.weekly_windows,
+        "5": [{ opens: "09:00:00", closes: "12:00:00" }] } }; version = 3; revision = 9;
+      throw new ApiError("Policy version changed", 409, "STALE_VERSION", undefined);
+    });
+    await click("Save regular settings");
+    expect(field("Saturday opens").value).toBe("09:00");
+    expect(field("Holidays").value).toBe("none");
+    expect(field("Booking horizon").value).toBe("21");
+    request.mockResolvedValueOnce(undefined);
+    await click("Save regular settings");
+    expect(request.mock.calls[2]![1].body).toMatchObject({ expected_version: 3, expected_revision: 9,
+      policy: { booking_horizon_days: 21, holiday_calendar: null } });
+    expect(request.mock.calls[2]![1].body.policy.weekly_windows["5"]).toEqual([{ opens: "09:00", closes: "12:00" }]);
+  });
+
+  it("shows the newer value and clears the flag when the owner discards after a merge", async () => {
+    await act(async () => setValue(field("Monday closes"), "16:00"));
+    request.mockImplementationOnce(async () => elsewhere({
+      weekly_windows: { ...policy.weekly_windows, "0": [{ opens: "08:00:00", closes: "15:00:00" }] } }));
+    await click("Save regular settings");
+    expect(host.textContent).toContain("Also changed elsewhere");
+    await click("Discard my edits");
+    expect(field("Monday closes").value).toBe("15:00");
+    expect(host.textContent).not.toContain("Also changed elsewhere");
+    expect(host.textContent).not.toContain("unsaved changes");
+  });
 });

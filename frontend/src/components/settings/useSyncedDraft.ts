@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-interface State<T> { base: T | null; draft: T | null; conflicts: string[] }
+interface State<T> { base: T | null; draft: T | null; conflicts: string[]; settling?: string }
 
 /**
  * A form draft that starts from the saved value and remembers it as the base. When a newer saved
@@ -10,11 +10,12 @@ interface State<T> { base: T | null; draft: T | null; conflicts: string[] }
  */
 export function useSyncedDraft<T extends object>(saved: T | null): {
   draft: T | null; setDraft: (update: (current: T) => T) => void; dirty: boolean; reset: () => void;
-  conflicts: string[];
+  conflicts: string[]; rebase: (committed: T) => void;
 } {
   const savedKey = JSON.stringify(saved);
   const [state, setState] = useState<State<T>>({ base: saved, draft: saved, conflicts: [] });
-  if (savedKey !== JSON.stringify(state.base)) {
+  // While the owner's own committed save is still loading back, the old saved value is not a newer change.
+  if (savedKey !== JSON.stringify(state.base) && state.settling !== savedKey) {
     setState(merge(state, saved));
   }
   const draft = state.draft ?? saved;
@@ -27,6 +28,8 @@ export function useSyncedDraft<T extends object>(saved: T | null): {
     dirty: saved !== null && JSON.stringify(draft) !== savedKey,
     reset: () => setState({ base: saved, draft: saved, conflicts: [] }),
     conflicts: live,
+    // The owner's own save replaced the saved values: they are the new starting point, and every flag is resolved.
+    rebase: (committed) => setState((current) => ({ ...current, base: committed, conflicts: [], settling: savedKey })),
   };
 }
 
