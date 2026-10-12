@@ -1930,22 +1930,20 @@ class DynamoDBCalendarRepository:
                 if "TransactionConflict" in codes:
                     raise RevisionConflict("Calendar transaction conflicted") from exc
                 guard_index = 7 if hold.replaces_appointment_id is not None else -1
-                if (0 <= service_index < len(codes)
-                        and codes[service_index] == "ConditionalCheckFailed"):
-                    raise ServiceDurationChanged("The default visit duration changed") from exc
                 if any(
                     codes[index] == "ConditionalCheckFailed"
                     for index in (0, 3, guard_index)
                     if 0 <= index < len(codes)
                 ):
                     raise RevisionConflict("Calendar or idempotency condition changed") from exc
+                # After the revision and idempotency checks, so a concurrent same-key commit
+                # replays instead of reporting a changed default.
+                if (0 <= service_index < len(codes)
+                        and codes[service_index] == "ConditionalCheckFailed"):
+                    raise ServiceDurationChanged("The default visit duration changed") from exc
                 raise
             # Some clients omit per-item reasons. Verify the expected
             # conditional guards rather than interpreting all cancellations as races.
-            if guarded_minutes is not None:
-                saved = self.read_business_profile(hold.business_id).profile
-                if saved is None or saved.default_duration_minutes != guarded_minutes:
-                    raise ServiceDurationChanged("The default visit duration changed") from exc
             if (
                 self.read_revision(hold.business_id) != expected_revision
                 or self.read_idempotency(commit.command) is not None
@@ -1958,6 +1956,10 @@ class DynamoDBCalendarRepository:
                 )
             ):
                 raise RevisionConflict("Calendar or idempotency condition changed") from exc
+            if guarded_minutes is not None:
+                saved = self.read_business_profile(hold.business_id).profile
+                if saved is None or saved.default_duration_minutes != guarded_minutes:
+                    raise ServiceDurationChanged("The default visit duration changed") from exc
             raise
 
     @staticmethod

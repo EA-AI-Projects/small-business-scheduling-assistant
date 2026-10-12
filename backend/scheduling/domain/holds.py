@@ -14,6 +14,11 @@ from scheduling.domain.business_profile import BusinessProfileRecord
 from scheduling.domain.calendar import CalendarEvent, CalendarSnapshot, CalendarStatus
 from scheduling.domain.service_duration import ServiceDurationChanged, service_duration
 
+# Placeholder length for looking up a stored saved-default request by key: the hash of such
+# a command ignores the resolved minutes, so the stored result can be found before the
+# current default is read (and even when it can no longer be resolved).
+LOOKUP_MINUTES = 1
+
 # Owner notification for a request a client created by accepting an owner counteroffer.
 COUNTEROFFER_REQUEST_TEMPLATE = "counteroffer-request"
 
@@ -89,9 +94,14 @@ class CreateHold:
             "actor_id": self.actor_id,
             "client_id": self.client_id,
             "start_at": self.start_at.astimezone(UTC).isoformat(),
-            "duration_minutes": self.duration_minutes,
+            # A saved-default request hashes as "the default", not the minutes it resolved
+            # to, so a retry after the owner changes the default still replays (#339).
+            "duration_minutes": (self.duration_minutes
+                                 if self.service_duration_minutes is None else None),
             "replaces_appointment_id": self.replaces_appointment_id,
         }
+        if self.service_duration_minutes is not None:
+            payload["service_default"] = True
         if self.replaces_pending_version is not None:
             payload["replaces_pending_version"] = self.replaces_pending_version
         if self.replaces_confirmed_version is not None:

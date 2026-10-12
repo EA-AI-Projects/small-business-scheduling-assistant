@@ -23,6 +23,7 @@ from scheduling.domain.availability import (
 from scheduling.domain.calendar import CalendarStatus
 from scheduling.domain.client_records import ClientProfile
 from scheduling.domain.holds import (
+    LOOKUP_MINUTES,
     CreateHold,
     HoldRepository,
     HoldService,
@@ -297,6 +298,12 @@ def add_client_session_route(
                             "The visit length changed. Please choose from the new times.", ())
         return minutes
 
+    def stored_hold(lookup: CreateHold) -> PendingHold | None:
+        try:
+            return holds.existing(lookup)
+        except IdempotencyKeyReused as exc:
+            raise _refused("IDEMPOTENCY_KEY_REUSED", str(exc)) from exc
+
     def create_hold(command: CreateHold, start: datetime) -> PendingHold:
         """The SMS path's atomic hold with the portal's error mapping."""
         try:
@@ -347,12 +354,20 @@ def add_client_session_route(
         """Ask the owner for a visit: the SMS path's atomic hold, so it stays pending."""
         usable_profile(session)
         start = valid_start(body)
+
+        def command(minutes: int) -> CreateHold:
+            return CreateHold(
+                session.business_id, session.client_id, session.client_id,
+                # Namespaced so a caller-chosen key can never meet the SMS path's provider IDs.
+                f"portal:{idempotency_key}", start, minutes, service_duration_minutes=minutes)
+
+        # A retry of a saved request reports it even if the default changed since: the
+        # stored result is found by key before the current default is read.
+        stored = stored_hold(command(LOOKUP_MINUTES))
+        if stored is not None:
+            return _booking(stored, store.read_appointment(stored.hold_id), now())
         minutes = booking_duration(session.business_id, body.quoted_duration_minutes)
-        hold = create_hold(CreateHold(
-            session.business_id, session.client_id, session.client_id,
-            # Namespaced so a caller-chosen key can never meet the SMS path's provider IDs.
-            f"portal:{idempotency_key}", start, minutes,
-            service_duration_minutes=minutes), start)
+        hold = create_hold(command(minutes), start)
         return _booking(hold, store.read_appointment(hold.hold_id), now())
 
     def own_booking(session: ClientSession, appointment_id: str) -> Appointment:
@@ -417,17 +432,17 @@ def add_client_session_route(
         """
         usable_profile(session)
         start = valid_start(body)
-        minutes = booking_duration(session.business_id, body.quoted_duration_minutes)
-        command = CreateHold(
-            session.business_id, session.client_id, session.client_id,
-            f"portal:{idempotency_key}", start, minutes,
-            appointment_id, replaces_confirmed_version=body.expected_version,
-            service_duration_minutes=minutes)
+
+        def command(minutes: int) -> CreateHold:
+            return CreateHold(
+                session.business_id, session.client_id, session.client_id,
+                f"portal:{idempotency_key}", start, minutes,
+                appointment_id, replaces_confirmed_version=body.expected_version,
+                service_duration_minutes=minutes)
+
         original = own_booking(session, appointment_id)
-        try:
-            existing = holds.existing(command)  # A retry reports the replacement's state.
-        except IdempotencyKeyReused as exc:
-            raise _refused("IDEMPOTENCY_KEY_REUSED", str(exc)) from exc
+        # A retry reports the replacement's state, found by key before the default is read.
+        existing = stored_hold(command(LOOKUP_MINUTES))
         if existing is not None:
             return _booking(existing, store.read_appointment(existing.hold_id), now())
         if original.status != CalendarStatus.CONFIRMED or original.end_at <= now():
@@ -436,5 +451,6 @@ def add_client_session_route(
         if original.version != body.expected_version:
             raise _refused("STALE_BOOKING",
                            "This appointment changed. Please review it before trying again.")
-        hold = create_hold(command, start)
+        hold = create_hold(command(booking_duration(
+            session.business_id, body.quoted_duration_minutes)), start)
         return _booking(hold, store.read_appointment(hold.hold_id), now())

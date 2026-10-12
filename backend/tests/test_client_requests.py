@@ -265,7 +265,8 @@ def test_retry_whose_first_request_commits_mid_command_replays_not_conflicts() -
     interleaved.save_profile(repository.read_profile("business-1", "client-a"), 0, None)  # type: ignore[arg-type]
     interleaved.set_business_profile_for_test("business-1", 60)
     web = TestClient(app)
-    interleaved.first = CreateHold("business-1", "client-a", "client-a", "portal:k1", START, 60)
+    interleaved.first = CreateHold("business-1", "client-a", "client-a", "portal:k1", START, 60,
+                                       service_duration_minutes=60)
     response = request(web, "a", "k1")
     assert response.status_code == 200, response.text  # type: ignore[attr-defined]
     assert response.json()["status"] == "PENDING_APPROVAL"  # type: ignore[attr-defined]

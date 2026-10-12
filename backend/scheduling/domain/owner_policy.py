@@ -23,6 +23,10 @@ class PolicyConflict(Exception):
     """A policy edit would invalidate a future active reservation."""
 
 
+class DefaultDurationConflict(PolicyConflict):
+    """The new maximum visit would be shorter than the saved service default duration."""
+
+
 class PolicyNotConfigured(Exception):
     """The owner must persist the pilot policy before editing it."""
 
@@ -176,7 +180,7 @@ class OwnerPolicyService:
         profile = self._repository.read_business_profile(command.business_id)
         if (profile.profile is not None and profile.profile.default_duration_minutes
                 > command.policy.maximum_visit_minutes):
-            raise PolicyConflict(
+            raise DefaultDurationConflict(
                 "The saved default booking duration is longer than this maximum visit; "
                 "lower the default duration in the business profile first")
         result = PolicyResult(PolicyRecord(command.policy, version), revision + 1)

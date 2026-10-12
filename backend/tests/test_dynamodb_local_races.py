@@ -1434,3 +1434,22 @@ def test_profile_save_is_guarded_by_the_policy_version_and_replays_first(
     with pytest.raises(ProfileExceedsPolicy):
         repo.save_business_profile(env.business, "synthetic-owner", "new", 1,
                                    _profile("three", 60), tight)
+
+
+def test_same_key_default_hold_retry_replays_after_the_default_changes(
+        race_env: RaceEnv) -> None:
+    env = race_env
+    now = datetime(2026, 9, 28, 15, tzinfo=UTC)
+    repo = DynamoDBCalendarRepository(env.client, env.table)
+    OwnerPolicyService(repo, lambda: now).seed(env.business, "synthetic-owner", "seed")
+    repo.save_business_profile(env.business, "synthetic-owner", "one", 0, _profile("one", 60))
+    start = datetime(2026, 9, 29, 16, tzinfo=UTC)
+    first = HoldService(repo).create(CreateHold(
+        env.business, "synthetic-owner", "portal-a", "same-key", start, 60,
+        service_duration_minutes=60), now)
+    env.appointment_ids.append(first.hold_id)
+    repo.save_business_profile(env.business, "synthetic-owner", "two", 1, _profile("two", 90))
+    # The retry's lookup command carries a placeholder length; its hash ignores the minutes.
+    lookup = CreateHold(env.business, "synthetic-owner", "portal-a", "same-key", start, 1,
+                        service_duration_minutes=1)
+    assert HoldService(repo).existing(lookup) == first

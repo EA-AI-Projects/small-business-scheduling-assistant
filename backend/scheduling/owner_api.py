@@ -51,6 +51,7 @@ from scheduling.domain.client_records import (
     RecordNotFound,
 )
 from scheduling.domain.holds import (
+    LOOKUP_MINUTES,
     CreateHold,
     HoldRepository,
     HoldService,
@@ -76,10 +77,12 @@ from scheduling.domain.owner_calendar import (
     OwnerAction,
     OwnerCalendarCommand,
     OwnerCalendarRepository,
+    OwnerCalendarResult,
     OwnerCalendarService,
     UnavailableBlock,
 )
 from scheduling.domain.owner_policy import (
+    DefaultDurationConflict,
     OwnerPolicyService,
     PolicyCommand,
     PolicyConflict,
@@ -492,6 +495,8 @@ def create_owner_app(
             raise _error("STALE_VERSION", str(exc), 409, current() if current else None) from exc
         except ReplacementPending as exc:
             raise _error("REPLACEMENT_PENDING", str(exc), 409, current() if current else None) from exc
+        except DefaultDurationConflict as exc:
+            raise _error("DEFAULT_DURATION_EXCEEDS_MAXIMUM", str(exc), 409) from exc
         except (SlotConflict, PolicyConflict) as exc:
             raise _error("SLOT_CONFLICT", str(exc), 409, current() if current else None) from exc
         except HoldExpired as exc:
@@ -787,11 +792,19 @@ def create_owner_app(
                        owner: Annotated[OwnerPrincipal, Depends(principal)],
                        request_key: Annotated[str, Depends(key)]) -> object:
         def create() -> object:
+            def command(minutes: int, saved_default: bool) -> CreateHold:
+                return CreateHold(
+                    business_id, owner.actor_id, body.client_id, request_key,
+                    body.start_at, minutes, body.replaces_appointment_id,
+                    service_duration_minutes=minutes if saved_default else None)
+
+            if body.duration_minutes is None:
+                # A retry of a saved request replays even if the default changed since.
+                stored = holds.existing(command(LOOKUP_MINUTES, True))
+                if stored is not None:
+                    return stored
             minutes, saved_default = default_or(business_id, body.duration_minutes)
-            return holds.create(CreateHold(
-                business_id, owner.actor_id, body.client_id, request_key,
-                body.start_at, minutes, body.replaces_appointment_id,
-                service_duration_minutes=minutes if saved_default else None), now())
+            return holds.create(command(minutes, saved_default), now())
         return run(create)
 
     def transition(business_id: str, appointment_id: str, body: DecisionBody,
@@ -863,10 +876,21 @@ def create_owner_app(
     def create_appointment(business_id: str, body: ManualAppointmentBody,
                            owner: Annotated[OwnerPrincipal, Depends(principal)],
                            request_key: Annotated[str, Depends(key)]) -> object:
-        return owner_write(lambda: OwnerCalendarCommand(
-            business_id, owner.actor_id, request_key, OwnerAction.CREATE_APPOINTMENT,
-            body.expected_revision, client_id=body.client_id, start_at=body.start_at,
-            duration_minutes=default_or(business_id, body.duration_minutes)[0]))
+        def command(minutes: int, saved_default: bool) -> OwnerCalendarCommand:
+            return OwnerCalendarCommand(
+                business_id, owner.actor_id, request_key, OwnerAction.CREATE_APPOINTMENT,
+                body.expected_revision, client_id=body.client_id, start_at=body.start_at,
+                duration_minutes=minutes, service_default=saved_default)
+
+        def build() -> OwnerCalendarResult:
+            if body.duration_minutes is None:
+                # A retry of a saved appointment replays even if the default changed since.
+                stored = calendar.replayed(command(LOOKUP_MINUTES, True))
+                if stored is not None:
+                    return stored
+            return calendar.apply(command(*default_or(business_id, body.duration_minutes)))
+
+        return run(build)
 
     return app
 

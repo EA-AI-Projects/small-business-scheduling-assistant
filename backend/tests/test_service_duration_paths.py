@@ -157,6 +157,7 @@ def test_policy_edit_that_would_invalidate_the_default_is_rejected() -> None:
     response = api.put(f"{BASE}/policy", headers={**OWNER, "Idempotency-Key": "lower"}, json={
         "expected_revision": revision, "expected_version": 1, "policy": policy})
     assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "DEFAULT_DURATION_EXCEEDS_MAXIMUM"
     assert repository.read_revision("business-1") == revision
     repository.set_business_profile_for_test("business-1", 120)
     ok = api.put(f"{BASE}/policy", headers={**OWNER, "Idempotency-Key": "lower2"}, json={
@@ -223,3 +224,65 @@ def test_legacy_client_item_with_home_size_and_duration_still_reads() -> None:
     assert (profile.client_id, profile.version, profile.phone_verified_at) == (
         "client-1", 4, NOW)
     assert not hasattr(profile, "home_size") and not hasattr(profile, "default_duration_minutes")
+
+
+def test_same_key_retries_replay_after_the_default_changes() -> None:
+    api, repository, _ = both()
+    # Portal create, with and without a quote.
+    quoted = request(api, "a", "p1", quoted_duration_minutes=60)
+    plain = request(api, "b", "p2", START + timedelta(hours=3))
+    owner = api.post(f"{BASE}/requests", headers=OWNER_KEY, json={
+        "client_id": "client-a", "start_at": (START + timedelta(hours=7)).isoformat()})
+    revision = repository.read_revision("business-1")
+    manual_headers = {**OWNER, "Idempotency-Key": "m1"}
+    manual_body = {"expected_revision": revision, "client_id": "client-b",
+                   "start_at": (START + timedelta(hours=5)).isoformat()}
+    manual = api.post(f"{BASE}/appointments", headers=manual_headers, json=manual_body)
+    assert [r.status_code for r in (quoted, plain, owner, manual)] == [200] * 4  # type: ignore[attr-defined]
+    revision = repository.read_revision("business-1")
+
+    repository.set_business_profile_for_test("business-1", 120)
+    again_quoted = request(api, "a", "p1", quoted_duration_minutes=60)
+    again_plain = request(api, "b", "p2", START + timedelta(hours=3))
+    again_owner = api.post(f"{BASE}/requests", headers=OWNER_KEY, json={
+        "client_id": "client-a", "start_at": (START + timedelta(hours=7)).isoformat()})
+    again_manual = api.post(f"{BASE}/appointments", headers=manual_headers, json=manual_body)
+    assert again_quoted.status_code == 200 and again_quoted.json() == quoted.json()  # type: ignore[attr-defined]
+    assert again_plain.status_code == 200 and again_plain.json() == plain.json()  # type: ignore[attr-defined]
+    assert again_owner.status_code == 200 and again_owner.json() == owner.json()
+    assert again_manual.status_code == 200
+    assert again_manual.json()["appointment"]["appointment_id"] == \
+        manual.json()["appointment"]["appointment_id"]
+    assert repository.read_revision("business-1") == revision  # nothing new was written
+    # A different start under a used key is still a reuse, not a replay.
+    reused = request(api, "a", "p1", START + timedelta(hours=1), quoted_duration_minutes=120)
+    assert reused.status_code == 409  # type: ignore[attr-defined]
+    assert reused.json()["detail"]["code"] == "IDEMPOTENCY_KEY_REUSED"  # type: ignore[attr-defined]
+
+
+def test_portal_reschedule_retry_replays_after_the_default_changes() -> None:
+    from test_client_changes import confirmed
+
+    api, repository, _ = both()
+    booking = confirmed(api, "a")
+    path = f"/v1/client/bookings/{booking['appointment_id']}/reschedule"
+    headers = {**auth("a"), "Idempotency-Key": "move-1"}
+    body = {"start_at": (START + timedelta(hours=5)).isoformat(),
+            "expected_version": booking["version"], "quoted_duration_minutes": 60}
+    first = api.post(path, headers=headers, json=body)
+    assert first.status_code == 200, first.text
+    repository.set_business_profile_for_test("business-1", 120)
+    again = api.post(path, headers=headers, json=body)
+    assert again.status_code == 200 and again.json() == first.json()
+
+
+def test_profile_payload_keeps_the_duration_first_for_the_commit_guard() -> None:
+    from dataclasses import asdict
+
+    from scheduling.adapters.dynamodb import _duration_prefix
+
+    for minutes in (30, 90, 1440):
+        profile = BusinessProfile("A", "B", "C", "D", "E", minutes)
+        assert json.dumps(asdict(profile), sort_keys=True).startswith(_duration_prefix(minutes))
+        assert not json.dumps(asdict(profile), sort_keys=True).startswith(
+            _duration_prefix(minutes + 1))
