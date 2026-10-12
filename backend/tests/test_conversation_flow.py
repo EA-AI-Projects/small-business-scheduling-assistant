@@ -9,7 +9,7 @@ import pytest
 
 from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.domain.calendar import CalendarStatus
-from scheduling.domain.client_records import ClientProfile, HomeSize
+from scheduling.domain.client_records import ClientProfile
 from scheduling.domain.client_replies import ClientReplyResult
 from scheduling.domain.conversation import (
     ConversationOutcome,
@@ -99,7 +99,8 @@ class Harness:
         self.store = InMemoryCalendarRepository()
         self.store.save_profile(ClientProfile(
             "pilot", "client-1", "Avery Example", "+14155550101", "1 Test Street",
-            HomeSize.MEDIUM, 120, True, 1, NOW, NOW, NOW), 0, None)
+            True, 1, NOW, NOW, NOW), 0, None)
+        self.store.set_business_profile_for_test("pilot", 120)
         self.model = model if model is not None else Script()
         self.states = InMemoryConversationStates()
         self.now = NOW

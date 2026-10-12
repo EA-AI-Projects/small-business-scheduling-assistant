@@ -15,8 +15,8 @@ STAMP = NOW.isoformat()
 PROFILE_ITEM = {
     "business_id": {"S": "pilot"}, "client_id": {"S": "client-1"},
     "name": {"S": "Synthetic Client"}, "phone_e164": {"S": "+14155550101"},
-    "service_address": {"S": "123 Test Street"}, "home_size": {"S": "small"},
-    "default_duration_minutes": {"N": "60"}, "active": {"BOOL": True},
+    "service_address": {"S": "123 Test Street"},
+    "active": {"BOOL": True},
     "version": {"N": "1"}, "created_at": {"S": STAMP}, "updated_at": {"S": STAMP},
 }
 

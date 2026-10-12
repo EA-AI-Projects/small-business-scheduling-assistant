@@ -149,18 +149,10 @@
             "title": "Active",
             "type": "boolean"
           },
-          "default_duration_minutes": {
-            "exclusiveMinimum": 0.0,
-            "title": "Default Duration Minutes",
-            "type": "integer"
-          },
           "expected_version": {
             "minimum": 0.0,
             "title": "Expected Version",
             "type": "integer"
-          },
-          "home_size": {
-            "$ref": "#/components/schemas/HomeSize"
           },
           "name": {
             "maxLength": 200,
@@ -185,9 +177,7 @@
           "expected_version",
           "name",
           "phone_e164",
-          "service_address",
-          "home_size",
-          "default_duration_minutes"
+          "service_address"
         ],
         "title": "ClientProfileBody",
         "type": "object"
@@ -313,9 +303,16 @@
             "type": "string"
           },
           "duration_minutes": {
-            "exclusiveMinimum": 0.0,
-            "title": "Duration Minutes",
-            "type": "integer"
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Minutes"
           },
           "replaces_appointment_id": {
             "anyOf": [
@@ -336,8 +333,7 @@
         },
         "required": [
           "client_id",
-          "start_at",
-          "duration_minutes"
+          "start_at"
         ],
         "title": "HoldBody",
         "type": "object"
@@ -347,15 +343,6 @@
           "US_FEDERAL"
         ],
         "title": "HolidayCalendar",
-        "type": "string"
-      },
-      "HomeSize": {
-        "enum": [
-          "small",
-          "medium",
-          "large"
-        ],
-        "title": "HomeSize",
         "type": "string"
       },
       "InPersonConsentBody": {
@@ -423,9 +410,16 @@
             "type": "string"
           },
           "duration_minutes": {
-            "exclusiveMinimum": 0.0,
-            "title": "Duration Minutes",
-            "type": "integer"
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Minutes"
           },
           "expected_revision": {
             "minimum": 0.0,
@@ -441,8 +435,7 @@
         "required": [
           "expected_revision",
           "client_id",
-          "start_at",
-          "duration_minutes"
+          "start_at"
         ],
         "title": "ManualAppointmentBody",
         "type": "object"

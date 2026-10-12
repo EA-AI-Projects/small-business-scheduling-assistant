@@ -9,7 +9,7 @@ import pytest
 from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.adapters.sms_twilio import TwilioSmsSender
 from scheduling.domain.calendar import CalendarStatus
-from scheduling.domain.client_records import ClientProfile, HomeSize
+from scheduling.domain.client_records import ClientProfile
 from scheduling.domain.conversation import (
     ConversationOutcome,
     ConversationService,
@@ -192,8 +192,7 @@ def state_of(world: World) -> OfferState | None:
 
 
 def profile(client_id: str, name: str, phone: str) -> ClientProfile:
-    return ClientProfile("pilot", client_id, name, phone, "123 Test Street", HomeSize.MEDIUM,
-                         120, True, 1, NOW, NOW, NOW)
+    return ClientProfile("pilot", client_id, name, phone, "123 Test Street", True, 1, NOW, NOW, NOW)
 
 
 def make_world() -> World:

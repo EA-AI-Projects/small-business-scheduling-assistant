@@ -23,6 +23,7 @@ from scheduling.domain.availability import (
 from scheduling.domain.calendar import CalendarStatus
 from scheduling.domain.client_records import ClientProfile
 from scheduling.domain.holds import (
+    LOOKUP_MINUTES,
     CreateHold,
     HoldRepository,
     HoldService,
@@ -43,6 +44,12 @@ from scheduling.domain.lifecycle import (
     StaleVersion,
 )
 from scheduling.domain.owner_policy import PolicyNotConfigured
+from scheduling.domain.service_duration import (
+    ServiceDurationChanged,
+    ServiceDurationSource,
+    ServiceNotConfigured,
+    service_duration,
+)
 from scheduling.identity_links import IdentityLink, LinkRole
 
 
@@ -57,7 +64,7 @@ class ClientSession(BaseModel):
 
 
 class ClientAvailabilityQuery(BaseModel):
-    """Only the day; the visit length comes from the linked client's owner-set profile."""
+    """Only the day; the visit length is the business's saved default duration."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -97,13 +104,15 @@ class ClientBookings(BaseModel):
 class ClientRequest(BaseModel):
     """The only caller input: a start the client chose from the offered times.
 
-    Client, business, visit length, and actor are never accepted; they come from the link
-    and the owner-set profile.
+    Client, business, and actor are never accepted; they come from the link. The visit
+    length is the business's saved default. A client may echo the length the offered
+    times were quoted at, and a request is refused when the owner has changed it since.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     start_at: datetime
+    quoted_duration_minutes: int | None = Field(default=None, gt=0)
 
     def validated(self) -> datetime:
         if self.start_at.tzinfo is None:
@@ -126,6 +135,7 @@ class ClientReschedule(BaseModel):
 
     start_at: datetime
     expected_version: int = Field(gt=0)
+    quoted_duration_minutes: int | None = Field(default=None, gt=0)
 
     def validated(self) -> datetime:
         if self.start_at.tzinfo is None:
@@ -133,7 +143,7 @@ class ClientReschedule(BaseModel):
         return self.start_at
 
 
-class ClientBookingRepository(AvailabilityRepository, Protocol):
+class ClientBookingRepository(AvailabilityRepository, ServiceDurationSource, Protocol):
     def read_appointment(self, appointment_id: str) -> Appointment | None: ...
 
     def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None: ...
@@ -221,6 +231,10 @@ def add_client_session_route(
         return
     availability_service = AvailabilityService(store)
 
+    def current_duration(business_id: str) -> int:
+        """The saved service duration, checked against the current policy."""
+        return service_duration(store, business_id, store.read_policy(business_id))
+
     @app.get("/v1/client/availability", response_model=ClientAvailability)
     def client_availability(
         session: Annotated[ClientSession, Depends(linked_client)],
@@ -229,12 +243,13 @@ def add_client_session_route(
         profile = store.read_profile(session.business_id, session.client_id)
         if profile is None or not profile.active:
             raise HTTPException(status_code=503, detail="Booking is unavailable")
-        duration = profile.default_duration_minutes
         try:
+            duration = current_duration(session.business_id)
             starts = availability_service.find_starts(
                 session.business_id, query.day, duration, now())
-        except (InvalidDuration, InvalidPolicy, PolicyNotConfigured) as exc:
-            # A stored duration the policy rejects is the owner's to fix, not the client's.
+        except (InvalidDuration, InvalidPolicy, PolicyNotConfigured,
+                ServiceNotConfigured) as exc:
+            # A missing or policy-rejected duration is the owner's to fix, not the client's.
             raise HTTPException(status_code=503, detail="Booking is unavailable") from exc
         return ClientAvailability(
             day=query.day, duration_minutes=duration, starts_at=list(starts))
@@ -271,7 +286,25 @@ def add_client_session_route(
                 "alternatives": []})
         return profile
 
-    def create_hold(command: CreateHold, start: datetime, profile: ClientProfile) -> PendingHold:
+    def booking_duration(business_id: str, quoted: int | None) -> int:
+        """The saved default now; a quoted length the owner has since changed is refused."""
+        try:
+            minutes = current_duration(business_id)
+        except (InvalidDuration, InvalidPolicy, PolicyNotConfigured,
+                ServiceNotConfigured) as exc:
+            raise HTTPException(status_code=503, detail="Booking is unavailable") from exc
+        if quoted is not None and quoted != minutes:
+            raise _conflict("DURATION_CHANGED",
+                            "The visit length changed. Please choose from the new times.", ())
+        return minutes
+
+    def stored_hold(lookup: CreateHold) -> PendingHold | None:
+        try:
+            return holds.existing(lookup)
+        except IdempotencyKeyReused as exc:
+            raise _refused("IDEMPOTENCY_KEY_REUSED", str(exc)) from exc
+
+    def create_hold(command: CreateHold, start: datetime) -> PendingHold:
         """The SMS path's atomic hold with the portal's error mapping."""
         try:
             return holds.create(command, now())
@@ -284,7 +317,7 @@ def add_client_session_route(
                 day = start.astimezone(
                     ZoneInfo(store.read_policy(command.business_id).timezone)).date()
                 current = tuple(availability_service.find_starts(
-                    command.business_id, day, profile.default_duration_minutes, now())[:5])
+                    command.business_id, day, command.duration_minutes, now())[:5])
             except (InvalidDuration, InvalidPolicy, PolicyNotConfigured) as inner:
                 raise HTTPException(
                     status_code=503, detail="Booking is unavailable") from inner
@@ -301,7 +334,12 @@ def add_client_session_route(
         except InvalidReplacement as exc:
             raise _refused("STALE_BOOKING",
                            "This visit changed. Please review it before trying again.") from exc
-        except (InvalidDuration, InvalidPolicy, PolicyNotConfigured) as exc:
+        except ServiceDurationChanged as exc:
+            raise _conflict("DURATION_CHANGED",
+                            "The visit length changed. Please choose from the new times.",
+                            ()) from exc
+        except (InvalidDuration, InvalidPolicy, PolicyNotConfigured,
+                ServiceNotConfigured) as exc:
             raise HTTPException(status_code=503, detail="Booking is unavailable") from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -314,12 +352,22 @@ def add_client_session_route(
             str, Header(alias="Idempotency-Key", min_length=1, max_length=128)],
     ) -> ClientBooking:
         """Ask the owner for a visit: the SMS path's atomic hold, so it stays pending."""
-        profile = usable_profile(session)
+        usable_profile(session)
         start = valid_start(body)
-        hold = create_hold(CreateHold(
-            session.business_id, session.client_id, session.client_id,
-            # Namespaced so a caller-chosen key can never meet the SMS path's provider IDs.
-            f"portal:{idempotency_key}", start, profile.default_duration_minutes), start, profile)
+
+        def command(minutes: int) -> CreateHold:
+            return CreateHold(
+                session.business_id, session.client_id, session.client_id,
+                # Namespaced so a caller-chosen key can never meet the SMS path's provider IDs.
+                f"portal:{idempotency_key}", start, minutes, service_duration_minutes=minutes)
+
+        # A retry of a saved request reports it even if the default changed since: the
+        # stored result is found by key before the current default is read.
+        stored = stored_hold(command(LOOKUP_MINUTES))
+        if stored is not None:
+            return _booking(stored, store.read_appointment(stored.hold_id), now())
+        minutes = booking_duration(session.business_id, body.quoted_duration_minutes)
+        hold = create_hold(command(minutes), start)
         return _booking(hold, store.read_appointment(hold.hold_id), now())
 
     def own_booking(session: ClientSession, appointment_id: str) -> Appointment:
@@ -382,17 +430,19 @@ def add_client_session_route(
         This is the text path's reschedule: a pending hold that names the original, so the
         owner's approval swaps the two atomically and a decline or expiry keeps the original.
         """
-        profile = usable_profile(session)
+        usable_profile(session)
         start = valid_start(body)
-        command = CreateHold(
-            session.business_id, session.client_id, session.client_id,
-            f"portal:{idempotency_key}", start, profile.default_duration_minutes,
-            appointment_id, replaces_confirmed_version=body.expected_version)
+
+        def command(minutes: int) -> CreateHold:
+            return CreateHold(
+                session.business_id, session.client_id, session.client_id,
+                f"portal:{idempotency_key}", start, minutes,
+                appointment_id, replaces_confirmed_version=body.expected_version,
+                service_duration_minutes=minutes)
+
         original = own_booking(session, appointment_id)
-        try:
-            existing = holds.existing(command)  # A retry reports the replacement's state.
-        except IdempotencyKeyReused as exc:
-            raise _refused("IDEMPOTENCY_KEY_REUSED", str(exc)) from exc
+        # A retry reports the replacement's state, found by key before the default is read.
+        existing = stored_hold(command(LOOKUP_MINUTES))
         if existing is not None:
             return _booking(existing, store.read_appointment(existing.hold_id), now())
         if original.status != CalendarStatus.CONFIRMED or original.end_at <= now():
@@ -401,5 +451,6 @@ def add_client_session_route(
         if original.version != body.expected_version:
             raise _refused("STALE_BOOKING",
                            "This appointment changed. Please review it before trying again.")
-        hold = create_hold(command, start, profile)
+        hold = create_hold(command(booking_duration(
+            session.business_id, body.quoted_duration_minutes)), start)
         return _booking(hold, store.read_appointment(hold.hold_id), now())

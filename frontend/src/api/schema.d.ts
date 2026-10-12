@@ -518,11 +518,8 @@ export interface components {
              * @default true
              */
             active: boolean;
-            /** Default Duration Minutes */
-            default_duration_minutes: number;
             /** Expected Version */
             expected_version: number;
-            home_size: components["schemas"]["HomeSize"];
             /** Name */
             name: string;
             /** Phone E164 */
@@ -570,7 +567,7 @@ export interface components {
             /** Client Id */
             client_id: string;
             /** Duration Minutes */
-            duration_minutes: number;
+            duration_minutes?: number | null;
             /** Replaces Appointment Id */
             replaces_appointment_id?: string | null;
             /**
@@ -584,11 +581,6 @@ export interface components {
          * @enum {string}
          */
         HolidayCalendar: "US_FEDERAL";
-        /**
-         * HomeSize
-         * @enum {string}
-         */
-        HomeSize: "small" | "medium" | "large";
         /** InPersonConsentBody */
         InPersonConsentBody: {
             /** Clear Yes */
@@ -610,7 +602,7 @@ export interface components {
             /** Client Id */
             client_id: string;
             /** Duration Minutes */
-            duration_minutes: number;
+            duration_minutes?: number | null;
             /** Expected Revision */
             expected_revision: number;
             /**

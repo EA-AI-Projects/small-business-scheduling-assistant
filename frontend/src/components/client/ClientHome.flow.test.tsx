@@ -170,7 +170,7 @@ describe("client calendar and bookings", () => {
 
       const [url, init] = posts(fetcher)[0]!;
       expect(url).toBe("https://api.example.test/v1/client/requests");
-      expect(JSON.parse(init.body as string)).toEqual({ start_at: START });
+      expect(JSON.parse(init.body as string)).toEqual({ start_at: START, quoted_duration_minutes: 90 });
       const headers = init.headers as Record<string, string>;
       expect(headers["Idempotency-Key"]).toBeTruthy();
       expect(headers.Authorization).toBe("Bearer access");
@@ -178,6 +178,21 @@ describe("client calendar and bookings", () => {
       expect(note()?.textContent).toContain("waiting for owner approval");
       expect(note()?.textContent).not.toContain("Confirmed");
       expect(document.body.querySelector("[role=dialog]")).toBeNull();
+    });
+
+    it("explains a changed visit length and sends nothing at the old length", async () => {
+      const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          return json({ detail: { code: "DURATION_CHANGED", message: "x", alternatives: [] } }, 409);
+        }
+        return url.includes("availability") ? json({ day: TODAY, duration_minutes: 90, starts_at: [START] })
+          : json({ bookings: [] });
+      });
+      vi.stubGlobal("fetch", fetcher);
+      await render("calendar"); await pick();
+      await act(async () => send().click());
+      expect(JSON.parse(posts(fetcher)[0]![1].body as string).quoted_duration_minutes).toBe(90);
+      expect(document.body.textContent).toContain("The visit length changed after those times were shown");
     });
 
     it("does not call a replayed request waiting when it was already declined", async () => {
@@ -405,7 +420,7 @@ describe("client calendar and bookings", () => {
 
       const [url, init] = posts(fetcher)[0]!;
       expect(url).toBe("https://api.example.test/v1/client/bookings/visit-1/reschedule");
-      expect(JSON.parse(init.body as string)).toEqual({ start_at: START, expected_version: 3 });
+      expect(JSON.parse(init.body as string)).toEqual({ start_at: START, expected_version: 3, quoted_duration_minutes: 90 });
       const status = note()?.textContent ?? "";
       expect(status).toContain("Move requested");
       expect(status).toContain("not confirmed yet");
@@ -598,7 +613,7 @@ describe("client calendar and bookings", () => {
       await act(async () => host.querySelector<HTMLButtonElement>("[data-available-start]")!.click());
       await act(async () => action("Send move request for owner approval")!.click());
       expect(posts(fetcher)[0]![0]).toContain("/v1/client/bookings/calendar-visit/reschedule");
-      expect(JSON.parse(posts(fetcher)[0]![1].body as string)).toEqual({ start_at: START, expected_version: 7 });
+      expect(JSON.parse(posts(fetcher)[0]![1].body as string)).toEqual({ start_at: START, expected_version: 7, quoted_duration_minutes: 90 });
       expect(host.textContent).toContain("original appointment is still confirmed");
       await open();
       const card = document.body.querySelector("[role=dialog]")!;

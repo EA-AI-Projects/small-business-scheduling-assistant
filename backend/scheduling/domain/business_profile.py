@@ -50,23 +50,51 @@ class BusinessProfileRecord:
         return self.profile is not None
 
 
+class ProfileExceedsPolicy(ValueError):
+    """The default duration is longer than the scheduling policy allows."""
+
+
+@dataclass(frozen=True)
+class PolicyGuard:
+    """The policy a profile edit was validated against.
+
+    The repository checks it after the idempotent replay lookup and inside the
+    save transaction, so a retry of a stored save never re-validates and a
+    concurrent policy edit cannot slip a too-long default past the check.
+    """
+
+    version: int | None
+    maximum_visit_minutes: int | None
+
+    def check(self, profile: BusinessProfile) -> None:
+        if (self.maximum_visit_minutes is not None
+                and profile.default_duration_minutes > self.maximum_visit_minutes):
+            raise ProfileExceedsPolicy(
+                "Default duration exceeds the scheduling policy's visit maximum")
+
+
 class BusinessProfileRepository(Protocol):
     def read_business_profile(self, business_id: str) -> BusinessProfileRecord:
         """Return the unconfigured version-zero default for a new business."""
         ...
 
     def save_business_profile(self, business_id: str, actor_id: str, key: str,
-                              expected_version: int,
-                              profile: BusinessProfile) -> BusinessProfileRecord:
-        """Atomically compare version, save, audit, and replay a duplicate key."""
+                              expected_version: int, profile: BusinessProfile,
+                              policy_guard: PolicyGuard | None = None) -> BusinessProfileRecord:
+        """Atomically compare version, save, audit, and replay a duplicate key.
+
+        A duplicate key replays before ``policy_guard`` is checked.
+        """
         ...
 
 
 def update_business_profile(repository: BusinessProfileRepository, business_id: str,
                             actor_id: str, key: str, expected_version: int,
-                            profile: BusinessProfile) -> BusinessProfileRecord:
+                            profile: BusinessProfile,
+                            policy_guard: PolicyGuard | None = None) -> BusinessProfileRecord:
     if expected_version < 0:
         raise ValueError("Expected version must be nonnegative")
     if not business_id or not actor_id or not key:
         raise ValueError("Owner and request identity are required")
-    return repository.save_business_profile(business_id, actor_id, key, expected_version, profile)
+    return repository.save_business_profile(business_id, actor_id, key, expected_version,
+                                            profile, policy_guard)

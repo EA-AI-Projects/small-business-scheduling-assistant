@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from starlette.datastructures import FormData
 from twilio.request_validator import RequestValidator
 
-from scheduling.domain.client_records import ClientProfile, HomeSize
+from scheduling.domain.client_records import ClientProfile
 from scheduling.domain.sms_ingress import (
     ConsentEvidence,
     InboundReceipt,
@@ -78,7 +78,7 @@ class Clients:
         if phone_e164 != "+14155550101":
             return None
         return ClientProfile(business_id, "client-1", "Synthetic Client", phone_e164,
-                             "123 Test Street", HomeSize.SMALL, 60, True, 1,
+                             "123 Test Street", True, 1,
                              NOW, NOW, NOW)
 
 

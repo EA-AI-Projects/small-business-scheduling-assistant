@@ -1,10 +1,14 @@
-"""Client identity and ordinary notes, separate from appointment snapshots."""
+"""Client identity and ordinary notes, separate from appointment snapshots.
+
+A client record holds no visit length: the business's saved service duration
+(business_profile) is the one booking input, and appointments keep their own
+duration snapshots (#339).
+"""
 
 import re
 import unicodedata
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from enum import StrEnum
 from typing import Protocol
 from uuid import uuid4
 
@@ -18,12 +22,6 @@ ACCESS_CODE_PATTERN = re.compile(
     r"(?:door|gate|entry|access|lockbox|alarm|keypad)\b",
     re.IGNORECASE,
 )
-
-
-class HomeSize(StrEnum):
-    SMALL = "small"
-    MEDIUM = "medium"
-    LARGE = "large"
 
 
 class RecordConflict(Exception):
@@ -41,8 +39,6 @@ class ClientProfile:
     name: str
     phone_e164: str
     service_address: str
-    home_size: HomeSize
-    default_duration_minutes: int
     active: bool
     version: int
     created_at: datetime
@@ -62,8 +58,8 @@ class ClientProfile:
             raise ValueError("Service address is too long")
         if ACCESS_CODE_PATTERN.search(self.name) or ACCESS_CODE_PATTERN.search(self.service_address):
             raise ValueError("Entry/access codes are not allowed in client profiles")
-        if self.default_duration_minutes <= 0 or self.version <= 0:
-            raise ValueError("Duration and version must be positive")
+        if self.version <= 0:
+            raise ValueError("Version must be positive")
         if self.created_at.tzinfo is None or self.updated_at.tzinfo is None:
             raise ValueError("Profile timestamps must be timezone-aware")
         if self.phone_verified_at is not None and self.phone_verified_at.tzinfo is None:
@@ -131,11 +127,10 @@ class ClientRecordService:
         self._repository = repository
 
     def save_profile(self, business_id: str, client_id: str, name: str, phone_e164: str,
-                     service_address: str, home_size: HomeSize, default_duration_minutes: int,
-                     active: bool, expected_version: int, maximum_visit_minutes: int,
+                     service_address: str, active: bool, expected_version: int,
                      now: datetime) -> ClientProfile:
-        if expected_version < 0 or default_duration_minutes > maximum_visit_minutes:
-            raise ValueError("Profile version or visit duration is invalid")
+        if expected_version < 0:
+            raise ValueError("Profile version is invalid")
         phone_e164 = clean_phone(phone_e164)
         current = self._repository.read_profile(business_id, client_id)
         if (current.version if current else 0) != expected_version:
@@ -143,7 +138,7 @@ class ClientRecordService:
         instant = _utc(now)
         profile = ClientProfile(
             business_id, client_id, name.strip(), phone_e164, service_address.strip(),
-            home_size, default_duration_minutes, active, expected_version + 1,
+            active, expected_version + 1,
             current.created_at if current else instant, instant,
             current.phone_verified_at if current and current.phone_e164 == phone_e164 else None,
         )

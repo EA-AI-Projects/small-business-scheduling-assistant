@@ -18,7 +18,7 @@ from scheduling.domain.booking_invitations import (
     scheduled_window,
 )
 from scheduling.domain.booking_outreach import OutreachRecord, OutreachSettings, update_outreach
-from scheduling.domain.client_records import ClientRecordService, HomeSize, RecordConflict
+from scheduling.domain.client_records import ClientRecordService, RecordConflict
 from scheduling.domain.conversation import ConversationService
 from scheduling.domain.conversation_state import InMemoryConversationStates
 from scheduling.domain.holds import CreateHold, HoldService
@@ -69,6 +69,7 @@ class SafeRecords(InMemoryCalendarRepository):
 def setup() -> tuple[InMemoryCalendarRepository, Consent, InvitationSelector]:
     records = SafeRecords()
     OwnerPolicyService(records, lambda: RUN).seed(BUSINESS, "owner", "seed")
+    records.set_business_profile_for_test(BUSINESS, 120)
     consent = Consent()
     selector = InvitationSelector(records, consent)
     return records, consent, selector
@@ -81,7 +82,7 @@ def client(records: InMemoryCalendarRepository, consent: Consent, number: int,
     phone = f"+14155550{number:03d}"
     service = ClientRecordService(records)
     service.save_profile(BUSINESS, client_id, "Synthetic Client", phone,
-                         "123 Test Street", HomeSize.SMALL, 60, active, 0, 180, RUN)
+                         "123 Test Street", active, 0, RUN)
     if verified:
         service.verify_phone(BUSINESS, client_id, phone, RUN)
     if consented:
@@ -271,7 +272,7 @@ def test_appointment_cancellation_and_phone_change_affect_next_selection() -> No
     assert profile is not None
     ClientRecordService(records).save_profile(
         BUSINESS, target, profile.name, "+14155550299", profile.service_address,
-        profile.home_size, 60, True, profile.version, 180, RUN)
+        True, profile.version, RUN)
     assert selector.run(BUSINESS, RUN).reasons == {"unverified": 1}
     assert intent.phone_hash != sha256(b"+14155550299").hexdigest()
 
@@ -503,8 +504,8 @@ def test_invitation_suppresses_changed_state_before_provider_handoff(change: str
         profile = records.read_profile(BUSINESS, target)
         assert profile is not None
         ClientRecordService(records).save_profile(BUSINESS, target, profile.name,
-            "+14155550699", profile.service_address, profile.home_size, 60,
-            True, profile.version, 180, RUN)
+            "+14155550699", profile.service_address,
+            True, profile.version, RUN)
 
     class Messages:
         calls = 0

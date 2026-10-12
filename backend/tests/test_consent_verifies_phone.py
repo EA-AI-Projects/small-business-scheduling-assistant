@@ -15,7 +15,6 @@ from scheduling.domain.calendar import CalendarStatus
 from scheduling.domain.client_records import (
     ClientProfile,
     ClientRecordService,
-    HomeSize,
     RecordConflict,
 )
 from scheduling.domain.outbox import DeliveryState, OutboxRecord, PermanentDeliveryFailure
@@ -71,7 +70,7 @@ def world() -> tuple[InMemoryCalendarRepository, ClientRecordService, Store]:
     repository = InMemoryCalendarRepository()
     clients = ClientRecordService(repository)
     clients.save_profile("pilot", "client-1", "Synthetic Client", PHONE, "123 Test Street",
-                         HomeSize.SMALL, 60, True, 0, 180, NOW)
+                         True, 0, NOW)
     return repository, clients, Store(repository)
 
 
@@ -156,7 +155,7 @@ def test_phone_change_clears_verification_and_needs_new_consent() -> None:
     repository, clients, store = world()
     consent(repository, store)
     changed = clients.save_profile("pilot", "client-1", "Synthetic Client", "+14155550102",
-                                   "123 Test Street", HomeSize.SMALL, 60, True, 2, 180, NOW)
+                                   "123 Test Street", True, 2, NOW)
     assert changed.phone_verified_at is None
     assert repository.read_verified_phone("pilot", "+14155550102") is None
     # The old consent is for the old number; the new number has none until recorded.
@@ -183,7 +182,7 @@ def test_concurrent_profile_change_fails_without_consent() -> None:
         profile = original(business_id, client_id)
         # The owner edits the profile after the consent check read it.
         clients.save_profile("pilot", "client-1", "Synthetic Client Two", PHONE,
-                             "123 Test Street", HomeSize.SMALL, 60, True, 1, 180, NOW)
+                             "123 Test Street", True, 1, NOW)
         return profile
 
     repository.read_profile = stale_read  # type: ignore[method-assign]
@@ -209,7 +208,7 @@ class FakeDynamo:
 def verified_pair() -> tuple[ConsentEvidence, ClientProfile]:
     evidence = ConsentEvidence("pilot", "client-1", "Synthetic Client", PHONE, NOW, "pilot-v1")
     profile = ClientProfile("pilot", "client-1", "Synthetic Client", PHONE, "123 Test Street",
-                            HomeSize.SMALL, 60, True, 3, NOW, NOW, NOW)
+                            True, 3, NOW, NOW, NOW)
     return evidence, profile
 
 

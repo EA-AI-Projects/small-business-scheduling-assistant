@@ -35,6 +35,7 @@ const REFUSALS: Record<string, string> = {
   REPLACEMENT_PENDING: "A move request for this appointment is already waiting for the owner. Withdraw it first to change anything else.",
   BOOKING_NOT_ACTIVE: "That appointment is no longer active, so nothing was changed. Refresh to see its current state.",
   BOOKING_NOT_RESCHEDULABLE: "Only an upcoming confirmed appointment can be moved. Refresh to see its current state.",
+  DURATION_CHANGED: "The visit length changed after those times were shown, so nothing was sent. Choose from the new times.",
   CALENDAR_BUSY: "The calendar changed while sending. Nothing was changed; please try again.",
   PROFILE_INCOMPLETE: "Your profile needs the owner's attention before you can change appointments online. Please contact the business.",
   IDEMPOTENCY_KEY_REUSED: "That attempt was already used for something else. Refresh and try again.",
@@ -68,7 +69,8 @@ async function write(config: OwnerConfig, token: string, path: string, payload: 
     return { kind: "conflict", alternatives };
   }
   if (response.status === 409 && code && code in REFUSALS) return { kind: "error", message: REFUSALS[code]!,
-    stale: code === "STALE_BOOKING" || code === "BOOKING_NOT_ACTIVE" || code === "BOOKING_NOT_RESCHEDULABLE" };
+    stale: code === "STALE_BOOKING" || code === "BOOKING_NOT_ACTIVE" || code === "BOOKING_NOT_RESCHEDULABLE"
+      || code === "DURATION_CHANGED" };
   if (response.status === 404) return { kind: "error", message: "That appointment was not found. Refresh to see your appointments." };
   if (response.status === 503) return { kind: "error", message: timed ? "Online requests are not available right now." : "Online changes are not available right now." };
   return { kind: "error", message: timed ? "Your request was not sent. Please try again."
@@ -82,8 +84,8 @@ export interface MoveState { booking: ClientBooking | null; set: (booking: Clien
  * Client pages, in the business time zone. With `calendar` (the Calendar page) it shows the client's own
  * bookings and open times in the shared Day and Week views; choosing one and confirming sends a
  * request for owner approval, never an appointment until the owner approves. Without it (the Appointments
- * page) it lists the bookings with cancel, withdraw and move. The visit length is the owner-set length on
- * the client's profile, chosen by the server.
+ * page) it lists the bookings with cancel, withdraw and move. The visit length is the business's saved default
+ * duration, chosen by the server.
  */
 export function ClientHome({ config, token, zone, onSessionEnded, calendar, horizonDays, move, onOpenCalendar }: {
   config: OwnerConfig; token: string; zone: string | null; onSessionEnded: () => void;
@@ -229,11 +231,13 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
     const id = `${moving?.appointment_id ?? "new"}|${moving?.version ?? 0}|${chosen}`;
     if (attempt.current?.id !== id) attempt.current = { id, key: crypto.randomUUID() };
     setSending(true);
+    // The length the shown times were quoted at; the server refuses it if the owner has changed it since.
+    const quote = availability?.minutes ? { quoted_duration_minutes: availability.minutes } : {};
     try {
       const result = moving && hasVersion(moving)
         ? await write(config, token, `/v1/client/bookings/${encodeURIComponent(moving.appointment_id)}/reschedule`,
-          { start_at: chosen, expected_version: moving.version }, attempt.current.key, true)
-        : await write(config, token, "/v1/client/requests", { start_at: chosen }, attempt.current.key, true);
+          { start_at: chosen, expected_version: moving.version, ...quote }, attempt.current.key, true)
+        : await write(config, token, "/v1/client/requests", { start_at: chosen, ...quote }, attempt.current.key, true);
       if (result.kind !== "error") { attempt.current = null; setChosen(null); setRefresh((count) => count + 1); }
       if (result.kind === "sent" || (result.kind === "error" && result.stale)) {
         // A refused or finished move never leaves an old version in the panel.

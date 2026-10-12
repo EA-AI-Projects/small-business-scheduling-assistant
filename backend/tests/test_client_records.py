@@ -8,7 +8,6 @@ from fastapi.testclient import TestClient
 from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.domain.client_records import (
     ClientRecordService,
-    HomeSize,
     RecordConflict,
     RecordNotFound,
     note_expired,
@@ -32,8 +31,7 @@ def ready() -> tuple[InMemoryCalendarRepository, ClientRecordService]:
 def save(service: ClientRecordService, client_id: str, phone: str,
          version: int = 0, duration: int = 60) -> object:
     return service.save_profile(BUSINESS, client_id, "Synthetic Client", phone,
-                                "123 Test Street", HomeSize.SMALL, duration,
-                                True, version, 180, NOW)
+                                "123 Test Street", True, version, NOW)
 
 
 def test_note_scope_retention_and_access_code_exclusion() -> None:
@@ -118,7 +116,7 @@ def test_owner_routes_require_verified_business_identity() -> None:
     base = f"/v1/owner/businesses/{BUSINESS}/clients/client-1"
     body = {"expected_version": 0, "name": "Synthetic Client",
             "phone_e164": "+14155550101", "service_address": "123 Test Street",
-            "home_size": "small", "default_duration_minutes": 60, "active": True}
+            "active": True}
     assert api.put(base, json=body, headers={"Idempotency-Key": "profile"}).status_code == 401
     assert api.put(base.replace(BUSINESS, "other"), json=body,
                    headers={"Authorization": "Bearer good",

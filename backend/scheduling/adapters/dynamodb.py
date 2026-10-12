@@ -17,12 +17,15 @@ from scheduling.domain.booking_invitations import (
     invitation_outbox_id,
 )
 from scheduling.domain.booking_outreach import OutreachRecord, OutreachSettings
-from scheduling.domain.business_profile import BusinessProfile, BusinessProfileRecord
+from scheduling.domain.business_profile import (
+    BusinessProfile,
+    BusinessProfileRecord,
+    PolicyGuard,
+)
 from scheduling.domain.calendar import CalendarEvent, CalendarSnapshot, CalendarStatus
 from scheduling.domain.client_records import (
     ClientNote,
     ClientProfile,
-    HomeSize,
     RecordConflict,
     RecordNotFound,
 )
@@ -57,6 +60,7 @@ from scheduling.domain.owner_policy import (
     PolicyReplay,
     PolicyResult,
 )
+from scheduling.domain.service_duration import ServiceDurationChanged
 from scheduling.domain.sms_ingress import SmsCommandInterrupted
 
 
@@ -89,6 +93,11 @@ def _record_transaction_conflict(exc: Exception) -> bool:
                for code in codes):
             return False
     return True
+
+
+def _duration_prefix(minutes: int) -> str:
+    """The start of a canonical (sorted-key) profile payload with this default duration."""
+    return json.dumps({"default_duration_minutes": minutes})[:-1] + ","
 
 
 def _hold_payload(hold: PendingHold) -> dict[str, Any]:
@@ -218,8 +227,8 @@ class DynamoDBCalendarRepository:
                                      int(item["version"]["N"]))
 
     def save_business_profile(self, business_id: str, actor_id: str, key: str,
-                              expected_version: int,
-                              profile: BusinessProfile) -> BusinessProfileRecord:
+                              expected_version: int, profile: BusinessProfile,
+                              policy_guard: PolicyGuard | None = None) -> BusinessProfileRecord:
         identity = self._business_key(business_id,
             _command_sort_key(actor_id, "edit_business_profile", key))
         payload = json.dumps(asdict(profile), sort_keys=True)
@@ -236,6 +245,10 @@ class DynamoDBCalendarRepository:
         existing = replay()
         if existing is not None:
             return existing
+        # After the replay lookup: a retry of a stored save returns it even if the
+        # policy maximum has since been lowered.
+        if policy_guard is not None:
+            policy_guard.check(profile)
         next_version = expected_version + 1
         put: dict[str, Any] = {"TableName": self._table,
             "Item": {**self._business_key(business_id, "PROFILE#BUSINESS"),
@@ -246,9 +259,22 @@ class DynamoDBCalendarRepository:
             put["ExpressionAttributeNames"] = {"#version": "version"}
             put["ExpressionAttributeValues"] = {":old": {"N": str(expected_version)}}
         audit_key = sha256(json.dumps([business_id, actor_id, key]).encode()).hexdigest()
+        policy_checks: list[dict[str, Any]] = []
+        if policy_guard is not None:
+            policy_check: dict[str, Any] = {
+                "TableName": self._table,
+                "Key": self._business_key(business_id, "POLICY#SCHEDULING")}
+            if policy_guard.version is None:
+                policy_check["ConditionExpression"] = "attribute_not_exists(PK)"
+            else:
+                policy_check["ConditionExpression"] = "#version = :policy_version"
+                policy_check["ExpressionAttributeNames"] = {"#version": "version"}
+                policy_check["ExpressionAttributeValues"] = {
+                    ":policy_version": {"N": str(policy_guard.version)}}
+            policy_checks.append({"ConditionCheck": policy_check})
         try:
             self._client.transact_write_items(TransactItems=[
-                {"Put": put},
+                {"Put": put}, *policy_checks,
                 {"Put": {"TableName": self._table,
                     "Item": {**identity, "request_hash": {"S": request_hash},
                              "version": {"N": str(next_version)}},
@@ -717,8 +743,6 @@ class DynamoDBCalendarRepository:
             name=item["name"]["S"],
             phone_e164=item["phone_e164"]["S"],
             service_address=item["service_address"]["S"],
-            home_size=HomeSize(item["home_size"]["S"]),
-            default_duration_minutes=int(item["default_duration_minutes"]["N"]),
             active=item["active"]["BOOL"],
             version=int(item["version"]["N"]),
             created_at=datetime.fromisoformat(item["created_at"]["S"]),
@@ -1048,8 +1072,6 @@ class DynamoDBCalendarRepository:
             "name": {"S": profile.name},
             "phone_e164": {"S": profile.phone_e164},
             "service_address": {"S": profile.service_address},
-            "home_size": {"S": profile.home_size.value},
-            "default_duration_minutes": {"N": str(profile.default_duration_minutes)},
             "active": {"BOOL": profile.active},
             "version": {"N": str(profile.version)},
             "created_at": {"S": _instant(profile.created_at)},
@@ -1459,6 +1481,18 @@ class DynamoDBCalendarRepository:
                     raise
             raise RevisionConflict("Owner calendar or idempotency condition changed") from exc
 
+    def _profile_version_check(self, business_id: str, version: int) -> dict[str, Any]:
+        check: dict[str, Any] = {
+            "TableName": self._table,
+            "Key": self._business_key(business_id, "PROFILE#BUSINESS")}
+        if version == 0:
+            check["ConditionExpression"] = "attribute_not_exists(PK)"
+        else:
+            check["ConditionExpression"] = "#version = :profile_version"
+            check["ExpressionAttributeNames"] = {"#version": "version"}
+            check["ExpressionAttributeValues"] = {":profile_version": {"N": str(version)}}
+        return check
+
     def commit_policy(self, expected_revision: int, commit: PolicyCommit) -> None:
         command = commit.command
         old_version = command.expected_version
@@ -1544,6 +1578,8 @@ class DynamoDBCalendarRepository:
                 },
                 "ConditionExpression": "attribute_not_exists(PK)",
             }},
+            {"ConditionCheck": self._profile_version_check(
+                command.business_id, commit.profile_version)},
         ]
         try:
             self._client.transact_write_items(TransactItems=writes)
@@ -1860,6 +1896,20 @@ class DynamoDBCalendarRepository:
                 "ExpressionAttributeValues": {":now": {"S": _instant(commit.created_at)}},
             }})
         writes.extend(self._sms_guard_checks(hold.business_id))
+        guarded_minutes = commit.command.service_duration_minutes
+        service_index = -1
+        if guarded_minutes is not None:
+            # The saved default must still be the duration this hold was validated with.
+            # The payload is canonical JSON with sorted keys, so the duration is its prefix.
+            service_index = len(writes)
+            writes.append({"ConditionCheck": {
+                "TableName": self._table,
+                "Key": self._business_key(hold.business_id, "PROFILE#BUSINESS"),
+                "ConditionExpression": "begins_with(#payload, :duration_prefix)",
+                "ExpressionAttributeNames": {"#payload": "payload"},
+                "ExpressionAttributeValues": {
+                    ":duration_prefix": {"S": _duration_prefix(guarded_minutes)}},
+            }})
         if len(writes) > 100:
             raise ValueError("Hold transaction exceeds DynamoDB item limit")
         try:
@@ -1886,8 +1936,13 @@ class DynamoDBCalendarRepository:
                     if 0 <= index < len(codes)
                 ):
                     raise RevisionConflict("Calendar or idempotency condition changed") from exc
+                # After the revision and idempotency checks, so a concurrent same-key commit
+                # replays instead of reporting a changed default.
+                if (0 <= service_index < len(codes)
+                        and codes[service_index] == "ConditionalCheckFailed"):
+                    raise ServiceDurationChanged("The default visit duration changed") from exc
                 raise
-            # Some clients omit per-item reasons. Verify the two expected
+            # Some clients omit per-item reasons. Verify the expected
             # conditional guards rather than interpreting all cancellations as races.
             if (
                 self.read_revision(hold.business_id) != expected_revision
@@ -1901,6 +1956,10 @@ class DynamoDBCalendarRepository:
                 )
             ):
                 raise RevisionConflict("Calendar or idempotency condition changed") from exc
+            if guarded_minutes is not None:
+                saved = self.read_business_profile(hold.business_id).profile
+                if saved is None or saved.default_duration_minutes != guarded_minutes:
+                    raise ServiceDurationChanged("The default visit duration changed") from exc
             raise
 
     @staticmethod

@@ -23,16 +23,15 @@ from scheduling.adapters.outbox_aws import DynamoOutboxStore, due_keys
 from scheduling.adapters.sms_dynamodb import DynamoSmsIngressStore
 from scheduling.client_api import add_client_session_route
 from scheduling.domain.appointments import Appointment
-from scheduling.domain.business_profile import BusinessProfile
+from scheduling.domain.business_profile import BusinessProfile, PolicyGuard, ProfileExceedsPolicy
 from scheduling.domain.calendar import CalendarStatus
 from scheduling.domain.client_records import (
     ClientProfile,
     ClientRecordService,
-    HomeSize,
     RecordConflict,
 )
 from scheduling.domain.conversation_state import ConversationState, PromptKind
-from scheduling.domain.holds import OutboxIntent, RevisionConflict
+from scheduling.domain.holds import CreateHold, HoldService, OutboxIntent, RevisionConflict
 from scheduling.domain.lifecycle import (
     Action,
     ActorRole,
@@ -48,7 +47,8 @@ from scheduling.domain.outbox import (
     DispatchService,
     OutboxRecord,
 )
-from scheduling.domain.owner_policy import OwnerPolicyService
+from scheduling.domain.owner_policy import OwnerPolicyService, PolicyCommand
+from scheduling.domain.service_duration import ServiceDurationChanged
 from scheduling.domain.sms_ingress import ConsentEvidence, record_in_person_consent
 from scheduling.domain.sms_status import SmsDeliveryStatus
 from scheduling.identity_links import IdentityLink, LinkRole, LinkState
@@ -251,7 +251,7 @@ def test_client_erasure_releases_reservations_and_removes_linked_records(
     repo = DynamoDBCalendarRepository(env.client, env.table)
     ClientRecordService(repo).save_profile(
         env.business, "synthetic-client", "Synthetic Client", "+14155550101",
-        "123 Test Street", HomeSize.SMALL, 60, True, 0, 180, START,
+        "123 Test Street", True, 0, START,
     )
     confirmed = _appointment(env, "erasure-confirmed", CalendarStatus.CONFIRMED)
     pending = _appointment(env, "erasure-pending", CalendarStatus.PENDING_APPROVAL)
@@ -450,12 +450,13 @@ def _client_portal(env: RaceEnv) -> tuple[TestClient, DynamoDBCalendarRepository
     now = datetime(2026, 9, 28, 15, tzinfo=UTC)
     repo = DynamoDBCalendarRepository(env.client, env.table)
     OwnerPolicyService(repo, lambda: now).seed(env.business, "synthetic-owner", "seed")
+    repo.save_business_profile(env.business, "synthetic-owner", "service", 0, _profile("service", 60))
     links = {}
     for number, name in enumerate(("a", "b"), start=1):
         client_id = f"portal-{name}"
         repo.save_profile(ClientProfile(
             env.business, client_id, "Synthetic Client", f"+1555010000{number}",
-            "1 Test Street", HomeSize.MEDIUM, 60, True, 1, now, now, now), 0, None)
+            "1 Test Street", True, 1, now, now, now), 0, None)
         links[f"token-{name}"] = IdentityLink(
             f"sub-{name}", LinkRole.CLIENT, env.business, client_id, LinkState.ACTIVE, 1, now,
             "synthetic-admin", "test")
@@ -931,7 +932,7 @@ def _consent_world(env: RaceEnv) -> tuple[DynamoDBCalendarRepository, DynamoSmsI
     repo = DynamoDBCalendarRepository(env.client, env.table)
     clients = ClientRecordService(repo)
     clients.save_profile(env.business, "consent-client", "Synthetic Client", "+14155550101",
-                         "123 Test Street", HomeSize.SMALL, 60, True, 0, 180, START)
+                         "123 Test Street", True, 0, START)
     return repo, DynamoSmsIngressStore(env.client, env.table), clients
 
 
@@ -970,8 +971,8 @@ def test_profile_change_between_read_and_consent_writes_nothing(race_env: RaceEn
         repo.read_profile = original  # type: ignore[method-assign]  # the save below reads too
         profile = original(business_id, client_id)
         clients.save_profile(env.business, "consent-client", "Synthetic Client Two",
-                             "+14155550101", "123 Test Street", HomeSize.SMALL, 60, True, 1,
-                             180, START)
+                             "+14155550101", "123 Test Street", True, 1,
+                             START)
         return profile
 
     repo.read_profile = stale_read  # type: ignore[method-assign]
@@ -1020,18 +1021,18 @@ def test_repeat_consent_and_pre_welcome_client_queue_no_second_welcome(
     assert _welcome_items(env) == ["OUTBOX#welcome#consent-client"]
     # A client enrolled before welcome texts existed: consent records, no outbox record.
     clients.save_profile(env.business, "old-client", "Synthetic Old", "+14155550103",
-                         "123 Test Street", HomeSize.SMALL, 60, True, 0, 180, START)
+                         "123 Test Street", True, 0, START)
     old = ConsentEvidence(env.business, "old-client", "Synthetic Old", "+14155550103", START, "1")
     profile = repo.read_profile(env.business, "old-client")
     assert profile is not None
     store.put_consent_verifying_phone(old, replace(
         profile, version=2, updated_at=START, phone_verified_at=START))
     clients.save_profile(env.business, "old-client", "Synthetic Old", "+14155550104",
-                         "123 Test Street", HomeSize.SMALL, 60, True, 2, 180, START)
+                         "123 Test Street", True, 2, START)
     # A new client then consents on the old client's former (shared) number, which
     # overwrites that number's current-consent record but not the old client's history.
     clients.save_profile(env.business, "shared-client", "Synthetic Shared", "+14155550103",
-                         "123 Test Street", HomeSize.SMALL, 60, True, 0, 180, START)
+                         "123 Test Street", True, 0, START)
     record_in_person_consent(store, repo, env.business, "shared-client", "+14155550103",
                              "Synthetic Shared", "1", START + timedelta(days=3))
     record_in_person_consent(store, repo, env.business, "old-client", "+14155550104",
@@ -1311,9 +1312,9 @@ def _owner_edge_cases(env: RaceEnv, store: DynamoSmsIngressStore, owner: str,
     assert "body" in read("owner-racing")
 
 
-def _profile(name: str) -> BusinessProfile:
+def _profile(name: str, minutes: int = 120) -> BusinessProfile:
     return BusinessProfile(name, "Synthetic home cleaning.", "help@example.test",
-                           "Standard clean", "Whole-home visit.", 120)
+                           "Standard clean", "Whole-home visit.", minutes)
 
 
 def test_concurrent_first_business_profile_saves_commit_at_most_one(race_env: RaceEnv) -> None:
@@ -1352,3 +1353,103 @@ def test_same_key_business_profile_retry_returns_the_stored_result(race_env: Rac
     assert repo.read_business_profile(env.business) == first
     assert len([item for item in _business_items(env)
                 if item["SK"]["S"].startswith("AUDIT#profile#")]) == 1
+
+
+def test_hold_commit_requires_the_saved_default_to_be_unchanged(race_env: RaceEnv) -> None:
+    env = race_env
+    now = datetime(2026, 9, 28, 15, tzinfo=UTC)
+    plain = DynamoDBCalendarRepository(env.client, env.table)
+    OwnerPolicyService(plain, lambda: now).seed(env.business, "synthetic-owner", "seed")
+    plain.save_business_profile(env.business, "synthetic-owner", "one", 0, _profile("one", 60))
+
+    class Racing(DynamoDBCalendarRepository):
+        changed = False
+
+        def read_calendar_for_hold(self, *args: Any, **kwargs: Any) -> Any:
+            snapshot = super().read_calendar_for_hold(*args, **kwargs)
+            if not self.changed:  # Another owner session saves a new default mid-request.
+                self.changed = True
+                plain.save_business_profile(
+                    env.business, "synthetic-owner", "two", 1, _profile("two", 90))
+            return snapshot
+
+    racing = Racing(env.client, env.table)
+    revision = racing.read_revision(env.business)
+    start = datetime(2026, 9, 29, 16, tzinfo=UTC)
+    command = CreateHold(env.business, "synthetic-owner", "portal-a", "guarded", start, 60,
+                         service_duration_minutes=60)
+    with pytest.raises(ServiceDurationChanged):
+        HoldService(racing).create(command, now)
+    assert racing.read_revision(env.business) == revision
+    assert not [item for item in _business_items(env)
+                if item["SK"]["S"].startswith("AUDIT#hold-created#")]
+
+
+def test_policy_edit_requires_the_profile_unchanged_since_it_was_validated(
+        race_env: RaceEnv) -> None:
+    env = race_env
+    now = datetime(2026, 9, 28, 15, tzinfo=UTC)
+    plain = DynamoDBCalendarRepository(env.client, env.table)
+    OwnerPolicyService(plain, lambda: now).seed(env.business, "synthetic-owner", "seed")
+    plain.save_business_profile(env.business, "synthetic-owner", "one", 0, _profile("one", 60))
+
+    class Racing(DynamoDBCalendarRepository):
+        def read_business_profile(self, business_id: str) -> Any:
+            record = super().read_business_profile(business_id)
+            if record.version == 1:  # A profile save lands after the edit read the profile.
+                plain.save_business_profile(
+                    env.business, "synthetic-owner", "two", 1, _profile("two", 150))
+            return record
+
+    racing = Racing(env.client, env.table)
+    record = racing.read_policy_record(env.business)
+    assert record is not None
+    lowered = replace(record.policy, maximum_visit_minutes=120)
+    command = PolicyCommand(env.business, "synthetic-owner", "lower",
+                            racing.read_revision(env.business), record.version, lowered)
+    with pytest.raises(RevisionConflict):
+        OwnerPolicyService(racing, lambda: now).apply(command)
+    assert plain.read_policy_record(env.business) == record
+
+
+def test_profile_save_is_guarded_by_the_policy_version_and_replays_first(
+        race_env: RaceEnv) -> None:
+    env = race_env
+    now = datetime(2026, 9, 28, 15, tzinfo=UTC)
+    repo = DynamoDBCalendarRepository(env.client, env.table)
+    OwnerPolicyService(repo, lambda: now).seed(env.business, "synthetic-owner", "seed")
+    policy = repo.read_policy_record(env.business)
+    assert policy is not None
+    guard = PolicyGuard(policy.version, policy.policy.maximum_visit_minutes)
+    first = repo.save_business_profile(
+        env.business, "synthetic-owner", "k", 0, _profile("one", 60), guard)
+    # A stale policy version cannot commit.
+    with pytest.raises(RevisionConflict):
+        repo.save_business_profile(env.business, "synthetic-owner", "stale", 1,
+                                   _profile("two", 60), PolicyGuard(policy.version + 5, 480))
+    # A default above the maximum is refused, but a retry of a stored save still replays.
+    tight = PolicyGuard(policy.version, 30)
+    assert repo.save_business_profile(
+        env.business, "synthetic-owner", "k", 0, _profile("one", 60), tight) == first
+    with pytest.raises(ProfileExceedsPolicy):
+        repo.save_business_profile(env.business, "synthetic-owner", "new", 1,
+                                   _profile("three", 60), tight)
+
+
+def test_same_key_default_hold_retry_replays_after_the_default_changes(
+        race_env: RaceEnv) -> None:
+    env = race_env
+    now = datetime(2026, 9, 28, 15, tzinfo=UTC)
+    repo = DynamoDBCalendarRepository(env.client, env.table)
+    OwnerPolicyService(repo, lambda: now).seed(env.business, "synthetic-owner", "seed")
+    repo.save_business_profile(env.business, "synthetic-owner", "one", 0, _profile("one", 60))
+    start = datetime(2026, 9, 29, 16, tzinfo=UTC)
+    first = HoldService(repo).create(CreateHold(
+        env.business, "synthetic-owner", "portal-a", "same-key", start, 60,
+        service_duration_minutes=60), now)
+    env.appointment_ids.append(first.hold_id)
+    repo.save_business_profile(env.business, "synthetic-owner", "two", 1, _profile("two", 90))
+    # The retry's lookup command carries a placeholder length; its hash ignores the minutes.
+    lookup = CreateHold(env.business, "synthetic-owner", "portal-a", "same-key", start, 1,
+                        service_duration_minutes=1)
+    assert HoldService(repo).existing(lookup) == first

@@ -7,8 +7,9 @@ from uuid import uuid4
 
 from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.adapters.openai_messages import OpenAIMessageInterpreter
+from scheduling.domain.business_profile import BusinessProfile
 from scheduling.domain.calendar import CalendarStatus
-from scheduling.domain.client_records import ACCESS_CODE_PATTERN, ClientProfile, HomeSize
+from scheduling.domain.client_records import ACCESS_CODE_PATTERN, ClientProfile
 from scheduling.domain.conversation import ConversationService
 from scheduling.domain.conversation_state import InMemoryConversationStates
 from scheduling.domain.holds import HoldService
@@ -45,8 +46,13 @@ def main() -> int:
     now = datetime.now(UTC)
     store.save_profile(ClientProfile(
         BUSINESS, "client-1", "Synthetic Client", CLIENT_PHONE,
-        "123 Fictional Street", HomeSize.MEDIUM, 120, True, 1,
+        "123 Fictional Street", True, 1,
         now, now, now), 0, None)
+    store.save_business_profile(
+        BUSINESS, "local-owner", "local-profile", 0, BusinessProfile(
+            "Example Cleaning Co.", "A synthetic small cleaning business.",
+            "support@example.invalid", "Standard cleaning",
+            "A synthetic standard cleaning visit.", 120))
     service = ConversationService(
         store, OpenAIMessageInterpreter(key), HoldService(store),
         LifecycleService(store, lambda: datetime.now(UTC)),

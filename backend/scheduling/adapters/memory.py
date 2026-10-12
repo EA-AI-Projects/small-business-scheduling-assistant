@@ -13,7 +13,11 @@ from scheduling.domain.booking_invitations import (
     invitation_outbox_id,
 )
 from scheduling.domain.booking_outreach import OutreachRecord, OutreachSettings
-from scheduling.domain.business_profile import BusinessProfile, BusinessProfileRecord
+from scheduling.domain.business_profile import (
+    BusinessProfile,
+    BusinessProfileRecord,
+    PolicyGuard,
+)
 from scheduling.domain.calendar import CalendarEvent, CalendarSnapshot, CalendarStatus
 from scheduling.domain.client_records import ClientNote, ClientProfile, RecordConflict
 from scheduling.domain.holds import (
@@ -33,6 +37,7 @@ from scheduling.domain.owner_calendar import (
     UnavailableBlock,
 )
 from scheduling.domain.owner_policy import PolicyCommand, PolicyCommit, PolicyRecord, PolicyReplay
+from scheduling.domain.service_duration import ServiceDurationChanged
 
 
 class InMemoryCalendarRepository:
@@ -74,8 +79,8 @@ class InMemoryCalendarRepository:
             return self._profiles.get(business_id, BusinessProfileRecord(None, 0))
 
     def save_business_profile(self, business_id: str, actor_id: str, key: str,
-                              expected_version: int,
-                              profile: BusinessProfile) -> BusinessProfileRecord:
+                              expected_version: int, profile: BusinessProfile,
+                              policy_guard: PolicyGuard | None = None) -> BusinessProfileRecord:
         with self._lock:
             identity = (business_id, actor_id, key)
             previous = self._profile_replays.get(identity)
@@ -84,6 +89,12 @@ class InMemoryCalendarRepository:
                 if old_profile != profile or old_version != expected_version:
                     raise IdempotencyKeyReused("Key already used for another profile edit")
                 return result
+            if policy_guard is not None:
+                # The replay above wins, so a retry after the maximum was lowered
+                # still returns the stored result. Then the policy must be unchanged.
+                if self._policy_versions.get(business_id) != policy_guard.version:
+                    raise RevisionConflict("Scheduling policy changed during the profile edit")
+                policy_guard.check(profile)
             if self.read_business_profile(business_id).version != expected_version:
                 raise RevisionConflict("Business profile version changed")
             result = BusinessProfileRecord(profile, expected_version + 1)
@@ -337,6 +348,11 @@ class InMemoryCalendarRepository:
             key = self._idempotency_key(commit.command)
             if key in self._idempotency:
                 raise RevisionConflict("Idempotency record already exists")
+            guarded = commit.command.service_duration_minutes
+            if guarded is not None:
+                saved = self.read_business_profile(business_id).profile
+                if saved is None or saved.default_duration_minutes != guarded:
+                    raise ServiceDurationChanged("The default visit duration changed")
             original_id = commit.result.replaces_appointment_id
             if original_id is not None:
                 guard_key = (business_id, original_id)
@@ -587,6 +603,9 @@ class InMemoryCalendarRepository:
             previous_version = self._policy_versions.get(business_id)
             if previous_version != commit.command.expected_version:
                 raise RevisionConflict("Policy version changed")
+            if self._profiles.get(business_id, BusinessProfileRecord(None, 0)).version \
+                    != commit.profile_version:
+                raise RevisionConflict("Business profile changed during the policy edit")
             key = self._policy_replay_key(commit.command)
             if key in self._policy_replays:
                 raise RevisionConflict("Policy idempotency key already used")
@@ -596,6 +615,16 @@ class InMemoryCalendarRepository:
             self._audit[commit.audit_id] = commit
             self._outbox[f"{commit.audit_id}#owner"] = commit
             self._revisions[business_id] += 1
+
+    def set_business_profile_for_test(self, business_id: str,
+                                      default_duration_minutes: int = 120) -> None:
+        """Seed a synthetic configured business profile with this default duration."""
+        with self._lock:
+            self._profiles[business_id] = BusinessProfileRecord(BusinessProfile(
+                "Example Cleaning Co.", "A synthetic small cleaning business.",
+                "support@example.invalid", "Standard cleaning",
+                "A synthetic standard cleaning visit.", default_duration_minutes),
+                self._profiles.get(business_id, BusinessProfileRecord(None, 0)).version + 1)
 
     def set_policy_for_test(self, business_id: str, policy: AvailabilityPolicy) -> None:
         with self._lock:

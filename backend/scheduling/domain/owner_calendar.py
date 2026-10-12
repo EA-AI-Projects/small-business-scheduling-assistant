@@ -60,6 +60,10 @@ class OwnerCalendarCommand:
     end_at: datetime | None = None
     client_id: str | None = None
     duration_minutes: int | None = None
+    # True when duration_minutes is the saved service default rather than an owner's
+    # explicit value: the hash then names "the default", so a same-key retry replays
+    # after the default changes (#339).
+    service_default: bool = False
 
     def __post_init__(self) -> None:
         if not all((self.business_id, self.actor_id, self.idempotency_key)):
@@ -106,8 +110,10 @@ class OwnerCalendarCommand:
             "start_at": self.start_at.astimezone(UTC).isoformat() if self.start_at else None,
             "end_at": self.end_at.astimezone(UTC).isoformat() if self.end_at else None,
             "client_id": self.client_id,
-            "duration_minutes": self.duration_minutes,
+            "duration_minutes": None if self.service_default else self.duration_minutes,
         }
+        if self.service_default:
+            payload["service_default"] = True
         return sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -159,6 +165,11 @@ class OwnerCalendarService:
     def __init__(self, repository: OwnerCalendarRepository, clock: Callable[[], datetime]) -> None:
         self._repository = repository
         self._clock = clock
+
+    def replayed(self, command: OwnerCalendarCommand) -> OwnerCalendarResult | None:
+        """The stored result of this exact command, or None when it was never committed."""
+        replay = self._repository.read_owner_calendar_replay(command)
+        return None if replay is None else self._replay(replay, command.request_hash())
 
     def apply(self, command: OwnerCalendarCommand) -> OwnerCalendarResult:
         request_hash = command.request_hash()

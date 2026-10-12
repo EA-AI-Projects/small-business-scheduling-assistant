@@ -10,7 +10,7 @@ from test_sms_processing import Reader
 
 from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.domain.calendar import CalendarEvent, CalendarSnapshot, CalendarStatus
-from scheduling.domain.client_records import ClientProfile, HomeSize
+from scheduling.domain.client_records import ClientProfile
 from scheduling.domain.conversation import ConversationService, MessageContext, MessageProposal
 from scheduling.domain.conversation_history import HistoryMessage
 from scheduling.domain.holds import CreateHold, HoldService
@@ -33,8 +33,7 @@ DAY = date(2026, 10, 1)
 
 
 def profile(client_id: str, name: str, phone: str) -> ClientProfile:
-    return ClientProfile("pilot", client_id, name, phone, "123 Test Street", HomeSize.MEDIUM,
-                         120, True, 1, NOW, NOW, NOW)
+    return ClientProfile("pilot", client_id, name, phone, "123 Test Street", True, 1, NOW, NOW, NOW)
 
 
 class Repository(InMemoryCalendarRepository):

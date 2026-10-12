@@ -20,6 +20,7 @@ from scheduling.domain.availability import (
     InvalidPolicy,
     available_starts,
 )
+from scheduling.domain.business_profile import BusinessProfileRecord
 from scheduling.domain.calendar import CalendarSnapshot, CalendarStatus
 from scheduling.domain.client_calendar_questions import (
     BOTH,
@@ -78,6 +79,11 @@ from scheduling.domain.lifecycle import (
 )
 from scheduling.domain.owner_calendar_tool import STATUSES as OWNER_CALENDAR_STATUSES
 from scheduling.domain.owner_calendar_tool import calendar_page
+from scheduling.domain.service_duration import (
+    ServiceDurationChanged,
+    ServiceNotConfigured,
+    service_duration,
+)
 from scheduling.domain.sms_ingress import (
     ConsentEvidence,
     InboundReceipt,
@@ -195,6 +201,7 @@ class ClientReplyDrafter(Protocol):
 class ConversationRepository(Protocol):
     def read_policy(self, business_id: str) -> AvailabilityPolicy: ...
     def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None: ...
+    def read_business_profile(self, business_id: str) -> BusinessProfileRecord: ...
     def read_pending_requests(self, business_id: str, now: datetime) -> tuple[Appointment, ...]: ...
     def read_calendar(self, business_id: str) -> CalendarSnapshot: ...
     def read_appointment(self, appointment_id: str) -> Appointment | None: ...
@@ -731,7 +738,7 @@ class ConversationService:
             except ValueError:
                 return ConversationOutcome(
                     f"That date is unavailable. Reply {reply_command} YYYY-MM-DD for options.")
-            return self._offer(receipt, profile, policy, now, day, day, None, None, original)
+            return self._offer(receipt, policy, now, day, day, None, None, original)
         if not EXPLICIT_START.fullmatch(date_text):
             return ConversationOutcome(self._clarify(
                 receipt.role, "clarify", receipt.body or "", targets))
@@ -745,13 +752,18 @@ class ConversationService:
                     .astimezone(UTC).astimezone(zone).replace(tzinfo=None) == wall}
         if len(instants) != 1:
             return ConversationOutcome("That local time is missing or ambiguous. Please choose another.")
+        minutes = self._service_minutes(receipt.business_id, policy)
+        if minutes is None:
+            return ConversationOutcome("Please contact the owner to schedule this visit.")
         try:
             result = self._holds.create(CreateHold(
                 receipt.business_id, receipt.client_id, receipt.client_id,
-                receipt.provider_id, next(iter(instants)), profile.default_duration_minutes,
-                original.appointment_id if original else None), now)
-        except (SlotConflict, InvalidReplacement, ReplacementPending,
-                TooManyConflicts, IdempotencyKeyReused, InvalidDuration, ValueError):
+                receipt.provider_id, next(iter(instants)), minutes,
+                original.appointment_id if original else None,
+                service_duration_minutes=minutes), now)
+        except (SlotConflict, InvalidReplacement, ReplacementPending, TooManyConflicts,
+                IdempotencyKeyReused, InvalidDuration, ServiceDurationChanged,
+                ServiceNotConfigured, ValueError):
             return ConversationOutcome("That time is unavailable. Please request another exact date and time.")
         return self._requested(receipt, original, next(iter(instants)), result.hold_id, policy)
 
@@ -765,13 +777,14 @@ class ConversationService:
 
     def _remember(self, receipt: InboundReceipt, kind: PromptKind, now: datetime, *,
                   options: tuple[datetime, ...] = (),
-                  appointment: Appointment | None = None) -> None:
+                  appointment: Appointment | None = None,
+                  duration_minutes: int | None = None) -> None:
         self._states.put_state(ConversationState(
             receipt.business_id, receipt.sender, receipt.provider_id, kind, now,
             now + PROMPT_LIFETIME, options,
             appointment.appointment_id if appointment is not None else None,
             appointment.version if appointment is not None else None,
-            receipt.client_id))
+            receipt.client_id, duration_minutes=duration_minutes))
 
     def _answer(self, receipt: InboundReceipt, prompt: ConversationState | None,
                 targets: tuple[Appointment, ...], policy: AvailabilityPolicy,
@@ -947,13 +960,29 @@ class ConversationService:
                     "Please tell me which visit to move.")
                 return self._with_result(outcome, "nothing_changed", "none",
                                          reason="original_changed")
+        minutes = self._service_minutes(receipt.business_id, policy)
+        if minutes is None:
+            self._forget(prompt)
+            return ConversationOutcome("Please contact the owner to schedule this visit.")
+        if prompt.duration_minutes is not None and prompt.duration_minutes != minutes:
+            # The offer quoted a visit length the owner has since changed: nothing is
+            # booked at either length, and the client gets fresh times at the new one.
+            self._forget(prompt)
+            outcome = ConversationOutcome(
+                "The visit length changed after I sent those times, so nothing was booked. "
+                "Tell me what day works and I'll send the current open times.")
+            return self._with_result(outcome, "request_failed", "none",
+                                     (self._client_fact(start, zone, "unavailable"),),
+                                     "visit_length_changed")
         try:
             result = self._holds.create(CreateHold(
                 receipt.business_id, receipt.client_id, receipt.client_id, receipt.provider_id,
-                start, profile.default_duration_minutes,
-                original.appointment_id if original is not None else None), now)
+                start, minutes,
+                original.appointment_id if original is not None else None,
+                service_duration_minutes=minutes), now)
         except (SlotConflict, InvalidReplacement, ReplacementPending, TooManyConflicts,
-                IdempotencyKeyReused, InvalidDuration, ValueError):
+                IdempotencyKeyReused, InvalidDuration, ServiceDurationChanged,
+                ServiceNotConfigured, ValueError):
             self._forget(prompt)
             outcome = ConversationOutcome(
                 f"Sorry, {when_text(start, zone)} is no longer open, so nothing was booked. "
@@ -1322,9 +1351,16 @@ class ConversationService:
                 "I couldn't tell which day you meant. What date works for you?")
             return self._with_result(outcome, "date_clarification", "none",
                                      reason="invalid_range")
-        return self._offer(receipt, profile, policy, now, first, last, earliest, latest, original)
+        return self._offer(receipt, policy, now, first, last, earliest, latest, original)
 
-    def _offer(self, receipt: InboundReceipt, profile: ClientProfile, policy: AvailabilityPolicy,
+    def _service_minutes(self, business_id: str, policy: AvailabilityPolicy) -> int | None:
+        """The saved service duration, or None when it is missing or beyond the policy."""
+        try:
+            return service_duration(self._repository, business_id, policy)
+        except (ServiceNotConfigured, InvalidDuration):
+            return None
+
+    def _offer(self, receipt: InboundReceipt, policy: AvailabilityPolicy,
                now: datetime, first: date, last: date, earliest: time | None,
                latest: time | None, original: Appointment | None) -> ConversationOutcome:
         """Offer real open times. Offering writes nothing to the calendar."""
@@ -1343,6 +1379,11 @@ class ConversationService:
                                      (self._client_date_fact(horizon, "booking horizon"),),
                                      reason="outside_horizon")
         first, last = max(first, today), min(last, horizon)
+        minutes = self._service_minutes(receipt.business_id, policy)
+        if minutes is None:
+            outcome = ConversationOutcome("Please contact the owner to schedule this visit.")
+            return self._with_result(outcome, "request_failed", "none",
+                                     reason="invalid_availability_policy")
         events = None
         if original is not None:
             events = tuple(event for event in self._repository.read_calendar(
@@ -1353,9 +1394,9 @@ class ConversationService:
                 day = first + timedelta(days=offset)
                 starts.extend(
                     self._availability.find_starts(
-                        receipt.business_id, day, profile.default_duration_minutes, now)
+                        receipt.business_id, day, minutes, now)
                     if events is None else
-                    available_starts(policy, day, profile.default_duration_minutes, events, now))
+                    available_starts(policy, day, minutes, events, now))
         except (InvalidDuration, InvalidPolicy, ValueError):
             outcome = ConversationOutcome("Please contact the owner to schedule this visit.")
             return self._with_result(outcome, "request_failed", "none",
@@ -1391,10 +1432,10 @@ class ConversationService:
         else:
             chosen = spread(tuple(starts), zone)
         # A replacement offer remembers the visit it would replace.
-        self._remember(receipt, PromptKind.OFFER, now, options=chosen, appointment=original)
+        self._remember(receipt, PromptKind.OFFER, now, options=chosen, appointment=original,
+                       duration_minutes=minutes)
         lead = (f"To move your {when_text(original.start_at, zone)} visit: "
                 if original is not None else "")
-        minutes = profile.default_duration_minutes
         length = f"{minutes // 60}-hour" if minutes % 60 == 0 else f"{minutes}-minute"
         if len(chosen) == 1:
             body = (f"{when_text(chosen[0], zone)} is open for your {length} cleaning. "

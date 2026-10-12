@@ -24,7 +24,7 @@ The owner currently coordinates appointments with clients by text, spending subs
 - Provide accurate availability from a shared calendar.
 - Keep owner interaction simple and text-first.
 - Require owner approval for new bookings during the initial trust-building phase.
-- Support per-client visit duration estimates and per-appointment overrides.
+- Use one saved service duration for every booking path and support per-appointment overrides by the owner (#339).
 - Make the system safe against double bookings and stale availability.
 
 ## 4. Non-goals for MVP
@@ -63,7 +63,7 @@ Implementation follows [#226](https://github.com/EA-AI-Projects/small-business-s
 
 ### 6.1 Scheduling and availability
 
-- The owner maintains one versioned business profile (#336): display name, short description, support contact, one bookable service (name and description), and a default booking duration. It is the trusted source of business information for the owner UI, client UI, backend, and future SMS tools; a model never authors business facts. The pilot has one service and no service catalog. One configured service is required before new booking flows rely on the profile. Edits use an expected version and are audited. The owner edits these in a "Business details" card in regular Settings (#337): it loads the saved values, shows unsaved changes and validation, keeps the owner's edits and shows the newer version after a stale save, and explains that changing the default duration affects future requests while existing appointments keep their duration. Details are in [ARCHITECTURE.md](ARCHITECTURE.md).
+- The owner maintains one versioned business profile (#336): display name, short description, support contact, one bookable service (name and description), and a default booking duration. It is the trusted source of business information for the owner UI, client UI, backend, and future SMS tools; a model never authors business facts. The pilot has one service and no service catalog. One configured service is required before booking flows rely on the profile: until the owner saves it, SMS replies that the owner will schedule the visit, the client portal reports booking unavailable, and an owner-created request without an explicit duration is refused with `SERVICE_NOT_CONFIGURED` (#339). Edits use an expected version and are audited. The owner edits these in a "Business details" card in regular Settings (#337): it loads the saved values, shows unsaved changes and validation, keeps the owner's edits and shows the newer version after a stale save, and explains that changing the default duration affects future requests while existing appointments keep their duration. Details are in [ARCHITECTURE.md](ARCHITECTURE.md).
 - Configure business operating hours; pilot baseline is Monday–Friday, 8:00 a.m. to 5:00 p.m. in `America/Los_Angeles` with daylight saving.
 - Use configurable 15-minute start-time increments for the pilot.
 - Observed US federal holidays are unbookable by default. The owner can edit holiday closures and add manual exceptions in the admin view. Use the [US Office of Personnel Management schedule](https://www.opm.gov/policy-data-oversight/pay-leave/federal-holidays/) as the baseline; this is a business closure setting, not a payroll rule. The owner edits the scheduling policy at any time in Settings (#338): regular Settings holds weekly hours (a day with none is closed), the holiday setting (closed on observed US federal holidays, or open), date exceptions, and the booking horizon; a collapsed "Advanced scheduling" card holds the start-time increment, maximum visit, maximum buffer, gap between visits, opening and closing buffers, hold duration, and the business timezone (with a warning that it changes how dates display and how hours are read). An edit that would invalidate an active booking or pending request is rejected with an explanation, leaves the saved policy unchanged, and keeps what the owner typed. The "Current policy" card summarizes all of these.
@@ -75,13 +75,13 @@ Implementation follows [#226](https://github.com/EA-AI-Projects/small-business-s
 - Prevent conflicting reservations atomically, including when two requests arrive close together.
 - Availability is revalidated when a client selects a time and again when the owner approves.
 
-### 6.2 Client profile and visit duration
+### 6.2 Client profile and visit duration (one service duration, #339)
 
-- Maintain a client profile with contact number, name, service address, and estimated visit duration.
-- The owner enters and verifies client profile fields (name, service address, and home size/duration) in the authenticated calendar. The phone becomes verified when the owner records the client's in-person text consent, after reading the number back; changing the phone clears it (#91). SMS does not collect or change profile fields; it collects only the requested visit date and time. A text from a sender without an active, owner-verified profile and matching consent gets no scheduling reply by SMS, and no scheduling change occurs; texting an unconsented number would need a separate consent decision. The owner decided this in issue #22.
-- Use configurable small, medium, and large home-size categories with pilot default durations of 1, 2, and 3 hours respectively. The current maximum visit is 3 hours; these values must remain editable by the owner.
+- Maintain a client profile with contact number, name, service address, and active state. A client record holds no visit length and no home size.
+- The owner enters and verifies client profile fields (name, service address, and active state) in the authenticated calendar. The phone becomes verified when the owner records the client's in-person text consent, after reading the number back; changing the phone clears it (#91). SMS does not collect or change profile fields; it collects only the requested visit date and time. A text from a sender without an active, owner-verified profile and matching consent gets no scheduling reply by SMS, and no scheduling change occurs; texting an unconsented number would need a separate consent decision. The owner decided this in issue #22.
+- Every booking path (SMS, the client portal, and owner-created requests and appointments) takes the visit length from the one saved default duration in the business profile, checked against the scheduling policy's maximum visit at the time it is read. The home-size categories and per-client default durations are retired; legacy values on stored client records are ignored and dropped on the next save, and identity, consent, notes, and appointment history are unchanged. The owner cannot save a default longer than the policy maximum, and cannot lower the policy maximum below the saved default. A changed default affects only requests made afterward: existing appointments, pending requests, and active holds keep the duration they were created with, and an offer already quoted at the old length is refused rather than booked at a different length (the client is asked to choose from fresh times).
 - Permit an owner to override duration for an individual appointment, including after approval.
-- Store the chosen duration on the appointment; later profile changes must not silently change existing appointments.
+- Store the chosen duration on the appointment; later business-profile or policy changes must not silently change existing appointments.
 - Notify the client when an approved appointment’s duration or resulting schedule details are changed.
 
 ### 6.3 Booking lifecycle and owner approval
@@ -154,7 +154,7 @@ Minimal authenticated owner interface:
 - View appointments, pending holds, and unavailable blocks in a calendar/list.
 - Create/edit/cancel appointments and unavailable blocks.
 - Review and act on pending requests.
-- Edit operating days/hours, holiday closures and exceptions, booking horizon, default buffer, hold duration, client duration categories, and client profiles.
+- Edit operating days/hours, holiday closures and exceptions, booking horizon, default buffer, hold duration, the service default duration (in the business profile), and client profiles.
 - Clearly distinguish pending, confirmed, cancelled, declined, expired, and unavailable time.
 
 ### 6.8 Notes and privacy
@@ -199,7 +199,7 @@ No numerical improvement target is set until the baseline and pilot cohort are k
 4. Approval, decline, or expiry updates the shared calendar and sends the appropriate client notification.
 5. Concurrent requests cannot create overlapping appointments or holds.
 6. A client can cancel a confirmed appointment by text; the appointment is cancelled, the time becomes available, and the owner receives a text.
-7. Duration derives from configured client data and can be overridden per appointment without changing unrelated appointments.
+7. Duration derives from the saved service default and can be overridden per appointment without changing unrelated appointments.
 8. Travel buffer is configurable and defaults to 30 minutes.
 9. Owner can review and correct the schedule through a minimal authenticated interface.
 10. Client and appointment notes are distinct and access-controlled.

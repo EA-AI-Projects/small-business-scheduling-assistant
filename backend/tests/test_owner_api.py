@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from scheduling.adapters.dynamodb import encode_policy
 from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.domain.availability import pilot_policy
-from scheduling.domain.client_records import ClientRecordService, HomeSize
+from scheduling.domain.client_records import ClientRecordService
 from scheduling.domain.holds import CreateHold, HoldService
 from scheduling.domain.sms_ingress import ConsentEvidence
 from scheduling.owner_api import OwnerPrincipal, create_owner_app
@@ -55,7 +55,7 @@ def test_owner_records_in_person_yes_and_queues_one_welcome_for_a_new_client() -
     repository = InMemoryCalendarRepository()
     ClientRecordService(repository).save_profile(
         "pilot", "client-1", "Synthetic Client", "+14155550101", "123 Test Street",
-        HomeSize.SMALL, 60, True, 0, 180, NOW,
+        True, 0, NOW,
     )
 
     class ConsentStore:
@@ -225,7 +225,7 @@ def test_consent_route_returns_409_when_the_profile_changed() -> None:
     repository = InMemoryCalendarRepository()
     ClientRecordService(repository).save_profile(
         "pilot", "client-1", "Synthetic Client", "+14155550101", "123 Test Street",
-        HomeSize.SMALL, 60, True, 0, 180, NOW,
+        True, 0, NOW,
     )
 
     class ConflictStore:

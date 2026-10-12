@@ -15,7 +15,7 @@ from test_sms_processing import Reader
 
 from evals.scheduling_messages import CASES
 from scheduling.domain.calendar import CalendarEvent, CalendarStatus
-from scheduling.domain.client_records import ClientProfile, HomeSize
+from scheduling.domain.client_records import ClientProfile
 from scheduling.domain.conversation import ConversationOutcome, MessageProposal
 from scheduling.domain.conversation_state import PromptKind
 from scheduling.domain.holds import CreateHold, HoldService
@@ -235,7 +235,7 @@ def test_answers_show_only_this_clients_visits() -> None:
     chat, _, _ = week_with_visits()
     chat.store.save_profile(ClientProfile(
         "pilot", "client-2", "Jordan Sample", "+14155550102", "2 Test Street",
-        HomeSize.MEDIUM, 120, True, 1, NOW, NOW, NOW), 0, None)
+        True, 1, NOW, NOW, NOW), 0, None)
     other = HoldService(chat.store).create(CreateHold(
         "pilot", "client-2", "client-2", "other", THURSDAY + timedelta(hours=3), 120),
         NOW).hold_id

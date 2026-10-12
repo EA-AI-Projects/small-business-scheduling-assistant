@@ -105,6 +105,7 @@ class World:
 def world() -> World:
     repository = Repository()
     repository.save_profile(profile("client-1", "Avery Sample", CLIENT_PHONE), 0, None)
+    repository.set_business_profile_for_test("pilot", 120)
     store, consent, clock, history = InMemoryCounterofferStore(), Consent(), [NOW], History()
     holds = HoldService(repository)
     service = ConversationService(

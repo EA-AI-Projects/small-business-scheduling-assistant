@@ -9,7 +9,7 @@ from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.client_api import add_client_session_route
 from scheduling.domain.availability import AvailabilityPolicy
 from scheduling.domain.calendar import CalendarStatus
-from scheduling.domain.client_records import ClientProfile, HomeSize
+from scheduling.domain.client_records import ClientProfile
 from scheduling.domain.holds import CreateHold, HoldService
 from scheduling.domain.lifecycle import Action, ActorRole, AppointmentCommand, LifecycleService
 from scheduling.domain.owner_policy import PolicyNotConfigured
@@ -44,6 +44,7 @@ def setup() -> tuple[TestClient, InMemoryCalendarRepository]:
     add_client_session_route(app, verify, repository, lambda: NOW)
     for client in ("client-a", "client-b"):
         save_profile(repository, client, 60)
+    repository.set_business_profile_for_test("business-1", 60)
     return TestClient(app), repository
 
 
@@ -51,7 +52,7 @@ def save_profile(repository: InMemoryCalendarRepository, client: str, minutes: i
                  active: bool = True) -> None:
     repository.save_profile(ClientProfile(
         "business-1", client, "Synthetic Client", "+15550100001" if client == "client-a"
-        else "+15550100002", "1 Test Street", HomeSize.MEDIUM, minutes, active, 1, NOW, NOW),
+        else "+15550100002", "1 Test Street", active, 1, NOW, NOW),
         0, None)
 
 
@@ -135,19 +136,33 @@ def test_availability_hides_owner_blocks_without_exposing_them() -> None:
     assert set(response.json()) == {"day", "duration_minutes", "starts_at"}
 
 
-def test_availability_uses_the_linked_clients_profile_duration() -> None:
+def test_availability_uses_the_business_default_duration_for_every_client() -> None:
     api, repository = setup()
-    assert api.get(f"/v1/client/availability?day={DAY}",
-                   headers=auth("a")).json()["duration_minutes"] == 60
-    repository.save_profile(ClientProfile(
-        "business-1", "client-b", "Synthetic Client", "+15550100002", "1 Test Street",
-        HomeSize.LARGE, 180, True, 2, NOW, NOW), 1, "+15550100002")
-    long_day = api.get(f"/v1/client/availability?day={DAY}", headers=auth("b")).json()
-    assert long_day["duration_minutes"] == 180
-    assert len(long_day["starts_at"]) < len(starts(api, "a"))
+    for who in ("a", "b"):
+        assert api.get(f"/v1/client/availability?day={DAY}",
+                       headers=auth(who)).json()["duration_minutes"] == 60
+    short_day = starts(api, "a")
+    repository.set_business_profile_for_test("business-1", 180)
+    for who in ("a", "b"):
+        long_day = api.get(f"/v1/client/availability?day={DAY}", headers=auth(who)).json()
+        assert long_day["duration_minutes"] == 180
+        assert len(long_day["starts_at"]) < len(short_day)
 
 
-@pytest.mark.parametrize("state", ["missing", "inactive", "too-long"])
+def test_availability_is_unavailable_until_the_business_profile_is_saved() -> None:
+    _, repository = setup()
+    unconfigured = InMemoryCalendarRepository()
+    unconfigured.save_profile(repository.read_profile(  # type: ignore[arg-type]
+        "business-1", "client-a"), 0, None)
+    app = create_owner_app(unconfigured, lambda _t: OwnerPrincipal("o", "business-1"),
+                           lambda: NOW)
+    add_client_session_route(app, verify, unconfigured, lambda: NOW)
+    response = TestClient(app).get(f"/v1/client/availability?day={DAY}", headers=auth("a"))
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Booking is unavailable"}
+
+
+@pytest.mark.parametrize("state", ["missing", "inactive"])
 def test_availability_unavailable_without_a_usable_profile(state: str) -> None:
     api, repository = setup()
     if state == "missing":
@@ -162,8 +177,7 @@ def test_availability_unavailable_without_a_usable_profile(state: str) -> None:
     else:
         repository.save_profile(ClientProfile(
             "business-1", "client-a", "Synthetic Client", "+15550100001", "1 Test Street",
-            HomeSize.MEDIUM, 60 if state == "inactive" else 900, state != "inactive", 2,
-            NOW, NOW), 1, "+15550100001")
+            False, 2, NOW, NOW), 1, "+15550100001")
         response = api.get(f"/v1/client/availability?day={DAY}", headers=auth("a"))
     assert response.status_code == 503
     assert response.json() == {"detail": "Booking is unavailable"}

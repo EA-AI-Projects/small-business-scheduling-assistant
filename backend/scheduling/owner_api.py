@@ -41,16 +41,17 @@ from scheduling.domain.booking_outreach import OutreachRepository, OutreachSetti
 from scheduling.domain.business_profile import (
     BusinessProfile,
     BusinessProfileRepository,
+    PolicyGuard,
     update_business_profile,
 )
 from scheduling.domain.client_records import (
     ClientRecordRepository,
     ClientRecordService,
-    HomeSize,
     RecordConflict,
     RecordNotFound,
 )
 from scheduling.domain.holds import (
+    LOOKUP_MINUTES,
     CreateHold,
     HoldRepository,
     HoldService,
@@ -76,16 +77,24 @@ from scheduling.domain.owner_calendar import (
     OwnerAction,
     OwnerCalendarCommand,
     OwnerCalendarRepository,
+    OwnerCalendarResult,
     OwnerCalendarService,
     UnavailableBlock,
 )
 from scheduling.domain.owner_policy import (
+    DefaultDurationConflict,
     OwnerPolicyService,
     PolicyCommand,
     PolicyConflict,
     PolicyNotConfigured,
     PolicyRecord,
     PolicyRepository,
+)
+from scheduling.domain.service_duration import (
+    ServiceDurationChanged,
+    ServiceDurationSource,
+    ServiceNotConfigured,
+    service_duration,
 )
 from scheduling.domain.sms_ingress import SmsIngressStore, record_in_person_consent
 
@@ -227,7 +236,9 @@ class ManualInvitationBody(StrictModel):
 class HoldBody(StrictModel):
     client_id: str = Field(min_length=1)
     start_at: datetime
-    duration_minutes: int = Field(gt=0)
+    # Omitted: the business's saved default duration. Present: an owner override for
+    # this one request.
+    duration_minutes: int | None = Field(default=None, gt=0)
     replaces_appointment_id: str | None = None
 
 
@@ -265,7 +276,8 @@ class ManualAppointmentBody(StrictModel):
     expected_revision: int = Field(ge=0)
     client_id: str = Field(min_length=1)
     start_at: datetime
-    duration_minutes: int = Field(gt=0)
+    # Omitted: the business's saved default duration. Present: an owner override.
+    duration_minutes: int | None = Field(default=None, gt=0)
 
 
 class ClientProfileBody(StrictModel):
@@ -273,8 +285,6 @@ class ClientProfileBody(StrictModel):
     name: str = Field(min_length=1, max_length=200)
     phone_e164: str = Field(min_length=2, max_length=16)
     service_address: str = Field(min_length=1, max_length=500)
-    home_size: HomeSize
-    default_duration_minutes: int = Field(gt=0)
     active: bool = True
 
 
@@ -485,6 +495,8 @@ def create_owner_app(
             raise _error("STALE_VERSION", str(exc), 409, current() if current else None) from exc
         except ReplacementPending as exc:
             raise _error("REPLACEMENT_PENDING", str(exc), 409, current() if current else None) from exc
+        except DefaultDurationConflict as exc:
+            raise _error("DEFAULT_DURATION_EXCEEDS_MAXIMUM", str(exc), 409) from exc
         except (SlotConflict, PolicyConflict) as exc:
             raise _error("SLOT_CONFLICT", str(exc), 409, current() if current else None) from exc
         except HoldExpired as exc:
@@ -493,6 +505,10 @@ def create_owner_app(
             raise _error("INVALID_TARGET", str(exc), 409, current() if current else None) from exc
         except PolicyNotConfigured as exc:
             raise _error("POLICY_NOT_CONFIGURED", str(exc), 409) from exc
+        except ServiceNotConfigured as exc:
+            raise _error("SERVICE_NOT_CONFIGURED", str(exc), 409) from exc
+        except ServiceDurationChanged as exc:
+            raise _error("DURATION_CHANGED", str(exc), 409) from exc
         except RecordConflict as exc:
             raise _error("RECORD_CONFLICT", str(exc), 409) from exc
         except RecordNotFound as exc:
@@ -547,13 +563,9 @@ def create_owner_app(
     def save_client(business_id: str, client_id: str, body: ClientProfileBody,
                     owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:
         del owner
-        record = store.read_policy_record(business_id)
-        if record is None:
-            raise _error("POLICY_NOT_CONFIGURED", "Persist the pilot policy first", 409)
         return run(lambda: clients.save_profile(
             business_id, client_id, body.name, body.phone_e164, body.service_address,
-            body.home_size, body.default_duration_minutes, body.active,
-            body.expected_version, record.policy.maximum_visit_minutes, now()))
+            body.active, body.expected_version, now()))
 
     if sms_store is not None:
         @app.post("/v1/owner/businesses/{business_id}/clients/{client_id}/sms-consent")
@@ -658,14 +670,15 @@ def create_owner_app(
                               owner: Annotated[OwnerPrincipal, Depends(principal)],
                               request_key: Annotated[str, Depends(key)]) -> object:
         profiles = cast(BusinessProfileRepository, repository)
+        # Validated by the repository after the idempotent replay lookup and guarded
+        # in the save transaction by the policy version read here.
         policy_record = store.read_policy_record(business_id)
-        if (policy_record is not None and body.profile.default_duration_minutes
-                > policy_record.policy.maximum_visit_minutes):
-            raise _error("INVALID_REQUEST",
-                         "Default duration exceeds the scheduling policy's visit maximum", 422)
+        guard = PolicyGuard(
+            policy_record.version if policy_record is not None else None,
+            policy_record.policy.maximum_visit_minutes if policy_record is not None else None)
         return run(lambda: update_business_profile(profiles, business_id, owner.actor_id,
                                                    request_key, body.expected_version,
-                                                   body.profile.profile()),
+                                                   body.profile.profile(), guard),
                    lambda: jsonable_encoder(profiles.read_business_profile(business_id)))
 
     @app.get("/v1/owner/businesses/{business_id}/booking-outreach")
@@ -763,13 +776,36 @@ def create_owner_app(
             business_id, owner.actor_id, request_key, body.expected_revision,
             body.expected_version, body.policy.policy())), lambda: policy_state(business_id))
 
+    def default_or(business_id: str, override: int | None) -> tuple[int, bool]:
+        """An owner's explicit duration, else the saved default checked against the policy.
+
+        The flag is True when the saved default was used, so the write can require it
+        unchanged.
+        """
+        if override is not None:
+            return override, False
+        return service_duration(cast(ServiceDurationSource, repository), business_id,
+                                cast(HoldRepository, repository).read_policy(business_id)), True
+
     @app.post("/v1/owner/businesses/{business_id}/requests")
     def create_request(business_id: str, body: HoldBody,
                        owner: Annotated[OwnerPrincipal, Depends(principal)],
                        request_key: Annotated[str, Depends(key)]) -> object:
-        return run(lambda: holds.create(CreateHold(
-            business_id, owner.actor_id, body.client_id, request_key,
-            body.start_at, body.duration_minutes, body.replaces_appointment_id), now()))
+        def create() -> object:
+            def command(minutes: int, saved_default: bool) -> CreateHold:
+                return CreateHold(
+                    business_id, owner.actor_id, body.client_id, request_key,
+                    body.start_at, minutes, body.replaces_appointment_id,
+                    service_duration_minutes=minutes if saved_default else None)
+
+            if body.duration_minutes is None:
+                # A retry of a saved request replays even if the default changed since.
+                stored = holds.existing(command(LOOKUP_MINUTES, True))
+                if stored is not None:
+                    return stored
+            minutes, saved_default = default_or(business_id, body.duration_minutes)
+            return holds.create(command(minutes, saved_default), now())
+        return run(create)
 
     def transition(business_id: str, appointment_id: str, body: DecisionBody,
                    owner: OwnerPrincipal, request_key: str, action: Action,
@@ -840,10 +876,21 @@ def create_owner_app(
     def create_appointment(business_id: str, body: ManualAppointmentBody,
                            owner: Annotated[OwnerPrincipal, Depends(principal)],
                            request_key: Annotated[str, Depends(key)]) -> object:
-        return owner_write(lambda: OwnerCalendarCommand(
-            business_id, owner.actor_id, request_key, OwnerAction.CREATE_APPOINTMENT,
-            body.expected_revision, client_id=body.client_id, start_at=body.start_at,
-            duration_minutes=body.duration_minutes))
+        def command(minutes: int, saved_default: bool) -> OwnerCalendarCommand:
+            return OwnerCalendarCommand(
+                business_id, owner.actor_id, request_key, OwnerAction.CREATE_APPOINTMENT,
+                body.expected_revision, client_id=body.client_id, start_at=body.start_at,
+                duration_minutes=minutes, service_default=saved_default)
+
+        def build() -> OwnerCalendarResult:
+            if body.duration_minutes is None:
+                # A retry of a saved appointment replays even if the default changed since.
+                stored = calendar.replayed(command(LOOKUP_MINUTES, True))
+                if stored is not None:
+                    return stored
+            return calendar.apply(command(*default_or(business_id, body.duration_minutes)))
+
+        return run(build)
 
     return app
 
