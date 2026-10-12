@@ -61,7 +61,11 @@ function Form({ state, zone, profile }: { state: OutreachState; zone: string;
   // Until the owner edits it, the message is the default for the chosen window and saved business details.
   const current = !customized && defaultMessage ? defaultMessage : message;
   const missing = enabled && (!weekday || !localTime || !lookahead);
-  const invalidMessage = !current.trim() || current.length > 500;
+  const tooLong = current.length > 500;
+  // Saving the schedule never needs message text: with no saved business details and no custom
+  // message it stores "no custom message". Only a send needs text, and an emptied custom one is invalid.
+  const invalidSave = tooLong || (customized && !current.trim());
+  const invalidSend = invalidSave || !current.trim();
   const dirty = enabled !== saved.settings.enabled
     || weekday !== (saved.settings.weekday?.toString() ?? "")
     || localTime !== (saved.settings.local_time?.slice(0, 5) ?? "")
@@ -77,18 +81,18 @@ function Form({ state, zone, profile }: { state: OutreachState; zone: string;
         local_time: localTime || null,
         lookahead_weeks: lookahead === "" ? null : Number(lookahead),
         // The default wording is stored as "no custom message", so it follows later changes to the business details.
-        message: current.trim() === defaultMessage ? null : current.trim(),
+        message: !current.trim() || current.trim() === defaultMessage ? null : current.trim(),
       },
     };
   }
 
   async function save() {
-    if (missing || invalidMessage) return;
+    if (missing || invalidSave) return;
     await change("/booking-outreach", "PUT", body(), "Booking invitation settings saved");
   }
 
   async function prepareSend(key: string): Promise<boolean> {
-    if (missing || invalidMessage || !lookahead) return false;
+    if (missing || invalidSend || !lookahead) return false;
     if (!dirty) return true;
     try {
       const updated = await api.request<OutreachState>("/booking-outreach", { method: "PUT", body: body(),
@@ -130,7 +134,7 @@ function Form({ state, zone, profile }: { state: OutreachState; zone: string;
     {missing && <p className="field-error" role="alert">Choose a day, time, and lookahead to enable invitations.</p>}
     {!profile && !customized && <p className="hint">Save the business name and service under Business details to
       get the default invitation text, or write your own message.</p>}
-    {invalidMessage && <p className="field-error" role="alert">Enter an invitation message of up to 500 characters.</p>}
+    {invalidSave && <p className="field-error" role="alert">Enter an invitation message of up to 500 characters.</p>}
     <div><BusyButton className="primary" onClick={save}>Save invitation settings</BusyButton></div>
     <p className="meta">Version {saved.version} · Schedule uses the business timezone above.</p>
   </div>;

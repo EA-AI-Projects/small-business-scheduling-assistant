@@ -183,8 +183,8 @@ class TwilioSmsSender:
         except PermanentDeliveryFailure:
             self._records.complete_invitation(intent, None)
             raise
-        if not self._records.claim_invitation_handoff(intent):
-            raise PermanentDeliveryFailure("INVITATION_NOT_SENDABLE")
+        # Every read and the profile-missing decision come before the durable SENDING
+        # claim, so a transient read failure leaves the invitation in OUTBOX to retry.
         profile = self._records.read_profile(intent.business_id, intent.client_id)
         if profile is None:
             self._records.complete_invitation(intent, None)
@@ -204,6 +204,8 @@ class TwilioSmsSender:
                 raise PermanentDeliveryFailure("INVITATION_PROFILE_MISSING")
             body = (invitation_message(settings, saved) if settings is not None
                     else approved_invitation_message(intent.lookahead_weeks, saved))
+        if not self._records.claim_invitation_handoff(intent):
+            raise PermanentDeliveryFailure("INVITATION_NOT_SENDABLE")
         try:
             provider_id = self._send(record, to, body, intent.client_id, pre_send=check)
         except PermanentDeliveryFailure:

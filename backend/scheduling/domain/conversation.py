@@ -259,13 +259,14 @@ class ConversationService:
                 return outcome
             now = self._clock()
             policy = self._repository.read_policy(receipt.business_id)
+            business_name, service_name = self._names(receipt.business_id)
             context = MessageContext(
                 receipt.role, now.astimezone(ZoneInfo(policy.timezone)).date(),
                 policy.timezone, (), policy.booking_horizon_days,
                 history=(self._history_reader.read_conversation_history(receipt, now)
                          if self._history_reader is not None else ()),
-                business_name=self._names(receipt.business_id)[0],
-                service_name=self._names(receipt.business_id)[1],
+                business_name=business_name,
+                service_name=service_name,
             )
             result = outcome.reply_result
             draft = self._interpreter.draft_client_reply(receipt.body, context, result)
@@ -331,6 +332,7 @@ class ConversationService:
             prompt = (self._states.read_state(receipt.business_id, receipt.sender)
                       if receipt.role == SenderRole.CLIENT else None)
             calendar = self._calendar_context(prompt, now)
+            business_name, service_name = self._names(receipt.business_id)
             context = MessageContext(
                 receipt.role, now.astimezone(ZoneInfo(policy.timezone)).date(),
                 policy.timezone,
@@ -342,8 +344,8 @@ class ConversationService:
                  else ()),
                 (prompt.kind.value if prompt is not None and not prompt.expired(now)
                  else "none"),
-                business_name=self._names(receipt.business_id)[0],
-                service_name=self._names(receipt.business_id)[1],
+                business_name=business_name,
+                service_name=service_name,
             )
             proposal = self._exact_command(receipt.body, context, targets)
         except (OSError, ValueError, TypeError, KeyError, RuntimeError):

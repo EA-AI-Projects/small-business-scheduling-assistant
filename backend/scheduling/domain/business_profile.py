@@ -47,7 +47,10 @@ def visit_phrase(profile: BusinessProfile | None) -> str:
     saved profile the wording stays neutral; a text that would invite a booking is blocked
     instead (see ``service_duration``).
     """
-    return f"{profile.service_name} visit" if profile is not None else "visit"
+    if profile is None:
+        return "visit"
+    name = profile.service_name
+    return name if name.lower().endswith("visit") else f"{name} visit"
 
 
 def sentence_case(text: str) -> str:

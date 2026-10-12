@@ -20,7 +20,7 @@ from scheduling.domain.booking_outreach import (
     approved_invitation_message,
     invitation_message,
 )
-from scheduling.domain.business_profile import BusinessProfile, BusinessProfileRecord
+from scheduling.domain.business_profile import BusinessProfile, BusinessProfileRecord, visit_phrase
 from scheduling.domain.calendar import CalendarStatus
 from scheduling.domain.client_records import ClientProfile
 from scheduling.domain.conversation import MessageContext
@@ -194,3 +194,28 @@ def test_default_invitation_is_not_sent_until_the_profile_is_saved() -> None:
     with pytest.raises(PermanentDeliveryFailure, match="INVITATION_PROFILE_MISSING"):
         sender.deliver(outbox)  # type: ignore[arg-type]
     assert messages.bodies == []
+
+
+def test_a_failed_profile_read_leaves_the_invitation_retryable() -> None:
+    sender, messages, outbox = queued_invitation(True)
+    records = sender._records  # type: ignore[attr-defined]
+    real = records.read_business_profile
+
+    def broken(business_id: str) -> BusinessProfileRecord:
+        raise OSError("synthetic transient read failure")
+
+    records.read_business_profile = broken
+    with pytest.raises(OSError):
+        sender.deliver(outbox)  # type: ignore[arg-type]
+    stored = records.read_invitation(outbox.business_id, outbox.entity_id)
+    assert stored is not None and stored.state == "OUTBOX"
+    records.read_business_profile = real
+    assert sender.deliver(outbox) == "SM-synthetic-invitation"  # type: ignore[arg-type]
+    assert len(messages.bodies) == 1
+
+
+def test_visit_phrase_does_not_repeat_visit() -> None:
+    from dataclasses import replace
+    assert visit_phrase(PROFILE) == f"{SERVICE} visit"
+    assert visit_phrase(replace(PROFILE, service_name="Home visit")) == "Home visit"
+    assert visit_phrase(None) == "visit"

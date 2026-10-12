@@ -11,9 +11,10 @@ const get = vi.fn(async () => ({ eligible: 3, examined: 4, delivery_enabled: tru
 const api = { businessId: "pilot", get, request: vi.fn(async (_path: string, options: {
   body: { settings: OutreachState["settings"] }
 }) => ({ settings: options.body.settings, version: 2 })) };
-const profile = { display_name: "Example Pet Care", description: "A synthetic pet business.",
+const savedProfile = { display_name: "Example Pet Care", description: "A synthetic pet business.",
   support_contact: "help@example.invalid", service_name: "Dog grooming",
   service_description: "A synthetic grooming visit.", default_duration_minutes: 60 };
+let profile: typeof savedProfile | null = savedProfile;
 let outreach: OutreachState = { settings: { enabled: false, weekday: null,
   local_time: null, lookahead_weeks: null }, version: 0 };
 vi.mock("@/owner/OwnerContext", () => ({
@@ -25,6 +26,7 @@ describe("Booking invitation settings", () => {
   let host: HTMLDivElement;
   let root: Root;
   beforeEach(async () => {
+    profile = savedProfile;
     change.mockClear();
     get.mockClear();
     api.request.mockClear();
@@ -61,6 +63,30 @@ describe("Booking invitation settings", () => {
       expected_version: 0, settings: { enabled: true, weekday: 0,
         local_time: "09:00", lookahead_weeks: 2,
         message: null },
+    }, "Booking invitation settings saved");
+  });
+
+  it("saves the schedule without a message while the business details are unsaved", async () => {
+    profile = null;
+    await act(async () => root.unmount());
+    root = createRoot(host);
+    await act(async () => root.render(<OutreachForm />));
+    await act(async () => host.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click());
+    const select = host.querySelectorAll<HTMLSelectElement>("select");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(select[0], "1");
+      select[0]!.dispatchEvent(new Event("change", { bubbles: true }));
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(select[1], "1");
+      select[1]!.dispatchEvent(new Event("change", { bubbles: true }));
+      const time = host.querySelector<HTMLInputElement>('input[type="time"]')!;
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(time, "10:30");
+      time.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Save invitation settings")!.click());
+    expect(change).toHaveBeenCalledWith("/booking-outreach", "PUT", {
+      expected_version: 0, settings: { enabled: true, weekday: 1,
+        local_time: "10:30", lookahead_weeks: 1, message: null },
     }, "Booking invitation settings saved");
   });
 
