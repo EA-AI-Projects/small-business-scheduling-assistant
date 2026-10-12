@@ -28,8 +28,10 @@ function setValue(element: HTMLInputElement | HTMLTextAreaElement, value: string
 describe("Business details settings", () => {
   let host: HTMLDivElement;
   let root: Root;
-  const field = (label: string) => [...host.querySelectorAll("label")]
-    .find((item) => item.textContent?.startsWith(label))!.querySelector<HTMLInputElement>("input, textarea")!;
+  const field = (label: string) => {
+    const item = [...host.querySelectorAll("label")].find((node) => node.textContent?.startsWith(label))!;
+    return host.querySelector<HTMLInputElement>(`#${item.htmlFor}`)!;
+  };
   const click = async (text: string) => act(async () => [...host.querySelectorAll<HTMLButtonElement>("button")]
     .find((button) => button.textContent === text)!.click());
 
@@ -60,7 +62,7 @@ describe("Business details settings", () => {
     await act(async () => setValue(field("Default booking duration"), "90"));
     expect(host.textContent).toContain("unsaved changes");
     await click("Save business details");
-    expect(request).toHaveBeenCalledWith("/profile", { method: "PUT", idempotent: true,
+    expect(request).toHaveBeenCalledWith("/profile", { method: "PUT", idempotencyKey: expect.any(String),
       body: { expected_version: 3, profile: { ...PROFILE, default_duration_minutes: 90 } } });
     expect(host.textContent).toContain("Version 4");
     expect(host.textContent).not.toContain("unsaved changes");
@@ -73,8 +75,24 @@ describe("Business details settings", () => {
     await click("Save business details");
     expect(request).not.toHaveBeenCalled();
     expect(host.textContent).toContain("Enter a business name.");
+    expect(host.querySelectorAll('[role="alert"]')).toHaveLength(1);
+    expect(host.querySelector('[role="alert"]')!.textContent).toBe("Fix 6 fields before saving.");
+    expect(field("Business name").getAttribute("aria-invalid")).toBe("true");
+    const describedBy = field("Business name").getAttribute("aria-describedby")!;
+    expect(host.querySelector(`#${describedBy}`)!.textContent).toBe("Enter a business name.");
     await act(async () => setValue(field("Default booking duration"), "300"));
     expect(host.textContent).toContain("cannot exceed the current maximum visit of 240 minutes");
+    expect(host.querySelectorAll('[role="alert"]')).toHaveLength(1);
+    const duration = field("Default booking duration").getAttribute("aria-describedby")!.split(" ");
+    expect(host.querySelector(`#${duration[1]}`)!.textContent).toContain("Existing appointments keep");
+  });
+
+  it("counts characters as the server does", async () => {
+    await mount({ profile: PROFILE, version: 1 });
+    request.mockResolvedValue({ profile: PROFILE, version: 2 });
+    await act(async () => setValue(field("Business description"), `${"a".repeat(299)}\u{1F600}`));
+    await click("Save business details");
+    expect(request).toHaveBeenCalledTimes(1);
   });
 
   it("keeps edits and shows the newer version after a stale save", async () => {
@@ -101,5 +119,32 @@ describe("Business details settings", () => {
     await click("Save business details");
     expect(host.textContent).toContain("Duration exceeds the maximum visit");
     expect(field("Service name").value).toBe("Deep clean");
+  });
+
+  it("reuses the idempotency key when retrying an unchanged save after a lost response", async () => {
+    await mount({ profile: PROFILE, version: 3 });
+    await act(async () => setValue(field("Service name"), "Deep clean"));
+    request.mockRejectedValueOnce(new ApiError("The owner API could not be reached", 0, null, undefined));
+    await click("Save business details");
+    request.mockResolvedValueOnce({ profile: { ...PROFILE, service_name: "Deep clean" }, version: 4 });
+    await click("Save business details");
+    const keys = request.mock.calls.map((call) => call[1].idempotencyKey);
+    expect(keys[1]).toBe(keys[0]);
+    await act(async () => setValue(field("Service name"), "Express clean"));
+    request.mockResolvedValueOnce({ profile: { ...PROFILE, service_name: "Express clean" }, version: 5 });
+    await click("Save business details");
+    expect(request.mock.calls[2]![1].idempotencyKey).not.toBe(keys[0]);
+  });
+
+  it("keeps text typed while a save is in flight", async () => {
+    await mount({ profile: PROFILE, version: 1 });
+    let finish!: (value: BusinessProfileState) => void;
+    request.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    await act(async () => setValue(field("Service name"), "Deep clean"));
+    await click("Save business details").then(() => undefined);
+    await act(async () => setValue(field("Service name"), "Deep clean plus"));
+    await act(async () => finish({ profile: { ...PROFILE, service_name: "Deep clean" }, version: 2 }));
+    expect(field("Service name").value).toBe("Deep clean plus");
+    expect(host.textContent).toContain("unsaved changes");
   });
 });
