@@ -1426,7 +1426,11 @@ class ConversationService:
             CancellationHooks(prepare, lambda: answer(False), lambda: answer(True)),
             reschedule,
             CounterofferHooks(counter_read, counter_respond)
-            if self._acceptance is not None else None)
+            if self._acceptance is not None else None,
+            prompt.appointment_id if (
+                prompt is not None and prompt.kind == PromptKind.RESCHEDULE_DAY
+                and not prompt.expired(now) and prompt.client_id == receipt.client_id)
+            else None)
 
         def check(text: str) -> str | None:
             return check_reply(text, tools.results, tools.offer, zone)
@@ -1452,8 +1456,13 @@ class ConversationService:
                 if self._acceptance is not None:
                     self._acceptance.supersede_for_new_request(receipt)
             elif prompt_state == "kept" or (
+                    prompt is not None and prompt.kind == PromptKind.RESCHEDULE_DAY
+                    and not prompt.expired(now)
+                    and any(item.get("error") == "move_question_open"
+                            for item in tools.results)) or (
                     tools.calls == 0 and prompt is not None
-                    and prompt.kind in (PromptKind.OFFER, PromptKind.CONFIRM_CANCEL)
+                    and prompt.kind in (PromptKind.OFFER, PromptKind.CONFIRM_CANCEL,
+                                        PromptKind.RESCHEDULE_DAY)
                     and not prompt.expired(now)):
                 # An unclear answer, or a question about it that used no tool: nothing
                 # changed and the client's offer or confirmation stays open to be answered.

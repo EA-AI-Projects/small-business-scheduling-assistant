@@ -287,3 +287,23 @@ def test_the_reply_must_report_the_real_counteroffer_status() -> None:
     declined = [{"ok": True, "requested": False, "declined": True, "nothing_changed": True}]
     assert check_reply("I requested that time for you.", declined, (), zone) is not None
     assert check_reply("OK, nothing was requested.", declined, (), zone) is None
+
+
+def test_counteroffer_replies_cannot_claim_a_move_and_must_state_the_offer() -> None:
+    zone = ZoneInfo("America/Los_Angeles")
+    done = [{"ok": True, "requested": True, "status": "pending_owner_approval",
+             "confirmed": False, "ref": "abcd1234", "date": "2026-10-01", "weekday": "Thursday",
+             "time": "2:00 PM", "when": "Thu Oct 1 at 2:00 PM"}]
+    for bad in (("Your visit was rescheduled to Thu Oct 1 at 2:00 PM, ref abcd1234, pending "
+                 "owner approval."),
+                ("Your visit has been moved to Thu Oct 1 at 2:00 PM, ref abcd1234, pending "
+                 "owner approval.")):
+        assert check_reply(bad, done, (), zone) is not None, bad
+    declined = [{"ok": True, "requested": False, "declined": True, "nothing_changed": True}]
+    assert check_reply("OK, nothing was requested. Your visit was moved.", declined, (),
+                       zone) is not None
+    open_offer = [{"ok": True, "open": True, "date": "2026-10-01", "weekday": "Thursday",
+                   "time": "2:00 PM", "when": "Thu Oct 1 at 2:00 PM", "your_request": None}]
+    assert check_reply("The owner offered a different time.", open_offer, (), zone) is not None
+    assert check_reply("The owner offered Thu Oct 1 at 2:00 PM. Nothing is requested yet.",
+                       open_offer, (), zone) is None

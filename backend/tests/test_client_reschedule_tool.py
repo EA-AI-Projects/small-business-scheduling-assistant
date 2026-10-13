@@ -18,7 +18,7 @@ from test_sms_processing import Reader
 from scheduling.domain.calendar import CalendarStatus
 from scheduling.domain.client_tools import check_reply
 from scheduling.domain.conversation import ConversationOutcome
-from scheduling.domain.conversation_state import PromptKind
+from scheduling.domain.conversation_state import ConversationState, PromptKind
 from scheduling.domain.holds import CreateHold, HoldService
 from scheduling.domain.lifecycle import Action, ActorRole, AppointmentCommand, LifecycleService
 from scheduling.domain.sms_ingress import InboundReceipt, Keyword, SenderRole
@@ -268,9 +268,27 @@ def test_the_reply_may_not_claim_a_move_or_confirmation_the_tools_did_not_make()
             "Requested Fri Oct 2 at 10:00 AM (ref abcd1234), pending owner approval.",
             good.replace("stays confirmed", "is cancelled")):
         assert check_reply(bad, done, (), local) is not None, bad
+    tail = " Ref abcd1234, pending owner approval. Your Thu Oct 1 at 9:00 AM visit stays confirmed."
+    for claim in ("Your visit was moved to Fri Oct 2 at 10:00 AM.",
+                  "Your visit is now rescheduled to Fri Oct 2 at 10:00 AM.",
+                  "Your visit has been moved to Fri Oct 2 at 10:00 AM.",
+                  "You're moved to Fri Oct 2 at 10:00 AM."):
+        assert check_reply(claim + tail, done, (), local) is not None, claim
+    # The new time is never the visit that "stays confirmed", and the original must be named.
+    for bad in (("Your Fri Oct 2 at 10:00 AM visit stays confirmed. Ref abcd1234, pending "
+                 "owner approval."),
+                ("Fri Oct 2 at 10:00 AM (ref abcd1234) is pending owner approval. Your visit "
+                 "stays confirmed."),
+                ("Ref abcd1234 is pending owner approval. Your Thu Oct 1 at 9:00 AM visit "
+                 "stays confirmed."),  # No requested date and time.
+                ):
+        assert check_reply(bad, done, (), local) is not None, bad
+    assert check_reply("Nothing was moved yet. " + good, done, (), local) is None
     refused = [{"ok": True, "requested": False, "nothing_changed": True,
                 "reason": "visit_changed"}]
-    assert check_reply("Your visit was rescheduled to Friday.", refused, (), local) is not None
+    # Rejected for the claim itself: the text says "nothing", so only the claim can fail it.
+    assert check_reply("Nothing changed, and your visit was rescheduled to Friday.", refused,
+                       (), local) is not None
     assert check_reply("That visit changed, so nothing was booked.", refused, (), local) is None
 
 
@@ -294,3 +312,38 @@ def test_a_loop_failure_falls_back_to_the_deterministic_reschedule_question() ->
     assert "What day would you like instead" in reply.text and not reply.committed
     assert state(chat) is not None and state(chat).kind == PromptKind.RESCHEDULE_DAY
     assert chat.status(visit) == CalendarStatus.CONFIRMED and len(model.loops) == 1
+
+
+def test_a_move_question_cannot_become_a_new_booking_offer() -> None:
+    results: list[dict[str, Any]] = []
+    chat, model = chat_with(lambda _tools: "unused")
+    visit = chat.hold(THURSDAY, "visit", confirm=True)
+    chat.model.replies["move my visit"] = ask("reschedule", target_date="2026-10-01")
+    chat.states.put_state(ConversationState(
+        "pilot", SENDER, "SM-day", PromptKind.RESCHEDULE_DAY, NOW, NOW + timedelta(minutes=30),
+        appointment_id=visit, appointment_version=2, client_id="client-1"))
+    model.plan = lambda tools: (
+        results.append(tools("get_availability", {
+            "from": FRIDAY, "to": FRIDAY, "time_from": None, "time_to": None, "ref": None})),
+        results.append(tools("get_availability", {
+            "from": FRIDAY, "to": FRIDAY, "time_from": None, "time_to": None, "ref": "deadbeef"})),
+        "Which visit do you want to move? Nothing changed.")[2]
+    chat.text("Friday")
+    assert [item["error"] for item in results[-2:]] == ["move_question_open"] * 2
+    assert state(chat).kind == PromptKind.RESCHEDULE_DAY
+    assert chat.status(visit) == CalendarStatus.CONFIRMED
+    model.plan = lambda tools: (results.append(offer_move(tools, visit[:8])),
+                                offer_text(results[-1]))[1]
+    chat.text("Friday")  # The same visit's ref is the move the question asked about.
+    assert state(chat).kind == PromptKind.OFFER and state(chat).appointment_id == visit
+
+
+def test_replies_must_state_the_requested_and_the_original_date_and_time() -> None:
+    local = ZoneInfo("America/Los_Angeles")
+    booked = [{"ok": True, "requested": True, "status": "pending_owner_approval",
+               "confirmed": False, "ref": "abcd1234", "date": FRIDAY, "weekday": "Friday",
+               "time": "10:00 AM", "when": "Fri Oct 2 at 10:00 AM"}]
+    assert check_reply("Requested Fri Oct 2 at 10:00 AM (ref abcd1234), pending owner "
+                       "approval.", booked, (), local) is None
+    assert check_reply("Request abcd1234 is pending owner approval.", booked, (), local) \
+        is not None
