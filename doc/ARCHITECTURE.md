@@ -57,6 +57,24 @@ inside the worker's 30-second limit. Receipt leases, stable outbox intents,
 sender rechecks, and no-history drafts keep replay and delivery idempotent.
 This client read path does not perform a calendar write; direct booking requests
 follow the separately scoped #272 work.
+Client read-tool loop (#340): after the receipt, consent, opt-out, exact-command,
+counteroffer, and open-prompt checks, and the existing intent call, a verified client's
+read-only question runs `run_client_loop`: at most five Responses calls, three tool
+calls, and a 30-second budget (the eight-second intent call plus the loop fit the
+60-second worker), with no stored session. `ClientReadTools` in
+`scheduling/domain/client_tools.py` is built per receipt with the verified business
+and client; its strict JSON tools `get_business_info`, `get_availability`, and
+`get_my_bookings` are read-only, bounded, and reject any argument beyond their schema.
+`get_availability` alone writes: the same receipt-keyed 30-minute offer memory the
+deterministic path uses, with the quoted visit length. `check_reply` compares the
+final text with the tool results (explicit dates, times, references, a stored offer
+listed whole, in order, and numbered, and no claimed write) before the receipt
+processor stores the reply for the outbox sender. One rewrite without tools is
+allowed; any other failure clears the offer and uses the deterministic answer.
+Occupied calendar time is reported only as reserved by owner. Booking,
+cancellation, and rescheduling keep their existing paths until #341 to #343. See
+[CONVERSATION.md](CONVERSATION.md#client-read-tool-loop-340).
+
 Owner approval and decline (#298): after the owner phone, consent, and opt-out
 checks and exact-command handling,
 the model receives the owner's bounded, sent-aware 24-hour SMS thread, the
