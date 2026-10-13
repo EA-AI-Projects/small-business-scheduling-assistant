@@ -1281,8 +1281,7 @@ class ConversationService:
 
         def store_offer(options: tuple[datetime, ...], minutes: int) -> None:
             nonlocal stored
-            if self._acceptance is not None:
-                self._acceptance.supersede_for_new_request(receipt)
+            # The owner's counteroffer is superseded only once the final text is accepted.
             self._remember(receipt, PromptKind.OFFER, now, options=options,
                            duration_minutes=minutes)
             stored = True
@@ -1302,7 +1301,10 @@ class ConversationService:
             reason = check(text)
             if reason is not None:
                 raise ValueError(reason)
-            if not tools.offer:
+            if tools.offer:
+                if self._acceptance is not None:
+                    self._acceptance.supersede_for_new_request(receipt)
+            else:
                 self._forget(prompt)
                 if (prompt is not None and not prompt.expired(now)
                         and prompt.kind != PromptKind.CALENDAR):

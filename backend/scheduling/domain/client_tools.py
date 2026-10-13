@@ -54,10 +54,15 @@ MONTHS = {name: number for number, name in enumerate(
     ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), 1)}
 WRITE_CLAIM = re.compile(
     r"\b(?:i|we)(?:'ve|\s+have)?\s+(?:just\s+)?(?:booked|cancel+ed|rescheduled|scheduled|"
-    r"reserved|requested|submitted|moved|confirmed|approved)\b"
+    r"reserved|requested|submitted|moved|confirmed|approved|put|added|locked|held|arranged|"
+    r"penciled|pencilled|set\s+up|taken\s+care)\b"
     r"|\b(?:has|have)\s+been\s+(?:booked|cancel+ed|rescheduled|scheduled|requested|"
     r"submitted|approved)\b"
-    r"|\byou(?:'re|\s+are)\s+(?:all\s+set|booked|scheduled)\b", re.IGNORECASE)
+    r"|\byou(?:'re|\s+are)\s+(?:all\s+set|booked|scheduled)\b"
+    r"|\bis\s+now\s+(?:booked|confirmed|scheduled|cancel+ed)\b"
+    # Another client's booking is never disclosed, even as a reason.
+    r"|\b(?:another|other)\s+(?:clients?|customers?)\b|\bsomeone\s+else\b"
+    r"|\bbooked\s+by\b", re.IGNORECASE)
 READ_ERRORS = (OSError, ValueError, TypeError, KeyError, RuntimeError)
 
 
@@ -348,6 +353,51 @@ def _facts(text: str) -> tuple[list[tuple[int, int]], list[tuple[int, int]], lis
     return days, times, refs
 
 
+MARKER = re.compile(r"(?<!\d)(\d)\s*\)")
+
+
+def _events(text: str) -> list[tuple[str, Any]]:
+    """Dates, option markers, and clock times of the text, in the order they are read."""
+    found: list[tuple[int, str, Any]] = []
+    for match in DATE.finditer(text):
+        if pair := _month_day(match.group()):
+            found.append((match.start(), "date", pair))
+    blanked = DATE.sub(lambda match: " " * len(match.group()), text)
+    for match in TIME.finditer(blanked):
+        if pair := _hour_minute(match.group()):
+            found.append((match.start(), "time", pair))
+    for match in MARKER.finditer(blanked):
+        found.append((match.start(), "marker", int(match[1])))
+    return [(kind, value) for _, kind, value in sorted(found, key=lambda item: item[0])]
+
+
+def _offer_in_order(text: str, starts: list[datetime]) -> bool:
+    """Each offered time is read in order, under its own date and (if several) its own number.
+
+    Option i's time must follow option i-1's, be introduced by marker ``i)`` (with only a
+    date between them), and sit under the most recent date before it, which is option i's.
+    """
+    events = _events(text)
+    position = 0
+    for number, start in enumerate(starts, 1):
+        want_date, want_time = (start.month, start.day), (start.hour, start.minute)
+        for index in range(position, len(events)):
+            kind, value = events[index]
+            if kind != "time" or value != want_time:
+                continue
+            before = [event for event in events[:index] if event[0] != "date"]
+            dates = [event[1] for event in events[:index] if event[0] == "date"]
+            if len(starts) > 1 and (not before or before[-1] != ("marker", number)):
+                continue
+            if not dates or dates[-1] != want_date:
+                continue
+            position = index + 1
+            break
+        else:
+            return False
+    return True
+
+
 def _authorized(results: list[dict[str, Any]]) -> tuple[set[tuple[int, int]],
                                                        set[tuple[int, int]], set[str]]:
     days: set[tuple[int, int]] = set()
@@ -395,11 +445,8 @@ def check_reply(text: str, results: list[dict[str, Any]],
         return "The SMS states a date, time, or reference that no tool result gave."
     if offer:
         starts = [start.astimezone(zone) for start in offer]
-        listed = iter(times)
-        if (not {(start.month, start.day) for start in starts} <= set(days)
-                or not all(any(pair == (start.hour, start.minute) for pair in listed)
-                           for start in starts)):
-            return "The SMS must list every offered time, in order."
+        if not _offer_in_order(text, starts):
+            return "The SMS must list every offered time, in order, with its own number and date."
         if len(starts) > 1 and not all(
                 re.search(rf"(?<!\d){number}\s*\)", text) for number in range(1, len(starts) + 1)):
             return "Number the offered times 1), 2), and so on."

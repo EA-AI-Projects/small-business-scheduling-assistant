@@ -18,7 +18,7 @@ from test_sms_processing import Reader
 from scheduling.domain.availability import LocalWindow, pilot_policy
 from scheduling.domain.calendar import CalendarStatus
 from scheduling.domain.client_records import ClientProfile
-from scheduling.domain.client_tools import MAX_TOOL_CALLS
+from scheduling.domain.client_tools import MAX_TOOL_CALLS, check_reply
 from scheduling.domain.conversation import ConversationOutcome
 from scheduling.domain.conversation_history import HistoryMessage
 from scheduling.domain.conversation_state import ConversationState, PromptKind
@@ -267,6 +267,10 @@ def test_ambiguous_text_asks_a_question_and_reads_or_stores_nothing() -> None:
     "I booked you for Wed Sep 30 at 10:00 AM.",
     "Done! I've requested that time for you.",
     "Your visit has been cancelled.",
+    "Another client has that time, so I put you down for the next one.",
+    "Sorry, that time is booked by someone else.",
+    "We added you to Fri Oct 2 at 10:00 AM.",
+    "Your visit is now scheduled.",
 ])
 def test_a_text_claiming_a_write_is_never_sent(text: str) -> None:
     chat, model = chat_with(lambda tools: (tools("get_availability", {
@@ -486,3 +490,26 @@ def test_openai_client_loop_rejects_an_unknown_tool_and_a_second_bad_text(
     with pytest.raises(ValueError, match="revision"):
         model.run_client_loop("hi", datetime(2026, 9, 29, 10, tzinfo=ZONE), "UTC", (),
                               lambda _n, _a: {}, lambda _t: "bad")
+
+
+def _offer_check(starts: tuple[datetime, ...], text: str) -> str | None:
+    facts = {"ok": True, "text": [
+        f"{start.astimezone(ZONE).strftime('%a %b')} {start.astimezone(ZONE).day} "
+        f"at {start.astimezone(ZONE).strftime('%I:%M %p').lstrip('0')}" for start in starts]}
+    return check_reply(text, [facts], starts, ZONE)
+
+
+def test_option_numbers_and_dates_must_match_the_stored_options() -> None:
+    day = datetime(2026, 10, 16, 17, tzinfo=ZONE)  # Fri Oct 16, 10:00 AM local.
+    two_days = (day.replace(hour=10), day.replace(day=17, hour=9))
+    two_times = (day.replace(hour=10), day.replace(hour=13))
+    ok = " The owner approves every request."
+    assert _offer_check(two_days, "1) Fri Oct 16 at 10:00 AM 2) Sat Oct 17 at 9:00 AM." + ok) is None
+    assert _offer_check(two_days, "1) Sat Oct 17 at 10:00 AM 2) Fri Oct 16 at 9:00 AM." + ok)
+    assert _offer_check(two_days, "Fri Oct 16: 1) 10:00 AM. Sat Oct 17: 2) 9:00 AM." + ok) is None
+    assert _offer_check(two_days, "Fri Oct 16: 1) 10:00 AM, 2) 9:00 AM." + ok)
+    assert _offer_check(two_times, "Fri Oct 16: 1) 10:00 AM or 2) 1:00 PM." + ok) is None
+    assert _offer_check(two_times, "Fri Oct 16: 2) 10:00 AM or 1) 1:00 PM." + ok)
+    assert _offer_check(two_times, "Fri Oct 16: 1) 1:00 PM or 2) 10:00 AM." + ok)
+    assert _offer_check(two_times[:1], "Fri Oct 16 at 10:00 AM." + ok) is None
+    assert _offer_check(two_times[:1], "Sat Oct 17 at 10:00 AM." + ok)

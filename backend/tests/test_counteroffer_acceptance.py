@@ -480,3 +480,42 @@ def test_only_that_clients_offer_can_be_accepted(world: World) -> None:
     assert not other.committed
     assert not any(a.replaces_appointment_id for a in
                    world.repository._appointments.values())
+
+
+class FailingClientLoop(NeverModel):
+    """A client loop that reads availability, then offers two texts the check rejects."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.rejected: list[str | None] = []
+        self.availability: dict[str, object] = {}
+
+    def run_client_loop(self, body: str, now: datetime, timezone: str, history: object,
+                        tool: object, check: object) -> str:
+        self.availability = tool("get_availability", {  # type: ignore[operator]
+            "from": "2026-10-02", "to": "2026-10-02", "time_from": None, "time_to": None})
+        for text in ("Open Fri Oct 2: 1) 4:45 AM. The owner approves every request.",
+                     "I booked you for Fri Oct 2."):
+            self.rejected.append(check(text))  # type: ignore[operator]
+        return text
+
+
+def test_a_failed_client_loop_keeps_the_owner_counteroffer_and_its_reminder(
+        world: World) -> None:
+    request = world.offered()
+    model = FailingClientLoop()
+    world.service._interpreter = model  # type: ignore[assignment]
+    reply = world.client("Anything else open Friday?")
+    assert model.availability["offer"] is not None  # The loop stored an offer, then failed.
+    assert all(reason is not None for reason in model.rejected)
+    assert reply.text and not reply.committed
+    receipt = InboundReceipt("pilot", "SM-r", CLIENT_PHONE, "+14155550000", "Yes", NOW,
+                             SenderRole.CLIENT, "client-1", Keyword.OTHER, True)
+    acceptance = world.service._acceptance
+    assert acceptance is not None
+    reminder = acceptance.reminder(receipt, world.clock[0])
+    assert reminder is not None and "reply YES to request it" in reminder
+    offer = world.store.read_confirmed_for_client("pilot", "client-1")
+    assert offer is not None and offer.state == OfferState.CONFIRMED
+    assert world.client("Yes").committed  # The counteroffer can still be accepted.
+    assert world.replacement_of(request).start_at == THURSDAY_2PM
