@@ -1,11 +1,14 @@
-"""Read-only, bounded tools for a verified client's SMS model loop (#340).
+"""Bounded tools for a verified client's SMS model loop (#340, #341).
 
 The backend builds every tool from the verified receipt: the business and client
 are fixed when the toolset is created, and no argument can name another. Results
-are structured, bounded, and read fresh for the message. Nothing here creates a
-hold, appointment, cancellation, or outbox row. ``get_availability`` is the only
-tool that stores anything: the short-lived offer a later reply may accept, which
-is the same offer memory the deterministic path writes.
+are structured, bounded, and read fresh for the message. The three read tools create
+no hold, appointment, cancellation, or outbox row. ``get_availability`` stores the
+short-lived offer a later reply may accept, which is the same offer memory the
+deterministic path writes. ``request_booking`` is the one write (#341): it names a
+local date and time, and the conversation service books it only if it is exactly one
+time in this client's own earlier, unexpired offer. It never books a time offered in the
+same message.
 
 ``check_reply`` compares the model's final text with what the tools returned
 before the text can be sent.
@@ -39,7 +42,7 @@ from scheduling.domain.conversation_state import (
 from scheduling.domain.holidays import observed_us_federal_holidays
 from scheduling.domain.service_duration import ServiceNotConfigured, service_duration
 
-TOOL_NAMES = ("get_business_info", "get_availability", "get_my_bookings")
+TOOL_NAMES = ("get_business_info", "get_availability", "get_my_bookings", "request_booking")
 MAX_TOOL_CALLS = 3
 MAX_RANGE_DAYS = 14
 MAX_REPLY_SEPTETS = 480
@@ -63,6 +66,17 @@ WRITE_CLAIM = re.compile(
     # Another client's booking is never disclosed, even as a reason.
     r"|\b(?:another|other)\s+(?:clients?|customers?)\b|\bsomeone\s+else\b"
     r"|\bbooked\s+by\b", re.IGNORECASE)
+# A booking request is pending owner approval, so these claims stay banned even after one.
+CONFIRM_CLAIM = re.compile(
+    r"\b(?:i|we)(?:'ve|\s+have)?\s+(?:just\s+)?(?:booked|cancel+ed|rescheduled|scheduled|"
+    r"reserved|moved|confirmed|approved|put|added|locked|held|arranged|penciled|pencilled|"
+    r"set\s+up|taken\s+care)\b"
+    r"|\b(?:has|have)\s+been\s+(?:booked|cancel+ed|rescheduled|scheduled|approved)\b"
+    r"|\byou(?:'re|\s+are)\s+(?:all\s+set|booked|scheduled)\b"
+    r"|\bis\s+now\s+(?:booked|confirmed|scheduled|cancel+ed)\b"
+    r"|\b(?:another|other)\s+(?:clients?|customers?)\b|\bsomeone\s+else\b"
+    r"|\bbooked\s+by\b", re.IGNORECASE)
+NOT_CONFIRMED = re.compile(r"\b(?:not|isn't|aren't|n't)\s+(?:yet\s+)?confirmed\b", re.IGNORECASE)
 READ_ERRORS = (OSError, ValueError, TypeError, KeyError, RuntimeError)
 
 
@@ -106,7 +120,8 @@ class ClientReadTools:
 
     def __init__(self, repository: ToolRepository, business_id: str, now: datetime,
                  policy: AvailabilityPolicy, own_visits: tuple[Appointment, ...],
-                 store_offer: Callable[[tuple[datetime, ...], int], None]) -> None:
+                 store_offer: Callable[[tuple[datetime, ...], int], None],
+                 request: Callable[[date, time], dict[str, Any]] | None = None) -> None:
         self._repository = repository
         self._business_id = business_id
         self._now = now
@@ -114,6 +129,8 @@ class ClientReadTools:
         self._zone = ZoneInfo(policy.timezone)
         self._visits = own_visits
         self._store_offer = store_offer
+        self._request = request
+        self.requested: dict[str, Any] | None = None
         self.results: list[dict[str, Any]] = []
         self.offer: tuple[datetime, ...] = ()
         self.calls = 0
@@ -196,6 +213,8 @@ class ClientReadTools:
             return dict(INVALID)
         if self.offer:
             return {"ok": False, "error": "offer_already_stored"}
+        if self.requested is not None:
+            return {"ok": False, "error": "already_requested"}
         if (earliest is None) != (latest is None):  # "After 2" or "before noon".
             earliest, latest = earliest or time(0), latest or time(23, 59)
         policy, zone, now = self._policy, self._zone, self._now
@@ -277,6 +296,31 @@ class ClientReadTools:
         if available_starts(policy, day, minutes, (), self._now):
             return RESERVED
         return "no_time_left_in_business_hours"
+
+    # -- request_booking ---------------------------------------------------
+
+    def request_booking(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Ask the service to book one time from this client's earlier, unexpired offer.
+
+        The arguments only name a local date and time. Whether that is exactly one time of
+        this client's own stored offer, and every other check, is the service's decision.
+        """
+        if set(args) != {"date", "time"}:
+            return dict(INVALID)
+        day, clock = _day_arg(args["date"]), _clock_arg(args["time"])
+        if day is None or clock is None:
+            return dict(INVALID)
+        if self._request is None:
+            return dict(UNAVAILABLE)
+        if self.offer:
+            # An offer made in this same message has not been sent to the client yet.
+            return {"ok": False, "error": "offer_not_sent_yet"}
+        if self.requested is not None:
+            return {"ok": False, "error": "already_requested"}
+        result = self._request(day, clock)
+        if result.get("requested") is True:
+            self.requested = result
+        return result
 
     # -- get_my_bookings ---------------------------------------------------
 
@@ -429,15 +473,32 @@ def check_reply(text: str, results: list[dict[str, Any]],
 
     Every date, clock time, and reference the text states must come from a successful tool
     result of this message. The text may not claim a booking, request, change, or
-    cancellation, because no read tool makes one. A stored offer must be listed whole, in
+    cancellation, because no read tool makes one. After a ``request_booking`` that created a
+    request, it must be called pending owner approval with its reference and never
+    confirmed; after one that did not, it must say nothing was booked. A stored offer must be listed whole, in
     order, numbered, and described as pending owner approval, so that a later number or time
     reply means what the client read.
     """
     size = gsm_septets(text, True)
     if not text.strip() or size is None or size > MAX_REPLY_SEPTETS:
         return "The SMS is empty, over 480 GSM-7 characters, or not GSM-7."
-    if WRITE_CLAIM.search(text):
+    outcomes = [result for result in results
+                if result.get("ok") is True and "requested" in result]
+    requested = [result for result in outcomes if result["requested"] is True]
+    if requested:
+        # A pending request may be called a request, never a confirmed booking.
+        if (CONFIRM_CLAIM.search(text)
+                or re.search(r"\bconfirmed\b", NOT_CONFIRMED.sub("", text), re.IGNORECASE)):
+            return "A booking request is pending owner approval; do not call it confirmed."
+        lowered = text.lower()
+        if "pending" not in lowered or "approv" not in lowered:
+            return "Say the request is pending owner approval."
+        if str(requested[0]["ref"]).lower() not in lowered:
+            return "Include the request reference from the tool result."
+    elif WRITE_CLAIM.search(text):
         return "The SMS claims a change; the tools made none."
+    elif outcomes and "nothing" not in text.lower():
+        return "The request was not made. Say that nothing was booked or changed."
     days, times, refs = _facts(text)
     allowed_days, allowed_times, allowed_refs = _authorized(results)
     if (not set(days) <= allowed_days or not set(times) <= allowed_times
