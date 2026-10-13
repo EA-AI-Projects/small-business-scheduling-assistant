@@ -142,7 +142,7 @@ def test_tool_choice_rules() -> None:
 
 def test_an_unsendable_reply_is_reported_not_hidden() -> None:
     bad = dict(PLANS)
-    bad["book-accepted-offer"] = (PLANS["book-accepted-offer"][0], "Booked and confirmed!")
+    bad["book-accepted-offer"] = (PLANS["book-accepted-offer"][0], "Booked for Thu Oct 1 at 9:45 AM!")
     result = run_case(ScriptedModel(bad), CASES[0])
     assert result["reply"] is None and result["reply_passes_check_reply"] is False
     assert result["check_reply_rejections"] and "ValueError" in result["error"]

@@ -230,13 +230,15 @@ def build_tools(case: Case) -> ClientReadTools:
     def prepare(ref: str) -> dict[str, Any]:
         matches = [item for item in case.visits if short_ref(item.appointment_id) == short_ref(ref)]
         if len(matches) != 1:
-            return {"ok": True, "prepared": False, "nothing_changed": True,
+            return {"ok": True, "prepared": False, "cancelled": False,
+                    "cancellation_question_open": False, "nothing_changed": True,
                     "reason": "ambiguous_visit" if matches else "visit_not_found",
                     "visits": [{"ref": item.appointment_id[:8],
                                 "when": when_text(item.start_at, ZONE), "status": "confirmed"}
                                for item in case.visits]}
         target = matches[0]
-        return {"ok": True, "prepared": True, "nothing_cancelled_yet": True,
+        return {"ok": True, "prepared": True, "cancelled": False,
+                "cancellation_question_open": True, "nothing_cancelled_yet": True,
                 "ref": target.appointment_id[:8], "status": "confirmed", "confirmed": True,
                 **_facts(target.start_at), "confirmation_valid_minutes": 30}
 
@@ -244,10 +246,12 @@ def build_tools(case: Case) -> ClientReadTools:
         key = "dismissed" if dismiss else "cancelled"
         target = case.cancel_open
         if target is None:
-            return {"ok": True, key: False, "nothing_changed": True,
+            return {"ok": True, key: False, "cancelled": False,
+                    "cancellation_question_open": False, "nothing_changed": True,
                     "reason": "no_open_confirmation"}
         if dismiss:
-            return {"ok": True, "dismissed": True, "nothing_cancelled": True,
+            return {"ok": True, "dismissed": True, "cancelled": False,
+                    "cancellation_question_open": False, "nothing_cancelled": True,
                     "still_booked": True, "ref": target.appointment_id[:8],
                     "when": when_text(target.start_at, ZONE)}
         return {"ok": True, "cancelled": True, "nothing_changed": False,
@@ -342,7 +346,8 @@ def run_case(model: ClientLoopModel, case: Case) -> dict[str, Any]:
         "actual_tools": calls, "tool_choice_passed": chosen,
         "reply": reply, "reply_passes_check_reply": reply_ok,
         "check_reply_rejections": rejected, "error": error, "note": case.note,
-        "review": "Simulated tool results only; read the reply for wording accuracy.",
+        "review": ("Simulated tool results only; the backend does not judge status wording, "
+                   "so read the reply for accuracy against the tool results."),
     }
 
 
@@ -373,6 +378,9 @@ def main(argv: Sequence[str] | None = None,
         "cases": len(results), "tool_choice_failures": failed,
         "errors": errors, "reply_check_failures": unsendable,
         "results": results}, indent=2))
+    # Status wording is the model's (#359) and is only reported for review. What check_reply
+    # still rejects (a date, time, or reference no tool gave, or an unsendable length or
+    # alphabet) is reported and does fail the run.
     return 1 if (failed or errors or unsendable) else 0
 
 

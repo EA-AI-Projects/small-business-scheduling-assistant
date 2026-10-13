@@ -1509,7 +1509,8 @@ class ConversationService:
                    else "pending_owner_approval"} for item in targets]
 
         def refused(reason: str, **extra: Any) -> tuple[dict[str, Any], bool]:
-            return ({"ok": True, "prepared": False, "nothing_changed": True,
+            return ({"ok": True, "prepared": False, "cancelled": False,
+                     "cancellation_question_open": False, "nothing_changed": True,
                      "reason": reason, **extra}, False)
 
         wanted = ref.lower()
@@ -1526,7 +1527,8 @@ class ConversationService:
         self._remember(receipt, PromptKind.CONFIRM_CANCEL, now, appointment=target)
         confirmed = target.status == CalendarStatus.CONFIRMED
         local = target.start_at.astimezone(zone)
-        return ({"ok": True, "prepared": True, "nothing_cancelled_yet": True,
+        return ({"ok": True, "prepared": True, "cancelled": False,
+                 "cancellation_question_open": True, "nothing_cancelled_yet": True,
                  "ref": target.appointment_id[:8],
                  "status": "confirmed" if confirmed else "pending_owner_approval",
                  "confirmed": confirmed, "date": local.date().isoformat(),
@@ -1549,8 +1551,9 @@ class ConversationService:
         key = "dismissed" if dismiss else "cancelled"
 
         def nothing(reason: str, state: str) -> tuple[dict[str, Any], None, str]:
-            return ({"ok": True, key: False, "nothing_changed": True, "reason": reason},
-                    None, state)
+            return ({"ok": True, key: False, "cancelled": False,
+                     "cancellation_question_open": False, "nothing_changed": True,
+                     "reason": reason}, None, state)
 
         if (prompt is None or prompt.kind != PromptKind.CONFIRM_CANCEL
                 or prompt.appointment_id is None):
@@ -1568,7 +1571,8 @@ class ConversationService:
             outcome = ConversationOutcome(f"OK, I kept {kept}. Nothing was cancelled.")
             if target is None:
                 return nothing("visit_changed", "closed")
-            return ({"ok": True, "dismissed": True, "nothing_cancelled": True,
+            return ({"ok": True, "dismissed": True, "cancelled": False,
+                     "cancellation_question_open": False, "nothing_cancelled": True,
                      "still_booked": True, "ref": target.appointment_id[:8],
                      "when": when_text(target.start_at, zone)}, outcome, "closed")
         outcome = self._cancel_confirmed(receipt, prompt, targets, zone)

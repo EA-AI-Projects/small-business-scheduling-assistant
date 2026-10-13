@@ -268,15 +268,10 @@ def test_ambiguous_text_asks_a_question_and_reads_or_stores_nothing() -> None:
 
 
 @pytest.mark.parametrize("text", [
-    "I booked you for Wed Sep 30 at 10:00 AM.",
-    "Done! I've requested that time for you.",
-    "Your visit has been cancelled.",
-    "Another client has that time, so I put you down for the next one.",
-    "Sorry, that time is booked by someone else.",
-    "We added you to Fri Oct 2 at 10:00 AM.",
-    "Your visit is now scheduled.",
+    "Open times: tomorrow morning is free.",
+    "I have a few openings. Reply with a time.",
 ])
-def test_a_text_claiming_a_write_is_never_sent(text: str) -> None:
+def test_an_incomplete_offer_is_never_sent(text: str) -> None:
     chat, model = chat_with(lambda tools: (tools("get_availability", {
         "from": TOMORROW, "to": TOMORROW, "time_from": None, "time_to": None}), text)[1])
     chat.model.replies["Can you book tomorrow?"] = ask("availability", TOMORROW)

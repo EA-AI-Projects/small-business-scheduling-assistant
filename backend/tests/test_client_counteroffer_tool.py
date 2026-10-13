@@ -271,7 +271,7 @@ def test_an_expired_offer_cannot_be_answered(world: World) -> None:
     assert offer is not None and offer.state == OfferState.SUPERSEDED
 
 
-def test_the_reply_must_report_the_real_counteroffer_status() -> None:
+def test_counteroffer_replies_keep_fact_checks_and_leave_status_wording_to_the_model() -> None:
     zone = ZoneInfo("America/Los_Angeles")
     done = [{"ok": True, "requested": True, "status": "pending_owner_approval",
              "confirmed": False, "ref": "abcd1234", "date": "2026-10-01", "weekday": "Thursday",
@@ -279,34 +279,12 @@ def test_the_reply_must_report_the_real_counteroffer_status() -> None:
     good = ("Requested Thu Oct 1 at 2:00 PM (ref abcd1234). It is pending owner approval, "
             "not confirmed yet.")
     assert check_reply(good, done, (), zone) is None
-    for bad in ("You're all set for Thu Oct 1 at 2:00 PM (ref abcd1234).",
-                ("Your visit is confirmed for Thu Oct 1 at 2:00 PM (ref abcd1234), pending "
-                 "owner approval."),
-                "Requested Thu Oct 1 at 2:00 PM, pending owner approval."):
+    assert check_reply("You're all set for Thu Oct 1 at 2:00 PM (ref abcd1234).", done, (),
+                       zone) is None  # Wording is the model's (#359).
+    for bad in ("Requested Thu Oct 1 at 3:00 PM (ref abcd1234).",
+                "Requested Fri Oct 2 at 2:00 PM (ref abcd1234).",
+                "Requested Thu Oct 1 at 2:00 PM (ref ffff9999)."):
         assert check_reply(bad, done, (), zone) is not None, bad
     declined = [{"ok": True, "requested": False, "declined": True, "nothing_changed": True}]
-    assert check_reply("I requested that time for you.", declined, (), zone) is not None
     assert check_reply("OK, nothing was requested.", declined, (), zone) is None
-
-
-def test_counteroffer_replies_cannot_claim_a_move_and_must_state_the_offer() -> None:
-    zone = ZoneInfo("America/Los_Angeles")
-    done = [{"ok": True, "requested": True, "status": "pending_owner_approval",
-             "confirmed": False, "ref": "abcd1234", "date": "2026-10-01", "weekday": "Thursday",
-             "time": "2:00 PM", "when": "Thu Oct 1 at 2:00 PM"}]
-    for bad in (("Your visit was rescheduled to Thu Oct 1 at 2:00 PM, ref abcd1234, pending "
-                 "owner approval."),
-                ("Your visit has been moved to Thu Oct 1 at 2:00 PM, ref abcd1234, pending "
-                 "owner approval.")):
-        assert check_reply(bad, done, (), zone) is not None, bad
-    for verb in ("is moved to", "is rescheduled for", "is switched to", "is changed to"):
-        text = f"Your visit {verb} Thu Oct 1 at 2:00 PM, ref abcd1234, pending owner approval."
-        assert check_reply(text, done, (), zone) is not None, verb
-    declined = [{"ok": True, "requested": False, "declined": True, "nothing_changed": True}]
-    assert check_reply("OK, nothing was requested. Your visit was moved.", declined, (),
-                       zone) is not None
-    open_offer = [{"ok": True, "open": True, "date": "2026-10-01", "weekday": "Thursday",
-                   "time": "2:00 PM", "when": "Thu Oct 1 at 2:00 PM", "your_request": None}]
-    assert check_reply("The owner offered a different time.", open_offer, (), zone) is not None
-    assert check_reply("The owner offered Thu Oct 1 at 2:00 PM. Nothing is requested yet.",
-                       open_offer, (), zone) is None
+    assert check_reply("OK, nothing was requested for tomorrow.", declined, (), zone) is None

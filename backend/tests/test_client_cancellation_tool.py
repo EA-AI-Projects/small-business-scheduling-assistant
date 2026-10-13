@@ -82,11 +82,13 @@ def test_declining_closes_the_question_and_the_visit_stays_booked() -> None:
     kept = chat.text("no, keep it")
     assert model.rejected[-1] is None and not kept.committed
     assert results[0]["dismissed"] is True and results[0]["still_booked"] is True
+    assert results[0]["cancelled"] is False and results[0]["cancellation_question_open"] is False
     assert state(chat) is None and chat.status(visit) == CalendarStatus.CONFIRMED
     model.plan = lambda tools: (results.append(tools("confirm_cancellation", {})),
                                 "Nothing was cancelled.")[1]
     chat.text("yes")  # The closed question cannot be confirmed later.
     assert results[-1]["reason"] == "no_open_confirmation"
+    assert results[-1]["cancelled"] is False and results[-1]["cancellation_question_open"] is False
     assert chat.status(visit) == CalendarStatus.CONFIRMED
 
 
@@ -316,13 +318,22 @@ def test_a_failed_confirmation_loop_without_a_tool_call_uses_the_deterministic_y
     assert reply.committed and chat.status(visit) == CalendarStatus.CANCELLED
 
 
-def test_a_premature_or_unbacked_cancellation_claim_is_replaced_before_sending() -> None:
+def test_status_wording_after_prepare_is_the_models_but_the_visit_is_still_booked() -> None:
     chat, model, visit = asked()
-    model.plan = lambda tools: (prepare(tools), "Done, your Thu Oct 1 visit is cancelled.")[1]
+    model.plan = lambda tools: (prepare(tools), "Your Thu Oct 1 visit is on hold, reply YES.")[1]
     chat.model.replies["cancel Thursday"] = ask("cancel", target_date="2026-10-01")
-    reply = chat.text("cancel Thursday")  # The checked text was refused, so none was sent.
-    assert model.rejected[-1] is not None and "cancelled" not in reply.text.lower().replace(
-        "nothing was cancelled", "")
+    reply = chat.text("cancel Thursday")
+    assert model.rejected[-1] is None  # Wording is not judged (#359).
+    assert reply.text == "Your Thu Oct 1 visit is on hold, reply YES."
+    assert chat.status(visit) == CalendarStatus.CONFIRMED  # Only confirm_cancellation writes.
+
+
+def test_a_fabricated_date_after_prepare_is_replaced_before_sending() -> None:
+    chat, model, visit = asked()
+    model.plan = lambda tools: (prepare(tools), "Cancel your Fri Oct 2 at 9:00 AM visit? YES?")[1]
+    chat.model.replies["cancel Thursday"] = ask("cancel", target_date="2026-10-01")
+    reply = chat.text("cancel Thursday")
+    assert model.rejected[-1] is not None and "Fri Oct 2" not in reply.text
     assert chat.status(visit) == CalendarStatus.CONFIRMED
 
 
@@ -373,43 +384,43 @@ def verdict(text: str, *results: dict[str, Any]) -> str | None:
     return check_reply(text, list(results), (), ZONE)
 
 
-def test_reply_check_distinguishes_cancelled_still_booked_and_unchanged() -> None:
+def test_reply_check_keeps_facts_and_leaves_cancellation_wording_to_the_model() -> None:
+    # Free status wording passes whatever the tools reported.
     assert verdict("Cancel your Thu Oct 1 at 9:00 AM visit? Reply YES to cancel.", ASKED) is None
-    assert verdict("I cancelled your Thu Oct 1 at 9:00 AM visit.", ASKED)  # Not yet.
-    assert verdict("Your Thu Oct 1 visit is cancelled. Reply YES to cancel?", ASKED)
-    assert verdict("Do you want to cancel your visit? Reply YES.", ASKED)  # No time named.
-    assert verdict("Cancel your Thu Oct 1 at 9:00 AM visit. Reply YES.", ASKED)  # No question.
-    assert verdict("Cancel your 9:00 AM visit? Reply YES to cancel.", ASKED)  # No date.
-    assert verdict("Cancel your Fri Oct 2 at 9:00 AM visit? Reply YES.", ASKED)  # Wrong date.
-    pending = {**ASKED, "confirmed": False}
-    assert verdict("Cancel your Thu Oct 1 at 9:00 AM confirmed request? Reply YES.", pending)
-    assert verdict("Cancel your Thu Oct 1 at 9:00 AM request, not confirmed yet? Reply YES.",
-                   pending) is None
+    assert verdict("I cancelled your Thu Oct 1 at 9:00 AM visit.", ASKED) is None
+    assert verdict("Your visit stays booked. Nothing was cancelled.", KEPT) is None
+    assert verdict("All set, your visit is cancelled.") is None
     assert verdict("Cancelled your Thu Oct 1 at 9:00 AM visit (ref abcd1234).", DONE) is None
-    assert verdict("I cancelled your Thu Oct 1 at 9:00 AM visit (ref abcd1234).", DONE) is None
-    assert verdict("Cancelled your Thu Oct 1 at 9:00 AM visit.", DONE)  # No reference.
-    assert verdict("Your visit (ref abcd1234) is still booked. Cancelled.", DONE)
-    assert verdict("Your Thu Oct 1 at 9:00 AM visit stays booked. Nothing was cancelled.",
-                   KEPT) is None
-    assert verdict("Your Thu Oct 1 at 9:00 AM visit stays booked.", KEPT)  # Not said.
-    assert verdict("That visit changed, so nothing was cancelled.", REFUSED) is None
-    assert verdict("That visit changed, so it is cancelled.", REFUSED)
-    assert verdict("Nothing was cancelled and your visit is still booked.", REFUSED)
-    assert verdict("Sorry, that did not work.", REFUSED)  # Does not say nothing changed.
-    assert verdict("All set, your visit is cancelled.")  # No tool made a cancellation.
-    assert verdict("Nothing was cancelled.") is None
+    assert verdict("Cancelled your visit tomorrow.", DONE) is None  # Relative dates unchecked.
+    # Absolute dates, times, and references must come from a tool result.
+    assert verdict("Cancel your Fri Oct 2 at 9:00 AM visit? Reply YES.", ASKED)
+    assert verdict("Cancel your Thu Oct 1 at 9:45 AM visit? Reply YES.", ASKED)
+    assert verdict("Cancelled your Thu Oct 1 at 9:00 AM visit (ref ffff9999).", DONE)
+    assert verdict("Cancelled your Thu Oct 1 at 9:00 AM visit (ref abcd1234).")  # No tool result.
 
 
-def test_the_model_cannot_claim_a_confirmed_booking_after_a_cancellation() -> None:
-    assert verdict("I booked you in for Thu Oct 1 at 9:00 AM. Cancelled ref abcd1234.", DONE)
+def test_cancellation_results_state_the_outcome_plainly() -> None:
+    chat, model, _visit = asked()
+    # The stored question: nothing cancelled, a question open.
+    results: list[dict[str, Any]] = []
+    model.plan = lambda tools: (results.append(prepare(tools)), ASK_TEXT)[1]
+    chat.model.replies["cancel Thursday"] = ask("cancel", target_date="2026-10-01")
+    chat.text("cancel Thursday")
+    assert results[0]["prepared"] is True and results[0]["cancelled"] is False
+    assert results[0]["cancellation_question_open"] is True
+    results.clear()
+    model.plan = lambda tools: (results.append(prepare(tools, "deadbeef")), "Not found.")[1]
+    chat.model.replies["cancel the other"] = ask("cancel", target_date="2026-10-01")
+    chat.text("cancel the other")
+    assert results[0]["prepared"] is False and results[0]["cancelled"] is False
+    assert results[0]["cancellation_question_open"] is False and results[0]["nothing_changed"]
 
 
-
-def test_a_question_that_omits_the_date_is_rejected_when_two_visits_share_a_time() -> None:
-    chat, model = chat_with(lambda tools: (prepare(tools, friday[:8]),
-                                           "Cancel your 9:00 AM visit? Reply YES to cancel.")[1])
-    chat.hold(THURSDAY, "thu", confirm=True)
-    friday = chat.hold(THURSDAY + timedelta(days=1), "fri", confirm=True)
-    chat.model.replies["cancel the 9"] = ask("cancel")
-    chat.text("cancel the 9")
-    assert model.rejected[-1] is not None
+def test_the_client_loop_instructions_leave_status_wording_to_the_model() -> None:
+    from scheduling.adapters.openai_messages import CLIENT_LOOP_INSTRUCTIONS as text
+    assert "both asks to cancel a visit and asks a question" in text
+    assert "call prepare_cancellation for that visit and answer the question" in text
+    assert "word the status yourself" in text
+    assert "only when prepare_cancellation returned prepared true in this message, or when " in text
+    assert "your own earlier message in the transcript asked the client to reply YES" in text
+    assert "cancellation_question_open true" not in text
