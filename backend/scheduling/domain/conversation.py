@@ -41,6 +41,7 @@ from scheduling.domain.client_replies import (
     gsm_septets,
     valid_draft,
 )
+from scheduling.domain.client_tools import ClientReadTools, check_reply
 from scheduling.domain.conversation_history import HistoryMessage
 from scheduling.domain.conversation_state import (
     MAX_OPTIONS,
@@ -89,6 +90,7 @@ from scheduling.domain.sms_ingress import (
     InboundReceipt,
     Keyword,
     SenderRole,
+    SmsCommandInterrupted,
     normalize_phone,
 )
 
@@ -193,6 +195,19 @@ class OwnerToolLoop(Protocol):
 
 
 OWNER_FAILURE_TEXT = "Something went wrong. Please try again."
+# A verified client's read-only questions use the bounded client tool loop (#340) when the
+# interpreter has one. Writes (booking, cancelling, moving) stay on their existing paths.
+CLIENT_LOOP_INTENTS = frozenset({"availability", "calendar_question", "clarify_booking",
+                                 "clarify", "unsupported"})
+CLOSED_NOTE = "\nI closed my earlier question, so nothing was booked or cancelled."
+
+
+@runtime_checkable
+class ClientToolLoop(Protocol):
+    def run_client_loop(self, body: str, now: datetime, timezone: str,
+                        history: tuple[HistoryMessage, ...],
+                        tool: Callable[[str, dict[str, Any]], dict[str, Any]],
+                        check: Callable[[str], str | None]) -> str: ...
 
 
 @runtime_checkable
@@ -390,6 +405,13 @@ class ConversationService:
         # "which day" question for a known visit carries into its answer.
         moving = (prompt if prompt is not None and prompt.kind == PromptKind.RESCHEDULE_DAY
                   and not prompt.expired(now) else None)
+        if (not exact and receipt.role == SenderRole.CLIENT and moving is None
+                and proposal.intent in CLIENT_LOOP_INTENTS
+                and isinstance(self._interpreter, ClientToolLoop)):
+            answered_by_loop = self._client_tool_loop(receipt, prompt, targets, policy, now)
+            if answered_by_loop is not None:
+                return answered_by_loop
+            # The loop could not produce a checked reply; the deterministic path answers.
         unclear = proposal.needs_clarification or proposal.intent in ("clarify", "unsupported")
         if unclear and calendar is not None and receipt.role == SenderRole.CLIENT:
             # Keep the calendar conversation open for the answer; nothing changes.
@@ -1239,6 +1261,68 @@ class ConversationService:
                     raise RuntimeError("Undelivered owner draft could not be discarded")
             return (replace(committed, text=OWNER_FAILURE_TEXT) if committed is not None
                     else ConversationOutcome(OWNER_FAILURE_TEXT))
+
+    def _client_tool_loop(self, receipt: InboundReceipt, prompt: ConversationState | None,
+                          targets: tuple[Appointment, ...], policy: AvailabilityPolicy,
+                          now: datetime) -> ConversationOutcome | None:
+        """Answer a verified client's read-only question with the bounded model/tool loop.
+
+        Business and client come from the receipt; the tools read only. The one stored
+        thing is the offer a later reply may accept. Any failure, or a final text that does
+        not match the tool results, clears that offer and returns None, so the caller falls
+        back to the deterministic answer. Nothing is sent from here: the receipt processor
+        stores the one reply for this receipt.
+        """
+        interpreter = self._interpreter
+        if not isinstance(interpreter, ClientToolLoop):
+            return None
+        zone = ZoneInfo(policy.timezone)
+        stored = False
+
+        def store_offer(options: tuple[datetime, ...], minutes: int) -> None:
+            nonlocal stored
+            # The owner's counteroffer is superseded only once the final text is accepted.
+            self._remember(receipt, PromptKind.OFFER, now, options=options,
+                           duration_minutes=minutes)
+            stored = True
+
+        tools = ClientReadTools(self._repository, receipt.business_id, now, policy,
+                                targets[:MAX_CONTEXT_APPOINTMENTS], store_offer)
+
+        def check(text: str) -> str | None:
+            return check_reply(text, tools.results, tools.offer, zone)
+
+        try:
+            history = (self._history_reader.read_conversation_history(receipt, now)
+                       if self._history_reader is not None else ())
+            text = interpreter.run_client_loop(
+                receipt.body or "", now.astimezone(zone), policy.timezone, history,
+                tools, check)
+            reason = check(text)
+            if reason is not None:
+                raise ValueError(reason)
+            if tools.offer:
+                if self._acceptance is not None:
+                    self._acceptance.supersede_for_new_request(receipt)
+            else:
+                self._forget(prompt)
+                if (prompt is not None and not prompt.expired(now)
+                        and prompt.kind != PromptKind.CALENDAR):
+                    closed = text + CLOSED_NOTE
+                    if (size := gsm_septets(closed, True)) is not None and size <= 480:
+                        text = closed
+                    else:
+                        raise ValueError("Reply leaves no room to close the earlier question")
+            return self._with_offer_note(receipt, now, ConversationOutcome(text))
+        except SmsCommandInterrupted:
+            raise
+        except Exception:
+            LOGGER.warning("Client tool loop failed; using the deterministic answer",
+                           exc_info=True)
+            if stored:
+                self._states.clear_state(receipt.business_id, receipt.sender,
+                                         receipt.provider_id)
+            return None
 
     @staticmethod
     def _active_target(receipt: InboundReceipt, appointment_id: str | None,
