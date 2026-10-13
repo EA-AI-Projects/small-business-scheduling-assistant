@@ -17,6 +17,13 @@ that binds that visit and its version; it cancels nothing. On a later message
 and receipt-keyed by the service), and ``dismiss_cancellation`` closes it. None of the three
 can name a visit or version of its own. Only one action tool takes effect per message.
 
+Rescheduling (#343) is replacement-first. ``get_availability`` with a visit ``ref`` stores an
+offer bound to that confirmed visit and its version; a later ``request_reschedule`` names the
+ref and one offered time, and the service creates a request pending owner approval while the
+original stays confirmed. ``get_my_counteroffer`` reads this client's own open owner
+counteroffer; ``respond_to_counteroffer`` accepts (a pending request, never a confirmed visit)
+or declines (no booking) that one offer and names nothing else.
+
 ``check_reply`` compares the model's final text with what the tools returned
 before the text can be sent.
 """
@@ -51,7 +58,8 @@ from scheduling.domain.holidays import observed_us_federal_holidays
 from scheduling.domain.service_duration import ServiceNotConfigured, service_duration
 
 TOOL_NAMES = ("get_business_info", "get_availability", "get_my_bookings", "request_booking",
-              "prepare_cancellation", "confirm_cancellation", "dismiss_cancellation")
+              "prepare_cancellation", "confirm_cancellation", "dismiss_cancellation",
+              "request_reschedule", "get_my_counteroffer", "respond_to_counteroffer")
 MAX_TOOL_CALLS = 3
 MAX_RANGE_DAYS = 14
 MAX_REPLY_SEPTETS = 480
@@ -72,6 +80,11 @@ WRITE_CLAIM = re.compile(
     r"submitted|approved)\b"
     r"|\byou(?:'re|\s+are)\s+(?:all\s+set|booked|scheduled)\b"
     r"|\bis\s+now\s+(?:booked|confirmed|scheduled|cancel+ed)\b"
+    r"|\b(?:is|are|was|were|has\s+been|have\s+been|is\s+now|are\s+now|you(?:'re|\s+are))\s+"
+    r"(?:moved|rescheduled|switched|shifted|swapped)\b"
+    r"|\b(?:is|are|was|were|has\s+been|have\s+been|is\s+now|are\s+now)\s+"
+    r"(?:changed|switched|updated|shifted)\s+(?:to|for)\b"
+    r"|\b(?:i|we)(?:'ve|\s+have)?\s+(?:just\s+)?(?:changed|switched|updated|shifted|swapped)\b"
     # Another client's booking is never disclosed, even as a reason.
     r"|\b(?:another|other)\s+(?:clients?|customers?)\b|\bsomeone\s+else\b"
     r"|\bbooked\s+by\b", re.IGNORECASE)
@@ -83,6 +96,11 @@ CONFIRM_CLAIM = re.compile(
     r"|\b(?:has|have)\s+been\s+(?:booked|cancel+ed|rescheduled|scheduled|approved)\b"
     r"|\byou(?:'re|\s+are)\s+(?:all\s+set|booked|scheduled)\b"
     r"|\bis\s+now\s+(?:booked|confirmed|scheduled|cancel+ed)\b"
+    r"|\b(?:is|are|was|were|has\s+been|have\s+been|is\s+now|are\s+now|you(?:'re|\s+are))\s+"
+    r"(?:moved|rescheduled|switched|shifted|swapped)\b"
+    r"|\b(?:is|are|was|were|has\s+been|have\s+been|is\s+now|are\s+now)\s+"
+    r"(?:changed|switched|updated|shifted)\s+(?:to|for)\b"
+    r"|\b(?:i|we)(?:'ve|\s+have)?\s+(?:just\s+)?(?:changed|switched|updated|shifted|swapped)\b"
     r"|\b(?:another|other)\s+(?:clients?|customers?)\b|\bsomeone\s+else\b"
     r"|\bbooked\s+by\b", re.IGNORECASE)
 NOT_CONFIRMED = re.compile(r"\b(?:not|isn't|aren't|n't)\s+(?:yet\s+)?confirmed\b", re.IGNORECASE)
@@ -97,7 +115,23 @@ NOTHING_CHANGED = re.compile(r"\bnothing\s+(?:was\s+|has\s+been\s+)?changed\b|\b
                              re.IGNORECASE)
 STILL_BOOKED = re.compile(r"\b(?:still|stays?|remains?)\s+(?:booked|scheduled|confirmed)\b"
                           r"|\bkept\b", re.IGNORECASE)
+# "Nothing was moved" is a denial, not a claim (#343).
+NOT_MOVED = re.compile(
+    r"\b(?:nothing\s+(?:was|is|has\s+been)|not|isn't|wasn't|hasn't|n't|never)\s+(?:yet\s+)?"
+    r"(?:been\s+)?(?:moved|rescheduled|switched|shifted|changed|updated)\b",
+    re.IGNORECASE)
+# Clauses end at sentence ends, semicolons, newlines, and a comma before a word (not before a
+# digit, month, or weekday, so "Thu, Oct 1" and "Oct 1, 9:00 AM" stay whole).
+SENTENCE_END = re.compile(
+    r"(?<=[.!?])\s+|\s*;\s*|\s*\n\s*"
+    r"|,\s+(?!\d|(?:mon|tue|wed|thu|fri|sat|sun|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)"
+    r"[a-z]*\b)", re.IGNORECASE)
 REF_ARG = re.compile(r"[0-9A-Za-z-]{4,40}")
+DECISIONS = ("accept", "decline")
+# A move is replacement-first: the visit being moved may be said to stay confirmed (#343).
+STAYS_CONFIRMED = re.compile(
+    r"\b(?:still|stays?|remains?)\s+(?:booked|scheduled|confirmed)\b|\bkept\b|\bunchanged\b",
+    re.IGNORECASE)
 READ_ERRORS = (OSError, ValueError, TypeError, KeyError, RuntimeError)
 
 
@@ -108,6 +142,14 @@ class CancellationHooks:
     prepare: Callable[[str], dict[str, Any]]
     confirm: Callable[[], dict[str, Any]]
     dismiss: Callable[[], dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class CounterofferHooks:
+    """The conversation service's steps for this client's own owner counteroffer (#343)."""
+
+    read: Callable[[], dict[str, Any]]
+    respond: Callable[[bool], dict[str, Any]]
 
 
 class ToolRepository(Protocol):
@@ -150,9 +192,12 @@ class ClientReadTools:
 
     def __init__(self, repository: ToolRepository, business_id: str, now: datetime,
                  policy: AvailabilityPolicy, own_visits: tuple[Appointment, ...],
-                 store_offer: Callable[[tuple[datetime, ...], int], None],
+                 store_offer: Callable[[tuple[datetime, ...], int, Appointment | None], None],
                  request: Callable[[date, time], dict[str, Any]] | None = None,
-                 cancellation: CancellationHooks | None = None) -> None:
+                 cancellation: CancellationHooks | None = None,
+                 reschedule: Callable[[str, date, time], dict[str, Any]] | None = None,
+                 counteroffer: CounterofferHooks | None = None,
+                 moving: str | None = None) -> None:
         self._repository = repository
         self._business_id = business_id
         self._now = now
@@ -162,9 +207,13 @@ class ClientReadTools:
         self._store_offer = store_offer
         self._request = request
         self._cancellation = cancellation
+        self._reschedule = reschedule
+        self._counteroffer = counteroffer
+        self._moving = moving  # The visit of this client's open "which day" move question.
         self.requested: dict[str, Any] | None = None
         self.prepared: dict[str, Any] | None = None  # A cancellation question asked now.
         self.answered = False  # confirm_cancellation or dismiss_cancellation ran.
+        self.responded = False  # respond_to_counteroffer ran.
         self.results: list[dict[str, Any]] = []
         self.offer: tuple[datetime, ...] = ()
         self.calls = 0
@@ -234,7 +283,11 @@ class ClientReadTools:
     # -- get_availability --------------------------------------------------
 
     def get_availability(self, args: dict[str, Any]) -> dict[str, Any]:
-        if set(args) != {"from", "to", "time_from", "time_to"}:
+        base = {"from", "to", "time_from", "time_to"}
+        if set(args) not in (base, base | {"ref"}):
+            return dict(INVALID)
+        ref = args.get("ref")
+        if ref is not None and (not isinstance(ref, str) or REF_ARG.fullmatch(ref) is None):
             return dict(INVALID)
         first, last = _day_arg(args["from"]), _day_arg(args["to"])
         earliest = _clock_arg(args["time_from"]) if args["time_from"] is not None else None
@@ -251,6 +304,19 @@ class ClientReadTools:
             return {"ok": False, "error": "already_requested"}
         if self.prepared is not None or self.answered:
             return {"ok": False, "error": "cancellation_in_progress"}
+        if self.responded:
+            return {"ok": False, "error": "counteroffer_answered"}
+        if self._moving is not None and (
+                ref is None or ref.lower() not in (self._moving[:8].lower(),
+                                                   self._moving.lower())):
+            # The client was asked which day to move a visit to; times for another visit or
+            # a new booking would replace that question.
+            return {"ok": False, "error": "move_question_open"}
+        original: Appointment | None = None
+        if ref is not None:
+            original, why = self._movable(ref)
+            if original is None:
+                return {"ok": False, "error": why}
         if (earliest is None) != (latest is None):  # "After 2" or "before noon".
             earliest, latest = earliest or time(0), latest or time(23, 59)
         policy, zone, now = self._policy, self._zone, self._now
@@ -259,6 +325,9 @@ class ClientReadTools:
         except (ServiceNotConfigured, InvalidDuration):
             return {"ok": False, "error": "service_not_configured"}
         events = self._repository.read_calendar(self._business_id).events
+        if original is not None:  # The visit being moved does not block its own replacement.
+            events = tuple(event for event in events
+                           if event.event_id != original.appointment_id)
         today = now.astimezone(zone).date()
         horizon = today + timedelta(days=policy.booking_horizon_days)
         starts: list[datetime] = []
@@ -275,10 +344,14 @@ class ClientReadTools:
             return {"ok": False, "error": "availability_unavailable"}
         chosen, matched = self._choose(tuple(sorted(starts)), earliest, latest)
         if chosen:
-            self._store_offer(chosen, minutes)
+            self._store_offer(chosen, minutes, original)
             self.offer = chosen
         return {
             "ok": True, "timezone": policy.timezone, "duration_minutes": minutes,
+            "replaces": None if original is None else {
+                "ref": original.appointment_id[:8], "status": "confirmed",
+                "when": when_text(original.start_at, zone),
+                "stays_confirmed_until_owner_approves": True},
             "from": first.isoformat(), "to": last.isoformat(), "days": days,
             "requested_time_matched": matched,
             "offer": None if not chosen else {
@@ -290,6 +363,21 @@ class ClientReadTools:
                             for number, start in enumerate(chosen, 1)]},
             "more_open_times_than_offered": len(starts) > len(chosen),
         }
+
+    def _movable(self, ref: str) -> tuple[Appointment | None, str]:
+        """This client's own confirmed visit with no move request waiting, or why not."""
+        wanted = ref.lower()
+        matches = [visit for visit in self._visits
+                   if visit.appointment_id[:8].lower() == wanted
+                   or visit.appointment_id.lower() == wanted]
+        if len(matches) != 1:
+            return None, "visit_not_found"
+        target = matches[0]
+        if target.status != CalendarStatus.CONFIRMED:
+            return None, "visit_not_confirmed"
+        if any(other.replaces_appointment_id == target.appointment_id for other in self._visits):
+            return None, "move_request_pending"
+        return target, ""
 
     def _choose(self, starts: tuple[datetime, ...], earliest: time | None,
                 latest: time | None) -> tuple[tuple[datetime, ...], bool]:
@@ -355,7 +443,74 @@ class ClientReadTools:
             return {"ok": False, "error": "already_requested"}
         if self.prepared is not None or self.answered:
             return {"ok": False, "error": "cancellation_in_progress"}
+        if self.responded:
+            return {"ok": False, "error": "counteroffer_answered"}
         result = self._request(day, clock)
+        if result.get("requested") is True:
+            self.requested = result
+        return result
+
+    # -- rescheduling and counteroffers (#343) --------------------------------
+
+    def request_reschedule(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Ask the service to request one offered replacement time for one confirmed visit.
+
+        The arguments name the visit's reference and a local date and time. The service
+        acts only if the reference is the visit of this client's own earlier, unexpired
+        reschedule offer, still at the version that offer stored, and the time is exactly
+        one of that offer's. The original stays confirmed until the owner approves.
+        """
+        ref = args.get("ref")
+        if set(args) != {"ref", "date", "time"} or not isinstance(ref, str) \
+                or REF_ARG.fullmatch(ref) is None:
+            return dict(INVALID)
+        day, clock = _day_arg(args["date"]), _clock_arg(args["time"])
+        if day is None or clock is None:
+            return dict(INVALID)
+        if self._reschedule is None:
+            return dict(UNAVAILABLE)
+        if (why := self._write_blocked()) is not None:
+            return {"ok": False, "error": why}
+        result = self._reschedule(ref, day, clock)
+        if result.get("requested") is True:
+            self.requested = result
+        return result
+
+    def _write_blocked(self) -> str | None:
+        """Why no new write may run now: another action already took effect this message."""
+        if self.offer:
+            return "offer_not_sent_yet"
+        if self.requested is not None:
+            return "already_requested"
+        if self.prepared is not None or self.answered:
+            return "cancellation_in_progress"
+        if self.responded:
+            return "counteroffer_answered"
+        return None
+
+    def get_my_counteroffer(self, args: dict[str, Any]) -> dict[str, Any]:
+        """This client's own open owner counteroffer, if any. Read-only."""
+        if args:
+            return dict(INVALID)
+        if self._counteroffer is None:
+            return dict(UNAVAILABLE)
+        return self._counteroffer.read()
+
+    def respond_to_counteroffer(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Accept or decline this client's own open, unexpired owner counteroffer.
+
+        No argument names an offer, time, or request. Accepting creates one request pending
+        owner approval through the offer's own idempotency key; declining books nothing.
+        """
+        decision = args.get("decision")
+        if set(args) != {"decision"} or decision not in DECISIONS:
+            return dict(INVALID)
+        if self._counteroffer is None:
+            return dict(UNAVAILABLE)
+        if (why := self._write_blocked()) is not None:
+            return {"ok": False, "error": why}
+        self.responded = True  # The service decides once; a second call cannot try again.
+        result = self._counteroffer.respond(decision == "accept")
         if result.get("requested") is True:
             self.requested = result
         return result
@@ -374,6 +529,8 @@ class ClientReadTools:
             return "cancellation_question_not_sent_yet"
         if self.answered:
             return "already_answered"
+        if self.responded:
+            return "counteroffer_answered"
         return None
 
     def prepare_cancellation(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -554,6 +711,43 @@ def _authorized(results: list[dict[str, Any]]) -> tuple[set[tuple[int, int]],
     return days, times, refs
 
 
+def _without_stays(text: str, original_when: str, new_ref: str) -> tuple[str, bool]:
+    """The text without the sentences that say the visit being moved stays confirmed.
+
+    Only a sentence naming that visit's own date and time, and nothing else's, counts; a
+    stays-confirmed phrase about any other time (such as the new one) stays in the text, so
+    the confirmed-wording check rejects it. Returns the remaining text and whether one was found.
+    """
+    own_days, own_times, _ = _facts(original_when)
+    kept: list[str] = []
+    found = False
+    for sentence in SENTENCE_END.split(text):
+        if STAYS_CONFIRMED.search(sentence) is not None:
+            days, times, _ = _facts(sentence)
+            if (days and times and set(days) <= set(own_days) and set(times) <= set(own_times)
+                    and (not new_ref or new_ref.lower() not in sentence.lower())):
+                found = True
+                continue
+        kept.append(sentence)
+    return " ; ".join(kept), found
+
+
+def _counteroffer_problem(text: str, results: list[dict[str, Any]]) -> str | None:
+    """An open counteroffer that was only described must give its date and time (#343)."""
+    ok = [result for result in results if result.get("ok") is True]
+    if any("requested" in result for result in ok):
+        return None
+    for result in ok:
+        if result.get("open") is True and "your_request" in result:
+            day = _day_arg(result.get("date"))
+            clock = _hour_minute(str(result.get("time", "")))
+            shown_days, shown_times, _ = _facts(text)
+            if (day is None or clock is None or (day.month, day.day) not in shown_days
+                    or clock not in shown_times):
+                return "State the owner's offered date and time from the tool result."
+    return None
+
+
 def _cancellation_problem(text: str, results: list[dict[str, Any]]) -> str | None:
     """Why the text misstates the cancellation tools' outcome (#342), or None.
 
@@ -618,23 +812,39 @@ def check_reply(text: str, results: list[dict[str, Any]],
                 if result.get("ok") is True and "requested" in result]
     requested = [result for result in outcomes if result["requested"] is True]
     if requested:
-        # A pending request may be called a request, never a confirmed booking.
-        unclaimed = NOT_BOOKED.sub("", NOT_CONFIRMED.sub("", text))
-        if (CONFIRM_CLAIM.search(text)
+        # A pending request may be called a request, never a confirmed booking. A move may
+        # say its original stays confirmed (and must), because that stays true until approval.
+        moved = "replaces_ref" in requested[0]
+        stated, stays = (_without_stays(text, str(requested[0].get("original_when", "")),
+                                        str(requested[0]["ref"]))
+                         if moved else (text, False))
+        unclaimed = NOT_BOOKED.sub("", NOT_CONFIRMED.sub("", stated))
+        if (CONFIRM_CLAIM.search(NOT_MOVED.sub("", stated))
                 or re.search(r"\b(?:confirmed|booked)\b", unclaimed, re.IGNORECASE)):
             return "A booking request is pending owner approval; do not call it confirmed."
+        if moved and not stays:
+            return ("Say your current visit, with its date and time, stays confirmed until "
+                    "the owner approves the move.")
         lowered = text.lower()
+        shown_days, shown_times, _ = _facts(text)
+        day = _day_arg(requested[0].get("date"))
+        clock = _hour_minute(str(requested[0].get("time", "")))
+        if (day is None or clock is None or (day.month, day.day) not in shown_days
+                or clock not in shown_times):
+            return "State the requested date and time from the tool result."
         if "pending" not in lowered or "approv" not in lowered:
             return "Say the request is pending owner approval."
         if str(requested[0]["ref"]).lower() not in lowered:
             return "Include the request reference from the tool result."
-    elif WRITE_CLAIM.search(CANCELLED.sub("done", text)
+    elif WRITE_CLAIM.search(NOT_MOVED.sub("", CANCELLED.sub("done", text)
                             if any(result.get("cancelled") is True for result in results)
-                            else text):
+                            else text)):
         return "The SMS claims a change; the tools made none."
     elif outcomes and "nothing" not in text.lower():
         return "The request was not made. Say that nothing was booked or changed."
     if (problem := _cancellation_problem(text, results)) is not None:
+        return problem
+    if (problem := _counteroffer_problem(text, results)) is not None:
         return problem
     days, times, refs = _facts(text)
     allowed_days, allowed_times, allowed_refs = _authorized(results)
@@ -650,4 +860,10 @@ def check_reply(text: str, results: list[dict[str, Any]],
             return "Number the offered times 1), 2), and so on."
         if "approv" not in text.lower():
             return "The SMS must say the owner approves every request."
+        for result in results:
+            moving = result.get("replaces") if result.get("ok") is True else None
+            if isinstance(moving, dict) and not _without_stays(
+                    text, str(moving.get("when", "")), "")[1]:
+                return ("Say your current visit, with its date and time, stays confirmed "
+                        "until the owner approves a move.")
     return None

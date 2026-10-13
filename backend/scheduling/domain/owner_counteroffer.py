@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from hashlib import sha256
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from zoneinfo import ZoneInfo
 
 from scheduling.domain.appointments import Appointment
@@ -25,6 +25,7 @@ from scheduling.domain.conversation_history import HistoryMessage
 from scheduling.domain.conversation_state import (
     PROMPT_LIFETIME,
     Selection,
+    clock_text,
     is_negative,
     match_selection,
     when_text,
@@ -546,6 +547,138 @@ class CounterofferAcceptance:
                 "That isn't the time offered, so nothing was requested. Reply YES to request "
                 f"{when_text(offer.proposed_start, zone)}, or tell me another day.")
         return self._accept(offer, now, zone)
+
+    def open_facts(self, receipt: InboundReceipt, now: datetime) -> dict[str, Any] | None:
+        """What the client may be told about their own current owner offer (#343), or None.
+
+        Only the client's own offer: its time, and their own earlier request it counters.
+        ``open`` is true while a reply can still accept or decline it.
+        """
+        offer = self._open_offer(receipt)
+        if offer is None or offer.state not in (OfferState.CONFIRMED, OfferState.ACCEPTED):
+            return None
+        zone = ZoneInfo(self._repository.read_policy(receipt.business_id).timezone)
+        if offer.state == OfferState.ACCEPTED:
+            created = (self._repository.read_appointment(offer.accepted_request_id)
+                       if offer.accepted_request_id is not None else None)
+            if (created is None or created.status != CalendarStatus.PENDING_APPROVAL
+                    or created.hold_expires_at is None or created.hold_expires_at <= now
+                    or offer.expired(now)):
+                return None
+            return {"open": False, "already_requested": True,
+                    "status": "pending_owner_approval", "ref": created.appointment_id[:8],
+                    "when": when_text(created.start_at, zone)}
+        if offer.expired(now):
+            return None
+        local = offer.proposed_start.astimezone(zone)
+        original = self._repository.read_appointment(offer.request_id)
+        return {
+            "open": True, "owner_approval_required": True,
+            "date": local.date().isoformat(), "weekday": local.strftime("%A"),
+            "time": clock_text(offer.proposed_start, zone),
+            "when": when_text(offer.proposed_start, zone),
+            "duration_minutes": offer.duration_minutes,
+            "your_request": None if original is None else {
+                "ref": original.appointment_id[:8], "status": "pending_owner_approval",
+                "when": when_text(original.start_at, zone)}}
+
+    def respond(self, receipt: InboundReceipt, now: datetime, accept: bool,
+                newer_prompt: bool = False,
+                ) -> tuple[dict[str, Any], "ConversationOutcome | None"]:
+        """Accept or decline the client's own current offer for the model tool (#343).
+
+        Acting is gated exactly like a plain YES or NO: the client's own confirmed,
+        unexpired offer, then the same source-request, consent, and calendar recheck, and
+        the offer's own idempotency key, so a repeated receipt creates nothing twice.
+        Acceptance creates one request pending owner approval; declining books nothing.
+        Returns the tool facts and the outcome of a real attempt, if one was made.
+        """
+        from scheduling.domain.conversation import ConversationOutcome
+
+        def nothing(reason: str, outcome: "ConversationOutcome | None" = None,
+                    **extra: Any) -> tuple[dict[str, Any], "ConversationOutcome | None"]:
+            return ({"requested": False, "nothing_changed": True, "reason": reason, **extra},
+                    outcome)
+
+        offer = self._open_offer(receipt)
+        if offer is None or offer.state not in (OfferState.CONFIRMED, OfferState.ACCEPTED):
+            return nothing("no_open_offer")
+        if newer_prompt:
+            return nothing("newer_question_open")
+        zone = ZoneInfo(self._repository.read_policy(receipt.business_id).timezone)
+
+        def already(hold_id: str, start: datetime) -> tuple[dict[str, Any],
+                                                             "ConversationOutcome | None"]:
+            return nothing("already_requested", None, status="pending_owner_approval",
+                           ref=hold_id[:8], when=when_text(start, zone))
+
+        if offer.state == OfferState.ACCEPTED:
+            created = (self._repository.read_appointment(offer.accepted_request_id)
+                       if offer.accepted_request_id is not None else None)
+            if (created is None or created.status != CalendarStatus.PENDING_APPROVAL
+                    or created.hold_expires_at is None or created.hold_expires_at <= now
+                    or offer.expired(now)):
+                return nothing("no_open_offer")
+            return already(created.appointment_id, created.start_at)
+        try:
+            made = self._holds.existing(self._command(offer))
+        except IdempotencyKeyReused:
+            made = None
+        if made is not None:
+            # An earlier delivery created the request but its offer update was lost.
+            self._store.accept(offer, made.hold_id)
+            created = self._repository.read_appointment(made.hold_id)
+            if (created is None or created.status != CalendarStatus.PENDING_APPROVAL
+                    or created.hold_expires_at is None or created.hold_expires_at <= now
+                    or offer.expired(now)):
+                return nothing("no_open_offer")
+            return already(made.hold_id, made.start_at)
+        if offer.expired(now):
+            self._store.supersede(offer)
+            return nothing("offer_expired", ConversationOutcome(
+                "That offer expired after 30 minutes, so nothing changed. Tell me what day "
+                "works and I'll send the current open times."))
+        if not accept:
+            self._store.supersede(offer)
+            return ({"requested": False, "declined": True, "nothing_changed": True,
+                     "original_request_unchanged": True},
+                    ConversationOutcome(
+                        "OK, I won't request that time. Nothing was requested, and your "
+                        "original request is unchanged."))
+        gone = ConversationOutcome(
+            "Sorry, that offer is no longer available, so nothing was requested. Tell me what "
+            "day works and I'll send the current open times.")
+        problem = check_offer(offer, self._repository, self._consent, now)
+        if problem is not None:
+            return nothing({
+                OfferProblem.REQUEST_CHANGED: "original_request_changed",
+                OfferProblem.SLOT_UNAVAILABLE: "time_no_longer_open",
+                OfferProblem.SAME_TIME: "same_time_as_request",
+            }.get(problem, "offer_no_longer_available"), gone)
+        try:
+            hold = self._holds.create(self._command(offer), now)
+        except (SlotConflict, TooManyConflicts) as exc:
+            return nothing("time_no_longer_open", ConversationOutcome(
+                f"Sorry, {when_text(offer.proposed_start, zone)} is no longer open, so "
+                "nothing was requested. Tell me what day works and I'll send the current "
+                "open times."), detail=type(exc).__name__)
+        except (InvalidReplacement, ReplacementPending, IdempotencyKeyReused, InvalidDuration,
+                InvalidPolicy, ValueError):
+            return nothing("offer_no_longer_available", gone)
+        self._store.accept(offer, hold.hold_id)
+        outcome = self._requested(offer, hold, zone)
+        local = hold.start_at.astimezone(zone)
+        original = self._repository.read_appointment(offer.request_id)
+        return ({"requested": True, "status": "pending_owner_approval", "confirmed": False,
+                 "owner_approval_required": True, "ref": hold.hold_id[:8],
+                 "date": local.date().isoformat(), "weekday": local.strftime("%A"),
+                 "time": clock_text(hold.start_at, zone),
+                 "when": when_text(hold.start_at, zone),
+                 **({} if original is None else {
+                     "earlier_request_ref": original.appointment_id[:8],
+                     "earlier_request_stays_pending": True,
+                     "earlier_request_when": when_text(original.start_at, zone)})},
+                outcome)
 
     def _accept(self, offer: Counteroffer, now: datetime,
                 zone: ZoneInfo) -> "ConversationOutcome":

@@ -136,9 +136,28 @@ CLIENT_LOOP_INSTRUCTIONS = (
     "cancelled true, with its ref; when it returns false, say nothing was cancelled and "
     "give the reason plainly (confirmation_expired, visit_changed, no_open_confirmation, "
     "move_request_pending: withdraw the move request first); after dismiss_cancellation, "
-    "say the visit stays booked and nothing was cancelled. You cannot move a visit in "
-    "this reply; never say you did, and tell the client nothing changed if they ask for "
-    "one. After a tool error, say you could not "
+    "say the visit stays booked and nothing was cancelled. To move a visit, find its ref "
+    "with get_my_bookings, ask which visit if unclear (only a confirmed visit can be moved), "
+    "then call get_availability with that ref and the days wanted: the offer stays tied to "
+    "that visit and its current version; list the times as for any offer and say the current "
+    "visit stays confirmed until the owner approves the move. On the client's next message "
+    "accepting one listed time, call request_reschedule with the visit ref and that time's "
+    "date and time; when it returns requested true, say the move request is pending owner "
+    "approval with its date, time, and ref, and that the current visit stays confirmed "
+    "until then; never say it was moved or rescheduled. When it returns requested false, "
+    "say nothing changed, the visit stays as it was, and give the reason (offer_expired, "
+    "visit_changed, move_request_pending, reserved_by_owner, outside_current_hours). If the "
+    "client asks about an offer or counteroffer from the owner, call get_my_counteroffer. "
+    "Call respond_to_counteroffer with accept only when the client's message clearly says yes "
+    "to that offered time, and with decline only when it clearly says no; when unclear, ask "
+    "and call nothing. Accepting returns requested true: say the request is pending owner "
+    "approval, with its date, time, and ref, never confirmed. Declining books nothing: say "
+    "nothing was requested. When it returns requested false, say nothing was requested and "
+    "give the reason (offer_expired, no_open_offer, newer_question_open, "
+    "original_request_changed, time_no_longer_open, already_requested: say it is already "
+    "pending owner approval with its ref). Take only one action per message; if the client "
+    "also asks a question, answer it with a read tool. Never name any other client or why a "
+    "time is reserved. After a tool error, say you could not "
     "check and nothing changed. State "
     "only dates, times, and references that tool results gave, in the same spelling. "
     "Return one plain SMS, no JSON or markdown, GSM-7 characters only, at most 380 "
@@ -159,8 +178,11 @@ CLIENT_LOOP_TOOLS: list[dict[str, Any]] = [
          "to": {"type": "string", "description": "YYYY-MM-DD local date"},
          "time_from": {"type": ["string", "null"], "description": "HH:MM local, or null"},
          "time_to": {"type": ["string", "null"],
-                     "description": "HH:MM local; equal to time_from for one exact time"}},
-         "required": ["from", "to", "time_from", "time_to"],
+                     "description": "HH:MM local; equal to time_from for one exact time"},
+         "ref": {"type": ["string", "null"],
+                 "description": "The ref of the client's own confirmed visit to move, or null "
+                                "for a new visit"}},
+         "required": ["from", "to", "time_from", "time_to", "ref"],
          "additionalProperties": False}},
     {"type": "function", "name": "get_my_bookings", "strict": True,
      "description": "This client's own current confirmed visits and pending requests, "
@@ -178,6 +200,30 @@ CLIENT_LOOP_TOOLS: list[dict[str, Any]] = [
          "date": {"type": "string", "description": "YYYY-MM-DD local date of the offered time"},
          "time": {"type": "string", "description": "HH:MM local 24-hour offered time"}},
          "required": ["date", "time"], "additionalProperties": False}},
+    {"type": "function", "name": "request_reschedule", "strict": True,
+     "description": "Request the one replacement time the client just accepted from an earlier "
+                    "move offer for one of their confirmed visits. Creates a request pending "
+                    "owner approval; the current visit stays confirmed until the owner "
+                    "approves. Only if it is exactly one time in this client's own unexpired "
+                    "move offer for that visit and still open; otherwise nothing changes.",
+     "parameters": {"type": "object", "properties": {
+         "ref": {"type": "string", "description": "The ref of the visit being moved"},
+         "date": {"type": "string", "description": "YYYY-MM-DD local date of the offered time"},
+         "time": {"type": "string", "description": "HH:MM local 24-hour offered time"}},
+         "required": ["ref", "date", "time"], "additionalProperties": False}},
+    {"type": "function", "name": "get_my_counteroffer", "strict": True,
+     "description": "The owner's current time offer to this client, if one is open and "
+                    "unexpired, with the client's own request it counters. Read-only.",
+     "parameters": {"type": "object", "properties": {}, "required": [],
+                    "additionalProperties": False}},
+    {"type": "function", "name": "respond_to_counteroffer", "strict": True,
+     "description": "Accept or decline the owner's open time offer to this client, only when "
+                    "the client's message clearly does so. Takes no time or request. Accepting "
+                    "creates a request pending owner approval, never a confirmed visit; "
+                    "declining books nothing.",
+     "parameters": {"type": "object", "properties": {
+         "decision": {"type": "string", "enum": ["accept", "decline"]}},
+         "required": ["decision"], "additionalProperties": False}},
     {"type": "function", "name": "prepare_cancellation", "strict": True,
      "description": "Ask the client to confirm cancelling one of their own visits or pending "
                     "requests. Cancels nothing; stores a 30-minute confirmation question for "
