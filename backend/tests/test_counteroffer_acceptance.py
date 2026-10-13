@@ -495,7 +495,7 @@ class FailingClientLoop(NeverModel):
         self.availability = tool("get_availability", {  # type: ignore[operator]
             "from": "2026-10-02", "to": "2026-10-02", "time_from": None, "time_to": None})
         for text in ("Open Fri Oct 2: 1) 4:45 AM. The owner approves every request.",
-                     "I booked you for Fri Oct 2."):
+                     "I booked you for Fri Oct 2 at 4:45 AM."):
             self.rejected.append(check(text))  # type: ignore[operator]
         return text
 

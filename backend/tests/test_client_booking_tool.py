@@ -11,7 +11,7 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from test_client_tool_loop import LoopScript, Tools, chat_with, second_client
-from test_conversation_flow import NOW, TOMORROW, ZONE, Harness, ask
+from test_conversation_flow import NOW, TOMORROW, Harness, ask
 from test_sms_processing import Reader
 
 from scheduling.domain.availability import pilot_policy
@@ -362,7 +362,7 @@ def test_the_tool_rejects_malformed_and_extra_arguments() -> None:
 def test_reply_check_keeps_facts_and_leaves_status_wording_to_the_model() -> None:
     ok = {"ok": True, "requested": True, "ref": "abcd1234", "date": "2026-09-30",
           "time": "10:00 AM", "when": "Wed Sep 30 at 10:00 AM"}
-    check = lambda text: check_reply(text, [ok], (), ZONE)
+    check = lambda text: check_reply(text, [ok])
     assert check("Requested Wed Sep 30 at 10:00 AM (ref abcd1234). Pending owner approval.") is None
     # Free wording passes; relative dates are not checked.
     assert check("Booked! Wed Sep 30 at 10:00 AM (ref abcd1234).") is None
@@ -372,7 +372,7 @@ def test_reply_check_keeps_facts_and_leaves_status_wording_to_the_model() -> Non
     assert check("Requested Thu Oct 1 at 10:00 AM (ref abcd1234).") is not None
     assert check("Requested Wed Sep 30 at 10:00 AM (ref ffff9999).") is not None
     none = {"ok": True, "requested": False, "reason": "offer_expired"}
-    assert check_reply("That expired.", [none], (), ZONE) is None
-    assert check_reply("", [none], (), ZONE) is not None
-    assert check_reply("x" * 481, [none], (), ZONE) is not None
-    assert check_reply("Sorry \u2014 that expired.", [none], (), ZONE) is not None  # Not GSM-7.
+    assert check_reply("That expired.", [none]) is None
+    assert check_reply("", [none]) is not None
+    assert check_reply("x" * 481, [none]) is not None
+    assert check_reply("Sorry \u2014 that expired.", [none]) is not None  # Not GSM-7.

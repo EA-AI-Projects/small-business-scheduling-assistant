@@ -324,7 +324,7 @@ def run_case(model: ClientLoopModel, case: Case) -> dict[str, Any]:
         return tools(name, args)
 
     def check(text: str) -> str | None:
-        problem = check_reply(text, tools.results, tools.offer, ZONE)
+        problem = check_reply(text, tools.results)
         if problem is not None:
             rejected.append(problem)
         return problem
@@ -335,8 +335,7 @@ def run_case(model: ClientLoopModel, case: Case) -> dict[str, Any]:
         reply = model.run_client_loop(case.message, NOW, ZONE_NAME, case.history, tool, check)
     except (ValueError, RuntimeError, TypeError, TimeoutError, OSError) as exc:
         error = f"{type(exc).__name__}: {exc}"
-    reply_ok = reply is not None and check_reply(reply, tools.results, tools.offer,
-                                                 ZONE) is None
+    reply_ok = reply is not None and check_reply(reply, tools.results) is None
     # A failed model call is an error, never a tool-choice pass.
     chosen = tool_choice_ok(case.expected, calls) if error is None else None
     return {
