@@ -299,6 +299,9 @@ def test_counteroffer_replies_cannot_claim_a_move_and_must_state_the_offer() -> 
                 ("Your visit has been moved to Thu Oct 1 at 2:00 PM, ref abcd1234, pending "
                  "owner approval.")):
         assert check_reply(bad, done, (), zone) is not None, bad
+    for verb in ("is moved to", "is rescheduled for", "is switched to", "is changed to"):
+        text = f"Your visit {verb} Thu Oct 1 at 2:00 PM, ref abcd1234, pending owner approval."
+        assert check_reply(text, done, (), zone) is not None, verb
     declined = [{"ok": True, "requested": False, "declined": True, "nothing_changed": True}]
     assert check_reply("OK, nothing was requested. Your visit was moved.", declined, (),
                        zone) is not None

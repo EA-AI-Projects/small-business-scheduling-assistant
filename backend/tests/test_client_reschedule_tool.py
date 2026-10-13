@@ -284,6 +284,30 @@ def test_the_reply_may_not_claim_a_move_or_confirmation_the_tools_did_not_make()
                 ):
         assert check_reply(bad, done, (), local) is not None, bad
     assert check_reply("Nothing was moved yet. " + good, done, (), local) is None
+    assert check_reply("Nothing is moved yet. " + good, done, (), local) is None
+    for verb in ("is moved to", "is rescheduled for", "are moved to", "is switched to",
+                 "was shifted to", "is changed to", "has been updated to", "is now moved to",
+                 "was swapped to"):
+        text = f"Your visit {verb} Fri Oct 2 at 10:00 AM.{tail}"
+        assert check_reply(text, done, (), local) is not None, verb
+    for active in ("I switched you to", "I've changed your visit to", "We updated it to"):
+        assert check_reply(f"{active} Fri Oct 2 at 10:00 AM.{tail}", done, (), local) \
+            is not None, active
+    # The same claims fail after a decline or a refusal, and for a counteroffer acceptance.
+    declined = [{"ok": True, "requested": False, "declined": True, "nothing_changed": True}]
+    for verb in ("is moved", "is rescheduled", "was switched", "has been changed to Friday"):
+        assert check_reply(f"OK, nothing was requested. Your visit {verb}.", declined, (),
+                           local) is not None, verb
+    # One clause may say the request is pending and the original stays confirmed.
+    one = ("Requested a move to Fri Oct 2 at 10:00 AM (ref abcd1234), pending owner approval; "
+           "your Thu Oct 1 at 9:00 AM visit stays confirmed until then.")
+    assert check_reply(one, done, (), local) is None
+    assert check_reply(one.replace("; your Thu Oct 1 at 9:00 AM visit", ", and your Thu Oct 1 "
+                                   "at 9:00 AM visit"), done, (), local) is None
+    assert check_reply(one.replace("your Thu Oct 1 at 9:00 AM visit", "your Fri Oct 2 at "
+                                   "10:00 AM visit"), done, (), local) is not None
+    assert check_reply(one.replace("; your Thu Oct 1 at 9:00 AM visit", ", your Fri Oct 2 at "
+                                   "10:00 AM visit"), done, (), local) is not None
     refused = [{"ok": True, "requested": False, "nothing_changed": True,
                 "reason": "visit_changed"}]
     # Rejected for the claim itself: the text says "nothing", so only the claim can fail it.

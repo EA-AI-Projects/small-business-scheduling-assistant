@@ -80,8 +80,11 @@ WRITE_CLAIM = re.compile(
     r"submitted|approved)\b"
     r"|\byou(?:'re|\s+are)\s+(?:all\s+set|booked|scheduled)\b"
     r"|\bis\s+now\s+(?:booked|confirmed|scheduled|cancel+ed)\b"
-    r"|\b(?:was|were|has\s+been|have\s+been|is\s+now|are\s+now|you(?:'re|\s+are))\s+"
-    r"(?:moved|rescheduled)\b"
+    r"|\b(?:is|are|was|were|has\s+been|have\s+been|is\s+now|are\s+now|you(?:'re|\s+are))\s+"
+    r"(?:moved|rescheduled|switched|shifted|swapped)\b"
+    r"|\b(?:is|are|was|were|has\s+been|have\s+been|is\s+now|are\s+now)\s+"
+    r"(?:changed|switched|updated|shifted)\s+(?:to|for)\b"
+    r"|\b(?:i|we)(?:'ve|\s+have)?\s+(?:just\s+)?(?:changed|switched|updated|shifted|swapped)\b"
     # Another client's booking is never disclosed, even as a reason.
     r"|\b(?:another|other)\s+(?:clients?|customers?)\b|\bsomeone\s+else\b"
     r"|\bbooked\s+by\b", re.IGNORECASE)
@@ -93,8 +96,11 @@ CONFIRM_CLAIM = re.compile(
     r"|\b(?:has|have)\s+been\s+(?:booked|cancel+ed|rescheduled|scheduled|approved)\b"
     r"|\byou(?:'re|\s+are)\s+(?:all\s+set|booked|scheduled)\b"
     r"|\bis\s+now\s+(?:booked|confirmed|scheduled|cancel+ed)\b"
-    r"|\b(?:was|were|has\s+been|have\s+been|is\s+now|are\s+now|you(?:'re|\s+are))\s+"
-    r"(?:moved|rescheduled)\b"
+    r"|\b(?:is|are|was|were|has\s+been|have\s+been|is\s+now|are\s+now|you(?:'re|\s+are))\s+"
+    r"(?:moved|rescheduled|switched|shifted|swapped)\b"
+    r"|\b(?:is|are|was|were|has\s+been|have\s+been|is\s+now|are\s+now)\s+"
+    r"(?:changed|switched|updated|shifted)\s+(?:to|for)\b"
+    r"|\b(?:i|we)(?:'ve|\s+have)?\s+(?:just\s+)?(?:changed|switched|updated|shifted|swapped)\b"
     r"|\b(?:another|other)\s+(?:clients?|customers?)\b|\bsomeone\s+else\b"
     r"|\bbooked\s+by\b", re.IGNORECASE)
 NOT_CONFIRMED = re.compile(r"\b(?:not|isn't|aren't|n't)\s+(?:yet\s+)?confirmed\b", re.IGNORECASE)
@@ -112,8 +118,14 @@ STILL_BOOKED = re.compile(r"\b(?:still|stays?|remains?)\s+(?:booked|scheduled|co
 # "Nothing was moved" is a denial, not a claim (#343).
 NOT_MOVED = re.compile(
     r"\b(?:nothing\s+(?:was|is|has\s+been)|not|isn't|wasn't|hasn't|n't|never)\s+(?:yet\s+)?"
-    r"(?:been\s+)?(?:moved|rescheduled)\b", re.IGNORECASE)
-SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+    r"(?:been\s+)?(?:moved|rescheduled|switched|shifted|changed|updated)\b",
+    re.IGNORECASE)
+# Clauses end at sentence ends, semicolons, newlines, and a comma before a word (not before a
+# digit, month, or weekday, so "Thu, Oct 1" and "Oct 1, 9:00 AM" stay whole).
+SENTENCE_END = re.compile(
+    r"(?<=[.!?])\s+|\s*;\s*|\s*\n\s*"
+    r"|,\s+(?!\d|(?:mon|tue|wed|thu|fri|sat|sun|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)"
+    r"[a-z]*\b)", re.IGNORECASE)
 REF_ARG = re.compile(r"[0-9A-Za-z-]{4,40}")
 DECISIONS = ("accept", "decline")
 # A move is replacement-first: the visit being moved may be said to stay confirmed (#343).
@@ -717,7 +729,7 @@ def _without_stays(text: str, original_when: str, new_ref: str) -> tuple[str, bo
                 found = True
                 continue
         kept.append(sentence)
-    return " ".join(kept), found
+    return " ; ".join(kept), found
 
 
 def _counteroffer_problem(text: str, results: list[dict[str, Any]]) -> str | None:
