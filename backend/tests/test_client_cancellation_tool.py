@@ -82,11 +82,13 @@ def test_declining_closes_the_question_and_the_visit_stays_booked() -> None:
     kept = chat.text("no, keep it")
     assert model.rejected[-1] is None and not kept.committed
     assert results[0]["dismissed"] is True and results[0]["still_booked"] is True
+    assert results[0]["cancelled"] is False and results[0]["cancellation_question_open"] is False
     assert state(chat) is None and chat.status(visit) == CalendarStatus.CONFIRMED
     model.plan = lambda tools: (results.append(tools("confirm_cancellation", {})),
                                 "Nothing was cancelled.")[1]
     chat.text("yes")  # The closed question cannot be confirmed later.
     assert results[-1]["reason"] == "no_open_confirmation"
+    assert results[-1]["cancelled"] is False and results[-1]["cancellation_question_open"] is False
     assert chat.status(visit) == CalendarStatus.CONFIRMED
 
 
@@ -418,4 +420,6 @@ def test_the_client_loop_instructions_leave_status_wording_to_the_model() -> Non
     from scheduling.adapters.openai_messages import CLIENT_LOOP_INSTRUCTIONS as text
     assert "both asks to cancel a visit and asks a question" in text
     assert "call prepare_cancellation for that visit and answer the question" in text
-    assert "word the status yourself" in text and "never invite a YES" in text
+    assert "word the status yourself" in text
+    assert "only when prepare_cancellation returned prepared true in this message or a " in text
+    assert "earlier message is still open (cancellation_question_open true" in text
