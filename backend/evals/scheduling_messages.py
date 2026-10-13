@@ -147,6 +147,9 @@ CASES = (
          lambda proposal: clarifies(proposal) or (
              proposal["intent"] == "cancel" and no_reference(proposal)
              and proposal["target_date"] is None)),
+    Case("cancel-next-appointment", "client", "Cancel my next appointment", TWO_REFS,
+         lambda proposal: proposal["intent"] == "cancel" and no_reference(proposal)
+         and proposal["target_date"] is None),
     Case("cant-make-thursday", "client", "I can't make Thursday", TWO_REFS,
          lambda proposal: proposal["intent"] == "cancel" and no_reference(proposal)
          and proposal["target_date"] == "2026-10-01"),
@@ -154,6 +157,8 @@ CASES = (
     # answers from the client's own visits. Cases 1-3 are the reported screenshot texts.
     Case("screenshot-1-bookings-this-week", "client", "do I have any bookings for this week?",
          TWO_REFS, this_week),
+    Case("next-appointment", "client", "When is my next appointment?", TWO_REFS,
+         calendar(None, view="list")),
     Case("screenshot-2-confirmed-already", "client",
          "Do I have any confirmed bookings already?  I'm trying to find out when the "
          "cleaners are coming", TWO_REFS,

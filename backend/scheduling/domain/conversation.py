@@ -493,7 +493,12 @@ class ConversationService:
                 view,
                 *(span if span is not None else (date.max, date.min)),
                 statuses if proposal.intent == "calendar_question" else BOTH,
-                ambiguous_booking=proposal.intent == "clarify_booking")
+                ambiguous_booking=proposal.intent == "clarify_booking",
+                next_only=(proposal.intent == "calendar_question" and view == View.LIST
+                    and bool(re.search(r"\bnext\s+(?:confirmed\s+)?(?:appointment|visit)\b",
+                                       receipt.body or "", re.IGNORECASE))
+                    and not bool(re.search(
+                        r"\bpending\b", receipt.body or "", re.IGNORECASE))))
             try:
                 outcome = self._client_calendar(receipt, question, prompt, targets, policy, now)
             except (OSError, ValueError, TypeError, KeyError, RuntimeError):
@@ -1118,11 +1123,10 @@ class ConversationService:
         zone = ZoneInfo(policy.timezone)
         when = when_text(start, zone)
         if original is not None:
-            text = (f"Requested a move to {when} (ref {hold_id[:8]}). It's pending owner "
-                    f"approval. Your {when_text(original.start_at, zone)} visit "
-                    f"(ref {original.appointment_id[:8]}) remains confirmed until then.")
+            text = (f"Requested a move to {when}. It's pending owner approval. "
+                    f"Your {when_text(original.start_at, zone)} visit remains confirmed until then.")
         else:
-            text = (f"Requested {when} (ref {hold_id[:8]}). It's pending owner approval, "
+            text = (f"Requested {when}. It's pending owner approval, "
                     "not confirmed yet.")
         facts = [ConversationService._client_fact(start, zone, "pending owner approval",
                                                    hold_id[:8])]
@@ -1161,8 +1165,8 @@ class ConversationService:
                                      reason="stale_or_uncertain")
         what = "visit" if target.status == CalendarStatus.CONFIRMED else "request"
         outcome = ConversationOutcome(
-            f"Cancelled your {when_text(target.start_at, zone)} {what} "
-            f"(ref {target.appointment_id[:8]}).", True, result.appointment.appointment_id,
+            f"Cancelled your {when_text(target.start_at, zone)} {what}.",
+            True, result.appointment.appointment_id,
             result.client_outbox_id)
         return self._with_result(outcome, "cancelled", "cancelled",
                                  (self._client_fact(result.appointment.start_at, zone,
@@ -1690,6 +1694,21 @@ class ConversationService:
             named = self._target(receipt.body or "", proposal.request_reference, targets)
             if named is not None and named.status in statuses:
                 return named, None
+        if (verb == "cancel" and proposal.target_date is None
+                and re.search(r"\bnext\s+(?:confirmed\s+)?(?:appointment|visit)\b",
+                              receipt.body or "", re.IGNORECASE)):
+            confirmed = tuple(target for target in candidates
+                              if target.status == CalendarStatus.CONFIRMED)
+            if confirmed:
+                return min(confirmed, key=lambda target: target.start_at), None
+            pending = tuple(target for target in candidates
+                            if target.status == CalendarStatus.PENDING_APPROVAL)
+            if pending:
+                next_request = min(pending, key=lambda target: target.start_at)
+                return None, ("I don't see an upcoming confirmed visit to cancel. "
+                              f"Your request for {when_text(next_request.start_at, zone)} "
+                              "is still awaiting approval.")
+            return None, "I don't see an upcoming confirmed visit to cancel."
         day = None
         if proposal.target_date:
             try:

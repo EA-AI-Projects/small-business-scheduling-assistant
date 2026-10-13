@@ -50,6 +50,7 @@ class ClientQuestion:
     last: date | None
     statuses: frozenset[CalendarStatus]
     ambiguous_booking: bool = False  # Check visits, or request a new visit?
+    next_only: bool = False  # The client asked for their next confirmed visit.
 
 
 # Write guards. A calendar answer offers nothing to pick or confirm, so these replies
@@ -94,9 +95,8 @@ def _line(visit: Appointment, zone: ZoneInfo) -> str:
     zone_name = visit.start_at.astimezone(zone).strftime("%Z")
     when = f"{when_text(visit.start_at, zone)}-{clock_text(visit.end_at, zone)} {zone_name}"
     if visit.status == CONFIRMED:
-        return f"{when}, confirmed (ref {visit.appointment_id[:8]})"
-    return (f"{when}, pending owner approval, not confirmed yet "
-            f"(ref {visit.appointment_id[:8]})")
+        return f"{when}, confirmed"
+    return f"{when}, pending owner approval, not confirmed yet"
 
 
 def booking_choice(question: ClientQuestion, visit: str = "visit") -> str:
@@ -133,6 +133,24 @@ def answer(question: ClientQuestion, visits: tuple[Appointment, ...], now: datet
     else:
         span = "coming up"
         shown = visits
+    if question.next_only:
+        confirmed = tuple(visit for visit in shown if visit.status == CONFIRMED)
+        pending = tuple(visit for visit in shown if visit.status == PENDING)
+        if not confirmed:
+            text = "You have no confirmed visits coming up."
+            if pending:
+                next_request = min(pending, key=lambda visit: visit.start_at)
+                text += (f" Your request for {when_text(next_request.start_at, zone)} "
+                         "is still awaiting approval.")
+            return text
+        next_visit = min(confirmed, key=lambda visit: visit.start_at)
+        text = f"Your next confirmed visit is {when_text(next_visit.start_at, zone)}."
+        earlier = tuple(visit for visit in pending if visit.start_at < next_visit.start_at)
+        if earlier:
+            next_request = min(earlier, key=lambda visit: visit.start_at)
+            text += (f" Your request for {when_text(next_request.start_at, zone)} "
+                     "is still awaiting approval.")
+        return text
     wanted = question.statuses
     matching = tuple(visit for visit in shown if visit.status in wanted)
     others = tuple(visit for visit in shown if visit.status not in wanted)
@@ -167,7 +185,7 @@ def compact_list(question: ClientQuestion, visits: tuple[Appointment, ...],
     """List every matching current visit when the detailed answer exceeds one SMS.
 
     The conversation service has already limited this client to eight current
-    visits. The compact form drops end times and references, not dates, start
+    visits. The compact form drops end times, not dates, start
     times, or status. A pending request is explicitly not confirmed.
     """
     today = now.astimezone(zone).date()

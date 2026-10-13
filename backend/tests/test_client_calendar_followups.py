@@ -37,8 +37,8 @@ def approve(chat: Harness, appointment_id: str) -> None:
 def test_the_reported_three_message_sequence_is_answered_from_the_calendar() -> None:
     """The texts from the #241 screenshot. The model reads each one; a follow-up leaves
     unchanged fields null, so the backend keeps the conversation's range."""
-    chat, confirmed, pending = week_with_visits()
-    later = chat.hold(NEXT_TUESDAY, "tue", confirm=True)
+    chat, _, _ = week_with_visits()
+    chat.hold(NEXT_TUESDAY, "tue", confirm=True)
     before = chat.calendar()
     week = asked(chat, "do I have any bookings for this week?", cal(*THIS_WEEK))
     assert week.text.startswith("You have 1 confirmed visit, 1 pending request from Tue Sep 29 "
@@ -50,29 +50,28 @@ def test_the_reported_three_message_sequence_is_answered_from_the_calendar() -> 
         "2026-09-28 to 2026-10-04; statuses: confirmed, pending; view: list")
     assert coming.text == (
         "You have 1 confirmed visit from Tue Sep 29 to Sun Oct 4:\n"
-        f"- Thu Oct 1 at 9:00 AM-11:00 AM PDT, confirmed (ref {confirmed[:8]})\n"
+        "- Thu Oct 1 at 9:00 AM-11:00 AM PDT, confirmed\n"
         "You also have 1 pending request from Tue Sep 29 to Sun Oct 4.\n"
-        f"- Fri Oct 2 at 9:00 AM-11:00 AM PDT, pending owner approval, not confirmed yet "
-        f"(ref {pending[:8]})")
+        "- Fri Oct 2 at 9:00 AM-11:00 AM PDT, pending owner approval, not confirmed yet")
     summary = asked(chat, "I want a summary of my itinerary",
                     cal(statuses=("confirmed", "pending"), view="list"))
     assert summary.text.startswith("You have 1 confirmed visit, 1 pending request from Tue "
                                    "Sep 29 to Sun Oct 4:")
-    assert later[:8] not in summary.text
+    assert "Tue Oct 6" not in summary.text
     assert chat.calendar() == before
 
 
 def test_follow_ups_keep_what_they_do_not_change() -> None:
-    chat, confirmed, _ = week_with_visits()
-    later = chat.hold(NEXT_TUESDAY, "tue", confirm=True)
+    chat, _, _ = week_with_visits()
+    chat.hold(NEXT_TUESDAY, "tue", confirm=True)
     asked(chat, "Do I have bookings this week?", cal(*THIS_WEEK))
     only = asked(chat, "Just confirmed ones", cal(statuses=("confirmed",)))
     assert only.text.startswith("You have 1 confirmed visit from Tue Sep 29 to Sun Oct 4:")
-    assert confirmed[:8] in only.text
+    assert "Thu Oct 1 at 9:00 AM-11:00 AM PDT, confirmed" in only.text
     following = asked(chat, "¿Y la próxima semana?", cal(*NEXT_WEEK))  # Keeps "confirmed".
     assert following.text == (
         "You have 1 confirmed visit from Mon Oct 5 to Sun Oct 11:\n"
-        f"- Tue Oct 6 at 9:00 AM-11:00 AM PDT, confirmed (ref {later[:8]})")
+        "- Tue Oct 6 at 9:00 AM-11:00 AM PDT, confirmed")
     count = asked(chat, "How many?", cal(view="count"))
     assert count.text == "You have 1 confirmed visit from Mon Oct 5 to Sun Oct 11."
     assert chat.model.contexts[-1].calendar_answer == (
@@ -90,11 +89,11 @@ def test_status_follow_ups_reach_the_model_and_are_not_taken_for_a_yes() -> None
 
 def test_all_upcoming_widens_a_week_conversation() -> None:
     chat, _, _ = week_with_visits()
-    later = chat.hold(NEXT_TUESDAY, "tue", confirm=True)
+    chat.hold(NEXT_TUESDAY, "tue", confirm=True)
     asked(chat, "Do I have bookings this week?", cal(*THIS_WEEK))
     reply = asked(chat, "Show me all my upcoming visits", cal(scope="all_upcoming"))
     assert reply.text.startswith("You have 2 confirmed visits, 1 pending request coming up:")
-    assert later[:8] in reply.text
+    assert "Tue Oct 6 at 9:00 AM-11:00 AM PDT, confirmed" in reply.text
 
 
 def test_a_follow_up_rereads_the_calendar_after_a_change() -> None:

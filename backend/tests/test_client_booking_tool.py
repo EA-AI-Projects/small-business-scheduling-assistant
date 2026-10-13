@@ -225,7 +225,7 @@ def test_a_fabricated_time_after_a_request_is_replaced_by_the_pending_notice() -
     reply = chat.text("10 works")
     assert model.rejected[-1] is not None
     assert reply.committed and len(chat.calendar()) == 1
-    assert reply.text.startswith("Requested Wed Sep 30 at 10:00 AM (ref ")
+    assert reply.text.startswith("Requested Wed Sep 30 at 10:00 AM.")
     assert "pending owner approval" in reply.text
 
 

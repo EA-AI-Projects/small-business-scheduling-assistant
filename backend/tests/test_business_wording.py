@@ -121,9 +121,8 @@ def person() -> ClientProfile:
 @pytest.mark.parametrize(("template", "recipient", "expected"), [
     ("hold-request", "owner", "New Dog grooming visit request from Avery Example: "),
     ("hold-pending", "client", "Your Dog grooming visit request for Thu Oct 1 at 9:00 AM"),
-    ("approve", "client", ("Dog grooming visit confirmed: Thu Oct 1 at 9:00 AM. Ref visit-12. "
-                           f"Reply to the {NAME} number for help.")),
-    ("decline", "client", "Dog grooming visit declined: Thu Oct 1 at 9:00 AM. Ref visit-12. "),
+    ("approve", "client", "Dog grooming visit confirmed: Thu Oct 1 at 9:00 AM."),
+    ("decline", "client", "Dog grooming visit declined: Thu Oct 1 at 9:00 AM."),
 ])
 def test_notifications_name_the_saved_service(template: str, recipient: str,
                                               expected: str) -> None:
@@ -136,9 +135,25 @@ def test_notifications_name_the_saved_service(template: str, recipient: str,
 def test_notifications_without_a_saved_profile_stay_neutral() -> None:
     body = render_notification("approve", "client", appointment(), person(), ZONE)
     assert body.startswith("Visit confirmed: ")
-    assert body.endswith("Reply to the business number for help.")
+    assert body == "Visit confirmed: Thu Oct 1 at 9:00 AM."
     assert "cleaning" not in render_notification(
         "hold-pending", "client", appointment(), person(), ZONE).lower()
+
+
+def test_cancellation_notices_identify_the_actor_without_routine_reference_or_help() -> None:
+    visit = appointment()
+    owner = render_notification("cancel", "owner", visit, person(), ZONE,
+                                business=PROFILE)
+    client = render_notification("cancel", "client", visit, person(), ZONE,
+                                 business=PROFILE)
+    owner_cancelled = render_notification("owner-cancel", "client", visit, person(), ZONE,
+                                          business=PROFILE)
+    assert owner == "Avery Example cancelled the Dog grooming visit on Thu Oct 1 at 9:00 AM."
+    assert client == "Dog grooming visit cancelled: Thu Oct 1 at 9:00 AM."
+    assert owner_cancelled == (
+        f"Your Dog grooming visit on Thu Oct 1 at 9:00 AM was cancelled by {NAME}.")
+    assert all("ref" not in text.lower() and "for help" not in text.lower()
+               for text in (owner, client, owner_cancelled))
 
 
 def test_invitation_text_names_the_saved_business_and_service() -> None:

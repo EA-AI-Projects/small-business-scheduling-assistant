@@ -413,7 +413,8 @@ class LifecycleService:
                 template = EXPIRED_REPLACEMENT_WAITING_TEMPLATE
             return (OutboxIntent(f"{audit_id}#client", before.appointment_id, "client", template),)
         if command.operation == Action.CANCEL and command.actor_role == ActorRole.OWNER:
-            return (OutboxIntent(f"{audit_id}#client", before.appointment_id, "client", template),)
+            return (OutboxIntent(f"{audit_id}#client", before.appointment_id, "client",
+                                 "owner-cancel"),)
         if result.replaced_appointment is not None:
             template = ("replacement-approved" if countered is None
                         else COUNTEROFFER_APPROVED_TEMPLATE)
