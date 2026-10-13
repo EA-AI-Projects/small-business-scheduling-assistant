@@ -248,10 +248,46 @@ def test_a_refused_booking_whose_loop_then_fails_does_not_try_again() -> None:
         accept(tools)
         raise TimeoutError("budget")
 
+    attempts: list[datetime] = []
+    original = chat.service._holds.create
+    chat.service._holds.create = lambda command, now: (  # type: ignore[method-assign]
+        attempts.append(command.start_at), original(command, now))[1]
     model.plan = plan
     reply = chat.text("10 works")
     assert not reply.committed and "nothing was booked" in reply.text
     assert len(chat.calendar()) == 1
+    assert len(attempts) == 1 and len(model.loops) == 2  # One booking attempt, no retry.
+
+
+def test_a_failed_loop_on_an_open_offer_runs_only_one_loop_for_the_message() -> None:
+    chat, model = chat_with(offer_plan)
+    offered(chat, model)
+    chat.model.replies["hmm which is better"] = ask("availability", TOMORROW)
+    before = len(model.loops)
+
+    def plan(tools: Tools) -> str:
+        raise TimeoutError("budget")
+
+    model.plan = plan
+    reply = chat.text("hmm which is better")
+    assert len(model.loops) - before == 1  # Not a second loop after the intent call.
+    assert not reply.committed and chat.calendar() == ()
+
+
+def test_a_length_change_inside_the_hold_is_not_reported_as_reserved_by_owner() -> None:
+    from scheduling.domain.holds import ServiceDurationChanged
+    chat, model = chat_with(offer_plan)
+    offered(chat, model)
+    results: list[dict[str, Any]] = []
+
+    def changed(_command: Any, _now: Any) -> Any:
+        raise ServiceDurationChanged("changed")
+
+    chat.service._holds.create = changed  # type: ignore[method-assign]
+    model.plan = lambda tools: (results.append(accept(tools)),
+                                "The visit length changed, so nothing was booked.")[1]
+    chat.text("10 works")
+    assert results[0]["reason"] == "visit_length_changed"
 
 
 def test_a_service_question_and_a_booking_request_in_one_text() -> None:
@@ -324,6 +360,10 @@ def test_reply_check_requires_pending_wording_and_the_reference() -> None:
     assert check("Requested Wed Sep 30 at 10:00 AM (ref abcd1234). Pending approval, "
                  "not confirmed yet.") is None
     assert check("Your visit Wed Sep 30 at 10:00 AM (ref abcd1234) is confirmed. Pending "
+                 "owner approval.") is not None
+    assert check("Booked! Wed Sep 30 at 10:00 AM (ref abcd1234). Pending owner approval.") \
+        is not None
+    assert check("Your visit is booked for Wed Sep 30 at 10:00 AM (ref abcd1234), pending "
                  "owner approval.") is not None
     assert check("Requested Wed Sep 30 at 10:00 AM (ref abcd1234).") is not None
     assert check("Pending owner approval for Wed Sep 30 at 10:00 AM.") is not None

@@ -385,12 +385,14 @@ class ConversationService:
                     self._forget(prompt)
                 return accepted
         exact = proposal is not None
+        loop_tried = False  # One client loop per receipt: it must fit the worker timeout.
         if (proposal is None and receipt.role == SenderRole.CLIENT and prompt is not None
                 and prompt.kind == PromptKind.OFFER and not prompt.expired(now)
                 and prompt.client_id == receipt.client_id and prompt.appointment_id is None
                 and isinstance(self._interpreter, ClientToolLoop)):
             # A reply while this client's own new-booking offer is open: the model reads it
             # in any wording and may call request_booking for exactly one offered time.
+            loop_tried = True
             answered_by_loop = self._client_tool_loop(receipt, prompt, targets, policy, now)
             if answered_by_loop is not None:
                 return answered_by_loop
@@ -416,8 +418,8 @@ class ConversationService:
         # "which day" question for a known visit carries into its answer.
         moving = (prompt if prompt is not None and prompt.kind == PromptKind.RESCHEDULE_DAY
                   and not prompt.expired(now) else None)
-        if (not exact and receipt.role == SenderRole.CLIENT and moving is None
-                and proposal.intent in CLIENT_LOOP_INTENTS
+        if (not exact and not loop_tried and receipt.role == SenderRole.CLIENT
+                and moving is None and proposal.intent in CLIENT_LOOP_INTENTS
                 and isinstance(self._interpreter, ClientToolLoop)):
             answered_by_loop = self._client_tool_loop(receipt, prompt, targets, policy, now)
             if answered_by_loop is not None:
@@ -1046,14 +1048,24 @@ class ConversationService:
                 service_duration_minutes=minutes), now)
         except (SlotConflict, InvalidReplacement, ReplacementPending, TooManyConflicts,
                 IdempotencyKeyReused, InvalidDuration, ServiceDurationChanged,
-                ServiceNotConfigured, ValueError):
+                ServiceNotConfigured, ValueError) as exc:
             self._forget(prompt)
+            if isinstance(exc, ServiceDurationChanged):
+                outcome = ConversationOutcome(
+                    "The visit length changed after I sent those times, so nothing was "
+                    "booked. Tell me what day works and I'll send the current open times.")
+                return self._with_result(outcome, "request_failed", "none",
+                                         (self._client_fact(start, zone, "unavailable"),),
+                                         "visit_length_changed")
             outcome = ConversationOutcome(
                 f"Sorry, {when_text(start, zone)} is no longer open, so nothing was booked. "
                 "Tell me what day works and I'll send the current open times.")
-            return self._with_result(outcome, "request_failed", "none",
-                                     (self._client_fact(start, zone, "unavailable"),),
-                                     "slot_taken")
+            # Only a calendar conflict is reported as the time being taken.
+            return self._with_result(
+                outcome, "request_failed", "none",
+                (self._client_fact(start, zone, "unavailable"),),
+                "slot_taken" if isinstance(exc, (SlotConflict, TooManyConflicts))
+                else "not_requested")
         self._forget(prompt)
         return self._requested(receipt, original, start, result.hold_id, policy)
 
@@ -1419,7 +1431,8 @@ class ConversationService:
             # Calendar time is only ever "reserved by owner": it may be another client's
             # visit or a private block, and neither is disclosed.
             why = "reserved_by_owner" if open_by_policy else "outside_current_hours"
-        return nothing(why or "not_requested", "closed")
+        refused, _, state = nothing(why or "not_requested", "closed")
+        return refused, outcome, state  # The real refusal, so a loop failure cannot retry it.
 
     @staticmethod
     def _active_target(receipt: InboundReceipt, appointment_id: str | None,

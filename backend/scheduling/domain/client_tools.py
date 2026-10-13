@@ -77,6 +77,8 @@ CONFIRM_CLAIM = re.compile(
     r"|\b(?:another|other)\s+(?:clients?|customers?)\b|\bsomeone\s+else\b"
     r"|\bbooked\s+by\b", re.IGNORECASE)
 NOT_CONFIRMED = re.compile(r"\b(?:not|isn't|aren't|n't)\s+(?:yet\s+)?confirmed\b", re.IGNORECASE)
+NOT_BOOKED = re.compile(r"\b(?:nothing\s+(?:was|is|has\s+been)|not|isn't|wasn't|n't)\s+"
+                        r"(?:yet\s+)?booked\b", re.IGNORECASE)
 READ_ERRORS = (OSError, ValueError, TypeError, KeyError, RuntimeError)
 
 
@@ -487,8 +489,9 @@ def check_reply(text: str, results: list[dict[str, Any]],
     requested = [result for result in outcomes if result["requested"] is True]
     if requested:
         # A pending request may be called a request, never a confirmed booking.
+        unclaimed = NOT_BOOKED.sub("", NOT_CONFIRMED.sub("", text))
         if (CONFIRM_CLAIM.search(text)
-                or re.search(r"\bconfirmed\b", NOT_CONFIRMED.sub("", text), re.IGNORECASE)):
+                or re.search(r"\b(?:confirmed|booked)\b", unclaimed, re.IGNORECASE)):
             return "A booking request is pending owner approval; do not call it confirmed."
         lowered = text.lower()
         if "pending" not in lowered or "approv" not in lowered:
