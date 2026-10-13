@@ -124,8 +124,21 @@ CLIENT_LOOP_INSTRUCTIONS = (
     "(offer_expired: the offer expired; visit_length_changed: the visit length changed; "
     "reserved_by_owner or outside_current_hours: that time is no longer open), and offer to "
     "send current times; for an unclear or unmatched time, ask which offered time they "
-    "mean. You cannot cancel or move a visit in this reply; never say you did, and tell "
-    "the client nothing changed if they ask for one. After a tool error, say you could not "
+    "mean. To cancel, find the client's own visit with get_my_bookings if you do not "
+    "already know its ref, then call prepare_cancellation with that ref. If the client has "
+    "not said which visit, or more than one could match, ask which one instead. "
+    "prepare_cancellation cancels nothing: ask the client to reply YES to cancel, naming "
+    "the visit's date and time, and say the question lasts 30 minutes. Call "
+    "confirm_cancellation only when the client's message answers that earlier question "
+    "with a clear yes; call dismiss_cancellation when it answers no or says to keep the "
+    "visit. For anything unclear, call neither: ask again. Never prepare and confirm in "
+    "one message. Say a visit is cancelled only when confirm_cancellation returned "
+    "cancelled true, with its ref; when it returns false, say nothing was cancelled and "
+    "give the reason plainly (confirmation_expired, visit_changed, no_open_confirmation, "
+    "move_request_pending: withdraw the move request first); after dismiss_cancellation, "
+    "say the visit stays booked and nothing was cancelled. You cannot move a visit in "
+    "this reply; never say you did, and tell the client nothing changed if they ask for "
+    "one. After a tool error, say you could not "
     "check and nothing changed. State "
     "only dates, times, and references that tool results gave, in the same spelling. "
     "Return one plain SMS, no JSON or markdown, GSM-7 characters only, at most 380 "
@@ -165,6 +178,24 @@ CLIENT_LOOP_TOOLS: list[dict[str, Any]] = [
          "date": {"type": "string", "description": "YYYY-MM-DD local date of the offered time"},
          "time": {"type": "string", "description": "HH:MM local 24-hour offered time"}},
          "required": ["date", "time"], "additionalProperties": False}},
+    {"type": "function", "name": "prepare_cancellation", "strict": True,
+     "description": "Ask the client to confirm cancelling one of their own visits or pending "
+                    "requests. Cancels nothing; stores a 30-minute confirmation question for "
+                    "that visit. Use the ref from get_my_bookings.",
+     "parameters": {"type": "object", "properties": {
+         "ref": {"type": "string", "description": "The visit's ref from get_my_bookings"}},
+         "required": ["ref"], "additionalProperties": False}},
+    {"type": "function", "name": "confirm_cancellation", "strict": True,
+     "description": "Cancel the visit named in this client's open cancellation question, "
+                    "only when the client's message clearly says yes to it. Takes no visit; "
+                    "cancels nothing if the question expired or the visit changed.",
+     "parameters": {"type": "object", "properties": {}, "required": [],
+                    "additionalProperties": False}},
+    {"type": "function", "name": "dismiss_cancellation", "strict": True,
+     "description": "Close this client's open cancellation question when they say no or "
+                    "want to keep the visit. Cancels nothing.",
+     "parameters": {"type": "object", "properties": {}, "required": [],
+                    "additionalProperties": False}},
 ]
 INSTRUCTIONS = (
     "Interpret one text message sent to a small appointment business. The Business and Service "

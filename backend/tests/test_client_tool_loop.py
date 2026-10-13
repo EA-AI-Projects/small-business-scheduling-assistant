@@ -385,14 +385,16 @@ def test_an_old_open_offer_is_closed_by_a_loop_answer_that_offers_nothing() -> N
     assert chat.calendar() == ()
 
 
-def test_booking_cancel_and_reschedule_requests_keep_their_existing_paths() -> None:
+def test_reschedule_and_exact_commands_keep_their_existing_paths() -> None:
     chat, model = chat_with(lambda _tools: "should not run")
     confirmed = chat.hold(THURSDAY, "keep", confirm=True)
-    chat.model.replies["cancel my visit"] = ask("cancel", target_date="2026-10-01")
-    prompt = chat.text("cancel my visit")
-    assert "Reply YES" in prompt.text or "cancel" in prompt.text.lower()
-    assert model.loops == []
+    chat.model.replies["move my visit"] = ask("reschedule", target_date="2026-10-01")
+    prompt = chat.text("move my visit")
+    assert "day" in prompt.text.lower()
+    assert model.loops == []  # Moving is #343; cancelling now uses the loop (#342).
     assert chat.status(confirmed) == CalendarStatus.CONFIRMED
+    done = chat.text(f"CANCEL {confirmed[:8]}")  # An exact command never reaches the model.
+    assert done.committed and model.loops == []
 
 
 def test_replay_of_one_receipt_runs_the_loop_and_stores_the_reply_once() -> None:
@@ -471,7 +473,10 @@ def test_openai_client_loop_bounds_tools_and_rewrites_once_when_the_check_fails(
     assert names == ["get_business_info", "get_business_info", "get_my_bookings"]
     assert {tool["name"] for tool in CLIENT_LOOP_TOOLS} == {
         "get_business_info", "get_availability", "get_my_bookings",
-        "request_booking"}  # The one write; the backend decides whether it books (#341).
+        "request_booking", "prepare_cancellation", "confirm_cancellation",
+        "dismiss_cancellation"}  # The backend decides whether each writes (#341, #342).
+    from scheduling.domain.client_tools import TOOL_NAMES
+    assert {tool["name"] for tool in CLIENT_LOOP_TOOLS} == set(TOOL_NAMES)
     assert all(payload["store"] is False for payload in payloads)
     assert "Local time: 10:00" in payloads[0]["input"][0]["content"]
     assert CLIENT_LOOP_BUDGET_SECONDS + 8 < 60  # Classification call plus loop fit the worker.
