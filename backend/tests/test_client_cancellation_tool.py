@@ -24,7 +24,7 @@ from scheduling.domain.sms_ingress import InboundReceipt, Keyword, SenderRole
 from scheduling.domain.sms_processing import ReceiptProcessor
 
 SENDER = "+14155550101"
-ASK_TEXT = "Cancel your Thu Oct 1 at 9:00 AM visit? Reply YES to cancel; this lasts 30 minutes."
+ASK_TEXT = "Cancel your Thu Oct 1 at 9:00 AM visit? Reply YES to confirm."
 
 
 def state(chat: Harness) -> Any:
@@ -47,7 +47,7 @@ def asked(plan_text: str = ASK_TEXT) -> tuple[Harness, LoopScript, str]:
 
 
 def cancelled_text(visit: str) -> str:
-    return f"Cancelled your Thu Oct 1 at 9:00 AM visit (ref {visit[:8]})."
+    return "Cancelled your Thu Oct 1 at 9:00 AM visit."
 
 
 def test_prepare_binds_one_visit_and_version_and_a_later_yes_cancels_it_once() -> None:

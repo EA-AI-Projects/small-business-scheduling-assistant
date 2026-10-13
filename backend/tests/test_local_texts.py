@@ -132,7 +132,7 @@ def test_text_booking_appears_in_owner_api_and_owner_app_approval_notifies_clien
     confirmed = [message for message in state if message["kind"] == "notification"
                  and message["party"] == "client-1" and "confirmed" in message["body"]]
     assert len(confirmed) == 1
-    assert request["appointment_id"][:8] in confirmed[0]["body"]
+    assert confirmed[0]["body"] == "Standard cleaning visit confirmed: Mon Oct 5 at 9:00 AM."
 
 
 def test_owner_text_approval_updates_the_owner_api_calendar() -> None:

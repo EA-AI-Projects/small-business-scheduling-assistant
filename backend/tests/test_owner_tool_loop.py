@@ -83,6 +83,23 @@ def receipt(body: str, provider_id: str = "SM-owner-1") -> InboundReceipt:
                           SenderRole.OWNER, None, Keyword.OTHER, True)
 
 
+def test_owner_human_help_reads_saved_contact_without_exposing_another_business() -> None:
+    def decide(tool: Callable[[str, dict[str, Any]], dict[str, Any]]) -> str:
+        assert tool("get_business_info", {"business_id": "other"}) == {
+            "ok": False, "error": "invalid_arguments"}
+        info = tool("get_business_info", {})
+        assert info == {"ok": True, "configured": True,
+                        "business_name": "Example Cleaning Co.",
+                        "support_contact": "support@example.invalid"}
+        return f"Please contact {info['business_name']} at {info['support_contact']}."
+
+    repository, _, service = world(decide)
+    repository.set_business_profile_for_test("pilot")
+    result = service.handle(receipt("I need a person"))
+    assert result.text == "Please contact Example Cleaning Co. at support@example.invalid."
+    assert not result.committed
+
+
 def test_approve_and_hedged_reply_use_model_choice_without_allowlist() -> None:
     for body in ("Approve", "Yes, but please tell me when it is done"):
         def decide(tool: Callable[[str, dict[str, Any]], dict[str, Any]]) -> str:

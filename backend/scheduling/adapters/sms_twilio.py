@@ -408,11 +408,6 @@ COUNTEROFFER_TEMPLATES = frozenset({
     COUNTEROFFER_DECLINED_TEMPLATE})
 
 
-def _help_tail(business: BusinessProfile | None) -> str:
-    who = business.display_name if business is not None else "business"
-    return f"Reply to the {who} number for help."
-
-
 def _counteroffer_text(template: str, recipient: str, appointment: Appointment,
                        profile: ClientProfile | None, timezone: ZoneInfo,
                        original: Appointment | None, now: datetime | None,
@@ -423,28 +418,25 @@ def _counteroffer_text(template: str, recipient: str, appointment: Appointment,
     name = profile.name if profile else "client"
     earlier = (_when(original.start_at.astimezone(timezone)) if original is not None
                else "the earlier time")
-    earlier_ref = f" (ref {original.appointment_id[:8]})" if original is not None else ""
     if template == COUNTEROFFER_REQUEST_TEMPLATE:
         if recipient != "owner":
             raise PermanentDeliveryFailure("TEMPLATE_RECIPIENT_MISMATCH")
         return (f"{name} accepted your counteroffer: new request for {when}, "
                 f"{appointment.duration_minutes} min. Ref {reference}. It replaces their "
-                f"request for {earlier}{earlier_ref}, which stays pending until you decide. "
+                f"request for {earlier}, which stays pending until you decide. "
                 "Approving this one resolves both. Review before approval.")
     if template == COUNTEROFFER_APPROVED_TEMPLATE:
         if recipient == "owner":
-            return (f"Accepted counteroffer approved: {name}, {when}. Ref {reference}. "
-                    f"Both requests are resolved: their request for {earlier}{earlier_ref} "
+            return (f"Accepted counteroffer approved: {name}, {when}. "
+                    f"Both requests are resolved: their request for {earlier} "
                     "is closed.")
-        return (f"{sentence_case(visit_phrase(business))} confirmed: {when}. Ref {reference}. "
-                f"{_help_tail(business)}")
+        return f"{sentence_case(visit_phrase(business))} confirmed: {when}."
     live = (original is not None and original.status == CalendarStatus.PENDING_APPROVAL
             and original.hold_expires_at is not None and now is not None
             and original.hold_expires_at > now)
-    tail = (f" The earlier request for {earlier}{earlier_ref} is still pending owner approval."
+    tail = (f" The earlier request for {earlier} is still pending owner approval."
             if live else "")
-    return (f"{sentence_case(visit_phrase(business))} request declined: {when}. "
-            f"Ref {reference}.{tail}")
+    return f"{sentence_case(visit_phrase(business))} request declined: {when}.{tail}"
 
 
 def render_notification(template: str, recipient: str, appointment: Appointment | None,
@@ -470,10 +462,11 @@ def render_notification(template: str, recipient: str, appointment: Appointment 
                 and original.hold_expires_at is not None and now is not None
                 and original.hold_expires_at > now):
             text += (f" Your request for {_when(original.start_at.astimezone(timezone))} "
-                     f"(ref {original.appointment_id[:8]}) is still pending owner approval.")
+                     "is still pending owner approval.")
         return text
     if template not in {
         "hold-request", "hold-pending", "approve", "decline", "expire", "cancel",
+        "owner-cancel",
         "edit_appointment", "replacement-approved", "replacement-original-retained",
         "create_owner_appointment", *COUNTEROFFER_TEMPLATES,
     }:
@@ -493,8 +486,15 @@ def render_notification(template: str, recipient: str, appointment: Appointment 
         return (f"New {visit_phrase(business)} request from {name}: {when}, "
                 f"{appointment.duration_minutes} min. Ref {reference}. Review before approval.")
     if template == "hold-pending":
-        return (f"Your {visit_phrase(business)} request for {when} is pending owner approval. "
-                f"Ref {reference}.")
+        return f"Your {visit_phrase(business)} request for {when} is pending owner approval."
+    if template == "cancel" and recipient == "owner":
+        name = profile.name if profile else "Your client"
+        return f"{name} cancelled the {visit_phrase(business)} on {when}."
+    if template == "owner-cancel":
+        if recipient != "client":
+            raise PermanentDeliveryFailure("TEMPLATE_RECIPIENT_MISMATCH")
+        who = business.display_name if business is not None else "the business"
+        return f"Your {visit_phrase(business)} on {when} was cancelled by {who}."
     # A later state may have superseded this intent before delivery. The
     # event-version check in the sender prevents a stale status announcement.
     status = {
@@ -503,8 +503,7 @@ def render_notification(template: str, recipient: str, appointment: Appointment 
         "replacement-approved": "confirmed", "replacement-original-retained": "not changed",
         "create_owner_appointment": "confirmed",
     }[template]
-    return (f"{sentence_case(visit_phrase(business))} {status}: {when}. Ref {reference}. "
-            f"{_help_tail(business)}")
+    return f"{sentence_case(visit_phrase(business))} {status}: {when}."
 
 def _when(local: datetime) -> str:
     return f"{local.strftime('%a %b')} {local.day} at {local.strftime('%I:%M %p').lstrip('0')}"

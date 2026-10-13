@@ -151,7 +151,7 @@ def test_plain_language_booking_then_owner_yes_confirms_it() -> None:
 
     booked = chat.text("10 works")
     assert booked.committed
-    assert booked.text.startswith("Requested Wed Sep 30 at 10:00 AM (ref ")
+    assert booked.text.startswith("Requested Wed Sep 30 at 10:00 AM. It's pending owner approval")
     assert "pending owner approval" in booked.text
     assert booked.appointment_id is not None
     assert chat.status(booked.appointment_id) == CalendarStatus.PENDING_APPROVAL
@@ -359,7 +359,7 @@ def test_cant_make_thursday_asks_before_cancelling() -> None:
     assert chat.status(visit) == CalendarStatus.CONFIRMED
     done = chat.text("Yes, cancel it")
     assert done.committed
-    assert done.text == f"Cancelled your Thu Oct 1 at 9:00 AM visit (ref {visit[:8]})."
+    assert done.text == "Cancelled your Thu Oct 1 at 9:00 AM visit."
     assert chat.status(visit) == CalendarStatus.CANCELLED
 
 
@@ -408,6 +408,43 @@ def test_cancel_with_several_visits_lists_them_and_still_asks_yes() -> None:
     assert chat.status(friday) == CalendarStatus.CANCELLED
     assert chat.status(thursday) == CalendarStatus.CONFIRMED
     assert "don't see a visit on Mon Oct 5" in chat.text("Cancel Monday").text
+
+
+def test_cancel_my_next_appointment_selects_earliest_confirmed_visit() -> None:
+    chat = Harness()
+    pending = chat.hold(THURSDAY - timedelta(days=1), "pending")
+    first = chat.hold(THURSDAY, "first", confirm=True)
+    later = chat.hold(THURSDAY + timedelta(days=1), "later", confirm=True)
+    chat.model.replies["Cancel my next appointment"] = ask("cancel")
+    question = chat.text("Cancel my next appointment")
+    assert question.text == "Cancel your Thu Oct 1 at 9:00 AM visit? Reply YES to confirm."
+    assert not question.committed
+    assert chat.text("yes").committed
+    assert chat.status(first) == CalendarStatus.CANCELLED
+    assert chat.status(pending) == CalendarStatus.PENDING_APPROVAL
+    assert chat.status(later) == CalendarStatus.CONFIRMED
+
+
+def test_cancel_my_next_appointment_does_not_withdraw_a_pending_request() -> None:
+    chat = Harness()
+    pending = chat.hold(THURSDAY - timedelta(days=1), "pending")
+    chat.model.replies["Cancel my next appointment"] = ask("cancel")
+    answer = chat.text("Cancel my next appointment")
+    assert answer.text == (
+        "I don't see an upcoming confirmed visit to cancel. "
+        "Your request for Wed Sep 30 at 9:00 AM is still awaiting approval.")
+    assert not answer.committed
+    assert chat.status(pending) == CalendarStatus.PENDING_APPROVAL
+
+
+def test_owner_cancel_queues_actor_specific_client_notice() -> None:
+    chat = Harness()
+    visit = chat.hold(THURSDAY, "visit", confirm=True)
+    LifecycleService(chat.store, lambda: NOW).apply(AppointmentCommand(
+        "pilot", visit, "owner", ActorRole.OWNER, Action.CANCEL, "owner-cancel", 2))
+    assert [(intent.recipient, intent.template)
+            for intent in chat.store.list_outbox_intents()[-1:]] == [
+                ("client", "owner-cancel")]
 
 
 def test_two_visits_on_one_day_can_be_told_apart_by_time_for_a_move() -> None:
@@ -908,8 +945,7 @@ def test_model_reads_a_free_form_yes_and_cancels_the_asked_visit() -> None:
     calls = len(chat.model.calls)
     done = chat.text(DROP)
     assert len(chat.model.calls) == calls + 1  # The model, not the keyword matcher, decided.
-    assert done.committed and done.text == (
-        f"Cancelled your Thu Oct 1 at 9:00 AM visit (ref {visit[:8]}).")
+    assert done.committed and done.text == "Cancelled your Thu Oct 1 at 9:00 AM visit."
     assert chat.status(visit) == CalendarStatus.CANCELLED
 
 

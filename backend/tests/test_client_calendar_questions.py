@@ -61,15 +61,14 @@ def unchanged(chat: Harness, before: tuple[tuple[str, str, int], ...]) -> None:
 
 
 def test_bookings_this_week_lists_confirmed_and_pending_separately() -> None:
-    chat, confirmed, pending = week_with_visits()
+    chat, _, _ = week_with_visits()
     before = chat.calendar()
     reply = asked(chat, "Do I have bookings this week?", cal(*THIS_WEEK))
     assert not reply.committed
     assert reply.text == (
         "You have 1 confirmed visit, 1 pending request from Tue Sep 29 to Sun Oct 4:\n"
-        f"- Thu Oct 1 at 9:00 AM-11:00 AM PDT, confirmed (ref {confirmed[:8]})\n"
-        f"- Fri Oct 2 at 9:00 AM-11:00 AM PDT, pending owner approval, not confirmed yet "
-        f"(ref {pending[:8]})")
+        "- Thu Oct 1 at 9:00 AM-11:00 AM PDT, confirmed\n"
+        "- Fri Oct 2 at 9:00 AM-11:00 AM PDT, pending owner approval, not confirmed yet")
     unchanged(chat, before)
 
 
@@ -110,20 +109,42 @@ def test_drafted_calendar_result_keeps_each_visit_status_with_its_reference() ->
 
 
 def test_a_question_in_spanish_gets_the_same_grounded_answer() -> None:
-    chat, confirmed, _ = week_with_visits()
+    chat, _, _ = week_with_visits()
     reply = asked(chat, "¿Tengo citas confirmadas esta semana?",
                   cal(*THIS_WEEK, statuses=("confirmed",)))
     assert reply.text.startswith("You have 1 confirmed visit from Tue Sep 29 to Sun Oct 4:")
-    assert confirmed[:8] in reply.text
+    assert "Thu Oct 1 at 9:00 AM-11:00 AM PDT, confirmed" in reply.text
     assert "You also have 1 pending request" in reply.text
 
 
 def test_no_range_lists_every_upcoming_visit() -> None:
-    chat, confirmed, _ = week_with_visits()
-    later = chat.hold(NEXT_TUESDAY, "tue", confirm=True)
+    chat, _, _ = week_with_visits()
+    chat.hold(NEXT_TUESDAY, "tue", confirm=True)
     reply = asked(chat, "When are the cleaners coming?", cal())
     assert reply.text.startswith("You have 2 confirmed visits, 1 pending request coming up:")
-    assert confirmed[:8] in reply.text and later[:8] in reply.text
+    assert "Thu Oct 1 at 9:00 AM-11:00 AM PDT, confirmed" in reply.text
+    assert "Tue Oct 6 at 9:00 AM-11:00 AM PDT, confirmed" in reply.text
+
+
+def test_next_appointment_names_confirmed_visit_and_earlier_pending_request() -> None:
+    chat = Harness()
+    chat.hold(THURSDAY - timedelta(days=1), "pending")
+    chat.hold(THURSDAY, "confirmed", confirm=True)
+    chat.hold(FRIDAY, "later", confirm=True)
+    reply = asked(chat, "When is my next appointment?", cal())
+    assert reply.text == (
+        "Your next confirmed visit is Thu Oct 1 at 9:00 AM. "
+        "Your request for Wed Sep 30 at 9:00 AM is still awaiting approval.")
+    assert "ref" not in reply.text.lower()
+
+
+def test_next_appointment_with_only_a_pending_request_is_not_confirmed() -> None:
+    chat = Harness()
+    chat.hold(THURSDAY, "pending")
+    reply = asked(chat, "When is my next appointment?", cal())
+    assert reply.text == (
+        "You have no confirmed visits coming up. "
+        "Your request for Thu Oct 1 at 9:00 AM is still awaiting approval.")
 
 
 def test_long_single_day_calendar_answer_lists_every_visit_within_sms_limit() -> None:
@@ -217,7 +238,7 @@ def test_no_matching_visits_says_so_and_how_to_ask_for_one() -> None:
 
 
 def test_status_filters_never_hide_or_promote_a_pending_request() -> None:
-    chat, _, pending = week_with_visits()
+    chat, _, _ = week_with_visits()
     count = asked(chat, "How many confirmed visits this week?",
                   cal(*THIS_WEEK, statuses=("confirmed",), view="count"))
     assert count.text == ("You have 1 confirmed visit from Tue Sep 29 to Sun Oct 4.\n"
@@ -227,8 +248,7 @@ def test_status_filters_never_hide_or_promote_a_pending_request() -> None:
     assert friday.text == (
         "You have no confirmed visits on Fri Oct 2.\n"
         "You also have 1 pending request on Fri Oct 2.\n"
-        f"- Fri Oct 2 at 9:00 AM-11:00 AM PDT, pending owner approval, not confirmed yet "
-        f"(ref {pending[:8]})")
+        "- Fri Oct 2 at 9:00 AM-11:00 AM PDT, pending owner approval, not confirmed yet")
 
 
 def test_answers_show_only_this_clients_visits() -> None:
@@ -265,7 +285,7 @@ def test_each_answer_reads_the_calendar_as_it_is_now() -> None:
         "pilot", confirmed, "client-1", ActorRole.CLIENT, Action.CANCEL, "gone", 2))
     assert chat.text("Do I have bookings this week?").text == (
         "You have 1 confirmed visit from Tue Sep 29 to Sun Oct 4:\n"
-        f"- Fri Oct 2 at 9:00 AM-11:00 AM PDT, confirmed (ref {pending[:8]})")
+            "- Fri Oct 2 at 9:00 AM-11:00 AM PDT, confirmed")
 
 
 def test_a_question_closes_an_open_offer_so_a_later_pick_books_nothing() -> None:
@@ -303,10 +323,10 @@ def test_unusable_or_past_ranges_ask_for_a_day() -> None:
 def test_times_carry_standard_time_after_the_clock_change() -> None:
     chat = Harness()
     chat.now = datetime(2026, 10, 30, 17, tzinfo=UTC)  # Fri Oct 30, 10:00 AM PDT.
-    visit = chat.hold(datetime(2026, 11, 3, 17, tzinfo=UTC), "nov", confirm=True)
+    chat.hold(datetime(2026, 11, 3, 17, tzinfo=UTC), "nov", confirm=True)
     assert asked(chat, "When is my next cleaning?", cal()).text == (
         "You have 1 confirmed visit coming up:\n"
-        f"- Tue Nov 3 at 9:00 AM-11:00 AM PST, confirmed (ref {visit[:8]})")
+        "- Tue Nov 3 at 9:00 AM-11:00 AM PST, confirmed")
 
 
 def _raw(intent: str, first: str | None = None, last: str | None = None,

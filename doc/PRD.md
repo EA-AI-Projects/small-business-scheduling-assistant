@@ -99,8 +99,9 @@ Implementation follows [#226](https://github.com/EA-AI-Projects/small-business-s
 
 - Clients may cancel without a cancellation cutoff in the MVP.
 - A plain-language cancellation, such as "I can't make Thursday", gets a confirmation question that states the full date and time ("Cancel your Thu Oct 1 at 11:00 AM visit? Reply YES to confirm."). Nothing is cancelled until the client confirms. The owner accepted this extra confirmation text in issue #60.
+- "My next appointment" means the earliest upcoming confirmed visit in client-facing SMS. An earlier pending request is called out separately as awaiting approval. "Cancel my next appointment" selects that confirmed visit for the normal second-message confirmation even when other visits exist.
 - Cancellation updates the calendar and releases the appointment’s time for future requests.
-- Notify the owner by SMS when a client cancels.
+- Notify the owner by SMS when a client cancels, naming the client, service, date, and time. An owner cancellation notice to the client says that the business cancelled the visit. Routine cancellation texts omit references and repeated help instructions; the 30-minute confirmation lifetime is explained when a late reply expires.
 - Do not proactively message other clients about newly available time in the MVP.
 - Rescheduling is handled as a new time request tied to the client. Keep the original confirmed appointment until the replacement is approved; a declined or expired replacement leaves it unchanged. Approval swaps them atomically. The owner confirmed this rule in issue #3. A plain-language reschedule ("Can I move Thursday to Friday?") offers replacement times the same way as a new booking; picking one creates the pending replacement.
 
