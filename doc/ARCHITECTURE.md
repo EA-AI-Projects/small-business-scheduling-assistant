@@ -73,8 +73,14 @@ takes only a local date and time and is the one tool that creates a hold: the
 conversation service books it only if it is exactly one time in this verified client's own
 unexpired new-booking offer, then `_book_option` rechecks the quoted length, current
 policy and calendar through `HoldService` (keyed by the receipt) and the result is a
-pending request. A reply while that offer is open reaches the loop before the
-deterministic option matcher; loop failure falls back to it. `check_reply` compares the
+pending request. Cancellation (#342) adds `prepare_cancellation` (a visit
+reference; stores the 30-minute confirmation question bound to one of the sender's own
+visits and its version), `confirm_cancellation` and `dismiss_cancellation` (no arguments;
+they act only on that stored question, `_cancel_confirmed` rechecks the visit and version,
+and the one lifecycle write is keyed by the receipt). Only one action tool takes effect
+per message, and a refused or written cancellation is never retried by a fallback. A reply
+while an offer or cancellation question is open reaches the loop before the deterministic
+matcher; loop failure falls back to it. `check_reply` compares the
 final text with the tool results (explicit dates, times, references, a stored offer
 listed whole, in order, each under its own number and date, and no claimed write or
 mention of another client) before the receipt

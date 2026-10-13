@@ -1,4 +1,4 @@
-"""Bounded tools for a verified client's SMS model loop (#340, #341).
+"""Bounded tools for a verified client's SMS model loop (#340, #341, #342).
 
 The backend builds every tool from the verified receipt: the business and client
 are fixed when the toolset is created, and no argument can name another. Results
@@ -10,12 +10,20 @@ local date and time, and the conversation service books it only if it is exactly
 time in this client's own earlier, unexpired offer. It never books a time offered in the
 same message.
 
+Cancellation (#342) is two steps over two messages. ``prepare_cancellation`` names one of
+this client's own visits by reference and stores the time-limited confirmation question
+that binds that visit and its version; it cancels nothing. On a later message
+``confirm_cancellation`` acts only on that stored question (the one cancel write, rechecked
+and receipt-keyed by the service), and ``dismiss_cancellation`` closes it. None of the three
+can name a visit or version of its own. Only one action tool takes effect per message.
+
 ``check_reply`` compares the model's final text with what the tools returned
 before the text can be sent.
 """
 
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
@@ -42,7 +50,8 @@ from scheduling.domain.conversation_state import (
 from scheduling.domain.holidays import observed_us_federal_holidays
 from scheduling.domain.service_duration import ServiceNotConfigured, service_duration
 
-TOOL_NAMES = ("get_business_info", "get_availability", "get_my_bookings", "request_booking")
+TOOL_NAMES = ("get_business_info", "get_availability", "get_my_bookings", "request_booking",
+              "prepare_cancellation", "confirm_cancellation", "dismiss_cancellation")
 MAX_TOOL_CALLS = 3
 MAX_RANGE_DAYS = 14
 MAX_REPLY_SEPTETS = 480
@@ -79,7 +88,26 @@ CONFIRM_CLAIM = re.compile(
 NOT_CONFIRMED = re.compile(r"\b(?:not|isn't|aren't|n't)\s+(?:yet\s+)?confirmed\b", re.IGNORECASE)
 NOT_BOOKED = re.compile(r"\b(?:nothing\s+(?:was|is|has\s+been)|not|isn't|wasn't|n't)\s+"
                         r"(?:yet\s+)?booked\b", re.IGNORECASE)
+# A cancellation is claimed only after confirm_cancellation made one; negations are not claims.
+CANCELLED = re.compile(r"\bcancel+ed\b", re.IGNORECASE)
+NOT_CANCELLED = re.compile(
+    r"\b(?:nothing\s+(?:was|is|has\s+been)|not|isn't|wasn't|n't|never|yet)\s+(?:yet\s+)?"
+    r"(?:been\s+)?cancel+ed\b", re.IGNORECASE)
+NOTHING_CHANGED = re.compile(r"\bnothing\s+(?:was\s+|has\s+been\s+)?changed\b|\bunchanged\b",
+                             re.IGNORECASE)
+STILL_BOOKED = re.compile(r"\b(?:still|stays?|remains?)\s+(?:booked|scheduled|confirmed)\b"
+                          r"|\bkept\b", re.IGNORECASE)
+REF_ARG = re.compile(r"[0-9A-Za-z-]{4,40}")
 READ_ERRORS = (OSError, ValueError, TypeError, KeyError, RuntimeError)
+
+
+@dataclass(frozen=True)
+class CancellationHooks:
+    """The conversation service's cancellation steps for this one message (#342)."""
+
+    prepare: Callable[[str], dict[str, Any]]
+    confirm: Callable[[], dict[str, Any]]
+    dismiss: Callable[[], dict[str, Any]]
 
 
 class ToolRepository(Protocol):
@@ -123,7 +151,8 @@ class ClientReadTools:
     def __init__(self, repository: ToolRepository, business_id: str, now: datetime,
                  policy: AvailabilityPolicy, own_visits: tuple[Appointment, ...],
                  store_offer: Callable[[tuple[datetime, ...], int], None],
-                 request: Callable[[date, time], dict[str, Any]] | None = None) -> None:
+                 request: Callable[[date, time], dict[str, Any]] | None = None,
+                 cancellation: CancellationHooks | None = None) -> None:
         self._repository = repository
         self._business_id = business_id
         self._now = now
@@ -132,7 +161,10 @@ class ClientReadTools:
         self._visits = own_visits
         self._store_offer = store_offer
         self._request = request
+        self._cancellation = cancellation
         self.requested: dict[str, Any] | None = None
+        self.prepared: dict[str, Any] | None = None  # A cancellation question asked now.
+        self.answered = False  # confirm_cancellation or dismiss_cancellation ran.
         self.results: list[dict[str, Any]] = []
         self.offer: tuple[datetime, ...] = ()
         self.calls = 0
@@ -217,6 +249,8 @@ class ClientReadTools:
             return {"ok": False, "error": "offer_already_stored"}
         if self.requested is not None:
             return {"ok": False, "error": "already_requested"}
+        if self.prepared is not None or self.answered:
+            return {"ok": False, "error": "cancellation_in_progress"}
         if (earliest is None) != (latest is None):  # "After 2" or "before noon".
             earliest, latest = earliest or time(0), latest or time(23, 59)
         policy, zone, now = self._policy, self._zone, self._now
@@ -319,10 +353,61 @@ class ClientReadTools:
             return {"ok": False, "error": "offer_not_sent_yet"}
         if self.requested is not None:
             return {"ok": False, "error": "already_requested"}
+        if self.prepared is not None or self.answered:
+            return {"ok": False, "error": "cancellation_in_progress"}
         result = self._request(day, clock)
         if result.get("requested") is True:
             self.requested = result
         return result
+
+    # -- cancellation (#342) ------------------------------------------------
+
+    def _other_action(self) -> str | None:
+        """Why no cancellation step may run now: another action already took effect."""
+        if self._cancellation is None:
+            return "unavailable"
+        if self.offer:
+            return "offer_not_sent_yet"
+        if self.requested is not None:
+            return "already_requested"
+        if self.prepared is not None:
+            return "cancellation_question_not_sent_yet"
+        if self.answered:
+            return "already_answered"
+        return None
+
+    def prepare_cancellation(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Ask the service to store a cancellation question for one of this client's visits."""
+        ref = args.get("ref")
+        if set(args) != {"ref"} or not isinstance(ref, str) or REF_ARG.fullmatch(ref) is None:
+            return dict(INVALID)
+        if (why := self._other_action()) is not None:
+            return {"ok": False, "error": why}
+        assert self._cancellation is not None
+        result = self._cancellation.prepare(ref)
+        if result.get("prepared") is True:
+            self.prepared = result
+        return result
+
+    def confirm_cancellation(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Ask the service to cancel the visit of this client's open cancellation question."""
+        if args:
+            return dict(INVALID)
+        if (why := self._other_action()) is not None:
+            return {"ok": False, "error": why}
+        assert self._cancellation is not None
+        self.answered = True  # The service decides once; a second call cannot try again.
+        return self._cancellation.confirm()
+
+    def dismiss_cancellation(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Ask the service to close this client's open cancellation question."""
+        if args:
+            return dict(INVALID)
+        if (why := self._other_action()) is not None:
+            return {"ok": False, "error": why}
+        assert self._cancellation is not None
+        self.answered = True
+        return self._cancellation.dismiss()
 
     # -- get_my_bookings ---------------------------------------------------
 
@@ -469,6 +554,45 @@ def _authorized(results: list[dict[str, Any]]) -> tuple[set[tuple[int, int]],
     return days, times, refs
 
 
+def _cancellation_problem(text: str, results: list[dict[str, Any]]) -> str | None:
+    """Why the text misstates the cancellation tools' outcome (#342), or None.
+
+    A cancellation is claimed only when confirm_cancellation made one, and then with its
+    reference. A question must ask for YES and name the visit time. Every other outcome must
+    say that nothing was cancelled; only a dismissed question may say the visit stays booked.
+    """
+    ok = [result for result in results if result.get("ok") is True]
+    done = [result for result in ok if result.get("cancelled") is True]
+    asked = [result for result in ok if result.get("prepared") is True]
+    kept = [result for result in ok if result.get("dismissed") is True]
+    refused = [result for result in ok if result.get("cancelled") is False
+               or result.get("prepared") is False or result.get("dismissed") is False]
+    unclaimed = NOT_CANCELLED.sub("", text)
+    claimed = CANCELLED.search(unclaimed) is not None
+    lowered = text.lower()
+    if done:
+        if not claimed:
+            return "Say the visit was cancelled, with its date, time, and reference."
+        if str(done[0]["ref"]).lower() not in lowered:
+            return "Include the visit reference from the tool result."
+        if STILL_BOOKED.search(text):
+            return "The visit was cancelled; do not say it is still booked."
+        return None
+    if claimed:
+        return "The SMS claims a cancellation; no tool made one."
+    if asked:
+        shown = _hour_minute(str(asked[0]["time"]))
+        if "yes" not in lowered or "?" not in text or shown not in _facts(text)[1]:
+            return ("Ask the client to reply YES to cancel, naming the visit's date and time; "
+                    "nothing is cancelled until they do.")
+    elif kept or refused:
+        if NOT_CANCELLED.search(text) is None and NOTHING_CHANGED.search(text) is None:
+            return "Say that nothing was cancelled."
+        if not kept and STILL_BOOKED.search(text):
+            return "The tool did not show the visit still booked; say only that nothing changed."
+    return None
+
+
 def check_reply(text: str, results: list[dict[str, Any]],
                 offer: tuple[datetime, ...], zone: ZoneInfo) -> str | None:
     """Why the final text may not be sent, or None. Compared with the tool outcomes only.
@@ -498,10 +622,14 @@ def check_reply(text: str, results: list[dict[str, Any]],
             return "Say the request is pending owner approval."
         if str(requested[0]["ref"]).lower() not in lowered:
             return "Include the request reference from the tool result."
-    elif WRITE_CLAIM.search(text):
+    elif WRITE_CLAIM.search(CANCELLED.sub("done", text)
+                            if any(result.get("cancelled") is True for result in results)
+                            else text):
         return "The SMS claims a change; the tools made none."
     elif outcomes and "nothing" not in text.lower():
         return "The request was not made. Say that nothing was booked or changed."
+    if (problem := _cancellation_problem(text, results)) is not None:
+        return problem
     days, times, refs = _facts(text)
     allowed_days, allowed_times, allowed_refs = _authorized(results)
     if (not set(days) <= allowed_days or not set(times) <= allowed_times
