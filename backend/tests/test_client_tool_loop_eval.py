@@ -177,3 +177,56 @@ def test_live_summary_exit_code_follows_tool_choice(
     assert runner.main(["--live", "--case", "cancel-unclear"],
                        lambda _key: ScriptedModel(wrong)) == 1
     assert json.loads(capsys.readouterr().out)["tool_choice_failures"] == ["cancel-unclear"]
+
+
+class RaisingModel:
+    def run_client_loop(self, *_args: Any) -> str:
+        raise RuntimeError("Model API HTTP 401")
+
+
+def test_a_failed_model_call_is_an_error_and_exits_nonzero(
+        monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    case = next(item for item in CASES if not item.expected)
+    result = run_case(RaisingModel(), case)
+    assert result["tool_choice_passed"] is None and "HTTP 401" in result["error"]
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-key")
+    assert runner.main(["--live", "--case", case.name], lambda _key: RaisingModel()) == 1
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["tool_choice_failures"] == []
+    assert summary["errors"] == [{"case": case.name, "error": result["error"]}]
+
+
+def test_an_unsendable_reply_makes_the_exit_code_nonzero(
+        monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    bad = dict(PLANS)
+    bad["cancel-unclear"] = ([], "Nothing was cancelled. Your visit is Thu Oct 15 at 9:45 AM.")
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-key")
+    assert runner.main(["--live", "--case", "cancel-unclear"],
+                       lambda _key: ScriptedModel(bad)) == 1
+    assert json.loads(capsys.readouterr().out)["reply_check_failures"] == ["cancel-unclear"]
+
+
+def test_refs_match_case_insensitively_and_by_full_appointment_id() -> None:
+    want = Step("prepare_cancellation", (("ref", "b202b202"),))
+    for ref in ("B202B202", "b202b202-0000-4000-8000-000000000000"):
+        assert tool_choice_ok((want,), [{"name": "prepare_cancellation", "args": {"ref": ref}}])
+    assert not tool_choice_ok((want,), [{"name": "prepare_cancellation",
+                                         "args": {"ref": "c303c303"}}])
+    case = next(item for item in CASES if item.name == "cancel-yes")
+    full = runner.build_tools(case)("prepare_cancellation", {
+        "ref": "B202B202-0000-4000-8000-000000000000"})
+    assert full["prepared"] is True
+
+
+def test_stand_in_refusals_have_production_shapes() -> None:
+    by_name = {case.name: case for case in CASES}
+    prepared = runner.build_tools(by_name["cancel-ambiguous-visit"])(
+        "prepare_cancellation", {"ref": "zzzz9999"})
+    assert prepared["reason"] == "visit_not_found" and len(prepared["visits"]) == 2
+    assert set(prepared["visits"][0]) == {"ref", "when", "status"}
+    booked = runner.build_tools(by_name["book-accepted-offer"])(
+        "request_booking", {"date": "2026-10-13", "time": "15:00"})
+    assert booked["reason"] == "not_an_offered_time" and len(booked["offered"]) == 2
+    move = runner.build_tools(by_name["move-accepted-time"])(
+        "request_booking", {"date": "2026-10-16", "time": "09:00"})
+    assert move["reason"] == "offer_is_for_a_move"

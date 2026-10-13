@@ -180,6 +180,22 @@ def _requested(start: datetime, **extra: Any) -> dict[str, Any]:
             **_facts(start), "duration_minutes": 120, **extra}
 
 
+def _offered(times: tuple[datetime, ...]) -> list[dict[str, Any]]:
+    return [{"number": number, "date": start.date().isoformat(), "time": clock_text(start, ZONE),
+             "when": when_text(start, ZONE)} for number, start in enumerate(times, 1)]
+
+
+def short_ref(value: object) -> object:
+    """A reference as production compares it: case-insensitive, full ID or its 8 characters."""
+    if not isinstance(value, str):
+        return value
+    lowered = value.lower()
+    for item in (THURSDAY, FRIDAY):
+        if lowered == item.appointment_id.lower():
+            return item.appointment_id[:8].lower()
+    return lowered
+
+
 def _nothing(reason: str, **extra: Any) -> dict[str, Any]:
     return {"ok": True, "requested": False, "nothing_changed": True, "reason": reason, **extra}
 
@@ -187,33 +203,38 @@ def _nothing(reason: str, **extra: Any) -> dict[str, Any]:
 def build_tools(case: Case) -> ClientReadTools:
     """Production tool dispatcher over fictional state; hooks only read the case."""
     def request(day: date, clock: time) -> dict[str, Any]:
-        if not case.offer:
-            return _nothing("no_offer_to_accept")
         if case.move is not None:
             return _nothing("offer_is_for_a_move")
+        if not case.offer:
+            return _nothing("no_offer_to_accept")
         wall = datetime.combine(day, clock)
         found = [start for start in case.offer if start.replace(tzinfo=None) == wall]
-        return _requested(found[0]) if len(found) == 1 else _nothing("not_an_offered_time")
+        return (_requested(found[0]) if len(found) == 1
+                else _nothing("not_an_offered_time", offered=_offered(case.offer)))
 
     def reschedule(ref: str, day: date, clock: time) -> dict[str, Any]:
         if case.move is None:
-            return _nothing("no_move_offer_to_accept")
-        if ref.lower() != case.move[0]:
+            return _nothing("no_move_offer_to_accept" if case.offer
+                            else "no_offer_to_accept")
+        if short_ref(ref) != case.move[0]:
             return _nothing("not_the_visit_offered_for")
         wall = datetime.combine(day, clock)
         found = [start for start in case.move[1] if start.replace(tzinfo=None) == wall]
         original = case.visits[0]
         if len(found) != 1:
-            return _nothing("not_an_offered_time")
+            return _nothing("not_an_offered_time", offered=_offered(case.move[1]))
         return _requested(found[0], replaces_ref=original.appointment_id[:8],
                           original_status="confirmed", original_stays_confirmed=True,
                           original_when=when_text(original.start_at, ZONE))
 
     def prepare(ref: str) -> dict[str, Any]:
-        matches = [item for item in case.visits if item.appointment_id[:8] == ref.lower()]
+        matches = [item for item in case.visits if short_ref(item.appointment_id) == short_ref(ref)]
         if len(matches) != 1:
             return {"ok": True, "prepared": False, "nothing_changed": True,
-                    "reason": "visit_not_found"}
+                    "reason": "ambiguous_visit" if matches else "visit_not_found",
+                    "visits": [{"ref": item.appointment_id[:8],
+                                "when": when_text(item.start_at, ZONE), "status": "confirmed"}
+                               for item in case.visits]}
         target = matches[0]
         return {"ok": True, "prepared": True, "nothing_cancelled_yet": True,
                 "ref": target.appointment_id[:8], "status": "confirmed", "confirmed": True,
@@ -267,7 +288,9 @@ class ClientLoopModel(Protocol):
 
 def _matches(call: dict[str, Any], wanted: Step) -> bool:
     return call["name"] == wanted.name and all(
-        isinstance(call["args"], dict) and call["args"].get(key) == value
+        isinstance(call["args"], dict) and (
+            short_ref(call["args"].get(key)) == short_ref(value) if key == "ref"
+            else call["args"].get(key) == value)
         for key, value in wanted.args)
 
 
@@ -310,7 +333,8 @@ def run_case(model: ClientLoopModel, case: Case) -> dict[str, Any]:
         error = f"{type(exc).__name__}: {exc}"
     reply_ok = reply is not None and check_reply(reply, tools.results, tools.offer,
                                                  ZONE) is None
-    chosen = tool_choice_ok(case.expected, calls)
+    # A failed model call is an error, never a tool-choice pass.
+    chosen = tool_choice_ok(case.expected, calls) if error is None else None
     return {
         "case": case.name, "message": case.message,
         "expected_tools": [{"name": item.name, "args": dict(item.args)}
@@ -340,14 +364,16 @@ def main(argv: Sequence[str] | None = None,
     model = (model_factory or OpenAIMessageInterpreter)(key)
     chosen = [case for case in CASES if args.case in (None, case.name)]
     results = [run_case(model, case) for case in chosen]  # One pass per case.
-    failed = [result["case"] for result in results if not result["tool_choice_passed"]]
+    failed = [result["case"] for result in results if result["tool_choice_passed"] is False]
+    errors = [{"case": result["case"], "error": result["error"]}
+              for result in results if result["error"] is not None]
+    unsendable = [result["case"] for result in results if not result["reply_passes_check_reply"]]
     print(json.dumps({
         "model": MODEL, "run_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "cases": len(results), "tool_choice_failures": failed,
-        "reply_check_failures": [result["case"] for result in results
-                                 if not result["reply_passes_check_reply"]],
+        "errors": errors, "reply_check_failures": unsendable,
         "results": results}, indent=2))
-    return 1 if failed else 0
+    return 1 if (failed or errors or unsendable) else 0
 
 
 if __name__ == "__main__":
