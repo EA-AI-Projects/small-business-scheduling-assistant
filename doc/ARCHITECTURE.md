@@ -81,9 +81,11 @@ and the one lifecycle write is keyed by the receipt). Only one action tool takes
 per message, and a refused or written cancellation is never retried by a fallback. A reply
 while an offer or cancellation question is open reaches the loop before the deterministic
 matcher; loop failure falls back to it. `check_reply` compares the
-final text with the tool results (explicit dates, times, references, a stored offer
-listed whole, in order, each under its own number and date, and no claimed write or
-mention of another client) before the receipt
+final text with the tool results (#359: it checks facts only: non-empty, one GSM-7
+segment, every absolute date, time, and reference came from a tool result of this message, and
+a stored offer is listed whole, in order, numbered; the model words status and the backend
+does not judge it, relative dates are the model's, and writes stay guarded by stored state)
+before the receipt
 processor stores the reply for the outbox sender. One rewrite without tools is
 allowed; any other failure clears the offer and uses the deterministic answer, and a request
 already written is never lost: its deterministic pending notice is sent instead.

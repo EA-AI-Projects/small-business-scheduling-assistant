@@ -161,7 +161,7 @@ def test_a_taken_time_is_refused_without_naming_why_and_is_never_retried() -> No
     results: list[dict[str, Any]] = []
     model.plan = lambda tools: (results.append(tools("request_reschedule", {
         "ref": visit[:8], "date": FRIDAY, "time": "10:00"})),
-        "Booked another time for you.")[1]  # The model then writes a bad final text.
+        "Booked Fri Oct 2 at 3:00 PM for you.")[1]  # The model then states a time no tool gave.
     reply = chat.text("2")
     assert model.rejected[-1] is not None and not reply.committed
     assert results[0]["requested"] is False and results[0]["reason"] == "reserved_by_owner"
@@ -253,7 +253,7 @@ def test_a_mixed_question_and_second_action_takes_only_one_action() -> None:
     assert state(chat).kind == PromptKind.OFFER and chat.status(visit) == CalendarStatus.CONFIRMED
 
 
-def test_the_reply_may_not_claim_a_move_or_confirmation_the_tools_did_not_make() -> None:
+def test_move_replies_keep_fact_checks_and_leave_status_wording_to_the_model() -> None:
     local = ZoneInfo("America/Los_Angeles")
     done = [{"ok": True, "requested": True, "status": "pending_owner_approval",
              "confirmed": False, "ref": "abcd1234", "replaces_ref": "feed5678",
@@ -262,70 +262,18 @@ def test_the_reply_may_not_claim_a_move_or_confirmation_the_tools_did_not_make()
     good = ("Requested a move to Fri Oct 2 at 10:00 AM (ref abcd1234). It is pending owner "
             "approval. Your Thu Oct 1 at 9:00 AM visit stays confirmed until then.")
     assert check_reply(good, done, (), local) is None
-    for bad in (
-            "I've rescheduled you to Fri Oct 2 at 10:00 AM (ref abcd1234), pending owner approval.",
-            good.replace("It is pending", "It is confirmed and pending"),
-            "Requested Fri Oct 2 at 10:00 AM (ref abcd1234), pending owner approval.",
-            good.replace("stays confirmed", "is cancelled")):
+    # Status wording is the model's (#359): none of these is judged.
+    for free in ("Your visit was moved to Fri Oct 2 at 10:00 AM (ref abcd1234).",
+                 "Requested Fri Oct 2 at 10:00 AM (ref abcd1234).",
+                 "Your visit moves next Friday."):
+        assert check_reply(free, done, (), local) is None, free
+    # Absolute dates, times, and references must come from a tool result.
+    for bad in (good.replace("Fri Oct 2", "Sat Oct 3"), good.replace("10:00 AM", "11:30 AM"),
+                good.replace("abcd1234", "ffff9999"), good.replace("Thu Oct 1", "Wed Sep 30")):
         assert check_reply(bad, done, (), local) is not None, bad
-    tail = " Ref abcd1234, pending owner approval. Your Thu Oct 1 at 9:00 AM visit stays confirmed."
-    for claim in ("Your visit was moved to Fri Oct 2 at 10:00 AM.",
-                  "Your visit is now rescheduled to Fri Oct 2 at 10:00 AM.",
-                  "Your visit has been moved to Fri Oct 2 at 10:00 AM.",
-                  "You're moved to Fri Oct 2 at 10:00 AM."):
-        assert check_reply(claim + tail, done, (), local) is not None, claim
-    # The new time is never the visit that "stays confirmed", and the original must be named.
-    for bad in (("Your Fri Oct 2 at 10:00 AM visit stays confirmed. Ref abcd1234, pending "
-                 "owner approval."),
-                ("Fri Oct 2 at 10:00 AM (ref abcd1234) is pending owner approval. Your visit "
-                 "stays confirmed."),
-                ("Ref abcd1234 is pending owner approval. Your Thu Oct 1 at 9:00 AM visit "
-                 "stays confirmed."),  # No requested date and time.
-                ):
-        assert check_reply(bad, done, (), local) is not None, bad
-    assert check_reply("Nothing was moved yet. " + good, done, (), local) is None
-    assert check_reply("Nothing is moved yet. " + good, done, (), local) is None
-    for verb in ("is moved to", "is rescheduled for", "are moved to", "is switched to",
-                 "was shifted to", "is changed to", "has been updated to", "is now moved to",
-                 "was swapped to"):
-        text = f"Your visit {verb} Fri Oct 2 at 10:00 AM.{tail}"
-        assert check_reply(text, done, (), local) is not None, verb
-    for active in ("I switched you to", "I've changed your visit to", "We updated it to"):
-        assert check_reply(f"{active} Fri Oct 2 at 10:00 AM.{tail}", done, (), local) \
-            is not None, active
-    # The same claims fail after a decline or a refusal, and for a counteroffer acceptance.
-    declined = [{"ok": True, "requested": False, "declined": True, "nothing_changed": True}]
-    for verb in ("is moved", "is rescheduled", "was switched", "has been changed to Friday"):
-        assert check_reply(f"OK, nothing was requested. Your visit {verb}.", declined, (),
-                           local) is not None, verb
-    # One clause may say the request is pending and the original stays confirmed.
-    one = ("Requested a move to Fri Oct 2 at 10:00 AM (ref abcd1234), pending owner approval; "
-           "your Thu Oct 1 at 9:00 AM visit stays confirmed until then.")
-    assert check_reply(one, done, (), local) is None
-    assert check_reply(one.replace("; your Thu Oct 1 at 9:00 AM visit", ", and your Thu Oct 1 "
-                                   "at 9:00 AM visit"), done, (), local) is None
-    assert check_reply(one.replace("your Thu Oct 1 at 9:00 AM visit", "your Fri Oct 2 at "
-                                   "10:00 AM visit"), done, (), local) is not None
-    assert check_reply(one.replace("; your Thu Oct 1 at 9:00 AM visit", ", your Fri Oct 2 at "
-                                   "10:00 AM visit"), done, (), local) is not None
     refused = [{"ok": True, "requested": False, "nothing_changed": True,
                 "reason": "visit_changed"}]
-    # Rejected for the claim itself: the text says "nothing", so only the claim can fail it.
-    assert check_reply("Nothing changed, and your visit was rescheduled to Friday.", refused,
-                       (), local) is not None
     assert check_reply("That visit changed, so nothing was booked.", refused, (), local) is None
-
-
-def test_a_move_offer_must_say_the_current_visit_stays() -> None:
-    local = ZoneInfo("America/Los_Angeles")
-    chat, _, _visit, seen = move_offered()
-    offered = tuple(item for item in state(chat).options)
-    missing = ("To move your visit, Fri Oct 2 is open: "
-               + ", ".join(f"{item['number']}) {item['time']}"
-                           for item in seen[0]["offer"]["options"])
-               + ". The owner approves every request.")
-    assert check_reply(missing, seen, offered, local) is not None
-    assert check_reply(offer_text(seen[0]), seen, offered, local) is None
 
 
 def test_a_loop_failure_falls_back_to_the_deterministic_reschedule_question() -> None:
@@ -360,14 +308,3 @@ def test_a_move_question_cannot_become_a_new_booking_offer() -> None:
                                 offer_text(results[-1]))[1]
     chat.text("Friday")  # The same visit's ref is the move the question asked about.
     assert state(chat).kind == PromptKind.OFFER and state(chat).appointment_id == visit
-
-
-def test_replies_must_state_the_requested_and_the_original_date_and_time() -> None:
-    local = ZoneInfo("America/Los_Angeles")
-    booked = [{"ok": True, "requested": True, "status": "pending_owner_approval",
-               "confirmed": False, "ref": "abcd1234", "date": FRIDAY, "weekday": "Friday",
-               "time": "10:00 AM", "when": "Fri Oct 2 at 10:00 AM"}]
-    assert check_reply("Requested Fri Oct 2 at 10:00 AM (ref abcd1234), pending owner "
-                       "approval.", booked, (), local) is None
-    assert check_reply("Request abcd1234 is pending owner approval.", booked, (), local) \
-        is not None

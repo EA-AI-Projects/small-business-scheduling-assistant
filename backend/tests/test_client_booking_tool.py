@@ -146,9 +146,6 @@ def test_a_taken_time_is_reserved_by_owner_and_discloses_no_other_client() -> No
     assert "client-2" not in json.dumps(results) and not reply.committed
     assert len(chat.calendar()) == 1  # Only the other client's hold.
     assert chat.states.read_state("pilot", "+14155550101") is None
-    # A reply that blames another client is not deliverable.
-    assert check_reply("Another client booked that, so nothing was booked.", results, (),
-                       ZONE) is not None
 
 
 def test_an_expired_offer_cannot_be_accepted() -> None:
@@ -211,10 +208,20 @@ def test_another_clients_or_a_reschedule_offer_is_never_accepted_here() -> None:
     assert chat.calendar() == ()
 
 
-def test_a_reply_that_calls_the_request_confirmed_is_replaced_by_the_pending_notice() -> None:
+def test_the_status_wording_after_a_request_is_the_models_and_is_not_judged() -> None:
     chat, model = chat_with(offer_plan)
     offered(chat, model)
-    model.plan = lambda tools: (accept(tools), "You're booked! Your visit is confirmed.")[1]
+    model.plan = lambda tools: (accept(tools), "Thanks! Wed Sep 30 at 10:00 AM is requested.")[1]
+    reply = chat.text("10 works")
+    assert model.rejected[-1] is None  # Only dates, times, and references are checked (#359).
+    assert reply.committed and len(chat.calendar()) == 1  # The guarded write happened once.
+    assert reply.text == "Thanks! Wed Sep 30 at 10:00 AM is requested."
+
+
+def test_a_fabricated_time_after_a_request_is_replaced_by_the_pending_notice() -> None:
+    chat, model = chat_with(offer_plan)
+    offered(chat, model)
+    model.plan = lambda tools: (accept(tools), "Requested Wed Sep 30 at 9:15 AM.")[1]
     reply = chat.text("10 works")
     assert model.rejected[-1] is not None
     assert reply.committed and len(chat.calendar()) == 1
@@ -352,22 +359,20 @@ def test_the_tool_rejects_malformed_and_extra_arguments() -> None:
     assert chat.calendar() == ()
 
 
-def test_reply_check_requires_pending_wording_and_the_reference() -> None:
+def test_reply_check_keeps_facts_and_leaves_status_wording_to_the_model() -> None:
     ok = {"ok": True, "requested": True, "ref": "abcd1234", "date": "2026-09-30",
           "time": "10:00 AM", "when": "Wed Sep 30 at 10:00 AM"}
     check = lambda text: check_reply(text, [ok], (), ZONE)
     assert check("Requested Wed Sep 30 at 10:00 AM (ref abcd1234). Pending owner approval.") is None
-    assert check("Requested Wed Sep 30 at 10:00 AM (ref abcd1234). Pending approval, "
-                 "not confirmed yet.") is None
-    assert check("Your visit Wed Sep 30 at 10:00 AM (ref abcd1234) is confirmed. Pending "
-                 "owner approval.") is not None
-    assert check("Booked! Wed Sep 30 at 10:00 AM (ref abcd1234). Pending owner approval.") \
-        is not None
-    assert check("Your visit is booked for Wed Sep 30 at 10:00 AM (ref abcd1234), pending "
-                 "owner approval.") is not None
-    assert check("Requested Wed Sep 30 at 10:00 AM (ref abcd1234).") is not None
-    assert check("Pending owner approval for Wed Sep 30 at 10:00 AM.") is not None
+    # Free wording passes; relative dates are not checked.
+    assert check("Booked! Wed Sep 30 at 10:00 AM (ref abcd1234).") is None
+    assert check("All set for tomorrow morning.") is None
+    # A date, time, or reference no tool gave is rejected.
+    assert check("Requested Wed Sep 30 at 9:15 AM (ref abcd1234).") is not None
+    assert check("Requested Thu Oct 1 at 10:00 AM (ref abcd1234).") is not None
+    assert check("Requested Wed Sep 30 at 10:00 AM (ref ffff9999).") is not None
     none = {"ok": True, "requested": False, "reason": "offer_expired"}
-    assert check_reply("That expired. Nothing was booked.", [none], (), ZONE) is None
-    assert check_reply("That expired.", [none], (), ZONE) is not None
-    assert check_reply("I requested it for you. Nothing was booked.", [none], (), ZONE) is not None
+    assert check_reply("That expired.", [none], (), ZONE) is None
+    assert check_reply("", [none], (), ZONE) is not None
+    assert check_reply("x" * 481, [none], (), ZONE) is not None
+    assert check_reply("Sorry \u2014 that expired.", [none], (), ZONE) is not None  # Not GSM-7.
