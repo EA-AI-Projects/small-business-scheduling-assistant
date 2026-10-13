@@ -87,8 +87,13 @@ mention of another client) before the receipt
 processor stores the reply for the outbox sender. One rewrite without tools is
 allowed; any other failure clears the offer and uses the deterministic answer, and a request
 already written is never lost: its deterministic pending notice is sent instead.
-Occupied calendar time is reported only as reserved by owner. Cancellation
-and rescheduling keep their existing paths until #342 and #343. See
+Occupied calendar time is reported only as reserved by owner. Rescheduling (#343) is replacement-first: `get_availability` with a visit reference
+stores an offer bound to that confirmed visit and version, `request_reschedule` names the
+visit and one offered time and creates a replacement hold pending owner approval with
+`replaces_confirmed_version` while the original stays confirmed, and
+`get_my_counteroffer` and `respond_to_counteroffer` read and answer the sender's own
+owner counteroffer through `CounterofferAcceptance` under the offer's idempotency key.
+The exact `RESCHEDULE` command keeps its deterministic path. See
 [CONVERSATION.md](CONVERSATION.md#client-read-tool-loop-340).
 
 Owner approval and decline (#298): after the owner phone, consent, and opt-out

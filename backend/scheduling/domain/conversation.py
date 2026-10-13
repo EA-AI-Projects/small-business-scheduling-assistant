@@ -41,7 +41,12 @@ from scheduling.domain.client_replies import (
     gsm_septets,
     valid_draft,
 )
-from scheduling.domain.client_tools import CancellationHooks, ClientReadTools, check_reply
+from scheduling.domain.client_tools import (
+    CancellationHooks,
+    ClientReadTools,
+    CounterofferHooks,
+    check_reply,
+)
 from scheduling.domain.conversation_history import HistoryMessage
 from scheduling.domain.conversation_state import (
     MAX_OPTIONS,
@@ -199,10 +204,13 @@ OWNER_FAILURE_TEXT = "Something went wrong. Please try again."
 # interpreter has one. Its one write is request_booking (#341): accepting a time this client
 # was offered. Cancelling (#342) is two steps: prepare_cancellation stores the confirmation
 # question and confirm_cancellation or dismiss_cancellation answers it on a later message.
-# Moving stays on its existing path.
+# Moving (#343) is replacement-first: get_availability with a visit reference stores an offer
+# bound to that confirmed visit and its version, request_reschedule requests one offered time
+# while the visit stays confirmed, and respond_to_counteroffer accepts or declines the client's
+# own open owner counteroffer. The exact RESCHEDULE command keeps its deterministic path.
 CLIENT_LOOP_INTENTS = frozenset({"availability", "request_booking", "calendar_question",
                                  "clarify_booking", "clarify", "unsupported", "cancel",
-                                 "confirm_cancel", "keep_visit"})
+                                 "confirm_cancel", "keep_visit", "reschedule"})
 CLOSED_NOTE = "\nI closed my earlier question, so nothing was booked or cancelled."
 
 
@@ -389,14 +397,23 @@ class ConversationService:
                 return accepted
         exact = proposal is not None
         loop_tried = False  # One client loop per receipt: it must fit the worker timeout.
-        if (proposal is None and receipt.role == SenderRole.CLIENT and prompt is not None
-                and (prompt.kind == PromptKind.OFFER or prompt.kind == PromptKind.CONFIRM_CANCEL)
-                and not prompt.expired(now) and prompt.client_id == receipt.client_id
-                and (prompt.appointment_id is None) == (prompt.kind == PromptKind.OFFER)
+        open_prompt = (prompt is not None and not prompt.expired(now)
+                       and prompt.client_id == receipt.client_id
+                       and (prompt.kind == PromptKind.OFFER
+                            or (prompt.kind in (PromptKind.CONFIRM_CANCEL,
+                                                PromptKind.RESCHEDULE_DAY)
+                                and prompt.appointment_id is not None)))
+        countered = (receipt.role == SenderRole.CLIENT and proposal is None
+                     and isinstance(self._interpreter, ClientToolLoop)
+                     and self._counteroffer_open(receipt, now))
+        if (proposal is None and receipt.role == SenderRole.CLIENT
+                and (open_prompt or countered)
                 and isinstance(self._interpreter, ClientToolLoop)):
-            # A reply while this client's own new-booking offer or cancellation question is
-            # open: the model reads it in any wording and may call request_booking for exactly
-            # one offered time, or confirm_cancellation or dismiss_cancellation.
+            # A reply while this client's own offer (new or a move), cancellation question,
+            # "which day" question, or the owner's counteroffer is open: the model reads it in
+            # any wording and may call request_booking or request_reschedule for exactly one
+            # offered time, confirm_cancellation or dismiss_cancellation, or
+            # respond_to_counteroffer.
             loop_tried = True
             answered_by_loop = self._client_tool_loop(receipt, prompt, targets, policy, now)
             if answered_by_loop is not None:
@@ -505,6 +522,15 @@ class ConversationService:
                     "I can't check current openings right now. Please try again later.")
             return self._bounded_read(outcome)
         return ConversationOutcome("Please describe the scheduling change you want.")
+
+    def _counteroffer_open(self, receipt: InboundReceipt, now: datetime) -> bool:
+        """Whether this client has an owner counteroffer they can still answer (#343)."""
+        if self._acceptance is None:
+            return False
+        try:
+            return (self._acceptance.open_facts(receipt, now) or {}).get("open") is True
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+            return False
 
     def _request_offered_time(self, receipt: InboundReceipt, proposal: MessageProposal,
                               prompt: ConversationState | None,
@@ -1050,6 +1076,8 @@ class ConversationService:
                 receipt.business_id, receipt.client_id, receipt.client_id, receipt.provider_id,
                 start, minutes,
                 original.appointment_id if original is not None else None,
+                replaces_confirmed_version=(prompt.appointment_version
+                                            if original is not None else None),
                 service_duration_minutes=minutes), now)
         except (SlotConflict, InvalidReplacement, ReplacementPending, TooManyConflicts,
                 IdempotencyKeyReused, InvalidDuration, ServiceDurationChanged,
@@ -1062,6 +1090,16 @@ class ConversationService:
                 return self._with_result(outcome, "request_failed", "none",
                                          (self._client_fact(start, zone, "unavailable"),),
                                          "visit_length_changed")
+            if isinstance(exc, (InvalidReplacement, ReplacementPending)):
+                # The visit being moved changed or already has a move waiting; the time is
+                # not what failed.
+                outcome = ConversationOutcome(
+                    "That visit changed or already has a move request waiting, so nothing "
+                    "was booked. Please tell me which visit to move.")
+                return self._with_result(
+                    outcome, "request_failed", "none", (),
+                    "move_request_pending" if isinstance(exc, ReplacementPending)
+                    else "visit_changed")
             outcome = ConversationOutcome(
                 f"Sorry, {when_text(start, zone)} is no longer open, so nothing was booked. "
                 "Tell me what day works and I'll send the current open times.")
@@ -1316,11 +1354,13 @@ class ConversationService:
         attempt: ConversationOutcome | None = None
         prompt_state = "absent"
 
-        def store_offer(options: tuple[datetime, ...], minutes: int) -> None:
+        def store_offer(options: tuple[datetime, ...], minutes: int,
+                        original: Appointment | None) -> None:
             nonlocal stored
-            # The owner's counteroffer is superseded only once the final text is accepted.
+            # The owner's counteroffer is superseded only once the final text is accepted. A
+            # move's offer remembers the visit and version it would replace.
             self._remember(receipt, PromptKind.OFFER, now, options=options,
-                           duration_minutes=minutes)
+                           appointment=original, duration_minutes=minutes)
             stored = True
 
         def request(day: date, clock: time) -> dict[str, Any]:
@@ -1332,6 +1372,35 @@ class ConversationService:
             elif outcome is not None:
                 attempt = outcome
             return result
+
+        def reschedule(ref: str, day: date, clock: time) -> dict[str, Any]:
+            nonlocal booked, attempt, prompt_state
+            result, outcome, prompt_state = self._offered_booking(
+                receipt, prompt, targets, policy, now, day, clock, ref)
+            if outcome is not None and outcome.committed:
+                booked = outcome
+            elif outcome is not None:
+                attempt = outcome
+            return result
+
+        def counter_read() -> dict[str, Any]:
+            assert self._acceptance is not None
+            return {"ok": True, **(self._acceptance.open_facts(receipt, now)
+                                   or {"open": False})}
+
+        def counter_respond(accept: bool) -> dict[str, Any]:
+            nonlocal booked, attempt, prompt_state
+            assert self._acceptance is not None
+            newer = (prompt is not None and not prompt.expired(now)
+                     and prompt.kind != PromptKind.CALENDAR)
+            result, outcome = self._acceptance.respond(receipt, now, accept, newer)
+            if outcome is not None and outcome.committed:
+                booked = outcome
+                prompt_state = "closed"
+            elif outcome is not None:
+                attempt = outcome  # Written or refused: a loop failure never tries it again.
+                prompt_state = "kept" if result.get("reason") == "no_open_offer" else "closed"
+            return {"ok": True, **result}
 
         def prepare(ref: str) -> dict[str, Any]:
             nonlocal stored, prompt_state
@@ -1354,7 +1423,10 @@ class ConversationService:
         tools = ClientReadTools(
             self._repository, receipt.business_id, now, policy,
             targets[:MAX_CONTEXT_APPOINTMENTS], store_offer, request,
-            CancellationHooks(prepare, lambda: answer(False), lambda: answer(True)))
+            CancellationHooks(prepare, lambda: answer(False), lambda: answer(True)),
+            reschedule,
+            CounterofferHooks(counter_read, counter_respond)
+            if self._acceptance is not None else None)
 
         def check(text: str) -> str | None:
             return check_reply(text, tools.results, tools.offer, zone)
@@ -1507,9 +1579,10 @@ class ConversationService:
 
     def _offered_booking(self, receipt: InboundReceipt, prompt: ConversationState | None,
                          targets: tuple[Appointment, ...], policy: AvailabilityPolicy,
-                         now: datetime, day: date, clock: time,
+                         now: datetime, day: date, clock: time, ref: str | None = None,
                          ) -> tuple[dict[str, Any], ConversationOutcome | None, str]:
-        """The request_booking tool (#341): book one time this client was offered earlier.
+        """The request_booking and request_reschedule tools (#341, #343): request one time
+        this client was offered earlier. ``ref`` is set only for a move.
 
         Returns the tool result, the outcome of a real attempt (if one was made), and what
         became of the open offer: "kept", "closed", or "absent". The model names only a
@@ -1526,11 +1599,30 @@ class ConversationService:
                      "reason": reason, **extra}, None, state)
 
         if (prompt is None or prompt.kind != PromptKind.OFFER
-                or prompt.client_id != receipt.client_id or prompt.appointment_id is not None):
+                or prompt.client_id != receipt.client_id):
             return nothing("no_offer_to_accept", "absent")
+        moving = ref is not None
+        if (prompt.appointment_id is not None) != moving:
+            # A new-booking offer cannot request a move, nor a move offer a new booking.
+            return nothing("offer_is_for_a_move" if prompt.appointment_id is not None
+                           else "no_move_offer_to_accept", "kept")
         if prompt.expired(now):
             self._forget(prompt)
             return nothing("offer_expired", "closed")
+        original: Appointment | None = None
+        if ref is not None and prompt.appointment_id is not None:
+            if ref.lower() not in (prompt.appointment_id[:8].lower(),
+                                   prompt.appointment_id.lower()):
+                return nothing("not_the_visit_offered_for", "kept")
+            original = self._active_target(receipt, prompt.appointment_id, targets)
+            if (original is None or original.status != CalendarStatus.CONFIRMED
+                    or original.version != prompt.appointment_version):
+                # The visit was edited, approved elsewhere, moved, or cancelled since the offer.
+                self._forget(prompt)
+                refusal, _, state = nothing("visit_changed", "closed")
+                return refusal, ConversationOutcome(
+                    "The visit you wanted to move has changed, so nothing was booked. "
+                    "Please tell me which visit to move."), state
         wall = datetime.combine(day, clock)
         matches = [option for option in prompt.options
                    if option.astimezone(zone).replace(tzinfo=None) == wall]
@@ -1549,7 +1641,12 @@ class ConversationService:
                      "date": start.astimezone(zone).date().isoformat(),
                      "weekday": start.astimezone(zone).strftime("%A"),
                      "time": clock_text(start, zone), "when": when_text(start, zone),
-                     "duration_minutes": prompt.duration_minutes}, outcome, "closed")
+                     "duration_minutes": prompt.duration_minutes,
+                     **({} if original is None else {
+                         "replaces_ref": original.appointment_id[:8],
+                         "original_status": "confirmed", "original_stays_confirmed": True,
+                         "original_when": when_text(original.start_at, zone)})},
+                    outcome, "closed")
         why = outcome.reply_result.reason if outcome.reply_result is not None else None
         if why == "slot_taken":
             try:
