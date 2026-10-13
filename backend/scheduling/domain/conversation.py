@@ -1187,11 +1187,18 @@ class ConversationService:
 
         def tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
             nonlocal committed, offer_action, drafted_offer_id
-            if name not in ("list_pending_requests", "approve_request", "decline_request",
+            if name not in ("get_business_info", "list_pending_requests", "approve_request", "decline_request",
                             "get_calendar", "draft_counteroffer", "send_counteroffer",
                             "cancel_counteroffer"):
                 return {"ok": False, "error": "unknown_tool"}
             try:
+                if name == "get_business_info":
+                    if args:
+                        return {"ok": False, "error": "invalid_arguments"}
+                    business_profile = self._profile(receipt.business_id)
+                    return {"ok": True, "configured": business_profile is not None,
+                            "business_name": business_profile.display_name if business_profile else None,
+                            "support_contact": business_profile.support_contact if business_profile else None}
                 policy = self._repository.read_policy(receipt.business_id)
                 zone = ZoneInfo(policy.timezone)
                 if name == "get_calendar":

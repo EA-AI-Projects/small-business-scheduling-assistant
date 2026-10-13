@@ -47,6 +47,9 @@ OWNER_LOOP_INSTRUCTIONS = (
     "may read get_calendar while leaving open_offer unchanged. Treat the draft's stored "
     "client_text as authoritative: send uses that exact text. Only one scheduling write is "
     "allowed per owner message. "
+    "When the owner asks for a person or needs help you cannot provide after clarification, "
+    "call get_business_info and give the saved support contact. If no contact is saved, "
+    "say you cannot provide one. Do not invent a contact or add help wording to routine replies. "
     "Keep routine replies brief. Include a reference only when it helps identify one "
     "actionable request or the owner asks for it. To inspect requests, call list_pending_requests. To approve or "
     "decline, copy a ref and version from that tool's current result and call the matching "
@@ -58,6 +61,10 @@ OWNER_LOOP_INSTRUCTIONS = (
     "Use GSM-7 characters and at most 480 characters."
 )
 OWNER_LOOP_TOOLS: list[dict[str, Any]] = [
+    {"type": "function", "name": "get_business_info", "strict": True,
+     "description": "Read the saved business name and support contact for a human-help request.",
+     "parameters": {"type": "object", "properties": {}, "required": [],
+                    "additionalProperties": False}},
     {"type": "function", "name": "get_calendar", "strict": True,
      "description": "Read a current calendar page in the business timezone. Dates are inclusive.",
      "parameters": {"type": "object", "properties": {
