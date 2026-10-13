@@ -582,9 +582,15 @@ def _cancellation_problem(text: str, results: list[dict[str, Any]]) -> str | Non
         return "The SMS claims a cancellation; no tool made one."
     if asked:
         shown = _hour_minute(str(asked[0]["time"]))
-        if "yes" not in lowered or "?" not in text or shown not in _facts(text)[1]:
-            return ("Ask the client to reply YES to cancel, naming the visit's date and time; "
-                    "nothing is cancelled until they do.")
+        day = _day_arg(asked[0].get("date"))
+        stated_days, stated_times, _ = _facts(text)
+        if (day is None or "yes" not in lowered or "?" not in text
+                or shown not in stated_times or (day.month, day.day) not in stated_days):
+            return ("Ask the client to reply YES to cancel, naming the visit's full date and "
+                    "time; nothing is cancelled until they do.")
+        if (asked[0].get("confirmed") is not True
+                and re.search(r"\bconfirmed\b", NOT_CONFIRMED.sub("", text), re.IGNORECASE)):
+            return "That request is pending owner approval; do not call it confirmed."
     elif kept or refused:
         if NOT_CANCELLED.search(text) is None and NOTHING_CHANGED.search(text) is None:
             return "Say that nothing was cancelled."

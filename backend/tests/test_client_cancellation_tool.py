@@ -359,7 +359,8 @@ def test_a_business_question_and_a_cancellation_answer_in_one_text() -> None:
 
 # -- the final-text check ----------------------------------------------------
 
-ASKED = {"ok": True, "prepared": True, "ref": "abcd1234", "date": "2026-10-01",
+ASKED = {"ok": True, "prepared": True, "confirmed": True, "ref": "abcd1234",
+         "date": "2026-10-01",
          "time": "9:00 AM", "when": "Thu Oct 1 at 9:00 AM"}
 DONE = {"ok": True, "cancelled": True, "ref": "abcd1234", "date": "2026-10-01",
         "time": "9:00 AM", "when": "Thu Oct 1 at 9:00 AM"}
@@ -378,6 +379,12 @@ def test_reply_check_distinguishes_cancelled_still_booked_and_unchanged() -> Non
     assert verdict("Your Thu Oct 1 visit is cancelled. Reply YES to cancel?", ASKED)
     assert verdict("Do you want to cancel your visit? Reply YES.", ASKED)  # No time named.
     assert verdict("Cancel your Thu Oct 1 at 9:00 AM visit. Reply YES.", ASKED)  # No question.
+    assert verdict("Cancel your 9:00 AM visit? Reply YES to cancel.", ASKED)  # No date.
+    assert verdict("Cancel your Fri Oct 2 at 9:00 AM visit? Reply YES.", ASKED)  # Wrong date.
+    pending = {**ASKED, "confirmed": False}
+    assert verdict("Cancel your Thu Oct 1 at 9:00 AM confirmed request? Reply YES.", pending)
+    assert verdict("Cancel your Thu Oct 1 at 9:00 AM request, not confirmed yet? Reply YES.",
+                   pending) is None
     assert verdict("Cancelled your Thu Oct 1 at 9:00 AM visit (ref abcd1234).", DONE) is None
     assert verdict("I cancelled your Thu Oct 1 at 9:00 AM visit (ref abcd1234).", DONE) is None
     assert verdict("Cancelled your Thu Oct 1 at 9:00 AM visit.", DONE)  # No reference.
@@ -396,3 +403,13 @@ def test_reply_check_distinguishes_cancelled_still_booked_and_unchanged() -> Non
 def test_the_model_cannot_claim_a_confirmed_booking_after_a_cancellation() -> None:
     assert verdict("I booked you in for Thu Oct 1 at 9:00 AM. Cancelled ref abcd1234.", DONE)
 
+
+
+def test_a_question_that_omits_the_date_is_rejected_when_two_visits_share_a_time() -> None:
+    chat, model = chat_with(lambda tools: (prepare(tools, friday[:8]),
+                                           "Cancel your 9:00 AM visit? Reply YES to cancel.")[1])
+    chat.hold(THURSDAY, "thu", confirm=True)
+    friday = chat.hold(THURSDAY + timedelta(days=1), "fri", confirm=True)
+    chat.model.replies["cancel the 9"] = ask("cancel")
+    chat.text("cancel the 9")
+    assert model.rejected[-1] is not None
