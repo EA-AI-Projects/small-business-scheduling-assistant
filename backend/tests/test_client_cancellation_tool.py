@@ -421,6 +421,6 @@ def test_the_client_loop_instructions_leave_status_wording_to_the_model() -> Non
     assert "both asks to cancel a visit and asks a question" in text
     assert "call prepare_cancellation for that visit and answer the question" in text
     assert "word the status yourself" in text
-    assert "only when prepare_cancellation returned prepared true in this message or a " in text
+    assert "only when prepare_cancellation returned prepared true in this message, or when " in text
     assert "your own earlier message in the transcript asked the client to reply YES" in text
     assert "cancellation_question_open true" not in text
