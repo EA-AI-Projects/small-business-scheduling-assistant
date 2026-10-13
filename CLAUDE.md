@@ -34,3 +34,17 @@ Frontend (from `frontend/`): `npm run lint`, `npm run typecheck`, `npm test`, `n
 - Commit subjects are plain sentences ending in `(#<issue>)`. Bodies explain why.
 - PR bodies start with `Refs #<n>.` and use the sections: what changes for users, safety boundary (when relevant), docs, validation, known limits.
 - A behavior change that alters a documented decision updates the owning document in the same PR.
+
+## Agent skills
+
+### Issue tracker
+
+Track work in GitHub Issues and the project board. See `doc/agents/issue-tracker.md`.
+
+### Triage labels
+
+Map the triage skill's five roles to their default GitHub labels. See `doc/agents/triage-labels.md`.
+
+### Domain docs
+
+Use the single-context glossary and ADR layout. See `doc/agents/domain.md`.
