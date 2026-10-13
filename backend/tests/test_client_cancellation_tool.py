@@ -11,7 +11,7 @@ from datetime import timedelta
 from typing import Any
 
 from test_client_tool_loop import LoopScript, Tools, chat_with, second_client
-from test_conversation_flow import NOW, THURSDAY, TOMORROW, ZONE, Harness, ask
+from test_conversation_flow import NOW, THURSDAY, TOMORROW, Harness, ask
 from test_sms_processing import Reader
 
 from scheduling.domain.calendar import CalendarStatus
@@ -381,7 +381,7 @@ REFUSED = {"ok": True, "cancelled": False, "nothing_changed": True, "reason": "v
 
 
 def verdict(text: str, *results: dict[str, Any]) -> str | None:
-    return check_reply(text, list(results), (), ZONE)
+    return check_reply(text, list(results))
 
 
 def test_reply_check_keeps_facts_and_leaves_cancellation_wording_to_the_model() -> None:

@@ -268,10 +268,10 @@ def test_ambiguous_text_asks_a_question_and_reads_or_stores_nothing() -> None:
 
 
 @pytest.mark.parametrize("text", [
-    "Open times: tomorrow morning is free.",
-    "I have a few openings. Reply with a time.",
+    "Open Wed Sep 30: 1) 4:45 PM or 2) 5:15 PM.",
+    "I have 4:45 PM free tomorrow.",
 ])
-def test_an_incomplete_offer_is_never_sent(text: str) -> None:
+def test_an_offer_text_with_a_time_no_tool_gave_is_never_sent(text: str) -> None:
     chat, model = chat_with(lambda tools: (tools("get_availability", {
         "from": TOMORROW, "to": TOMORROW, "time_from": None, "time_to": None}), text)[1])
     chat.model.replies["Can you book tomorrow?"] = ask("availability", TOMORROW)
@@ -299,29 +299,43 @@ def test_a_time_no_tool_returned_is_never_sent_and_leaves_no_stale_offer() -> No
                for start in state.options)
 
 
-def test_an_offer_must_be_listed_whole_in_order_numbered_and_pending_approval() -> None:
-    def plan_with(text_for: Callable[[list[dict[str, Any]]], str]) -> LoopScript:
-        def plan(tools: Tools) -> str:
-            result = tools("get_availability", {"from": TOMORROW, "to": TOMORROW,
-                                                "time_from": None, "time_to": None})
-            return text_for(result["offer"]["options"])
-        return LoopScript(plan)
+def test_a_freely_worded_offer_is_sent_as_written_and_the_stored_offer_still_resolves() -> None:
+    # The backend no longer judges how the model lists offered times (#361).
+    def plan(tools: Tools) -> str:
+        result = tools("get_availability", {"from": TOMORROW, "to": TOMORROW,
+                                            "time_from": None, "time_to": None})
+        options = result["offer"]["options"]
+        return "Open Sep 30, latest first: " + ", ".join(
+            f"{item['time']}" for item in reversed(options)) + "."
 
-    cases = {
-        "dropped": lambda o: f"Open: 1) {o[0]['time']}. The owner approves every request.",
-        "unnumbered": lambda o: "Open Sep 30: " + ", ".join(i["time"] for i in o)
-        + ". The owner approves every request.",
-        "reversed": lambda o: "Open Sep 30: " + ", ".join(
-            f"{i['number']}) {i['time']}" for i in reversed(o))
-        + ". The owner approves every request.",
-        "not_pending": lambda o: "Open Sep 30: " + ", ".join(
-            f"{i['number']}) {i['time']}" for i in o) + ". Reply with a number.",
-    }
-    for name, text_for in cases.items():
-        model = plan_with(text_for)
-        chat = Harness(model)
-        chat.text("anything tomorrow?")
-        assert model.rejected[0] is not None, name
+    model = LoopScript(plan)
+    chat = Harness(model)
+    reply = chat.text("anything tomorrow?")
+    assert model.rejected == [None] and reply.text.startswith("Open Sep 30, latest first: ")
+    state = chat.states.read_state("pilot", "+14155550101")
+    assert state is not None and state.kind == PromptKind.OFFER and len(state.options) >= 2
+    assert chat.calendar() == ()
+
+
+def test_the_fallback_lists_numbers_and_resolves_a_bare_number_against_the_stored_offer() -> None:
+    def plan(tools: Tools) -> str:
+        tools("get_availability", {"from": TOMORROW, "to": TOMORROW,
+                                   "time_from": None, "time_to": None})
+        return "Open Wed Sep 30: 1) 4:45 PM."  # A time no tool gave: the loop text is refused.
+
+    chat, model = chat_with(plan)
+    chat.model.replies["tomorrow?"] = ask("availability", TOMORROW)
+    reply = chat.text("tomorrow?")
+    assert model.rejected[0] is not None
+    assert reply.text.startswith("Open times on Wed Sep 30: 1) ") and "2) " in reply.text
+    state = chat.states.read_state("pilot", "+14155550101")
+    assert state is not None and state.kind == PromptKind.OFFER
+    chosen = state.options[1]
+    model.plan = lambda _tools: (_ for _ in ()).throw(TimeoutError("budget"))
+    booked = chat.text("2")  # A bare number resolves against the stored offer.
+    assert booked.committed
+    appointment = chat.store.read_appointment(booked.appointment_id or "")
+    assert appointment is not None and appointment.start_at == chosen
 
 
 def test_tool_errors_are_structured_and_the_reply_may_only_say_so() -> None:
@@ -500,20 +514,22 @@ def _offer_check(starts: tuple[datetime, ...], text: str) -> str | None:
     facts = {"ok": True, "text": [
         f"{start.astimezone(ZONE).strftime('%a %b')} {start.astimezone(ZONE).day} "
         f"at {start.astimezone(ZONE).strftime('%I:%M %p').lstrip('0')}" for start in starts]}
-    return check_reply(text, [facts], starts, ZONE)
+    return check_reply(text, [facts])
 
 
-def test_option_numbers_and_dates_must_match_the_stored_options() -> None:
+def test_offer_wording_is_not_judged_but_facts_still_are() -> None:
     day = datetime(2026, 10, 16, 17, tzinfo=ZONE)  # Fri Oct 16, 10:00 AM local.
-    two_days = (day.replace(hour=10), day.replace(day=17, hour=9))
-    two_times = (day.replace(hour=10), day.replace(hour=13))
-    ok = " The owner approves every request."
-    assert _offer_check(two_days, "1) Fri Oct 16 at 10:00 AM 2) Sat Oct 17 at 9:00 AM." + ok) is None
-    assert _offer_check(two_days, "1) Sat Oct 17 at 10:00 AM 2) Fri Oct 16 at 9:00 AM." + ok)
-    assert _offer_check(two_days, "Fri Oct 16: 1) 10:00 AM. Sat Oct 17: 2) 9:00 AM." + ok) is None
-    assert _offer_check(two_days, "Fri Oct 16: 1) 10:00 AM, 2) 9:00 AM." + ok)
-    assert _offer_check(two_times, "Fri Oct 16: 1) 10:00 AM or 2) 1:00 PM." + ok) is None
-    assert _offer_check(two_times, "Fri Oct 16: 2) 10:00 AM or 1) 1:00 PM." + ok)
-    assert _offer_check(two_times, "Fri Oct 16: 1) 1:00 PM or 2) 10:00 AM." + ok)
-    assert _offer_check(two_times[:1], "Fri Oct 16 at 10:00 AM." + ok) is None
-    assert _offer_check(two_times[:1], "Sat Oct 17 at 10:00 AM." + ok)
+    offer = (day.replace(hour=10), day.replace(hour=13))
+    # Any order, format, numbering, or missing approval line passes (#361).
+    for text in ("Fri Oct 16: 1) 10:00 AM or 2) 1:00 PM. The owner approves every request.",
+                 "Fri Oct 16: 2) 10:00 AM or 1) 1:00 PM.",
+                 "I can do 1:00 PM or 10:00 AM on Fri Oct 16, just tell me which.",
+                 "Fri Oct 16 at 10:00 AM."):
+        assert _offer_check(offer, text) is None, text
+    # A fabricated date, time, or reference is still rejected.
+    for text in ("Sat Oct 17: 1) 10:00 AM or 2) 1:00 PM.",
+                 "Fri Oct 16: 1) 10:00 AM or 2) 4:00 PM.",
+                 "Fri Oct 16 at 10:00 AM (ref abcd1234)."):
+        assert _offer_check(offer, text) is not None, text
+    assert _offer_check(offer, "") is not None
+    assert _offer_check(offer, "x" * 481) is not None

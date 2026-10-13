@@ -9,7 +9,6 @@ words an answer. No live model, SMS, or AWS is used.
 
 from datetime import timedelta
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from test_client_tool_loop import LoopScript, Tools, chat_with, second_client
 from test_conversation_flow import NOW, THURSDAY, Harness, ask
@@ -254,30 +253,29 @@ def test_a_mixed_question_and_second_action_takes_only_one_action() -> None:
 
 
 def test_move_replies_keep_fact_checks_and_leave_status_wording_to_the_model() -> None:
-    local = ZoneInfo("America/Los_Angeles")
     done = [{"ok": True, "requested": True, "status": "pending_owner_approval",
              "confirmed": False, "ref": "abcd1234", "replaces_ref": "feed5678",
              "date": FRIDAY, "weekday": "Friday", "time": "10:00 AM",
              "when": "Fri Oct 2 at 10:00 AM", "original_when": "Thu Oct 1 at 9:00 AM"}]
     good = ("Requested a move to Fri Oct 2 at 10:00 AM (ref abcd1234). It is pending owner "
             "approval. Your Thu Oct 1 at 9:00 AM visit stays confirmed until then.")
-    assert check_reply(good, done, (), local) is None
+    assert check_reply(good, done) is None
     # Status wording is the model's (#359): none of these is judged.
     for free in ("Your visit was moved to Fri Oct 2 at 10:00 AM (ref abcd1234).",
                  "Requested Fri Oct 2 at 10:00 AM (ref abcd1234).",
                  "Your visit moves next Friday."):
-        assert check_reply(free, done, (), local) is None, free
+        assert check_reply(free, done) is None, free
     # Absolute dates, times, and references must come from a tool result.
     for bad in (good.replace("Fri Oct 2", "Sat Oct 3"), good.replace("10:00 AM", "11:30 AM"),
                 good.replace("abcd1234", "ffff9999"), good.replace("Thu Oct 1", "Wed Sep 30")):
-        assert check_reply(bad, done, (), local) is not None, bad
+        assert check_reply(bad, done) is not None, bad
     refused = [{"ok": True, "requested": False, "nothing_changed": True,
                 "reason": "visit_changed"}]
-    assert check_reply("That visit changed, so nothing was booked.", refused, (), local) is None
+    assert check_reply("That visit changed, so nothing was booked.", refused) is None
 
 
 def test_a_loop_failure_falls_back_to_the_deterministic_reschedule_question() -> None:
-    chat, model = chat_with(lambda tools: (offer_move(tools), "Moved it!")[1])
+    chat, model = chat_with(lambda tools: (offer_move(tools), "Moved it to Fri Oct 2 at 4:45 AM.")[1])
     visit = chat.hold(THURSDAY, "visit", confirm=True)
     chat.model.replies["move my visit"] = ask("reschedule", target_date="2026-10-01")
     reply = chat.text("move my visit")

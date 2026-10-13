@@ -583,51 +583,6 @@ def _facts(text: str) -> tuple[list[tuple[int, int]], list[tuple[int, int]], lis
     return days, times, refs
 
 
-MARKER = re.compile(r"(?<!\d)(\d)\s*\)")
-
-
-def _events(text: str) -> list[tuple[str, Any]]:
-    """Dates, option markers, and clock times of the text, in the order they are read."""
-    found: list[tuple[int, str, Any]] = []
-    for match in DATE.finditer(text):
-        if pair := _month_day(match.group()):
-            found.append((match.start(), "date", pair))
-    blanked = DATE.sub(lambda match: " " * len(match.group()), text)
-    for match in TIME.finditer(blanked):
-        if pair := _hour_minute(match.group()):
-            found.append((match.start(), "time", pair))
-    for match in MARKER.finditer(blanked):
-        found.append((match.start(), "marker", int(match[1])))
-    return [(kind, value) for _, kind, value in sorted(found, key=lambda item: item[0])]
-
-
-def _offer_in_order(text: str, starts: list[datetime]) -> bool:
-    """Each offered time is read in order, under its own date and (if several) its own number.
-
-    Option i's time must follow option i-1's, be introduced by marker ``i)`` (with only a
-    date between them), and sit under the most recent date before it, which is option i's.
-    """
-    events = _events(text)
-    position = 0
-    for number, start in enumerate(starts, 1):
-        want_date, want_time = (start.month, start.day), (start.hour, start.minute)
-        for index in range(position, len(events)):
-            kind, value = events[index]
-            if kind != "time" or value != want_time:
-                continue
-            before = [event for event in events[:index] if event[0] != "date"]
-            dates = [event[1] for event in events[:index] if event[0] == "date"]
-            if len(starts) > 1 and (not before or before[-1] != ("marker", number)):
-                continue
-            if not dates or dates[-1] != want_date:
-                continue
-            position = index + 1
-            break
-        else:
-            return False
-    return True
-
-
 def _authorized(results: list[dict[str, Any]]) -> tuple[set[tuple[int, int]],
                                                        set[tuple[int, int]], set[str]]:
     days: set[tuple[int, int]] = set()
@@ -653,17 +608,15 @@ def _authorized(results: list[dict[str, Any]]) -> tuple[set[tuple[int, int]],
     return days, times, refs
 
 
-def check_reply(text: str, results: list[dict[str, Any]],
-                offer: tuple[datetime, ...], zone: ZoneInfo) -> str | None:
+def check_reply(text: str, results: list[dict[str, Any]]) -> str | None:
     """Why the final text may not be sent, or None. Facts only (#359).
 
     The text must be non-empty and one GSM-7 segment, and every absolute date, clock time,
     and reference it states must come from a successful tool result of this message. The
     model words status itself (pending, confirmed, cancelled, still booked) from the tool
     facts; the backend does not judge that wording, and relative dates are left to the model.
-    The writes themselves are guarded by stored state in the tools, not by this check. A stored
-    offer must be listed whole, in order, numbered, and with the owner approving every request,
-    so that a later number or time reply means what the client read.
+    The writes themselves are guarded by stored state in the tools, not by this check. How the
+    model lists offered times is its own wording (#361): the backend does not judge the listing.
     """
     size = gsm_septets(text, True)
     if not text.strip() or size is None or size > MAX_REPLY_SEPTETS:
@@ -673,13 +626,4 @@ def check_reply(text: str, results: list[dict[str, Any]],
     if (not set(days) <= allowed_days or not set(times) <= allowed_times
             or not set(refs) <= allowed_refs):
         return "The SMS states a date, time, or reference that no tool result gave."
-    if offer:
-        starts = [start.astimezone(zone) for start in offer]
-        if not _offer_in_order(text, starts):
-            return "The SMS must list every offered time, in order, with its own number and date."
-        if len(starts) > 1 and not all(
-                re.search(rf"(?<!\d){number}\s*\)", text) for number in range(1, len(starts) + 1)):
-            return "Number the offered times 1), 2), and so on."
-        if "approv" not in text.lower():
-            return "The SMS must say the owner approves every request."
     return None

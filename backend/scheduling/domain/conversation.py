@@ -1433,7 +1433,7 @@ class ConversationService:
             else None)
 
         def check(text: str) -> str | None:
-            return check_reply(text, tools.results, tools.offer, zone)
+            return check_reply(text, tools.results)
 
         try:
             history = (self._history_reader.read_conversation_history(receipt, now)

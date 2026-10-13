@@ -10,7 +10,6 @@ AWS is used.
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import pytest
 from test_counteroffer_acceptance import World
@@ -272,19 +271,18 @@ def test_an_expired_offer_cannot_be_answered(world: World) -> None:
 
 
 def test_counteroffer_replies_keep_fact_checks_and_leave_status_wording_to_the_model() -> None:
-    zone = ZoneInfo("America/Los_Angeles")
     done = [{"ok": True, "requested": True, "status": "pending_owner_approval",
              "confirmed": False, "ref": "abcd1234", "date": "2026-10-01", "weekday": "Thursday",
              "time": "2:00 PM", "when": "Thu Oct 1 at 2:00 PM"}]
     good = ("Requested Thu Oct 1 at 2:00 PM (ref abcd1234). It is pending owner approval, "
             "not confirmed yet.")
-    assert check_reply(good, done, (), zone) is None
-    assert check_reply("You're all set for Thu Oct 1 at 2:00 PM (ref abcd1234).", done, (),
-                       zone) is None  # Wording is the model's (#359).
+    assert check_reply(good, done) is None
+    # Wording is the model's (#359).
+    assert check_reply("You're all set for Thu Oct 1 at 2:00 PM (ref abcd1234).", done) is None
     for bad in ("Requested Thu Oct 1 at 3:00 PM (ref abcd1234).",
                 "Requested Fri Oct 2 at 2:00 PM (ref abcd1234).",
                 "Requested Thu Oct 1 at 2:00 PM (ref ffff9999)."):
-        assert check_reply(bad, done, (), zone) is not None, bad
+        assert check_reply(bad, done) is not None, bad
     declined = [{"ok": True, "requested": False, "declined": True, "nothing_changed": True}]
-    assert check_reply("OK, nothing was requested.", declined, (), zone) is None
-    assert check_reply("OK, nothing was requested for tomorrow.", declined, (), zone) is None
+    assert check_reply("OK, nothing was requested.", declined) is None
+    assert check_reply("OK, nothing was requested for tomorrow.", declined) is None

@@ -83,7 +83,7 @@ class ScriptedModel:
         calls, text = self.plans[case.name]
         for name, args in calls:
             result = tool(name, args)
-        if text == "OFFER":  # List the stored offer whole, as the reply check requires.
+        if text == "OFFER":  # List the stored offer (guidance only; not checked).
             listed = ", ".join(f"{item['number']}) {item['time']}"
                                for item in result["offer"]["options"])
             text = (f"Open Fri Oct 16: {listed}. The owner approves every request. Your Thu "
