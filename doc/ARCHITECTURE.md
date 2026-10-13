@@ -67,15 +67,22 @@ reply per receipt. `ClientReadTools` in
 `scheduling/domain/client_tools.py` is built per receipt with the verified business
 and client; its strict JSON tools `get_business_info`, `get_availability`, and
 `get_my_bookings` are read-only, bounded, and reject any argument beyond their schema.
-`get_availability` alone writes: the same receipt-keyed 30-minute offer memory the
-deterministic path uses, with the quoted visit length. `check_reply` compares the
+`get_availability` writes only the same receipt-keyed 30-minute offer memory the
+deterministic path uses, with the quoted visit length. `request_booking` (#341)
+takes only a local date and time and is the one tool that creates a hold: the
+conversation service books it only if it is exactly one time in this verified client's own
+unexpired new-booking offer, then `_book_option` rechecks the quoted length, current
+policy and calendar through `HoldService` (keyed by the receipt) and the result is a
+pending request. A reply while that offer is open reaches the loop before the
+deterministic option matcher; loop failure falls back to it. `check_reply` compares the
 final text with the tool results (explicit dates, times, references, a stored offer
 listed whole, in order, each under its own number and date, and no claimed write or
 mention of another client) before the receipt
 processor stores the reply for the outbox sender. One rewrite without tools is
-allowed; any other failure clears the offer and uses the deterministic answer.
-Occupied calendar time is reported only as reserved by owner. Booking,
-cancellation, and rescheduling keep their existing paths until #341 to #343. See
+allowed; any other failure clears the offer and uses the deterministic answer, and a request
+already written is never lost: its deterministic pending notice is sent instead.
+Occupied calendar time is reported only as reserved by owner. Cancellation
+and rescheduling keep their existing paths until #342 and #343. See
 [CONVERSATION.md](CONVERSATION.md#client-read-tool-loop-340).
 
 Owner approval and decline (#298): after the owner phone, consent, and opt-out

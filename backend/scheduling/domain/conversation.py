@@ -196,9 +196,10 @@ class OwnerToolLoop(Protocol):
 
 OWNER_FAILURE_TEXT = "Something went wrong. Please try again."
 # A verified client's read-only questions use the bounded client tool loop (#340) when the
-# interpreter has one. Writes (booking, cancelling, moving) stay on their existing paths.
-CLIENT_LOOP_INTENTS = frozenset({"availability", "calendar_question", "clarify_booking",
-                                 "clarify", "unsupported"})
+# interpreter has one. Its one write is request_booking (#341): accepting a time this client
+# was offered. Cancelling and moving stay on their existing paths.
+CLIENT_LOOP_INTENTS = frozenset({"availability", "request_booking", "calendar_question",
+                                 "clarify_booking", "clarify", "unsupported"})
 CLOSED_NOTE = "\nI closed my earlier question, so nothing was booked or cancelled."
 
 
@@ -384,6 +385,18 @@ class ConversationService:
                     self._forget(prompt)
                 return accepted
         exact = proposal is not None
+        loop_tried = False  # One client loop per receipt: it must fit the worker timeout.
+        if (proposal is None and receipt.role == SenderRole.CLIENT and prompt is not None
+                and prompt.kind == PromptKind.OFFER and not prompt.expired(now)
+                and prompt.client_id == receipt.client_id and prompt.appointment_id is None
+                and isinstance(self._interpreter, ClientToolLoop)):
+            # A reply while this client's own new-booking offer is open: the model reads it
+            # in any wording and may call request_booking for exactly one offered time.
+            loop_tried = True
+            answered_by_loop = self._client_tool_loop(receipt, prompt, targets, policy, now)
+            if answered_by_loop is not None:
+                return answered_by_loop
+            # The loop could not produce a checked reply; the deterministic path answers.
         if proposal is None:
             answered = self._answer(receipt, prompt, targets, policy, now)
             if answered is not None:
@@ -405,8 +418,8 @@ class ConversationService:
         # "which day" question for a known visit carries into its answer.
         moving = (prompt if prompt is not None and prompt.kind == PromptKind.RESCHEDULE_DAY
                   and not prompt.expired(now) else None)
-        if (not exact and receipt.role == SenderRole.CLIENT and moving is None
-                and proposal.intent in CLIENT_LOOP_INTENTS
+        if (not exact and not loop_tried and receipt.role == SenderRole.CLIENT
+                and moving is None and proposal.intent in CLIENT_LOOP_INTENTS
                 and isinstance(self._interpreter, ClientToolLoop)):
             answered_by_loop = self._client_tool_loop(receipt, prompt, targets, policy, now)
             if answered_by_loop is not None:
@@ -1035,14 +1048,24 @@ class ConversationService:
                 service_duration_minutes=minutes), now)
         except (SlotConflict, InvalidReplacement, ReplacementPending, TooManyConflicts,
                 IdempotencyKeyReused, InvalidDuration, ServiceDurationChanged,
-                ServiceNotConfigured, ValueError):
+                ServiceNotConfigured, ValueError) as exc:
             self._forget(prompt)
+            if isinstance(exc, ServiceDurationChanged):
+                outcome = ConversationOutcome(
+                    "The visit length changed after I sent those times, so nothing was "
+                    "booked. Tell me what day works and I'll send the current open times.")
+                return self._with_result(outcome, "request_failed", "none",
+                                         (self._client_fact(start, zone, "unavailable"),),
+                                         "visit_length_changed")
             outcome = ConversationOutcome(
                 f"Sorry, {when_text(start, zone)} is no longer open, so nothing was booked. "
                 "Tell me what day works and I'll send the current open times.")
-            return self._with_result(outcome, "request_failed", "none",
-                                     (self._client_fact(start, zone, "unavailable"),),
-                                     "slot_taken")
+            # Only a calendar conflict is reported as the time being taken.
+            return self._with_result(
+                outcome, "request_failed", "none",
+                (self._client_fact(start, zone, "unavailable"),),
+                "slot_taken" if isinstance(exc, (SlotConflict, TooManyConflicts))
+                else "not_requested")
         self._forget(prompt)
         return self._requested(receipt, original, start, result.hold_id, policy)
 
@@ -1278,6 +1301,9 @@ class ConversationService:
             return None
         zone = ZoneInfo(policy.timezone)
         stored = False
+        booked: ConversationOutcome | None = None
+        attempt: ConversationOutcome | None = None
+        prompt_state = "absent"
 
         def store_offer(options: tuple[datetime, ...], minutes: int) -> None:
             nonlocal stored
@@ -1286,8 +1312,18 @@ class ConversationService:
                            duration_minutes=minutes)
             stored = True
 
+        def request(day: date, clock: time) -> dict[str, Any]:
+            nonlocal booked, attempt, prompt_state
+            result, outcome, prompt_state = self._offered_booking(
+                receipt, prompt, targets, policy, now, day, clock)
+            if outcome is not None and outcome.committed:
+                booked = outcome
+            elif outcome is not None:
+                attempt = outcome
+            return result
+
         tools = ClientReadTools(self._repository, receipt.business_id, now, policy,
-                                targets[:MAX_CONTEXT_APPOINTMENTS], store_offer)
+                                targets[:MAX_CONTEXT_APPOINTMENTS], store_offer, request)
 
         def check(text: str) -> str | None:
             return check_reply(text, tools.results, tools.offer, zone)
@@ -1301,9 +1337,21 @@ class ConversationService:
             reason = check(text)
             if reason is not None:
                 raise ValueError(reason)
+            if booked is not None:
+                # The reply was checked against the tool result: pending, with its reference.
+                # No other reply draft replaces it; the committed text is what is delivered.
+                return replace(booked, text=text, reply_result=None)
             if tools.offer:
                 if self._acceptance is not None:
                     self._acceptance.supersede_for_new_request(receipt)
+            elif prompt_state == "kept" or (
+                    tools.calls == 0 and prompt is not None
+                    and prompt.kind == PromptKind.OFFER and not prompt.expired(now)):
+                # An unclear acceptance, or a question about it that used no tool: nothing
+                # changed and the client's offer stays open to be answered.
+                pass
+            elif prompt_state == "closed":
+                self._forget(prompt)
             else:
                 self._forget(prompt)
                 if (prompt is not None and not prompt.expired(now)
@@ -1319,10 +1367,72 @@ class ConversationService:
         except Exception:
             LOGGER.warning("Client tool loop failed; using the deterministic answer",
                            exc_info=True)
+            if booked is not None:
+                return booked  # The request was written; its own notification still goes out.
             if stored:
                 self._states.clear_state(receipt.business_id, receipt.sender,
                                          receipt.provider_id)
-            return None
+            # A refused booking already closed the offer; its own answer says nothing changed.
+            return attempt
+
+    def _offered_booking(self, receipt: InboundReceipt, prompt: ConversationState | None,
+                         targets: tuple[Appointment, ...], policy: AvailabilityPolicy,
+                         now: datetime, day: date, clock: time,
+                         ) -> tuple[dict[str, Any], ConversationOutcome | None, str]:
+        """The request_booking tool (#341): book one time this client was offered earlier.
+
+        Returns the tool result, the outcome of a real attempt (if one was made), and what
+        became of the open offer: "kept", "closed", or "absent". The model names only a
+        local date and time. The backend writes only if that is exactly one time in this
+        sender's own unexpired stored new-booking offer, then _book_option rechecks the
+        service length, current hours, and calendar through the hold service, whose key
+        is the receipt, so a retried receipt replays and cannot book twice.
+        """
+        zone = ZoneInfo(policy.timezone)
+
+        def nothing(reason: str, state: str, **extra: Any,
+                    ) -> tuple[dict[str, Any], ConversationOutcome | None, str]:
+            return ({"ok": True, "requested": False, "nothing_changed": True,
+                     "reason": reason, **extra}, None, state)
+
+        if (prompt is None or prompt.kind != PromptKind.OFFER
+                or prompt.client_id != receipt.client_id or prompt.appointment_id is not None):
+            return nothing("no_offer_to_accept", "absent")
+        if prompt.expired(now):
+            self._forget(prompt)
+            return nothing("offer_expired", "closed")
+        wall = datetime.combine(day, clock)
+        matches = [option for option in prompt.options
+                   if option.astimezone(zone).replace(tzinfo=None) == wall]
+        if len(matches) != 1:
+            return nothing(
+                "ambiguous_time" if matches else "not_an_offered_time", "kept",
+                offered=[{"number": number, "date": option.astimezone(zone).date().isoformat(),
+                          "time": clock_text(option, zone), "when": when_text(option, zone)}
+                         for number, option in enumerate(prompt.options, 1)])
+        start = matches[0]
+        outcome = self._book_option(receipt, prompt, start, targets, policy, now)
+        if outcome.committed and outcome.appointment_id is not None:
+            return ({"ok": True, "requested": True, "status": "pending_owner_approval",
+                     "confirmed": False, "owner_approval_required": True,
+                     "ref": outcome.appointment_id[:8],
+                     "date": start.astimezone(zone).date().isoformat(),
+                     "weekday": start.astimezone(zone).strftime("%A"),
+                     "time": clock_text(start, zone), "when": when_text(start, zone),
+                     "duration_minutes": prompt.duration_minutes}, outcome, "closed")
+        why = outcome.reply_result.reason if outcome.reply_result is not None else None
+        if why == "slot_taken":
+            try:
+                open_by_policy = start in available_starts(
+                    policy, start.astimezone(zone).date(), prompt.duration_minutes or 0,
+                    (), now)
+            except (InvalidDuration, InvalidPolicy):
+                open_by_policy = False
+            # Calendar time is only ever "reserved by owner": it may be another client's
+            # visit or a private block, and neither is disclosed.
+            why = "reserved_by_owner" if open_by_policy else "outside_current_hours"
+        refused, _, state = nothing(why or "not_requested", "closed")
+        return refused, outcome, state  # The real refusal, so a loop failure cannot retry it.
 
     @staticmethod
     def _active_target(receipt: InboundReceipt, appointment_id: str | None,

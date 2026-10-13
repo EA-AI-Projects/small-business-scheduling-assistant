@@ -103,7 +103,14 @@ CLIENT_LOOP_INSTRUCTIONS = (
     "length, hours, holidays, or how booking works. Call get_availability when the client "
     "asks for open times or wants a visit; it stores the offered times for the client's "
     "next reply and books nothing. Call get_my_bookings for the client's own confirmed "
-    "visits and pending requests. One message may need several tools; answer every part. "
+    "visits and pending requests. Call request_booking only when the client's message accepts "
+    "a time that an earlier assistant text in the transcript offered, for example a number, "
+    "'the 10 one', 'yes', or 'that works'; name that offered time's local date and time "
+    "exactly as the transcript listed it. If the acceptance could mean more than one offered "
+    "time, or you cannot tell which, do not call it: ask which one. Never call it for a "
+    "time you have not yet offered; a new request for a day or time starts with "
+    "get_availability and ends with the offer, in the same message. One message may need "
+    "several tools; answer every part. "
     "If the text is ambiguous (for example, only a day and the word booking), ask one short "
     "question instead of calling a tool. "
     "When get_availability returns an offer, list every option in order, numbered like "
@@ -111,9 +118,15 @@ CLIENT_LOOP_INSTRUCTIONS = (
     "to reply with the number or time. An offer is not a booking. When it returns none, give "
     "the day's reason: holiday and outside_business_hours or closed may be stated plainly; "
     "reserved_by_owner is worded only as reserved by owner, never as another client or any "
-    "other detail. A pending request is not confirmed. You cannot book, cancel, or change "
-    "a visit in this reply; never say you did, and tell the client nothing changed if they "
-    "ask for one. After a tool error, say you could not check and nothing changed. State "
+    "other detail. When request_booking returns requested true, say the request is pending "
+    "owner approval, with its date, time, and ref; never say it is confirmed or booked. "
+    "When it returns requested false, say nothing was booked, give the reason plainly "
+    "(offer_expired: the offer expired; visit_length_changed: the visit length changed; "
+    "reserved_by_owner or outside_current_hours: that time is no longer open), and offer to "
+    "send current times; for an unclear or unmatched time, ask which offered time they "
+    "mean. You cannot cancel or move a visit in this reply; never say you did, and tell "
+    "the client nothing changed if they ask for one. After a tool error, say you could not "
+    "check and nothing changed. State "
     "only dates, times, and references that tool results gave, in the same spelling. "
     "Return one plain SMS, no JSON or markdown, GSM-7 characters only, at most 380 "
     "characters."
@@ -143,6 +156,15 @@ CLIENT_LOOP_TOOLS: list[dict[str, Any]] = [
          "from": {"type": ["string", "null"], "description": "YYYY-MM-DD or null"},
          "to": {"type": ["string", "null"], "description": "YYYY-MM-DD or null"}},
          "required": ["from", "to"], "additionalProperties": False}},
+    {"type": "function", "name": "request_booking", "strict": True,
+     "description": "Request the one time the client just accepted from an earlier offer. "
+                    "Creates a request pending owner approval only if it is exactly one time "
+                    "in this client's own unexpired offer and is still open; otherwise "
+                    "nothing changes. Never use it for a time offered in this message.",
+     "parameters": {"type": "object", "properties": {
+         "date": {"type": "string", "description": "YYYY-MM-DD local date of the offered time"},
+         "time": {"type": "string", "description": "HH:MM local 24-hour offered time"}},
+         "required": ["date", "time"], "additionalProperties": False}},
 ]
 INSTRUCTIONS = (
     "Interpret one text message sent to a small appointment business. The Business and Service "

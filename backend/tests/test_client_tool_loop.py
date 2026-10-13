@@ -143,11 +143,15 @@ def test_availability_stores_an_offer_a_later_reply_can_accept_and_books_nothing
     assert offered[0]["offer"]["valid_minutes"] == 30
     assert offered[0]["days"][0]["open"] is True
 
-    # The existing deterministic acceptance path books it, once.
+    # A later accepting reply is read by the model, which may call request_booking (#341).
+    model.plan = lambda tools: (
+        tools("request_booking", {"date": TOMORROW, "time": "10:00"}),
+        "Requested Wed Sep 30 at 10:00 AM (ref " + chat.calendar()[0][0][:8]
+        + "). It is pending owner approval, not confirmed yet.")[1]
     booked = chat.text("10 works")
     assert booked.committed and "pending owner approval" in booked.text
     assert chat.status(booked.appointment_id or "") == CalendarStatus.PENDING_APPROVAL
-    assert len(model.loops) == 1
+    assert len(model.loops) == 2
 
 
 def test_no_opening_reasons_are_truthful_for_weekend_holiday_and_past_days() -> None:
@@ -466,7 +470,8 @@ def test_openai_client_loop_bounds_tools_and_rewrites_once_when_the_check_fails(
     assert [item["tool_choice"] for item in payloads] == ["auto"] * 3 + ["none"] * 2
     assert names == ["get_business_info", "get_business_info", "get_my_bookings"]
     assert {tool["name"] for tool in CLIENT_LOOP_TOOLS} == {
-        "get_business_info", "get_availability", "get_my_bookings"}  # No write tool.
+        "get_business_info", "get_availability", "get_my_bookings",
+        "request_booking"}  # The one write; the backend decides whether it books (#341).
     assert all(payload["store"] is False for payload in payloads)
     assert "Local time: 10:00" in payloads[0]["input"][0]["content"]
     assert CLIENT_LOOP_BUDGET_SECONDS + 8 < 60  # Classification call plus loop fit the worker.
@@ -481,7 +486,7 @@ def test_openai_client_loop_rejects_an_unknown_tool_and_a_second_bad_text(
     model = OpenAIMessageInterpreter("synthetic-key")
     monkeypatch.setattr("scheduling.adapters.openai_messages.urlopen",
                         lambda *_a, **_k: BytesIO(json.dumps(
-                            _call("request_booking", "x")).encode()))
+                            _call("cancel_visit", "x")).encode()))
     with pytest.raises(ValueError, match="malformed"):
         model.run_client_loop("hi", datetime(2026, 9, 29, 10, tzinfo=ZONE), "UTC", (),
                               lambda _n, _a: {}, lambda _t: None)
