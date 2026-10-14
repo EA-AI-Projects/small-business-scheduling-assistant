@@ -5,11 +5,12 @@ import { BusyButton } from "../BusyButton";
 import { WEEKDAYS } from "./policyDraft";
 import { shortTime } from "./policyEdit";
 
-export function PolicySummary({ policy }: { policy: PolicyState | null }) {
+export function PolicySummary({ policy, mode = "full" }: { policy: PolicyState | null;
+  mode?: "full" | "availability" }) {
   return (
     <section className="card">
-      <h3>Current policy</h3>
-      <div>{policy ? <Summary state={policy} /> : <SeedPolicy />}</div>
+      <h3>{mode === "availability" ? "Saved availability" : "Current policy"}</h3>
+      <div>{policy ? <Summary state={policy} mode={mode} /> : <SeedPolicy />}</div>
     </section>
   );
 }
@@ -18,7 +19,7 @@ function hours(windows: { opens: string; closes: string }[]): string {
   return windows.length ? windows.map((item) => `${shortTime(item.opens)}–${shortTime(item.closes)}`).join(", ") : "Closed";
 }
 
-function Summary({ state }: { state: PolicyState }) {
+function Summary({ state, mode }: { state: PolicyState; mode: "full" | "availability" }) {
   const policy = state.record.policy;
   const exceptions = Object.entries(policy.date_exceptions ?? {}).sort(([a], [b]) => a.localeCompare(b));
   return (
@@ -35,12 +36,14 @@ function Summary({ state }: { state: PolicyState }) {
       <h4>Date exceptions</h4>
       {exceptions.length === 0 && <p className="empty">No date exceptions</p>}
       {exceptions.map(([date, windows]) => <p key={date} className="meta">{`${date}: ${hours(windows)}`}</p>)}
-      <h4>Advanced scheduling</h4>
-      <p>{`Start-time increment: ${policy.slot_increment_minutes} minutes · Maximum visit: ${
-        policy.maximum_visit_minutes} minutes · Gap between visits: ${policy.minimum_visit_gap_minutes} minutes`}</p>
-      <p>{`Opening buffer: ${policy.opening_buffer_minutes} minutes · Closing buffer: ${
-        policy.closing_buffer_minutes} minutes · Maximum buffer: ${policy.maximum_buffer_minutes} minutes · Hold: ${
-        policy.hold_minutes} minutes`}</p>
+      {mode === "full" && <>
+        <h4>Advanced scheduling</h4>
+        <p>{`Start-time increment: ${policy.slot_increment_minutes} minutes · Maximum visit: ${
+          policy.maximum_visit_minutes} minutes · Gap between visits: ${policy.minimum_visit_gap_minutes} minutes`}</p>
+        <p>{`Opening buffer: ${policy.opening_buffer_minutes} minutes · Closing buffer: ${
+          policy.closing_buffer_minutes} minutes · Maximum buffer: ${policy.maximum_buffer_minutes} minutes · Hold: ${
+          policy.hold_minutes} minutes`}</p>
+      </>}
       <p className="meta">{`Version ${state.record.version} · calendar revision ${state.calendar_revision}`}</p>
     </>
   );
