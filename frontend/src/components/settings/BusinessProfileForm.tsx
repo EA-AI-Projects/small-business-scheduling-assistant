@@ -5,6 +5,7 @@ import { ApiError } from "@/lib/api";
 import { useOwner } from "@/owner/OwnerContext";
 
 import { BusyButton } from "../BusyButton";
+import { SettingsAccordion } from "./SettingsAccordion";
 
 const LIMITS = { display_name: 100, description: 300, support_contact: 200, service_name: 100,
   service_description: 300 } as const;
@@ -65,7 +66,7 @@ function Field({ name, label, error, shown, extra, children }: {
   </div>;
 }
 
-export function BusinessProfileForm() {
+export function BusinessProfileForm({ onDirtyChange }: { onDirtyChange?: (dirty: boolean) => void } = {}) {
   const { api, data, notify, refresh } = useOwner();
   const [saved, setSaved] = useState<BusinessProfileState | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -74,6 +75,13 @@ export function BusinessProfileForm() {
   const [stale, setStale] = useState(false);
   const [summary, setSummary] = useState<string | null>(null);
   const [serverError, setServerError] = useState<string | null>(null);
+  const [openSection, setOpenSection] = useState({ business: true, service: false });
+  const firstInvalidFocus = useRef<keyof Draft | null>(null);
+  useEffect(() => {
+    if (!shown || !firstInvalidFocus.current) return;
+    document.getElementById(`business-profile-${firstInvalidFocus.current}`)?.focus();
+    firstInvalidFocus.current = null;
+  }, [shown, openSection]);
 
   const load = useCallback(async () => {
     try {
@@ -100,6 +108,7 @@ export function BusinessProfileForm() {
 
   const savedDraft = toDraft(saved?.profile ?? null);
   const dirty = saved !== null && JSON.stringify(normalized(draft)) !== JSON.stringify(savedDraft);
+  useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
   const found = problems(draft, data.policy?.record.policy.maximum_visit_minutes ?? null);
   const count = Object.keys(found).length;
   // One key per exact request, so a retry after a lost response replays instead of conflicting.
@@ -117,6 +126,10 @@ export function BusinessProfileForm() {
     setSummary(null);
     if (count) {
       setSummary(`Fix ${count} ${count === 1 ? "field" : "fields"} before saving.`);
+      firstInvalidFocus.current = Object.keys(found)[0] as keyof Draft;
+      setOpenSection((current) => ({ business: current.business || Boolean(found.display_name || found.description
+        || found.support_contact), service: current.service || Boolean(found.service_name || found.service_description
+        || found.default_duration_minutes) }));
       return;
     }
     const clean = normalized(draft);
@@ -161,6 +174,8 @@ export function BusinessProfileForm() {
     {saved === null && loadError && <div><BusyButton onClick={load}>Retry</BusyButton></div>}
     {saved && <div className="form-stack">
       {saved.profile === null && <p className="empty">Not set up yet. Enter your details and save.</p>}
+      <SettingsAccordion title="Business" open={openSection.business}
+        onToggle={() => setOpenSection((current) => ({ ...current, business: !current.business }))}>
       <Field name="display_name" label="Business name" error={found.display_name} shown={shown}>
         {(props) => <input {...props} value={draft.display_name}
           onChange={(event) => edit("display_name", event.target.value)} />}
@@ -173,6 +188,9 @@ export function BusinessProfileForm() {
         {(props) => <input {...props} value={draft.support_contact}
           onChange={(event) => edit("support_contact", event.target.value)} />}
       </Field>
+      </SettingsAccordion>
+      <SettingsAccordion title="Service" open={openSection.service}
+        onToggle={() => setOpenSection((current) => ({ ...current, service: !current.service }))}>
       <Field name="service_name" label="Service name" error={found.service_name} shown={shown}>
         {(props) => <input {...props} value={draft.service_name}
           onChange={(event) => edit("service_name", event.target.value)} />}
@@ -189,6 +207,7 @@ export function BusinessProfileForm() {
       </Field>
       <p id="business-profile-duration-hint" className="hint">Changing the default duration affects
         future requests only. Existing appointments keep the duration they already have.</p>
+      </SettingsAccordion>
       {stale && <div className="field-error" role="alert">
         <p>These details were changed elsewhere (now version {saved.version}). Your edits are kept;
           review them and save again to replace the newer values.</p>

@@ -84,6 +84,16 @@ p { margin: .35rem 0 1rem; }
 .toolbar label { min-width: 145px; }
 .toolbar .calendar-zone { margin-left: auto; color: var(--color-text-subtle); font-size: .9rem; }
 .settings-stack { display: grid; gap: 1rem; }
+.settings-card { display: grid; gap: .25rem; width: 100%; padding: 1rem 1.1rem; border: 1px solid var(--color-border); border-radius: 12px; background: var(--color-surface); box-shadow: 0 2px 8px var(--color-shadow); text-align: left; color: var(--color-text); }
+.settings-card:hover { background: var(--color-primary-faint); }
+.settings-card > strong { font-size: 1.06rem; }
+.settings-card > span { color: var(--color-text-subtle); font-size: .9rem; }
+.settings-card .settings-unsaved { color: var(--color-danger); font-weight: 700; }
+.settings-editor { display: grid; gap: 1rem; min-width: 0; }
+.settings-editor-content { display: grid; gap: 1rem; }
+.settings-editor-content > .card { padding: 0; border: 0; box-shadow: none; }
+.settings-editor-content > .card > h3:first-child { display: none; }
+.settings-discard { padding: .75rem; border: 1px solid var(--color-danger-border); border-radius: 8px; background: var(--color-danger-bg); }
 .stack, .card-list { display: grid; gap: 1rem; }
 .request, .client-row, .note-row { border: 1px solid var(--color-border); background: var(--color-surface-subtle); border-radius: 8px; padding: .7rem; }
 .request h3 { margin-bottom: .3rem; }
