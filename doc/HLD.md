@@ -1,325 +1,109 @@
 # High-Level Design: Smart Scheduling Assistant
 
-**Status:** Draft for review  
-**Version:** 0.1  
-**Date:** 2026-09-25  
-**Related:** [PRD.md](PRD.md)
+**Status:** Current repository design; reviewed 2026-10-14. This describes implemented capabilities, not live deployment state.
 
 ## 1. Design goals
 
-- One authoritative schedule shared by SMS conversations and the owner interface.
-- Keep language-model behavior separate from authoritative booking decisions.
-- Prevent overlapping confirmed visits, pending holds, and unavailable blocks.
-- Make owner approval easy from SMS while preserving an audit trail.
-- Minimize sensitive data collection and protect client information.
-- Keep the first implementation small enough for a single-business pilot, with owner and client accounts scoped to their linked records.
+Provide one schedule for SMS, the owner app, and the client portal. The model interprets language and explains results; scheduling services enforce identity, availability, approval, and state transitions. The initial business has one schedulable crew and one service.
 
-## 2. Proposed architecture
+## 2. System overview
 
 ```text
- Client SMS                         Owner SMS
-     |                                  ^
-     v                                  |
-+----------------+                +------------------+
-| SMS Provider   |<-------------->| Notification /   |
-| inbound webhook|                | SMS adapter       |
-+-------+--------+                +---------+--------+
-        |                                   ^
-        v                                   |
-+-----------------------+                   |
-| Webhook/API service   |-------------------+
-| auth, validation,     |
-| idempotency, routing  |
-+-----------+-----------+
-            |
-     +------+-----------------------+
-     |                              |
-     v                              v
-+----------------------+   +-----------------------+
-| Conversation service |   | Scheduling domain     |
-| intent/slot gathering|-->| availability, holds,  |
-| LLM with bounded     |   | approvals, cancel,    |
-| tools and policies   |   | duration, audit       |
-+----------------------+   +-----------+-----------+
-                                     |
-                                     v
-                              +-------------+
-                              | DynamoDB    |
-                              | on-demand   |
-                              +------+------+ 
-                                     ^
-                                     |
-                         +-----------+-----------+
-                         | Owner web admin and   |
-                         | client landing state  |
-                         +-----------------------+
+Client / owner SMS -> Twilio -> signed webhook -> receipt queue -> conversation worker
+                                                                       |
+                                                             bounded OpenAI tools
+                                                                       |
+Owner / client browser -> static Next.js app -> authenticated API -> domain services
+                                                                       |
+                                                                   DynamoDB
+                                                                       |
+                                                       transactional notification outbox
+                                                                       |
+                                                       dispatcher -> SQS -> SMS sender -> Twilio
+
+Scheduled workers: hold expiry, note retention, SMS retention, booking invitations
 ```
 
-The SMS provider is an external dependency. The LLM is called only from the conversation service. The scheduling domain exposes explicit operations; the model cannot directly write database records or calculate authoritative availability by free-form reasoning.
+The calendar and stored appointment state are authoritative. Queue messages identify work; they do not authorize an action. Each worker rereads current state. SMS and browser actions use the same scheduling services.
 
 ## 3. Components and responsibilities
 
-### 3.1 SMS adapter and webhook/API service
+| Component | Responsibility |
+| --- | --- |
+| SMS ingress | Validate provider signatures and exact callback URLs, resolve verified senders, persist and deduplicate receipts, record keyword and delivery events. |
+| Conversation service | Interpret messages using bounded sender-scoped history and typed tools; retain short-lived offers and confirmation questions. See [CONVERSATION.md](CONVERSATION.md). |
+| Scheduling domain | Calculate availability, create holds, approve/decline, cancel, swap replacements, edit appointments/blocks/policy, and commit audit and notification records. |
+| Owner app | Calendar, pending decisions, clients, notes, consent, delivery failures, and business/policy/invitation settings. |
+| Client portal | Calendar and Appointments pages for the linked client's own visits, open times, requests, cancellation, withdrawal, and moves. |
+| Identity service | Link approved owners to businesses and invited clients to existing profiles. Cognito sign-in alone grants no data access. |
+| Background workers | Expire holds, dispatch/deliver notifications, purge retained content, and select/promote eligible invitations. |
 
-- Receive provider webhooks for inbound/outbound message events.
-- Verify provider signatures and reject invalid requests.
-- Normalize phone numbers and message metadata.
-- Deduplicate provider retries using provider message IDs/idempotency keys.
-- Persist inbound messages before processing so transient downstream failures can be retried.
-- Rate-limit and protect endpoints; avoid logging message bodies or phone numbers unnecessarily.
+## 4. Logical data model
 
-### 3.2 Conversation service
+- **Business policy and profile:** timezone, hours, holidays/exceptions, horizon, limits, buffer, hold lifetime, business/support details, and one service with a default duration.
+- **Client:** owner-maintained identity/contact/address, active state, phone verification and separate consent/opt-out evidence. No per-client visit duration.
+- **Account link:** verified subject, role, business, optional client, activation state, version and administrative audit.
+- **Appointment:** client, UTC interval, duration/buffer snapshots, status/version, hold expiry, and optional original appointment being replaced.
+- **Unavailable block:** owner-managed interval and version.
+- **Note:** ordinary client or appointment note with retention and documented legal hold; entry/access codes are excluded.
+- **Conversation:** durable inbound receipts, accepted outbound history, and sender-bound expiring prompt state.
+- **Audit and outbox:** committed action evidence and stable notification intents with independent delivery state.
+- **Outreach:** versioned invitation settings, selected intents, and scheduled repeat guards.
 
-- Associate inbound phone numbers with a client or an unrecognized-contact flow.
-- Load limited relevant context: client identity, current appointment/request state, and approved notes needed for the conversation.
-- Use the LLM to classify/interpret the message and formulate a response.
-- Invoke only typed, allowlisted tools, such as `get_available_slots`, `create_booking_request`, `cancel_appointment`, `get_client_appointments`, and `create_note_draft`.
-- Require confirmation/clarification when identity, date, time, appointment, or owner intent is ambiguous.
-- Answer a verified client's calendar questions read-only (#240, #271): the model interprets the question in any wording or language and may only propose the `calendar_question` or `clarify_booking` intent with a day range, statuses, and list or count. The backend reads only that client's current visits, then produces the authoritative answer from `client_calendar_questions.py`; no other client's visits, owner blocks, or notes enter the tool result. A long list becomes a compact SMS that still names every current visit's local start date, time, and status. The model drafts from the validated result and transcript; a backend check requires all and only the result's explicit dates, times, and references within one GSM-7 segment, then uses the safe backend answer on failure. The model instructions govern status wording; this check cannot detect every false claim or mismatched association among visits (#283, owner decision 2026-10-08). Follow-ups (#241) reuse only the last question's range, statuses, and view, kept 30 minutes in the per-sender conversation memory, and reread the visits each time. See [CONVERSATION.md](CONVERSATION.md#client-calendar-questions).
-- For verified client availability questions (#271), the typed model proposal selects the sender-scoped `list_available_slots` read. The backend checks current policy, duration, horizon, blocks, visits, and holds before returning an answer. The model gets the bounded sent-aware 24-hour SMS transcript and open prompt kind to interpret date-only follow-ups. A second model call may draft one SMS from the authoritative result; the service checks its length and explicit dates, times, and references. Failed checks use the authoritative answer; the model instructions guide availability wording. Since #275 this is the only reply-drafting call: the earlier read-only drafter was removed, and the fixed backend sentences remain only as the validated fallback.
-- Client cancellation and rescheduling (#273) use the same typed pattern as `request_booking`. The model proposes `cancel` or `reschedule` with the day of the visit; the backend resolves it only among the sender's own active visits, lists them by number if more than one matches, and asks the existing 30-minute cancel confirmation or offers replacement times. While the question is open the client tool loop (#342) reads the answer first, with the deterministic matcher as fallback; the model reads the client's answer in any wording and proposes `confirm_cancel`, `keep_visit` (cancellation) or `request_booking` (replacement). It names no visit: the backend acts only on the sender's own unexpired stored prompt (same client ID), which already binds one appointment and version, and calls the existing lifecycle or hold service with the inbound receipt ID as idempotency key. A replacement creates a pending request and the original stays confirmed until the owner approves it. An expired, replaced, changed-version, conflicting, or another client's prompt writes nothing. Plain YES and option-number matching are the fallback when the client tool loop (#341, #342) cannot answer; drafted replies use the validated result and fall back to deterministic text (#283).
-- Client read-tool loop (#340, under #333): for a verified client's read-only questions the model runs a bounded loop (five calls, three tool calls, 30 seconds) over three strict read tools plus `request_booking` (#341), `get_business_info` (saved one-service profile, policy hours, holidays), `get_availability` (current starts; stores the 30-minute offer a later reply may accept; truthful no-opening reason; occupied time is only "reserved by owner"), and `get_my_bookings` (this client's own confirmed and pending visits). Identity comes only from the verified receipt. The backend checks the final SMS against the tool results for facts only (#359: non-empty, one GSM-7 segment, every stated absolute date, time, and reference from a tool result; #361: the backend does not judge how offered times are listed, though the deterministic fallback still lists and numbers the stored offer) and otherwise falls back to the deterministic answer; the model words status itself and the backend does not judge that wording. `request_booking` names only a local date and time; the backend books it only when it is exactly one time in this client's own unexpired offer, rechecks length, policy, calendar, consent, and the receipt-keyed idempotency, and the tool result states pending owner approval or that nothing changed for the model to word. A first request offers times and never books in the same message. Cancellation (#342) is two backend-bound steps: `prepare_cancellation` takes only a visit reference and stores the 30-minute confirmation question for one of the sender's own visits at its current version; a later message's `confirm_cancellation` acts only on that stored question, after rechecking the visit and version, with one receipt-keyed lifecycle write, while `dismiss_cancellation` closes it. An ambiguous, unknown, expired, stale, changed, or unanswered question cancels nothing, a pending request is cancelled by the same explicit confirmation, and the tool results state cancelled, still booked, or unchanged for the model to word. Rescheduling and owner counteroffers (#343) are replacement-first and backend-bound: `get_availability` with a visit reference stores an offer bound to one of the sender's confirmed visits and its version; `request_reschedule` names that visit and one offered time and creates a request pending owner approval while the original stays confirmed (the owner's approval swaps them, and any failure leaves the original unchanged); `get_my_counteroffer` and `respond_to_counteroffer` read and answer only the sender's own unexpired owner counteroffer, where acceptance creates a pending request through the offer's idempotency key and declining books nothing. The tool result states the request as pending owner approval and the visit as still confirmed; the model words it. The deterministic reschedule and counteroffer paths remain the fallback and are never retried after a refused or written action. See [CONVERSATION.md](CONVERSATION.md#client-read-tool-loop-340).
-- Instruct the model never to tell a client that a booking is confirmed unless the scheduling service returns a persisted confirmed state. The backend checks scheduling writes by stored state; it does not check status wording (#275 for drafts, #359 for the client loop), which is an accepted risk of an AI-driven application.
-- Owner conversation (#297–#300): after verified-owner, consent, opt-out, and exact-command checks, one model tool loop receives the bounded, sent-aware 24-hour SMS transcript, business-local date, and timezone. Strict JSON tools read current pending requests and calendar pages, approve or decline a versioned request, and draft, send, or cancel a counteroffer. The model interprets follow-ups and writes the final owner SMS; the former short-reply allowlist, calendar matchers and paging state, counteroffer parser, and separate owner drafter are removed. The backend scopes every read to the verified business and owner, checks every write against current state, and retains the transactional lifecycle, consent, outbox, and receipt-ID replay guards. A counteroffer draft stores exact model-written client text without sending; the send tool requires a trusted sent owner preview containing that text, then rechecks the request, eligibility, slot, expiry, and newer-request rules before queuing one client outbox intent. An invalid final SMS (not GSM-7 or over 480 septets) gets one model rewrite without further tools, then the fixed owner failure line. A committed action remains committed if reply generation fails. The existing fixed owner notice for a later client-send failure remains as a delivery-status exception. See [CONVERSATION.md](CONVERSATION.md#owner-approval-and-decline-tool-loop-298) and [SCHEDULING_CONTRACTS.md](SCHEDULING_CONTRACTS.md#owner-counteroffer-confirmation-175).
-- Keep model prompts and response generation free of secrets and unnecessary personal data.
-
-### 3.3 Scheduling domain service
-
-Owns all business rules and state transitions:
-- Working-hours and booking-horizon enforcement.
-- Duration selection from the one saved service default (business profile) and owner appointment overrides (#339).
-- Buffer application.
-- Availability queries.
-- Pending request creation and hold expiration.
-- Owner approval/decline.
-- Cancellation and schedule changes.
-- Conflict detection and transactional persistence.
-- Audit events and notification outbox creation.
-
-### 3.4 Owner notification and reply handling
-
-For the future scheduled booking invitations in [CONVERSATION.md](CONVERSATION.md#scheduled-booking-invitations-249), keep selection outside the LLM and the ordinary inbound conversation handler. Authenticated owner Settings saves a separate, versioned booking-outreach record with enabled, local weekday/time, and one- or two-week lookahead. A new business reads a disabled, unconfigured version-zero default. A selector checks the current setting at the exact local run minute (first occurrence at a fall-back; no catch-up for a spring gap or missed run), then scans active profiles, current matching in-person consent and opt-out state, and confirmed appointments overlapping the inclusive lookahead endpoint. It writes a per-client intent and guard in one conditional transaction; the guard blocks overlapping runs and records last successful handoff time. The intent stores a phone hash and verification instant, not the phone or message body. A separately gated worker promotes eligible intents into the existing SMS outbox; the sender rechecks current settings, eligibility, consent, opt-out, verified phone, and appointment state immediately before provider handoff. Suppressed intents are terminal. A provider attempt with uncertain acceptance remains held for reconciliation rather than retried. Replies use the existing booking flow. The owner approved the sender label and confirmed disclosure and campaign coverage on #252; separate live-SMS authorization is still required. The schedule and invitation delivery gate default to disabled.
-
-The versioned outreach settings also store one owner-editable message shared by scheduled and manual sends. Legacy records without a message render the approved default. New scheduled intents capture the settings version, and any settings edit before handoff suppresses that queued intent. The Settings UI saves edited text before an immediate run. The API accepts nonblank text up to 500 characters without a STOP-content requirement; consent and opt-out checks remain in the delivery path.
-
-Manual invitations use the same eligibility and send-time checks but ignore the automatic enabled flag and repeat history. Each owner click processes clients in pages under one retryable request key and cursor, reserving client-linked intents and outbox records without a per-client frequency guard. The browser retains the key, text, and cursor until every page completes. The custom message is stored on the intent for delivery; the daily retention job removes it at 90 days, with DynamoDB TTL as a fallback. The owner API and SMS sender require a separate manual-delivery authorization flag and the SMS retention schedule, both disabled by default; the ordinary live-SMS gate also applies. The owner app previews the eligible count before a confirmed send.
-
-- Send concise SMS notifications for pending requests and cancellations.
-- Include a unique, non-guessable or otherwise securely scoped request reference when needed to disambiguate concurrent requests.
-- Resolve owner replies against a pending action. If more than one action matches, ask the owner to select/clarify; do not mutate state.
-- Natural-language parsing can identify intent, but the scheduling service validates that the requested transition is allowed.
-- Send owner a result receipt after the operation.
-
-### 3.5 Owner web admin
-
-- Authenticated, mobile-friendly minimal interface for calendar/list review, pending requests, clients, unavailable blocks, and configuration. The current owner app uses Cognito authorization-code PKCE in the browser and keeps the access token in page memory (the ID token is read once for the display-only `email` claim, not signature-checked, and dropped; the scope stays `openid`). It calls the owner API cross-origin through configured CORS. The API resolves owner-entered local date-times and rejects daylight-saving gaps or ambiguous times before calendar writes.
-- Owner activation requires invitation or administrator approval through the [manual administrative process](../README.md#account-provisioning-and-recovery); there is no administrator portal in MVP. An authenticated owner identity must link to the authorized business before it can use owner operations. Keep role and business checks even in a single-owner deployment (#226, #228).
-- Every write action uses the same scheduling domain service as SMS.
-- Basic audit history for changes, including actor/source and timestamps.
-
-### 3.5.1 Client account and recovery
-
-- Provide a separate client sign-in path with sign-out, email recovery, denied-access state, and minimal signed-in landing state (#229). Client scheduling pages are outside the MVP baseline; SMS remains the scheduling interface. The post-MVP client calendar and Appointments pages (#230, #313) are described in PRD 6.0 and ARCHITECTURE.
-- The owner creates a client profile first, then sends an email invitation for that profile. Activation requires verification of the invited email; uninvited or different addresses cannot claim a profile (#227). A verified Cognito account has no data access until its identity is linked to that client profile (#226).
-- Client API read routes (#231) return bookable start times and the client's own pending and confirmed bookings, scoped by the identity link and built on the shared availability rules; see [ARCHITECTURE.md](ARCHITECTURE.md#identity-link-storage-and-lifecycle-226). Client writes are `POST /v1/client/requests` (#233) and the booking cancel and reschedule routes (#234, below). The request route takes only a start time and an `Idempotency-Key`, derives client, business, and visit length from the link and profile, and calls the same `HoldService.create` the SMS flow uses, so the result is a pending-approval hold with the existing owner request, notifications, and expiry. The client can also cancel a booking and ask to move a confirmed one (#234): cancel is the existing client `CANCEL` lifecycle transition, and a move is the same hold naming the confirmed original, so the original stays confirmed until the owner approves the replacement (the existing atomic swap) and a decline, withdrawal, or expiry leaves it intact. Both authorize against the signed-in link and the specific booking and quote the version the client saw, so cross-client and stale actions are refused. See [ARCHITECTURE.md](ARCHITECTURE.md#identity-link-storage-and-lifecycle-226).
-- Server authorization resolves the identity link and limits a client to their own profile data; a client token cannot call owner operations. An owner token is limited to its linked business. Check both the role and record scope on every route, including after recovery (#228).
-- Email verification and email-based account recovery establish account control only. They do not mark a phone verified, record in-person SMS consent, or clear opt-out. Those SMS gates continue independently.
-
-### 3.6 Database and background jobs
-
-- DynamoDB on-demand stores clients, appointments, blocks, conversations, notes, configuration, audit events, and notification outbox records.
-- Scheduled Lambda jobs expire holds, recover due outbox records, and purge ordinary notes after the approved retention period; SQS/Lambda handles outbound delivery.
-- Use transactional outbox pattern so state changes and required notifications are not separated by a crash.
-- Use a strongly consistent calendar read and conditional calendar-revision update in one DynamoDB transaction to prevent overlapping active reservations for the single crew.
-
-## 4. Core data model (logical)
-
-### Business
-- `id`, `name`, `timezone`, `working_hours`, `booking_horizon_days`, `default_buffer_minutes`, `default_hold_minutes`, `owner_phone`
-
-### Client
-- `id`, `name`, `phone_e164` (unique per business unless shared-number handling is added), `service_address`, `active`, timestamps (no home size or duration; the visit length is the business profile's default duration, #339)
-
-### Account identity links
-- Cognito subject from a verified access token, role, approved business ID for an owner or existing business/client ID for a client, invitation/approval state, and timestamps. Resolve access from these server-side links, never from browser parameters or an email display claim (#226).
-
-### Appointment
-- `id`, `business_id`, `client_id`, `start_at`, `end_at`, `duration_minutes`, `buffer_minutes`, `status`, `requested_by`, `approved_by`, `hold_expires_at`, optional `replaces_appointment_id`, timestamps
-- Preserve the appointment’s duration and buffer snapshot so later profile/config changes do not silently rewrite existing bookings.
-
-### UnavailableBlock
-- `id`, `business_id`, `start_at`, `end_at`, `reason` (optional), `created_by`, timestamps
-
-### Note
-- `id`, `business_id`, `client_id`, nullable `appointment_id`, `body`, `created_by`, `source`, `review_status`, timestamps
-- Client-level note has no appointment ID; visit-specific note references an appointment. Exclude entry/access codes entirely from the MVP.
-- Delete ordinary client and appointment notes 12 months after the last completed visit, except during a documented legal hold. An authenticated owner can set or release the hold with a reason on an existing note; a conditional write prevents a race with purge. An overdue note becomes eligible for the next purge after release. A confirmed appointment whose end time has passed counts as completed unless cancelled. For a client with no completed visit, delete each note 12 months after its creation. Reject a new note if the last completed visit was already more than 12 months ago.
-
-### Conversation and Message
-- `Conversation`: client/phone association, current conversation state, timestamps.
-- `Message`: provider message ID, direction, delivery status, minimized/redacted content where possible, timestamps.
-- Delete SMS message bodies 90 days after the last scheduling exchange (in the owner's own thread, 90 days after each message, #201). Keep minimal consent and opt-out evidence separately for four years after the last program text, except during a documented legal hold. Do not copy full message bodies into that evidence record.
-
-### AuditEvent
-- Actor (owner/client/system), source, action, entity reference, timestamp, and minimal before/after fields needed for accountability. Avoid copying sensitive message content into audit records.
-
-### OutboxMessage
-- Destination reference, template/type, payload reference, retry state, provider ID, timestamps.
-- Protect phone numbers/message content and apply retention limits.
+Storage keys and concurrency rules belong in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## 5. Booking state machine
 
 ```text
-Client request
-     |
-     v
-PENDING_APPROVAL --owner approves--> CONFIRMED
-       |                                  |
-       | owner declines                   | client cancels
-       v                                  v
-   DECLINED                           CANCELLED
-       |
-       +-- hold released                 +-- availability released
-
-PENDING_APPROVAL --hold expiry--> EXPIRED
-       +-- hold released; client notified
+PENDING_APPROVAL -> CONFIRMED  (owner approval)
+                 -> DECLINED  (owner decline)
+                 -> EXPIRED   (hold deadline)
+                 -> CANCELLED (client withdrawal)
+CONFIRMED        -> CANCELLED (authorized cancellation or approved replacement)
 ```
 
-Rules:
-- A pending request occupies a temporary reservation until decision or expiry.
-- A confirmed appointment occupies its duration plus the applicable scheduling buffer.
-- Cancelled, declined, and expired entries no longer reserve time.
-- The owner may edit/cancel confirmed appointments; changes are audited and the client is notified when relevant.
-- Rescheduling is modeled as a replacement pending request while retaining the existing confirmed appointment until the replacement is approved. If the replacement is approved, confirm it and cancel the old appointment in one transaction; if declined/expired, leave the original appointment intact. The same model covers an accepted owner counteroffer (#176), where the original is the client's still-pending request: it stays pending, and approving the replacement confirms it and declines the original in one transaction (an original that already ended is left alone). See [SCHEDULING_CONTRACTS.md](SCHEDULING_CONTRACTS.md#client-acceptance-176).
+An unexpired pending request reserves time. Confirmed appointments reserve their interval and the applicable inter-visit buffer. Terminal states release time. Reads ignore expired holds even before the expiry worker runs.
+
+A move creates a pending replacement and keeps the original confirmed. Approval swaps both in one transaction; decline, withdrawal, expiry, or a failed approval leaves the original unchanged. An accepted owner counteroffer also creates a pending request; approval resolves its original pending request in the same transaction. See [SCHEDULING_CONTRACTS.md](SCHEDULING_CONTRACTS.md).
 
 ## 6. Availability and conflict handling
 
-For an appointment candidate:
-1. Determine the candidate’s duration from the owner's per-appointment override, otherwise the business's saved default service duration (checked against the policy maximum).
-2. Select the applicable buffer policy (MVP default: configured fixed buffer between homes).
-3. Validate the candidate start is within configured business hours and the 14-day booking horizon.
-4. Compute the occupied interval according to the agreed buffer semantics.
-5. Exclude intervals intersecting confirmed appointments, active pending holds, or unavailable blocks.
-6. Return only valid candidate start times.
-7. On request creation and approval, repeat validation inside a transaction to handle races.
+The saved policy controls working hours, exceptions, holidays, horizon, start increments, and duration/buffer caps. The saved business profile supplies the service duration; an owner may override a particular appointment. Existing appointments retain their duration and buffer snapshots.
 
-Use the single-crew DynamoDB calendar-revision transaction described in [ARCHITECTURE.md](ARCHITECTURE.md#5-data-architecture-and-conflict-correctness). The owner confirmed one crew, one saved service default duration (replacing the earlier 1/2/3-hour home-size categories, #339), a current 3-hour maximum, and 15-minute start increments. The maximum duration and buffer are configured before booking writes; they bound the lookback query. The 30-minute travel buffer applies between visits only, with no opening or closing boundary buffer. All calendar mutations, including edits, expiry, and reschedule swaps, follow the same transaction discipline.
+The approved baseline is `America/Los_Angeles`, weekdays 08:00–17:00, observed US federal holidays closed, a 14-day client booking horizon, 15-minute starts, a 24-hour pending hold, a 3-hour maximum visit, and a configurable 30-minute buffer between visits. There is no buffer at the opening/closing boundary or around blocks. Settings can change the policy subject to validation against existing reservations.
 
-All timestamps should be stored in UTC and rendered in the configured business timezone. Daylight-saving transitions, local working hours, and date-only client phrases require explicit timezone-aware parsing and tests.
+Availability excludes confirmed visits, unexpired holds, and authoritative unavailable blocks. Every calendar write revalidates against current state and conditionally advances the business calendar revision in its atomic transaction. UTC storage and business-local rendering keep daylight-saving handling explicit.
 
 ## 7. Key workflows
 
-### 7.1 Client asks for a booking
-1. Provider delivers inbound SMS webhook.
-2. API verifies signature, deduplicates, and persists event.
-3. Conversation service identifies client and interprets request.
-4. If required data is missing, assistant asks a concise question.
-5. Scheduling service returns valid options using current calendar state.
-6. Client selects an option; scheduling service validates and atomically creates a pending request with configured expiry.
-7. Outbox emits owner notification and client acknowledgement that the request is awaiting approval.
-
-### 7.2 Owner approves or declines
-1. Owner reply is persisted and associated with the pending request/action.
-2. An exact `APPROVE <ref>` or `DECLINE <ref>` command resolves directly. Other decision wording enters the owner model tool loop, which reads current pending requests and calls approve or decline with a reference and version. The same loop handles calendar reads and counteroffer draft, send, and cancel tools.
-3. If the model cannot identify one intended request and action, it asks a clarification question and makes no decision tool call.
-4. Scheduling service checks allowed transition, expiry, and current conflict state transactionally.
-5. State changes; audit event and notifications enter outbox in the same transaction.
-6. The model writes the owner's final SMS from the tool result, subject to the GSM-7 and 480-septet limit and one rewrite on invalid output; the fixed failure line covers a failed reply. The worker sends queued notifications and records provider delivery status.
-
-### 7.3 Hold expiration
-1. Worker selects expired pending requests using a safe claim/lock mechanism.
-2. Scheduling service transitions each eligible request to `EXPIRED` transactionally.
-3. Hold is released and client notification is enqueued.
-4. Repeated job execution is idempotent.
-
-### 7.4 Cancellation
-1. Identify client and target appointment; ask for clarification if multiple appointments could match.
-2. Scheduling service verifies ownership/eligibility and cancels transactionally.
-3. Calendar availability is released; audit event and owner notification are enqueued.
-4. Assistant confirms cancellation only after persisted success.
+- **Booking:** identify an eligible sender, offer current times, receive a later acceptance of one stored option, then create a pending hold and owner/client notices. The portal uses an explicit send action with the same hold service.
+- **Approval:** the owner identifies one versioned pending request; the service rechecks expiry and conflicts, commits the decision, and queues notices.
+- **Cancellation:** SMS prepares a question bound to one appointment/version and requires a later confirmation. The portal requires a separate confirmation press. A pending replacement must be resolved before cancelling its original.
+- **Rescheduling:** offer replacement times for one current confirmed visit, create a pending replacement, and await owner approval.
+- **Invitations:** an owner-configured schedule or confirmed manual run selects eligible clients. Send-time checks can suppress queued invitations; an invitation creates no reservation. Delivery requires separate gates.
 
 ## 8. AI boundaries and safeguards
 
-- Use structured schemas for intents/tool arguments; validate all values server-side.
-- LLM output is untrusted input. Never execute free-form SQL, code, or arbitrary URLs from model output.
-- No model-generated direct database writes.
-- Scheduling service enforces availability, authorization, booking horizon, durations, approval policy, and state transitions.
-- Natural-language owner approval must map to a specific pending request; ambiguity means no action.
-- Ask before storing uncertain information as a lasting client note; keep a review status for note drafts if note extraction is enabled.
-- Provide human fallback for unknown numbers, unsupported requests, repeated model/tool errors, and sensitive issues.
-- Maintain a conversation/action audit trail without unnecessary sensitive text retention.
-- Configure provider-level opt-out/help behavior and business messaging consent practices before sending production SMS.
+Models receive typed, scoped tool interfaces and bounded conversation context. They cannot choose identity, notification destinations, arbitrary database writes, or override scheduling rules. Client writes require stored offers or confirmation state; owner writes require current request/version checks. Duplicate receipts replay stored results.
 
-## 9. Security, privacy, and reliability
+The backend validates explicit dates, times, references, and message size where applicable. It does not prove every prose claim or status association; model wording and option presentation retain an accepted risk. Deterministic fallback text remains available. [CONVERSATION.md](CONVERSATION.md) owns the precise model/fallback boundaries.
 
-- HTTPS for all external endpoints; verify SMS provider signatures.
-- Secure authentication for the owner interface; strong session handling and CSRF protection where applicable.
-- Least-privilege service credentials; secrets stored in managed secret storage/environment configuration, never in prompts or logs.
-- Encrypt data in transit and at rest through deployment platform/database capabilities.
-- Restrict access to client details and notes; avoid showing one client’s information to another.
-- Exclude entry/access codes from the MVP; a later protected workflow requires a separate owner decision and design.
-- Idempotent webhook processing and outbound delivery retries.
-- Backups and restore tests appropriate to a small business production service.
-- Monitor webhook failures, SMS delivery errors, failed scheduling operations, expired holds, and unusual conflict attempts.
-- Implement the issue #16 retention periods and data export/deletion practices before onboarding real clients.
+## 9. Privacy and reliability
 
-## 10. Deployment and operations (initial direction)
+Client reads expose only that client's records. Web sign-in, phone verification, in-person SMS consent, and opt-out are separate gates. Secrets stay in managed storage; logs and audit events avoid message bodies and contact details.
 
-For the pilot, use `us-west-1` (the synthetic `dev` stack in the dedicated member account `214965372605`; `pilot` in its own separate account, see [ARCHITECTURE.md](ARCHITECTURE.md)) with the proposed Lambda, DynamoDB on-demand, and SQS architecture. The first proof of concept includes the authenticated owner calendar. Use Twilio for the California-only SMS pilot; a US number is bought and the A2P 10DLC brand and campaign are approved (issue #91), which does not authorize live SMS. Keep a staging environment and test with synthetic contacts before enabling real client traffic; the only real personal data allowed in `dev` is the authorized testers' phone numbers, messages, and consent evidence (see [ARCHITECTURE.md](ARCHITECTURE.md) section 8.3). This choice does not authorize resource provisioning, deployment, or live SMS.
+Ordinary notes expire 12 months after the last completed visit (or creation when there is no completed visit), subject to documented legal holds. SMS bodies expire 90 days after the client's last scheduling exchange; the owner's texts expire individually after 90 days. Minimal consent/opt-out evidence has a four-year clock; an active suppression marker survives evidence expiry. Client erasure fences concurrent work and leaves only the approved hashed replay/reuse markers. See [ARCHITECTURE.md](ARCHITECTURE.md#7-privacy-retention-and-erasure).
 
-Operational essentials:
-- Health/readiness endpoint and structured, redacted logs.
-- Alerts for inbound webhook outage, outbound SMS failures, and worker backlog.
-- DynamoDB schema evolution and rollback/backup plan.
-- Configuration for business timezone, hours, hold duration, buffer, and the service default duration.
-- Manual emergency procedure for pausing the assistant and reverting to ordinary owner texting.
+Appointment commits include outbox records. Failed SMS delivery does not undo a booking. Worker retries are idempotent, while uncertain provider acceptance can still produce duplicate ordinary notifications; invitation uncertainty is held for reconciliation.
+
+## 10. Deployment and operations
+
+AWS SAM defines the serverless backend in `us-west-1`; Amplify serves the static app. Dev uses a dedicated account and manual deployments. A pilot account and real-data launch require their own operational review. Live deployment state is read from AWS and operator records, not inferred from this document. See [PILOT_INFRASTRUCTURE.md](PILOT_INFRASTRUCTURE.md).
 
 ## 11. Testing strategy
 
-- Keep a small set of in-process workflow checks for booking, cancellation, rescheduling, expiry, duplicate requests, and other state changes where one action affects the next. The retained backend suite checks these workflows and selected HTTP, provider, queue, and DynamoDB boundaries. The retained frontend suite checks owner API requests, generated policy fields, consent-page version, and hosting configuration. These checks use synthetic data and do not replace functional or end-to-end coverage, which is a later effort (owner decision, 2026-10-02; #133).
-- Property/concurrency tests proving no overlapping active reservations can be committed.
-- Integration tests for scheduling transactions and outbox delivery semantics.
-- Webhook tests for signature validation, duplicate delivery, out-of-order events, and provider retry.
-- Conversation evaluation with synthetic cases: clear requests, ambiguous dates, competing pending requests, cancellation, reschedule, unknown phone, prompt injection, sensitive details, and unsupported requests.
-- Human approval tests confirming ambiguous owner replies never change state.
-- End-to-end tests using a messaging-provider sandbox/test numbers before live pilot.
-- Accessibility/usability check of the owner’s minimal interface on a phone.
+Retained checks cover stateful scheduling workflows and selected API/provider/queue/storage boundaries with synthetic data. DynamoDB Local checks exercise conditional transaction races. CI also checks backend/frontend types, lint, generated contracts, infrastructure, scripts, and static exports. Scripted models prove backend boundaries; model evaluations measure language behavior separately. Neither establishes a complete deployed end-to-end proof. See [AWS_VALIDATION.md](AWS_VALIDATION.md) and [MODEL_EVAL.md](MODEL_EVAL.md).
 
-## 12. Risks and mitigations
+## 12. Deferred scope
 
-| Risk | Mitigation |
-|---|---|
-| Double booking due to concurrent requests | Strong calendar reads and a conditional revision update in every calendar transaction |
-| Owner reply applied to wrong request | Explicit request references, ambiguity detection, confirmation, audit log |
-| AI claims a booking without a successful write | Only confirm after scheduling service returns persisted result |
-| One-day holds block useful availability | Configurable expiry, owner visibility, automatic release and client notice; review pilot metrics |
-| Duration estimates are inaccurate | Owner-configurable service default and per-appointment override; collect corrections |
-| Travel buffer insufficient for distant homes | Fixed configurable MVP buffer; dynamic travel estimate is a later phase |
-| Owner cannot use admin UI | SMS-first workflow plus usability-tested minimal calendar; emergency manual fallback |
-| Sensitive entry details exposed | Exclude credentials from ordinary notes; define dedicated controls before any storage |
-| SMS provider delays/outages | Persistent inbound processing, outbox retries, delivery status, manual fallback |
-| SMS compliance/consent problems | Select provider and launch geography early; implement consent and STOP/HELP handling |
-
-## 13. Pilot decisions and remaining setup
-
-1. `America/Los_Angeles` with daylight saving, Monday–Friday 8:00 a.m.–5:00 p.m.; observed US federal holidays closed by default, with owner-editable closures and exceptions.
-2. Small/medium/large defaults of 1/2/3 hours, a current maximum of 3 hours, and 15-minute increments are confirmed and configurable.
-3. Configurable 30-minute travel buffer between visits only; none before the first or after the last.
-4. Reschedule rule: retain the original confirmed appointment until the replacement is approved; atomically swap them on approval (owner confirmed in issue #3).
-5. The first proof of concept includes the authenticated owner calendar; its unavailable-block flow is the fallback for owner corrections.
-6. California-only pilot SMS uses Twilio and the documented in-person consent process; a US number is bought and the A2P 10DLC brand and campaign are approved (issue #91). STOP/HELP behavior and the owner-approved 90-day message, 12-month ordinary-note, and four-year minimal consent/opt-out evidence periods must be implemented before live messaging.
-7. Entry/access codes are excluded from this MVP.
-8. One crew/resource is confirmed for the pilot; revisit only if staff capacity changes.
-
-## 14. Effort framing
-
-Effort depends heavily on provider choice, developer experience, deployment/security expectations, and whether the owner web view is included. The major work streams are:
-
-- Scheduling domain and concurrency-safe calendar: medium.
-- SMS integration, delivery, and owner reply routing: medium.
-- Reliable natural-language conversation and ambiguity handling: medium-to-high, requiring iteration.
-- Minimal owner admin interface and authentication: medium.
-- Privacy/compliance, deployment, observability, and operational setup: medium.
-- Recurring schedules and dynamic routing: explicitly deferred and materially expand scope.
-
-A realistic estimate should follow discovery of provider/geography, owner interface expectations, working days/timezone, and duration rules. A prototype using sandbox SMS and synthetic clients should precede production commitments. The pilot should retain owner approval throughout.
+Recurring appointments, multiple crews/services, dynamic route planning, payments, native apps, and protected entry-code storage require separate design. Cancellation-triggered outreach is not implemented. Current requirements live in [PRD.md](PRD.md); prior choices live in [DECISION_HISTORY.md](DECISION_HISTORY.md).

@@ -1,135 +1,48 @@
-# Two-way SMS in dev: authorization packet (issue #91)
+# Dev SMS operations
 
-## Future booking invitation gate (#249)
+**Scope:** Current messaging gates and operating procedures, reviewed 2026-10-14. The staged #91 authorization packet is historical; it is not an uncompleted launch checklist or standing permission to send. Live provider settings must be checked in the private operator account.
 
-The staged dev SMS authorization in this plan covers the described scheduling conversations and notifications, not scheduled booking invitations. Keep invitation selection and sending disabled through these stages. The owner approved the sender label and confirmed the current in-person disclosure and Twilio campaign cover proactive invitations on #252. Before a separate invitation rollout, obtain separate live-SMS authorization; see [A2P_REGISTRATION.md](A2P_REGISTRATION.md#booking-invitations-249-252). Review an explicit run plan: owner-selected weekday/time and one- or two-week window, expected eligible count, test recipients, per-client repeat limit, suppression on state changes, monitoring, and a disable/rollback action. The invitation EventBridge schedule defaults to `DISABLED`, and `BookingInvitationDeliveryEnabled` defaults to `disabled`. Both need explicit deploy parameters and separate live-SMS authorization before activation. The worker promotes eligible intents into the existing outbox; the sender rechecks settings, booking, phone, consent, opt-out, and global SMS controls immediately before Twilio. A failed check suppresses the text with a safe reason. A provider timeout after possible acceptance leaves the intent held for operator reconciliation, with no automatic retry. Concurrent STOP or booking changes after the final read but before provider acceptance remain a narrow external handoff race. Disable the schedule and invitation delivery gate to stop new invitations, then retire pending invitation outbox records before reactivation.
+## Recipient and conversation gates
 
-This packet asks Enrique to authorize texting in the synthetic `dev` environment, one stage at a time, for himself and a few authorized testers only. Nothing in this document authorizes a deployment, a Twilio change, or a live text. Each stage below needs its own explicit "go" on #91.
+Inbound scheduling requires a recognized eligible sender. Client profiles must be active with a verified phone and matching in-person consent; the worker rechecks them. The owner records client consent after reading the phone back; that atomic operation verifies the profile phone. Changing the phone clears verification. This proves the recorded agreement, not possession of the handset.
 
-## Summary for Enrique
+Outbound delivery rechecks recipient, verified phone, client consent, opt-out, relevant event state and live authorization. Fictional 555-0100–555-0199 numbers are refused. There is no deploy-time recipient list. First client enrollment queues one welcome intent; fresh consent after STOP does not queue another welcome. Client STOP remains active until newer in-person consent and START are both recorded.
 
-- **What you get:** you and your testers can text the dev number to ask for times, book, approve by text, cancel, and reschedule. Testers must have given in-person consent and been entered in the owner app.
-- **What it costs:** about $7 a month in Twilio during an active test month ($3.15 of it fixed), out of your $46.41 prepaid balance and inside your $10 cap. AWS rises to about $3.85 a month, inside its $10 budget. OpenAI is capped by the budget you set there.
-- **Safety:** onboarding in the owner app is the only send gate: the app texts only people whose in-person consent the owner has recorded (which also verifies the phone) and who have not opted out, and numbers in the fictional 555-0100 to 555-0199 range are always refused. Texting can be turned off within minutes (section 6).
-- **Before stage 1:** three code changes must be reviewed and merged. Two more, which need your answers on #91, must be merged before stage 3 (section 2). None of them involves a live action.
-- **Your decisions:** the two questions on #91 (phone verification, old pending texts), then go or no-go for each stage in section 4, in order.
+## Configure and enable
 
-## 1. Decisions already made (from #91)
+Before an authorized enablement, confirm exact signed ingress/status URLs, provider configuration, consent process, alarm delivery, queue/outbox backlog, retention and delivery permissions. Resolve account IDs, provider IDs, phones, URLs and secrets privately. The SSM paths are `/scheduling/<environment>/twilio/auth-token` and `/scheduling/<environment>/openai/api-key`; values must be SecureString and never enter docs/logs.
 
-| Topic | Decision |
+| Capability | Required configuration |
 | --- | --- |
-| Twilio account and number | Paid account; US number bought; Sole proprietor A2P brand and campaign approved. |
-| Secrets | `/scheduling/dev/twilio/auth-token` and `/scheduling/dev/openai/api-key` exist as SSM Standard SecureStrings. |
-| Testers | Enrique plus a few friends and family. Each needs in-person consent, an owner-verified profile with placeholder name and address, and a California number. Numbers never go in the repository or GitHub. |
-| Spending | Twilio dev spend stays within about $10/month from the prepaid credit (balance $46.41 on 2026-10-01). Keep auto-recharge off so the balance is a hard stop. OpenAI is limited by the budget Enrique set there. |
-| Plain-language texts | Approved (OpenAI interpreter). |
-| Keyword handling | Advanced Opt-Out is enabled on the Messaging Service used by dev, with CANCEL removed from its opt-out keywords (owner decision on #91, superseding the earlier 2026-10-01 "Twilio defaults; Advanced Opt-Out stays off" decision for dev only). The full live keyword lists are not recorded here; opt-in keywords must not include YES (see #91). A bare "Cancel" now reaches the app as an ordinary scheduling message. The app's `STOP_WORDS` already exclude CANCEL, so code and Twilio agree. No keyword code changes. Revisit before the pilot (see section 8). |
-| Evidence | Once testers text, dev is not torn down while their consent and opt-out evidence is retained (four years). |
+| Inbound webhooks | `EnableSmsIngress=true`, valid exact URLs, Twilio secret and provider forwarding. |
+| Ordinary outbound | `SmsSendEnabled=authorized`, `SmsSenderMappingState=ENABLED`, outbox dispatch and eligible recipient. |
+| Model conversations | `EnableSmsConversations=authorized` plus ingress/sending authorization and OpenAI secret. |
+| Scheduled outreach | Separate schedule/delivery parameters, eligible clients and saved settings. |
+| Manual outreach | `ManualInvitationDeliveryEnabled=authorized`, retention schedule, eligible clients and confirmed owner action. |
 
-## 2. Code prerequisites (reviewed PRs; no live action)
+Enable one separately authorized capability at a time and record redacted results in its issue. Use [AWS_VALIDATION.md](AWS_VALIDATION.md) for deployed checks; complete a separately authorized booking/decision/cancel/move flow to establish end-to-end messaging proof.
 
-Before stage 1:
-1. **Delivery switches as parameters** (PR #111). The outbox dispatch schedule and the SMS sender's SQS trigger were hard-coded disabled in `template.yaml`, so outbound texts could not be turned on without a template change. Add `OutboxDispatchScheduleState` and `SmsSenderMappingState` parameters (default `DISABLED`). Extend the `deploy-backend.sh` guard so a change to either requires a matching `--param` and the live-SMS authorization flag, as it already does for the three schedules (DEV_STACK_PLAN section 2.5).
-2. **Phone-number parameters handled privately** (PR #111). Let `deploy-backend.sh` read `OwnerNumber`, `TwilioAccountSid` and `TwilioBusinessNumber` from a hidden prompt instead of the command line. It must never print them. Values remain visible to account administrators in the Lambda configuration; they are never written to the repository, GitHub, or logs this project controls.
-3. **Consent capture in the owner app** (PR #110). The deployed owner API already serves the routes that record in-person consent (`POST .../clients/{client_id}/sms-consent`) and list delivery failures, but the OpenAPI export omitted them, so the owner app has no screen for either. Export both routes, regenerate the contracts, and add a "Record in-person text consent" action on the client screen: a clear-yes checkbox, the profile's placeholder name, and script version 1 from the public consent page. Add a delivery-failures list, so failed or refused texts are visible.
+## Provider keywords
 
-Before stage 3 (each waits for Enrique's answer on #91):
+The recorded dev decision uses Twilio Advanced Opt-Out with CANCEL removed so ordinary cancellation language reaches scheduling. The app's STOP set excludes CANCEL. Twilio handles keyword replies; the app handles scheduling. STOP/HELP tags are authoritative; a START tag is honored as a keyword only when the body is START or UNSTOP, so YES can reach confirmation handling.
 
-4. **Phone verification (decided on #91, option (b); built in this change).** Incoming texts are acted on, and texts are sent, only for a client whose profile phone is marked verified (`phone_verified_at`). Recording in-person consent in the owner app now marks that phone verified in the same atomic write as the consent records, and onboarding a new client shows the consent step right away (consent can be recorded later from the client screen; until then the client can't text). The owner reads the number back to the client first, because nothing proves the client holds the phone. Changing a profile's phone clears the verification, so the new number needs fresh consent. No standalone verify route and no DynamoDB hand-editing.
-5. **Old pending texts.** Earlier synthetic testing left pending owner notifications in the dev outbox (for example "Scheduling policy updated" and "Owner calendar updated"). The dispatcher sends every due record, with no age limit. Purging the SQS queue does not help, because the records stay pending in DynamoDB and are re-queued. Enrique decided on #91 to retire them before stage 3: a reviewed one-off tool marks every unsent record created before stage 3 as failed with `RETIRED_BEFORE_LIVE_SMS`, not sent (see "Retire pending outbox records" below).
-6. **Doc fixes (in this PR).** `PILOT_INFRASTRUCTURE.md` and the README said Advanced Opt-Out handles STOP and HELP before tester texting; they first recorded the Twilio-defaults decision, which the Advanced Opt-Out decision in section 1 now supersedes for dev.
+The dev exception conflicts with the campaign's recorded CANCEL opt-out keyword. Before pilot, resolve it by updating the registration or restoring the provider keyword. Keep YES out of provider opt-in keywords. [A2P_REGISTRATION.md](A2P_REGISTRATION.md) owns registration/consent guidance. The owner number has no client-style fresh-consent reset; do not use an owner STOP test as if it were a recoverable client test.
 
-### Retire pending outbox records
+## Turning texting off
 
-`backend/scheduling/tools/retire_outbox.py` moves every unsent outbox record of one business that was created before a cutoff to the terminal `FAILED` state with error code `RETIRED_BEFORE_LIVE_SMS` (and `retired_at`). It removes the due-index keys, so the dispatcher never queues them and the consumer never claims them. Each write is conditional on the state and due times it read and on there being no lease. A record that is `SENDING` holds a lease and is reported and left alone; a record another worker changed first is reported as a conflict. Delivery-failure status items (`SMS_STATUS#`, written from Twilio callbacks) are separate and are not created.
+1. Disable the sender's SQS event-source mapping and confirm `Disabled`. Already-running sends may finish.
+2. Disable outbox dispatch. Disable conversation/ingress triggers or parameters as required by the incident; disabling outbound alone does not stop incoming receipts.
+3. Record the pause and inspect backlog and failures privately. Queue purge alone does not retire DynamoDB outbox intents.
+4. Before resume, review due records and appointment state, decide how stale work is handled, and deliberately restore both live parameters and trigger states through the reviewed deployment path. Do not blindly enable a backlog.
 
-The tool refuses unless the table is `scheduling-dev`, the region is `us-west-1` and the DynamoDB endpoint is exactly `https://dynamodb.us-west-1.amazonaws.com`, and the caller's AWS account is `214965372605` (the same account check as `scripts/dev/lib.sh`). It prints each candidate's last 8 outbox-ID characters, template, recipient role, state, created and due times, and never reads or prints phone numbers or message bodies. It is run once, just before stage 3, from the repository root with Enrique's admin profile (pick the cutoff as the current UTC time):
+Emergency commands and rollback are in [DEV_STACK_PLAN.md](DEV_STACK_PLAN.md#stop-on-a-failed-safety-gate). `deploy-backend.sh` preserves guarded trigger states; any temporary rule disable must be reflected in the next deployment's parameters.
 
-```sh
-export AWS_PROFILE=scheduling-dev-admin
-CUTOFF=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)
-(cd backend && .venv/bin/python -m scheduling.tools.retire_outbox --table scheduling-dev \
-  --business-id dev-synthetic --cutoff "$CUTOFF")             # dry run, the default; writes nothing
-(cd backend && .venv/bin/python -m scheduling.tools.retire_outbox --table scheduling-dev \
-  --business-id dev-synthetic --cutoff "$CUTOFF" --execute)   # same CUTOFF value
-```
+## One-off backlog retirement
 
-Expected today: 3 records (1 `seed_policy`, 2 `block_time`), provided no consent has been recorded yet (recording consent queues a welcome text, which would be retired and add to the count). `--execute` prints a result per record and a summary, then re-queries the due index and exits non-zero if any unsent record before the cutoff remains.
+`backend/scheduling/tools/retire_outbox.py` is the historical pre-live-SMS retirement tool. It is restricted to the fixed dev account/table/region and is not a general purge operation. It conditionally marks pre-cutoff unleased unsent intents `FAILED` with `RETIRED_BEFORE_LIVE_SMS`, removing due-index keys. Leased/conflicting records are left for review; it does not inspect message bodies/phones or delete callback status records.
 
-If the output shows `SKIPPED_LEASED` or `CONFLICT`, or the exit code is 1, stop and report it on #91. Do not re-run with a later cutoff.
+Its original one-time authorization does not cover later backlog retirement. Review the cutoff, business, dry-run counts, leases and audit requirements before proposing another execution. Do not retire a newly queued consent welcome by choosing an indiscriminate later cutoff.
 
-**Audit trail.** Each retired record stays in the table as `FAILED` with `last_error_code` `RETIRED_BEFORE_LIVE_SMS` and `retired_at`; that retained record is the audit trail. The summary of the run (counts only, no numbers or text) is recorded on #91.
+## Retention and failure handling
 
-## 3. What changes in AWS
-
-| Setting | Now | After stage 1 | After stage 3 |
-| --- | --- | --- | --- |
-| `EnableSmsIngress` | false | true (signed webhook API created) | true |
-| `TwilioInboundUrl`, `TwilioStatusUrl` | `example.invalid` | exact `SmsApiUrl` + `/webhooks/sms/inbound` and `/status` | same |
-| `TwilioAccountSid`, `TwilioBusinessNumber`, `OwnerNumber` | placeholders | real values (hidden prompt) | same |
-| `SmsSendEnabled` | disabled | disabled | authorized |
-| `EnableSmsConversations` | disabled | disabled | authorized |
-| `OutboxDispatchScheduleState`, `SmsSenderMappingState` | `DISABLED` | `DISABLED` | `ENABLED` |
-
-Stage 1 adds the resources that `EnableSmsIngress=false` leaves out: the SMS HTTP API with its stage, the ingress Lambda with its role, two Lambda permissions, its log group and its error alarm (DEV_STACK_PLAN section 2.2). The deploy also updates environment variables on the existing, still inert sender and conversation functions.
-
-## 4. Stages (each needs a separate "go")
-
-**Stage 1: signed webhook, no texts.** Deploy the merged prerequisites 1 to 3. Enable ingress with the inert URLs, read `SmsApiUrl`, and redeploy with the exact URLs (the two-step bootstrap in PILOT_INFRASTRUCTURE). Then check that an unsigned POST and a POST with a wrong signature both get 403. A correctly signed request needs the real auth token, which no agent may read, so the positive check happens in stage 2 with real Twilio traffic. The Twilio number still points elsewhere. *No SMS is sent or received.*
-
-**Stage 2: inbound only, from your phone.** You point the Twilio Messaging Service's incoming-message webhook at the exact inbound URL in the Twilio console. Sending and conversations stay off, so the app cannot text anyone. From your own phone, text the number: `HELP`, `YES`, `CANCEL`, `START`, then one plain sentence. Do not text STOP (see the note below). For each text, record what Twilio replied and what the app stored: keyword, role, and whether the body was kept. The first stored receipt is also the positive signature check from stage 1. Check the logs for phone numbers or message text. *Only Twilio's own keyword replies are sent; the app sends nothing.*
-
-> **Owner-phone note.** In the app, STOP from the owner number blocks every owner text, and it can't be cleared the way a client's can (owners have no consent record). So the owner phone never texts STOP. With CANCEL removed from the Advanced Opt-Out keywords, a bare `CANCEL` is no longer an opt-out on Twilio's side and is not a STOP in the app. If the app records that `CANCEL` as a STOP, stop and report it before stage 3.
-
-**Stage 3: full flow with you and one tester.** Requires prerequisites 4 and 5. Retire the old pending texts first: run the dry run, then `--execute`, of "Retire pending outbox records" once, before recording any consent. Then record the tester's consent in the owner app, which also marks their phone verified and queues the tester's one welcome text (do not retire after this step, or the welcome would be retired). Then turn on `SmsSendEnabled`, conversations, the sender trigger and outbox dispatch. Run one booking end to end: ask for times, pick one, you approve by text, the tester gets the confirmation, then cancel and reschedule.
-
-Next, check that a client without recorded consent is refused. Use a synthetic or un-onboarded client (profile only, no consent recorded) and book a visit for them in the owner app; its outbound confirmation must fail with `CONSENT_REQUIRED` in Clients → Text delivery failures, and nothing is sent. An inbound text from that client is refused before a reply is created, so it does not appear in delivery failures. Then turn texting off with section 6, steps 1 and 2, timing it, and turn it back on.
-
-Last: the tester texts STOP and you confirm no further texts reach them. To bring them back, record a fresh in-person consent, then have them text START. *Live texts go to two numbers only.*
-
-**Stage 4: remaining testers.** For each new tester: in-person consent, a profile with a placeholder name, the consent record and phone verification. Onboarding is the only step: no deploy is needed, and the tester can receive texts as soon as the consent is recorded. *Live texts go only to people onboarded this way.*
-
-Results of each stage are recorded on #91 without numbers or message text.
-
-**Stage 2 results** (#91, no numbers or message text). Under Twilio defaults: every forwarded owner text validated, which is the positive signature check deferred from stage 1. The logs held only invocation summaries. A bare "Cancel" unsubscribed the sender on Twilio's side while the app stored it as an ordinary message, and Twilio did not forward HELP. After Enrique enabled Advanced Opt-Out with CANCEL removed: "Cancel" was stored as `OTHER` with no unsubscribe, `HELP` is forwarded with the HELP keyword, and no opt-out was recorded.
-
-## 5. Cost (fetched 2026-10-01; list prices)
-
-**Twilio** ([US SMS pricing](https://www.twilio.com/en-us/sms/pricing/us), [A2P 10DLC fees](https://support.twilio.com/hc/en-us/articles/1260803965530-Pricing-and-Fees-for-A2P-10DLC-Service)):
-- Fixed: the number at $1.15/month plus the Sole Proprietor campaign at $2/month, so **$3.15/month** whether or not anyone texts. The brand ($4.50) and vetting ($15) fees are one-time and already paid. The A2P fee amounts come from search results, not the help page itself; re-check them in the Twilio console before stage 3.
-- Per text segment: $0.0083 plus a carrier fee of $0.0035 to $0.005 outbound or $0 to $0.0035 inbound, so about **$0.008 to $0.013**. A full booking (about 5 texts in, 5 out) costs about $0.12; longer replies take 2 segments.
-- Estimate for an active test month with 20 bookings plus some cancels and reschedules: about 300 segments, under **$4**. Total about **$7/month**, inside the $10 cap. The $46.41 balance covers roughly 6 to 7 such months, or about 14 idle months.
-- Sole Proprietor limits (one number, a low daily volume) are far above test needs.
-
-**AWS:** DEV_STACK_PLAN puts dev between $2.43 (active) and $3.20 (all schedules all month) at list price; outbox dispatch every minute is already in the $3.20 case. Turning on both SQS triggers adds about $0.52 a month in queue polling (DEV_STACK_PLAN section 1.4), and one more alarm adds $0.10. Expect **about $3.85/month**, inside the $10 AWS budget.
-
-**OpenAI:** one interpreter call per plain-language text (`gpt-6-luna`, at most 512 output tokens). Exact commands and offer replies don't call it. Spend is capped by Enrique's OpenAI budget limit.
-
-## 6. Turning texting off (runbook, verified 2026-10-05 in #118)
-
-In order of speed; the first two took effect within a few minutes in the dev verification:
-1. **Stop outbound:** disable the sender trigger. Run `aws lambda list-event-source-mappings --function-name <SmsSenderFunction>`, then `update-event-source-mapping --uuid <id> --no-enabled`. Pending texts stay pending, in the queue and in the DynamoDB outbox, and are sent when the trigger is turned back on. Before turning it back on, count due records through `OutboxDueIndex` and decide whether to retire any (prerequisite 5); purging the queue alone does not stop them. The retire tool is scoped to the one-off pre-stage-3 retirement; retiring anything after stage 3 is a separate decision on #91.
-2. **Stop inbound:** in the Twilio console, clear the Messaging Service's incoming-message webhook (or point it back to the previous value). Keep the current URL privately so it can be restored. Twilio still answers STOP and HELP itself and blocks later texts to anyone who sent STOP, but the app records no opt-out evidence for STOPs received while the webhook is cleared.
-3. Disable the outbox dispatch rule: `aws events disable-rule`.
-4. **Stop one tester** before they send STOP: mark their profile inactive in the owner app. An inactive profile is refused by the sender (`CLIENT_UNAVAILABLE` for notifications, `CONSENT_REQUIRED` for conversation replies), and the verified-phone lookup returns nothing for it, so their inbound texts are stored as an unknown sender with no command body and are never run as client commands (STOP is still recorded). Pending texts to them fail permanently rather than waiting. Their stored consent evidence is kept.
-5. Make it permanent with one deploy: `SmsSendEnabled=disabled`, `EnableSmsConversations=disabled`, both new states `DISABLED`, and optionally `EnableSmsIngress=false`. Record the stop on #91.
-
-Ingress can stay on while sending is off; it only stores receipts. Turning ingress off deletes the webhook API, so stage 1 has to be repeated to turn it back on. Turning texting off never deletes data (section 1, Evidence).
-
-## 7. Risks and how they're handled
-
-| Risk | Handling |
-| --- | --- |
-| A text reaches someone not authorized | Checks before every send: a verified phone and recorded consent for the client, no opt-out, and a refusal of fictional 555-0100 to 555-0199 numbers. Tested in code; checked live in stage 3. |
-| A stranger texts the number | No reply, and no scheduling change (PRD). The body is not processed. |
-| Forged webhook calls | Twilio signature required on the exact URL; checked in stages 1 and 2. A flood of rejected calls costs little (API Gateway and Lambda per-request pricing) and is visible in the ingress error alarm. |
-| Keyword mismatch: CANCEL is on the CTIA standard opt-out list and in the approved campaign's registered opt-out keywords, but is removed from dev's Advanced Opt-Out keywords | Accepted for dev only. Before the pilot, either update the campaign registration or restore CANCEL (see `doc/A2P_REGISTRATION.md`). Other keyword surprises are observed in stages 2 and 3 before testers; any fix is a separate decision. |
-| Old synthetic texts sent to real phones | Prerequisite 5 before stage 3. |
-| Testers' message text goes to OpenAI | Plain-language texts are sent to OpenAI for interpretation. A text that matches the access-code pattern (phrases such as "gate code") is dropped before processing, but other wording, such as a bare number at "the side door", still reaches OpenAI. Tell testers to keep texts to scheduling and never send access codes. |
-| Real numbers in logs | The SMS code logs no numbers or bodies; error tracebacks are checked in stage 2. Log groups keep 30 days. |
-| Cost runaway | Prepaid balance with auto-recharge off; AWS budget alarm; OpenAI budget limit; a DLQ alarm on both queues. |
-| A bad deploy | The change set is reviewed before execution; code rollback redeploys the previous artifact (DEV_STACK_PLAN section 3.2). |
-
-## 8. What this packet does not do
-
-It does not cover `pilot`, real clients, a business-registered sender, or the pilot's keyword handling. Advanced Opt-Out with CANCEL removed applies to dev only; the pilot direction (update the campaign registration or restore CANCEL) is open. It does not change retention, consent rules, or the conversation wording.
+Provider acceptance is distinct from delivery. Signed terminal failures remain visible to the owner for manual follow-up and do not authorize a blind resend. Ordinary uncertain provider acceptance may duplicate a retry; invitations retain a held claim for reconciliation. SMS body/evidence retention and client erasure are defined in [ARCHITECTURE.md](ARCHITECTURE.md#7-privacy-retention-and-erasure). Keep dev while required tester evidence remains within retention; stopping SMS does not authorize teardown.

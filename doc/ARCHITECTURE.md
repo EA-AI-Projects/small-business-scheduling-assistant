@@ -1,527 +1,142 @@
 # Technical Architecture: Smart Scheduling Assistant
 
-**Status:** Proposed architecture for review  
-**Version:** 0.1  
-**Date:** 2026-09-25  
-**Related documents:** [PRD](PRD.md), [High-Level Design](HLD.md)
+**Status:** Current repository architecture; reviewed 2026-10-14. Sources: `template.yaml`, `backend/scheduling/`, `frontend/`, `infra/`, and `scripts/dev/`. This is not a live AWS inventory.
 
 ## 1. Purpose
 
-### Application-owned SMS history (#270)
+Describe the runtime, module boundaries, storage, authorization, and correctness rules. Product requirements belong in [PRD.md](PRD.md), system workflows in [HLD.md](HLD.md), SMS details in [CONVERSATION.md](CONVERSATION.md), and deployment procedures in [PILOT_INFRASTRUCTURE.md](PILOT_INFRASTRUCTURE.md). Historical rationale is separate in [DECISION_HISTORY.md](DECISION_HISTORY.md).
 
-The verified SMS receipt identifies one business, sender role, phone, and (for a
-client) client ID. Each persisted inbound text and accepted outbound text gets
-an `SMS_HISTORY#` pointer keyed by role, hashed client ID or owner phone, and timestamp. A history
-read queries at most 64 recent pointers in that actor's 24-hour key range, then reads the pointed-to
-`SMS#` receipt or `SMS_OUT#` provider-handoff evidence consistently. Pointer
-rows have no message body, and client erasure deletes their client-linked rows.
-An additional body-free `SMS_INVITATION#` pointer fetches the latest eligible
-booking invitation with one bounded query, even after a busy thread exceeds
-the recent-pointer budget.
-The sender writes the
-exact rendered outbound text to that evidence only after Twilio accepts the
-send. Queued, suppressed, and failed outbox drafts have no history entry. The
-read does not call Twilio's Messages list API. The resulting 24-hour view is
-limited to 24 whole messages and 12,000 text characters before model input.
-Limitation accepted for #270: if one client changes their verified phone from
-P to Q and back to P within 24 hours, history from the earlier P interval may
-appear in the current P transcript. This unlikely sequence does not block #270
-and is not accommodated.
-Outbound text follows the existing 90-day SMS-body retention and client erasure;
-logs continue to carry no raw message bodies. This read is prepared for the
-read-only model loop in #271.
+## 2. Stack at a glance
 
-### Model-led read replies (#271)
+| Concern | Implementation |
+| --- | --- |
+| Web app | Next.js Pages Router, React, TypeScript, static export; Amplify Hosting `WEB`. |
+| Authenticated API | Python 3.12, FastAPI, Mangum, ZIP-packaged Lambda; API Gateway HTTP API. |
+| Web identity | Cognito user pool, authorization code with PKCE, active application identity links. |
+| Scheduling storage | Single on-demand DynamoDB table, strongly consistent authoritative reads, conditional transactions. |
+| Work delivery | SQS Standard outbox and conversation queues, each with a DLQ. |
+| Background work | Lambda functions invoked by EventBridge rules or SQS mappings. |
+| SMS / model | Twilio and OpenAI behind adapters. |
+| Credentials | Environment-scoped SSM Standard SecureString paths; narrow runtime reads. |
+| Operations | CloudWatch logs, metrics and alarms; SNS alarm email subscription. |
+| Infrastructure / delivery | SAM backend template, separate deployment-role template, manual dev scripts; GitHub Actions runs CI. No GitHub OIDC deployment workflow is implemented. |
+| Isolation | `us-west-1`; dedicated dev account, separate pilot account planned. No account IDs or live resource IDs belong in reference docs. |
 
-The conversation worker passes the verified receipt to the history reader after
-rechecking the sender and consent. The model receives the bounded 24-hour
-transcript as JSON conversation data, separate from system instructions, plus
-business-local date, timezone, horizon, open prompt kind, and short references.
-Its typed interpretation selects at most one `list_available_slots` or
-`list_client_appointments` read for a read-only client question. The service
-derives business and client identity exclusively from the verified receipt;
-model arguments cannot name another actor. Domain availability and client
-calendar code check the current schedule and produce the authoritative SMS
-answer. One final model call drafts the client SMS from a bounded result and
-transcript. Backend validation checks one GSM-7 segment and exact inclusion of
-the result's dates, times, and references, then falls back to the backend answer
-on malformed output or timeout. The model instructions govern status wording.
-This minimal check cannot detect every contradictory claim or association among
-multiple visits; the owner chose freer wording with this fallback (#283, 2026-10-08).
-This is the only client reply-drafting call (#275 removed the earlier read-only drafter); the backend sentence is its fallback. The same draft check covers client write results; a valid
-draft can attach to the existing pending notification intent, while a sender
-that already claimed the intent sends its safe template.
-The first model call asks the client to retry later on failure. Each model call
-has an eight-second timeout and no internal retry, keeping the two-call path
-inside the worker's 30-second limit. Receipt leases, stable outbox intents,
-sender rechecks, and no-history drafts keep replay and delivery idempotent.
-This client read path does not perform a calendar write; direct booking requests
-follow the separately scoped #272 work.
-Client read-tool loop (#340): after the receipt, consent, opt-out, exact-command,
-counteroffer, and open-prompt checks, and the existing intent call, a verified client's
-read-only question runs `run_client_loop`: at most five Responses calls, three tool
-calls, and a 30-second budget per receipt (plus the eight-second intent call), with no
-stored session. The 60-second worker is not sized for several such receipts in one run: a
-run that times out leaves its receipts to replay, which reruns the loop and stores the one
-reply per receipt. `ClientReadTools` in
-`scheduling/domain/client_tools.py` is built per receipt with the verified business
-and client; its strict JSON tools `get_business_info`, `get_availability`, and
-`get_my_bookings` are read-only, bounded, and reject any argument beyond their schema.
-`get_availability` writes only the same receipt-keyed 30-minute offer memory the
-deterministic path uses, with the quoted visit length. `request_booking` (#341)
-takes only a local date and time and is the one tool that creates a hold: the
-conversation service books it only if it is exactly one time in this verified client's own
-unexpired new-booking offer, then `_book_option` rechecks the quoted length, current
-policy and calendar through `HoldService` (keyed by the receipt) and the result is a
-pending request. Cancellation (#342) adds `prepare_cancellation` (a visit
-reference; stores the 30-minute confirmation question bound to one of the sender's own
-visits and its version), `confirm_cancellation` and `dismiss_cancellation` (no arguments;
-they act only on that stored question, `_cancel_confirmed` rechecks the visit and version,
-and the one lifecycle write is keyed by the receipt). Only one action tool takes effect
-per message, and a refused or written cancellation is never retried by a fallback. A reply
-while an offer or cancellation question is open reaches the loop before the deterministic
-matcher; loop failure falls back to it. `check_reply` compares the
-final text with the tool results (#359: it checks facts only: non-empty, one GSM-7
-segment, every absolute date, time, and reference came from a tool result of this message; the model
-words status and offered times freely (#361) and the backend does not judge either, relative dates are the model's, and writes stay guarded by stored state)
-before the receipt
-processor stores the reply for the outbox sender. One rewrite without tools is
-allowed; any other failure clears the offer and uses the deterministic answer, and a request
-already written is never lost: its deterministic pending notice is sent instead.
-Occupied calendar time is reported only as reserved by owner. Rescheduling (#343) is replacement-first: `get_availability` with a visit reference
-stores an offer bound to that confirmed visit and version, `request_reschedule` names the
-visit and one offered time and creates a replacement hold pending owner approval with
-`replaces_confirmed_version` while the original stays confirmed, and
-`get_my_counteroffer` and `respond_to_counteroffer` read and answer the sender's own
-owner counteroffer through `CounterofferAcceptance` under the offer's idempotency key.
-The exact `RESCHEDULE` command keeps its deterministic path. See
-[CONVERSATION.md](CONVERSATION.md#client-read-tool-loop-340).
-
-Owner approval and decline (#298): after the owner phone, consent, and opt-out
-checks and exact-command handling,
-the model receives the owner's bounded, sent-aware 24-hour SMS thread, the
-business-local date, and timezone. A read failure uses the fixed owner failure
-line. The model may call only strict JSON `list_pending_requests()`,
-`approve_request(ref, version)`, `decline_request(ref, version)`, or the #299
-`get_calendar(from, to, statuses, offset)` read tool, or the #300
-`draft_counteroffer(ref, version, date, time, client_text)`, `send_counteroffer(draft_id)`,
-and `cancel_counteroffer(draft_id)` tools. The pending-request
-read returns current business-scoped references, versions, client first names,
-local times, and statuses. A clear choice among several requests may act; the
-#177 short-reply allowlist, HIGH confidence gate, and sent-clarification-question
-state no longer gate owner decisions. The backend resolves the exact current
-request and passes its expected version to the transactional lifecycle service,
-which preserves expiry, conflict, and transition checks. The receipt ID remains
-the idempotency key. The model writes the final SMS from the tool result; the
-#285 per-entry owner decision draft checks are removed. The service accepts only
-nonempty GSM-7 text of at most 480 septets, asks the model once to shorten an
-invalid final answer without calling another tool, then uses the fixed failure
-line if it remains invalid. A committed lifecycle write is not undone by a
-later reply failure. Audit and notification intents still use the transactional
-outbox; sender rechecks and receipt replay remain in force. No live SMS or
-model call is part of #298. See [CONVERSATION.md](CONVERSATION.md#owner-approval-and-decline-tool-loop-298).
-
-Owner calendar reads (#299) now use that same loop. The model interprets local
-day/week, status, count, follow-up, and MORE requests from the owner's 24-hour
-sent-aware transcript, then supplies `from`, `to`, `statuses`, and `offset`.
-The backend derives the business from the verified owner and reads current
-calendar and first-name client records on every tool call, including later
-pages. Structured JSON includes only confirmed visits, unexpired pending
-requests, and unavailable blocks in the requested local range; cancelled,
-declined, and expired entries are absent. The model writes the single final SMS
-under the owner's GSM-7/480-septet check. It may misstate a count or date in
-prose; that residual risk is accepted without a second owner drafter or #285
-per-entry validator. The deterministic owner calendar question and MORE
-matchers, `OWNER_QUESTION#<phone>` follow-up state, and stored paging cursor
-are removed. A fresh page can differ after an intervening calendar write. The
-existing open counteroffer draft remains open across a calendar read; its
-expiry and send checks remain. No live model
-evaluation or SMS was run for #299. See [CONVERSATION.md](CONVERSATION.md#owner-calendar-questions-299).
-
-Counteroffers (#300) use the same loop. The model reads the owner's transcript
-to select a current request, prepare a proposed local date and time with
-client-facing `client_text`, or interpret an open draft's confirmation or
-cancellation. The draft tool checks the request
-reference and version, active verified client and consent, opt-out, time,
-availability, and expiry before it stores the model's exact `client_text` in a
-30-minute proposal; it sends nothing. A revision replaces the stored draft.
-Only the send tool may move
-that owner's current unexpired draft to confirmed and queue the exact stored
-model-written client text in the transactional outbox. Before that write it
-requires trusted sent-history evidence that an owner preview containing that
-exact text was sent after the draft was created; missing evidence returns
-`owner_preview_missing` and queues nothing. The send also rechecks request
-version and pending state, eligibility, availability, and any newer request. The cancel
-tool discards the draft without a send. Stable outbox IDs and receipt replay
-prevent a duplicate client message. The deterministic owner YES/NO offer hook,
-typed offer parser, closed-offer reminder logic, and fixed owner counteroffer
-sentences are removed. The model writes the final owner reply, subject to the
-GSM-7/480-septet delivery check; the backend does not check its meaning or
-client draft wording. A model misunderstanding can choose the wrong tool, but
-the backend still enforces the stored-draft and send guards. No live SMS is
-authorized by this change. If a queued client send later fails its final check,
-the existing fixed owner delivery-failure notice remains as an exception to
-model-written conversation replies. See [SCHEDULING_CONTRACTS.md](SCHEDULING_CONTRACTS.md#owner-counteroffer-confirmation-175).
-
-This document makes the AWS deployment and technology choices for the SMS-first scheduling MVP. It uses the existing **NeuroSpineDx** project as a reference for the team's AWS/serverless patterns, but adapts the choices to a small, low-traffic scheduling workload and its most important correctness constraint: no overlapping appointments or active holds.
-
-The goal is low idle cost and low operational overhead—not a large-scale SaaS platform. External services such as SMS and the language-model API remain replaceable integrations. All application-owned compute, data, web hosting, identity, secrets, and logs are deployable on AWS.
-
-## 2. Recommended stack at a glance
-
-| Concern | Recommendation | Reason |
-|---|---|---|
-| Owner calendar/admin UI | Next.js + React + TypeScript, static export, hosted on AWS Amplify Hosting | Matches NeuroSpineDx frontend experience; static assets avoid always-on web servers/SSR compute |
-| Backend API | Python 3.12+ + FastAPI + Mangum, one AWS Lambda function (ZIP package) | Matches NeuroSpineDx backend language/framework; scales to zero and is inexpensive at pilot traffic |
-| API ingress | Amazon API Gateway **HTTP API** | Managed webhook/API endpoint, lower-cost API Gateway option for this simple REST interface |
-| Primary data store | Amazon DynamoDB, on-demand (PAY_PER_REQUEST) | No provisioned database/idle capacity; suitable for a single small-business calendar |
-| Owner and client authentication | Amazon Cognito User Pool with separate owner and client sign-in paths; no SMS-based Cognito MFA | Avoids custom password/session implementation; application identity links and API checks enforce role and data scope |
-| SMS | Twilio (external provider), behind an internal SMS adapter | Mature inbound/outbound messaging and delivery callbacks; provider can be replaced later |
-| LLM | OpenAI API (external), behind a model adapter; choose a low-cost tool-capable model after testing | Follows the team's existing hosted-OpenAI pattern; no model servers to operate |
-| Secrets | AWS Systems Manager Parameter Store, Standard SecureString parameters for provider credentials; compare Secrets Manager if rotation is needed | Keeps fixed secret-management costs low for a tiny pilot; KMS encryption and narrow IAM permissions |
-| Notifications/retries | Amazon SQS Standard queue + dead-letter queue; Lambda consumer | Durable outbound SMS retries without an always-running worker |
-| Hold expiry | EventBridge scheduled rule invokes a small expiry handler periodically; status is also checked synchronously on every read/write | No server is left running; overdue holds cannot remain bookable merely because a scheduled job is delayed |
-| Logs/metrics | Amazon CloudWatch Logs and basic metrics/alarms | Native AWS operations; explicitly set retention to bound log cost and avoid sensitive message logging |
-| Infrastructure/deploy | AWS SAM template + GitHub Actions OIDC; Amplify GitHub integration for frontend | Declarative repeatable AWS resources; avoids long-lived AWS keys in GitHub |
-| AWS region and accounts | `us-west-1`. The synthetic `dev` stack targets the dedicated member account `214965372605`; the management account `339713090487` is for billing and organization administration only; `pilot` will get its own separate account | Region confirmed in issue #17; the dev account decision (issue #43) supersedes #17's single shared account. No resources are provisioned by this decision |
-
-### Stack continuity with NeuroSpineDx
-
-The inspected repository currently uses Next.js/React, Python/FastAPI, Amplify Hosting, Lambda, API Gateway HTTP API, DynamoDB on-demand, AWS secrets, CloudWatch, and GitHub Actions OIDC. Its latest backend deployment uses a Lambda container image in ECR and scripts to create/update resources. This project retains the core serverless pattern and language choices, but recommends a Lambda ZIP package and SAM-managed infrastructure for the smaller service to avoid container registry/build steps unless dependencies or team preference justify the image path.
-
-## 3. Context and topology
+## 3. Runtime topology
 
 ```text
- Client phones                                  Owner phone
-      |                                               ^
-      | SMS                                           | SMS approval/alerts
-      v                                               |
-+----------------------+    HTTPS webhook    +--------+---------+
-| Twilio (external)    |-------------------->| API Gateway      |
-| number, carrier SMS  |                     | HTTP API          |
-+----------------------+                     +--------+---------+
-                                                       |
-                                                Cognito authorizer
-                                                for owner routes
-                                                       |
-                                                       v
-                                              +--------+---------+
-                                              | FastAPI on Lambda |
-                                              | Python + Mangum   |
-                                              +---+-----------+---+
-                                                  |           |
-                             transactional reads/writes       | bounded LLM calls
-                                                  |           v
-                                                  |      +-----------+
-                                                  |      | OpenAI API|
-                                                  |      | external  |
-                                                  |      +-----------+
-                                                  v
-                                         +--------+----------+
-                                         | DynamoDB on-demand|
-                                         | schedule + clients|
-                                         +-------------------+
-                                                  |
-                                      transactional outbox / jobs
-                                                  v
-                                  +---------------+--------------+
-                                  | SQS + DLQ / scheduled expiry |
-                                  +---------------+--------------+
-                                                  |
-                                                  v
-                                           Lambda worker
-                                                  |
-                                                  +----> Twilio outbound SMS
+Browser -> Amplify static app -> Cognito sign-in
+                           -> HTTP API JWT authorizer -> owner/client API Lambda -> DynamoDB
 
- Owner browser --> Amplify-hosted static Next.js app --> HTTP API
-                         |
-                         +--> Cognito sign-in (owner and client paths)
+Twilio -> signed SMS HTTP API -> ingress Lambda -> DynamoDB receipts
+                                                -> conversation SQS -> conversation Lambda
+                                                                           -> OpenAI
+                                                                           -> domain + DynamoDB
 
- Client browser --> signed-in Calendar and Appointments pages --> client API (own bookings only)
+EventBridge -> expiry / retention / invitation workers -> DynamoDB
+EventBridge -> outbox dispatcher -> outbox SQS -> sender Lambda -> Twilio
+Twilio delivery callbacks -> signed ingress -> outbox-linked delivery status
 ```
 
-### AWS-owned components
-
-- Amplify Hosting static frontend.
-- API Gateway HTTP API.
-- FastAPI Lambda function(s) and IAM roles.
-- DynamoDB table(s), SQS queue/DLQ, EventBridge schedule.
-- Cognito User Pool for owner and client web access.
-- Parameter Store SecureString values (with KMS encryption).
-- CloudWatch logs/metrics/alarms.
-- GitHub Actions OIDC role for deployment.
-
-### External dependencies
-
-- Twilio for the SMS phone number, inbound SMS, outbound messages, and delivery status.
-- OpenAI API for message interpretation and response drafting; select the production model after the issue #24 evaluation.
-
-The core calendar, appointment state, approval policy, and availability calculation stay in AWS and do not depend on either external provider being available.
+The web API and SMS ingress are separate Lambda/API boundaries. SMS ingress is conditional. Conversation processing and sending require independent authorization parameters. Functions run without a VPC; the design has no NAT gateway, application server, relational database, or model server.
 
 ## 4. Application components
 
-### 4.1 Owner web application
+### 4.1 Web app
 
-- Next.js, React, TypeScript; mobile-first because the owner may mostly use a phone.
-- Build with static export and host via Amplify Hosting (platform `WEB`). No Next.js SSR or server actions in the initial design; all data operations use the API.
-- Implemented in `frontend/` with the Pages Router, whose static export emits no inline scripts, so a build-time CSP `<meta>` tag can allow only self-hosted scripts and connections to the exact API and Cognito origins. Amplify adds `frame-ancestors`, HSTS, and related headers from the repository-root `customHttp.yml`.
-- The owner API is cross-origin from the app. API Gateway CORS allows only the configured app origin, without credentials; owner routes use explicit methods so preflight never reaches the JWT authorizer.
-- Cognito signs in the owner through the owner path. The current owner app uses `openid` scope and reads the ID token `email` claim only to show who is signed in (display only, signature not checked, only the string kept in memory, never sent to the API). The API verifies the access token and active identity-to-business link before owner operations. Cognito authentication or a browser-supplied business ID alone grants no access.
-- Screens: day/week calendar, followed by month, schedule, and year views (#169); pending approvals, client list/profile, unavailable blocks, and Settings with four compact saved-value cards (Business details, Availability, Advanced scheduling, and Booking invitations). One card editor opens at a time with collapsible sections; Availability holds regular hours/holidays/booking horizon and date exceptions, including a repeating-week view for editing daily open periods (#338). Each policy form keeps its draft and only follows the saved policy while unedited. The schedule view lists confirmed visits and pending requests from the selected date, initially covering 30 days with a Load more action.
-- Shared calendar pieces (#314, under #313) do not depend on the owner. `frontend/src/calendar/useCalendarState.ts` holds the selected date (today in the business timezone until picked), view, Schedule range, and step/today/pick logic; `OwnerContext` uses it. `frontend/src/calendar/item.ts` defines the neutral `CalendarItem` (`event_id`, `start_at`, `end_at`, `status`) that `CalendarGrid`, `MonthGrid`, `YearGrid`, `ScheduleList` (which takes items grouped by `scheduleEvents` and an `itemTitle` function), and `EventCard` (status and time, with caller-supplied children) render; owner calendar events map to it with `toCalendarItem` in `frontend/src/owner/calendarItem.ts`. Owner-only behavior stays in owner code: `OwnerEventCard` (block and appointment editors), `OwnerScheduleList` (client names from owner reads), and `ScheduleTab` (Block time and slot cards). The owner app's look and behavior are unchanged.
-- Client calendar views (#316): `ClientShell` (in `frontend/src/client/ClientAccess.tsx`) owns one `useCalendarState` and renders the shared `CalendarControls` in the header on the Calendar page; the page reads the same state from `useClientSession`. `ClientHome` (given `calendar`) fetches `GET /v1/client/bookings` once and maps live bookings with `calendarItems` (`lib/clientBookings.ts`) onto `CalendarItem`, using the optional `label` and `kind` fields so a pending request reads "Waiting for approval" and a move request "Move request" with its own colour, never "Confirmed". Bookings that have ended are dropped. `ClientCalendarViews` renders the shared `CalendarGrid`, `MonthGrid`, `ScheduleList`, and `YearGrid` (a weekday heading in Week opens Day through the optional `onDay`) and an `EventCard` with the booking's own status text. Open times (`GET /v1/client/availability`) are fetched per visible Day or Week date within today through `booking_horizon_days`, never for a past or later date. A range-keyed result prevents stale responses from appearing in another view; only returned starts are placed at their business-local column and wall-clock position in the shared `CalendarGrid`. Selecting a start opens the shared accessible `PopoverCard` for the explicit request send, with focus restored on close, which `GET /v1/client/session` now returns with `timezone`. Browsing stops at the horizon: `ClientShell` passes `maxDate` (today plus the horizon, null when unknown) to `useCalendarState` and `CalendarControls`; in every view `stepRange` and `goToDate` clamp any date after `maxDate` back to it, Next is disabled when the next period (`calendar/horizon.ts`) lies wholly past it, and Schedule offers no Load more past it. Only `openDay` (a tapped day in Week, Month, or Schedule; `ClientCalendarViews`) keeps a date past `maxDate` and opens Day. Owner callers pass no `maxDate`, so their behavior is unchanged. A Day view past the horizon (reached only by `openDay`) shows "We only book up to N days ahead." Client calendar and Appointments split (#317): `ClientHome` without `calendar` is the Appointments page, which fetches only `GET /v1/client/bookings` and holds the list with cancel, withdraw, and move; with `calendar` it adds Day and Week grid starts and the request popover (same `write` helper, idempotency-key reuse, stale and conflict handling as before). The open-times section is no longer on Appointments, and `MiniCalendar` is no longer used by the client app. A move in progress is held in `ClientShell` (`MoveState`, shared through `useClientSession`) so Move on Appointments carries the booking and its version to the Calendar: the Appointments page sets Day view and today, then routes to `/client/`; the Calendar page keeps the "Moving this appointment" panel and sends `POST /v1/client/bookings/{id}/reschedule` with the version seen. While a held move waits for the first bookings read, the Day and Week views show no times and disable send; any bookings read that no longer contains the held booking at the same version clears the move and shows a "move was cancelled" alert, and `send` refuses to post while a held move is not current, so a stale move never falls back to `POST /v1/client/requests`. No client write or route is added. Client appointment popovers (#329) receive the same cancel and move handlers from `ClientHome` as the Appointments list. A confirmed visit without a pending replacement offers both actions. The calendar popover shows the separate cancellation confirmation in the business zone, and `ClientHome` posts the held version to the existing cancel route with a stable retry key. Move retains the selected booking and version in `MoveState`; choosing a Day or Week start posts to the existing reschedule route, never the new-request route while a move is held. A pending replacement disables both original-visit actions until it is withdrawn in Appointments. Both surfaces refresh bookings after writes; `PopoverCard` keeps its focus return and trap.
-- Client shell (#315, under #313): the signed-in client pages render inside the same `AppHeader` and `AccountMenu` the owner app uses (shared components, not copies). The menu comes from one list, `CLIENT_SECTIONS` in `frontend/src/client/ClientAccess.tsx`, and starts with Calendar (`/client/`) and Appointments (`/client/appointments/`); a new section is one entry plus one page under `frontend/src/pages/client/`. Each page exports a `getLayout` (wired in `_app.tsx`) so the sign-in state, kept only in memory, survives menu navigation in the static export; a full reload signs in again and returns to `/client/`. The avatar menu holds Sign out, replacing the Welcome card and Sign out button; sign-in, local client mode, the expired-session notice, and denied access are unchanged. Calendar and Appointments content is split as described under Client calendar views (#317). Owner pages are not linked or reachable by a client token; the API still enforces role.
-- The separate client sign-in path leads to the Calendar and Appointments pages described above (#232-#234 under #230; #314-#317 under #313); SMS remains the primary scheduling channel and the app adds no scheduling rules of its own. Both paths need sign-out, recovery, and denied-access handling (#229). The signed-in client page (#232) reads `GET /v1/client/availability` and `GET /v1/client/bookings` with the access token and, after an explicit confirm, sends one `POST /v1/client/requests` (#233) with a per-chosen-time `Idempotency-Key` that is reused on a retry and dropped only after a success or a time conflict (it is kept after 503, 422, 500, `PROFILE_INCOMPLETE`, or `IDEMPOTENCY_KEY_REUSED`, so a repeat press cannot duplicate), renders unknown booking statuses as "Status unavailable" (never confirmed), shows a request as expired only when the server stops listing it as pending; if the device clock says a hold has passed but the server still returns it pending, the page shows "Checking status…" (not confirmed), re-reads with backoff up to four times, and then leaves Refresh to the client; renders all times and the day picker in the business time zone from the session, and, after separate explicit confirmations (#234), cancels a booking or asks to move a confirmed one through the two routes below with per-attempt `Idempotency-Key`s that are reused on a retry; it sends no other writes.
+`frontend/` statically exports owner and client pages. Owner screens cover calendar, requests, clients, notes/consent, delivery failures, and Settings. Settings presents four saved-value cards with one focused editor at a time; [OWNER_SETTINGS_UI_SPEC.md](OWNER_SETTINGS_UI_SPEC.md) owns interaction details.
 
-### 4.1.1 Account identity and authorization (#224)
+Client Calendar and Appointments share neutral calendar components with the owner UI. They render only the linked client's upcoming confirmed visits and live pending requests. Day/Week views place bookable starts in the grid; Month/Schedule/Year show visits. Client navigation is bounded by the booking horizon, with a Day explanation when a tapped date lies beyond it. Appointment and move actions use the existing versioned client API. A held move never falls back to a new-booking write when its original becomes stale.
 
-- An approved owner Cognito identity links to its authorized business; an invited client identity links to one existing owner-created client profile. These server-side links are the source of role and data scope (#226). A Cognito account without a valid link has no owner or client access. API routes resolve role and scope from the verified token and link, then enforce them on every request (#228); clients cannot call owner operations.
-- Owner activation requires an invitation or administrator approval. The administrator follows the documented manual process in [README.md](../README.md#account-provisioning-and-recovery); the MVP has no administrator portal. Client activation starts from an owner-sent email invitation for an existing profile and requires verification of that invited address. An arbitrary sign-up or different verified address cannot claim the profile (#227).
-- Account recovery uses the identity provider's email-based recovery path, followed by the same server-side link checks. A changed account address or identity must not silently inherit a prior link; the administrator or owner re-establishes the approved association as appropriate. A lost or revoked link produces denied access, not a new role. The application must never infer access from a displayed email claim, phone number, or caller-supplied profile ID.
-- Account email verification proves control of the invited email for sign-in. It does not verify an SMS phone or grant SMS consent. Phone verification still follows the in-person owner recording in §8.3 and the [PRD](PRD.md#62-client-profile-and-visit-duration); opt-out and live-send gates remain separate.
+The browser keeps access tokens in page memory. The ID-token email is display-only and does not authorize API access. Public build variables identify API/Cognito origins and app configuration, never secrets. The build inserts a restrictive CSP; `customHttp.yml` supplies hosting headers. CORS permits only the configured exact app origin, methods and headers, without credentials. API Gateway answers preflight without JWT authorization.
 
-#### Identity link storage and lifecycle (#226)
+### 4.2 HTTP and identity boundaries
 
-- `ACCOUNT#sha256(Cognito sub) / LINK` stores one subject's role, business, optional client ID, state (`pending`, `active`, or `revoked`), version, time, operator, and reason. A unique `BUSINESS#id / ACCOUNT_TARGET#OWNER` or `ACCOUNT_TARGET#CLIENT#id` points back to the subject. Both records change in one conditional DynamoDB transaction. Numbered `EVENT#version` items under the subject key preserve who changed a link and why. This is an administrative audit trail; it contains no account email or profile phone. A revoked link loses its target pointer and never resolves. A subject cannot be retargeted; replacement uses a separately approved subject after the old link is revoked.
-- Resolution requires the active subject record, matching target pointer, and existing business policy or client profile. An absent, pending, revoked, mismatched, or corrupted record denies access. For clients, the profile read checks the deletion fence, so deletion denies access from its first fenced step even while purge continues. Client erasure removes the subject link, target pointer, and audit events; no erased profile data survives in identity records. Account email verification, profile phone verification, and SMS consent remain separate.
-- Before deploying the link gate, an authorized operator creates exactly one link for the current pilot subject and business using `python -m scheduling.tools.bootstrap_owner_link --table TABLE --subject SUB --business BUSINESS --actor OPERATOR` with the backend package on `PYTHONPATH`. The command fails if the business policy is absent or a link already exists. Inspect the created record before deploying. On a failed deployment, roll back the code while leaving the same link in place. This preparation is a separate live-data action and requires deployment authorization. The existing `OwnerSub` stack parameter remains for rollout compatibility; API authorization now uses the verified link rather than that parameter.
-- #227 owns invitation and approval workflows that call link creation/activation. The API resolves role and record scope from that link on every request. The browser activates a pending client link through `POST /v1/account/invitations/activate`, which derives business and client IDs from the verified subject rather than a browser parameter. `GET /v1/client/session` returns only the linked client's business and client IDs plus the business `timezone` (null when no policy exists); client scheduling operations remain outside MVP.
-- Client request route (#233): `POST /v1/client/requests` with body `{start_at}` (timezone-aware; the only other accepted field is the optional `quoted_duration_minutes`; client, business, and a caller-chosen duration are 422) and a required `Idempotency-Key` header (1-128 characters). The hold key is stored as `portal:<header value>` so it cannot collide with the same client's SMS provider-message keys. Client, business, and actor come from the verified link; the visit length is the business profile's saved `default_duration_minutes` (#339), carried as `CreateHold.service_duration_minutes` so the commit transaction requires it unchanged (409 `DURATION_CHANGED` otherwise). It calls `HoldService.create` (the SMS path's atomic, revision-guarded, idempotent hold): availability is revalidated inside the calendar-revision transaction, the hold, audit event, owner `hold-request` and client `hold-pending` notice intents commit together, and expiry uses the policy hold time and the existing expiry sweep. A success returns the portal booking shape with status `PENDING_APPROVAL`; the same key and body replays the stored result and creates nothing, reporting the request's current status (`DECLINED`, `EXPIRED`, `CONFIRMED`, ...), not a stale pending. `HoldService.create` re-checks the key before raising a slot conflict, so a retry that races its own first request replays it for both SMS and portal. Errors: 409 `SLOT_CONFLICT` or `CALENDAR_BUSY` with `detail.alternatives` (up to five currently open starts for that day and length, no hold created); 409 `IDEMPOTENCY_KEY_REUSED` (same key for a different start); 409 `PROFILE_INCOMPLETE` when the phone is not verified (the SMS path's rule, because the hold queues a client text); 503 for a missing or inactive profile, missing policy, or rejected duration; 422 for invalid input; 401/403 as for other client routes. Only start times that `GET /v1/client/availability` offers can succeed. Owner approval, decline, and expiry are the existing owner request workflow and expiry sweep. Error convention for all client routes (and for #234): errors are `{"detail": ...}`; a conflict that needs data uses `detail: {code, message, alternatives}`, and other failures use a plain string `detail`. Client routes do not use the owner `error` envelope. The route is mounted only when a repository is supplied, so it is not in the exported owner OpenAPI, as with the other client routes.
-- Client cancel and reschedule routes (#234), both authenticated as above and both returning the portal booking shape (which now also carries `version` and `replaces_appointment_id`, which is set on a replacement while it is pending and stays set after the owner approves it). Neither accepts a client, business, or actor; the caller supplies only the version of the booking it was shown, plus a new `start_at` for a move, and an `Idempotency-Key` header, stored as `portal:<value>`. A booking that is absent, in another business, or another client's returns the same 404 `{"detail": "Appointment not found"}`, so ids cannot be probed. `POST /v1/client/bookings/{appointment_id}/cancel` with `{expected_version}` calls `LifecycleService.apply` with the CLIENT actor and the CANCEL action, the SMS cancel path: the transition, audit event, revision bump, and the owner and client notice intents commit in one calendar-revision transaction; a replay of the same key returns the stored result. Like the text path it cancels a live confirmed visit or a live pending request (including the client's own pending replacement, which keeps the original confirmed and queues `replacement-original-retained`), and it refuses a visit that ended or a hold that lapsed. `POST /v1/client/bookings/{appointment_id}/reschedule` with `{start_at, expected_version}` requires an active profile with a verified phone and a confirmed upcoming original, then calls `HoldService.create` with `replaces_appointment_id`, the text path's reschedule: a pending hold with the standard hold time, owner `hold-request` and client `hold-pending` notices, and a replacement guard until it ends. `CreateHold.replaces_confirmed_version` (set only by the portal, included in the idempotency hash only when set) makes the hold refuse when the original is no longer at the version the client saw, inside the same revision-guarded transaction. The original stays confirmed and keeps blocking its time; the owner's existing approval (`LifecycleService`, APPROVE on a replacement) is the atomic swap that confirms the replacement and cancels the original in one transaction, while decline, withdrawal, or expiry clears the guard and leaves the original untouched. Times offered are the ones `GET /v1/client/availability` returns (the original's own slot is not among them). Errors follow the client convention (`{"detail": ...}`): 404 as above; 409 `STALE_BOOKING` (version changed, or an owner edit or cancel intervened), `BOOKING_NOT_ACTIVE` (ended, lapsed, or already cancelled), `BOOKING_NOT_RESCHEDULABLE` (not a confirmed upcoming visit), `REPLACEMENT_PENDING` (a move request is already waiting: cancelling the original or moving it again is refused until that request is withdrawn or ends), `SLOT_CONFLICT`/`CALENDAR_BUSY` with `detail.alternatives` for a move, `IDEMPOTENCY_KEY_REUSED`, `PROFILE_INCOMPLETE`; each 409 uses `detail: {code, message, alternatives}`. 503, 422, 401/403 as for the other client routes. These routes are mounted only with a repository, so they are not in the exported owner OpenAPI; all six client routes (session, availability, bookings, requests, cancel, reschedule) and both account activation routes (`POST /v1/account/invitations/activate`, which the client app calls, and the id-addressed `POST /v1/account/invitations/{business_id}/{client_id}/activate`, both still mounted) are routed through API Gateway (#305): each is an explicit `OwnerApiFunction` HTTP API event on the same API behind the `OwnerJwt` Cognito JWT authorizer, and the API's CORS preflight allows `authorization`, `content-type`, and `idempotency-key` for the client writes. `backend/tests/test_client_gateway_routes.py` fails if a mounted client route is missing from `template.yaml`, uses another authorizer, or the header is not allowed.
-- Client read routes (#231, post-MVP portal groundwork) use the same verified link on every request; business and client come only from it, and no route accepts a client or business ID (unknown query parameters are rejected with 422). `GET /v1/client/availability?day=YYYY-MM-DD` takes only the day (any other parameter, including `duration_minutes`, is 422) and uses the business profile's saved `default_duration_minutes` (#339), the same duration the SMS flow uses; it returns `{day, duration_minutes, starts_at[]}` from the same `AvailabilityService` the owner and SMS paths use (duration, horizon, hours, holidays, buffers, live holds, confirmed visits, owner blocks), so it never reveals who or what occupies a missing time. `GET /v1/client/bookings` returns `{bookings[]}` for the caller's own upcoming `PENDING_APPROVAL` (unexpired) and `CONFIRMED` appointments, ordered by start, each with `appointment_id, status, start_at, end_at, duration_minutes, hold_expires_at, requested_at, version, replaces_appointment_id` (#234); no client ID, notes, or other clients' data. Cancelled, declined, expired, and ended appointments drop out. Showing past visits (a history window) is an open owner question tracked on #231; the current behavior is upcoming only. Reads are not revision-guarded and reserve nothing; a listed start is advisory until a later write route revalidates it. A missing policy, or a missing or inactive client profile, or a profile duration the policy rejects returns 503. `GET /v1/client/session` also returns the business `timezone` (null when no policy exists) so the client app renders times and chooses days in the business zone. It also returns the saved `business_name` and `service_name` (null until the owner saves the business profile, #348); the portal shows them as "[service] with [business]" on Calendar and Appointments and never supplies a trade word of its own. The bookings read is a strongly consistent scan of the business's event projections with a metadata reread filtered by client, which is acceptable at pilot size.
+`owner_lambda.py` constructs `create_cognito_linked_app` from `linked_auth.py`. The API verifies signature, issuer, expiry, app client and access-token type, then resolves the active application link. API Gateway also uses a JWT authorizer. Owner routes under `/v1/owner/businesses/{business_id}` require an owner link for that business; `/v1/client/` routes derive business/client from the link. Browser-supplied business or role never grants access. The `OwnerSub` template parameter remains a bootstrap configuration value; current linked authorization derives owner access from the stored link.
 
-#### Account provisioning and invitation (#227)
+Owner API schemas are generated into `frontend/openapi/owner.json` and `frontend/src/api/schema.d.ts`. Client routes expose session, availability, bookings, requests, cancellation and rescheduling. Internal contracts and error mapping are in [SCHEDULING_CONTRACTS.md](SCHEDULING_CONTRACTS.md).
 
-- Administrators record owner approval and its business outside the app, create or review the Cognito account, and run the operator command only after `email_verified=true` and `UserStatus=CONFIRMED`. The command writes an active owner link with the approval reference; a Cognito user alone still has no access. The current pilot's configured subject and business remain additional guards.
-- An authenticated owner may invite an existing profile through the owner API. Cognito administrator creation initially suppresses delivery; after a pending identity link and invitation record exist, Cognito sends only an email invitation. The record stores the subject, profile, hash of the normalized invited email, owner actor, issue and 24-hour expiry times, and delivery/consumption/revocation times. The expiry is set from the successful send time, including when a failed send is retried later. It stores no profile phone and never writes SMS consent or outbox records. Exact retries return the active invitation; if delivery was not recorded, they may resend email. Changed addresses require owner revocation and a new invitation.
-- Activation verifies a Cognito ID token's signature, issuer, audience, `token_use=id`, subject and `email_verified=true`. For a new admin-created account, the directory sets that attribute at creation but initially suppresses delivery; only the emailed temporary password lets the recipient sign in and reach activation. An existing account must already be enabled with the same verified email; the invitation workflow never sets verification on it. Activation compares the verified email hash and subject with the unexpired, unused, unrevoked invitation, checks the still-existing profile, then activates the pending link. A stale or erased profile, changed address, duplicate subject or target, and replay fail closed. The owner can revoke an invitation or an activated client association; recovery does not silently restore it. [Amazon Cognito's administrator-created user flow](https://docs.aws.amazon.com/cognito/latest/developerguide/how-to-create-user-accounts.html) provides the email invitation and temporary-password step. No live invitation email or deployment is authorized by this code change.
+An owner is administratively approved and linked. A client invitation starts from an existing profile, creates a pending link, and expires after 24 hours. Activation validates the Cognito ID token, invited verified email, subject, profile and expiry. Email recovery restores sign-in, not record scope. Revocation removes access; a subject cannot be silently retargeted. Provisioning details are in the [README](../README.md#account-provisioning-and-recovery).
 
-### 4.2 API/backend
+Identity storage uses `ACCOUNT#sha256(sub) / LINK`, a business-scoped `ACCOUNT_TARGET#...` pointer and numbered audit events. Link and target updates are conditional and atomic. Resolution checks both and the referenced policy/profile, including the client deletion fence. Erasure removes the client's link, target and link audit.
 
-- FastAPI app served through Mangum from AWS Lambda.
-- One backend codebase; route groups have distinct authorization. A single Lambda deployment is sufficient initially. A separate worker Lambda may use the same package only if background responsibilities justify it.
-- Route categories:
-  - `POST /webhooks/sms/inbound` — provider-signed inbound messages.
-  - `POST /webhooks/sms/status` — delivery status callbacks.
-  - `/v1/owner/*` — authenticated owner schedule, client, configuration, and pending-request operations.
-  - Client-scoped authenticated routes for the minimal signed-in client state; exact endpoints belong to #228 and #229; `/v1/client/availability` and `/v1/client/bookings` are read-only (#231); `/v1/client/requests` (#233) and the booking cancel and reschedule routes (#234) are the client writes.
-  - Internal worker entry points for SQS messages and scheduled hold expiry.
-  - `/health` — non-sensitive readiness check.
-- Use Pydantic request/response schemas, explicit validation, typed domain services, and idempotency keys.
-- Organize modules around scheduling domain rules (availability, duration, buffer, transitions) and adapters (DynamoDB, Twilio, model API); do not let provider SDK calls own business rules.
+### 4.3 Domain and adapters
 
-### 4.3 Conversation and AI layer
+`backend/scheduling/domain/` owns availability, holds, lifecycle, policy, appointments/blocks, client records, profile/duration, conversation, counteroffers, invitations, outbox, expiry and retention behavior. DynamoDB, Twilio, SQS, Cognito and OpenAI adapters live under `adapters/`. `workers/` wires durable work to those services. Local entry points use synthetic in-memory repositories and are not deployed routes.
 
-- Use the model to classify likely intent, extract possible date/time preferences, ask questions, and draft conversational text.
-- Use a strict tool interface such as `list_available_slots`, `create_pending_request`, `list_client_appointments`, `cancel_appointment`, `owner_decide_request`, and `save_note_draft`.
-- The backend validates all tool arguments and permissions. The model cannot write DynamoDB, send arbitrary messages, or approve an appointment by itself.
-- Deterministic scheduling code is authoritative for availability, hold creation/expiration, conflict detection, status transitions, and confirmation messages.
-- Start with owner approval for every booking. Automatic approval remains a later product mode and should require an explicit business setting plus pilot evidence.
-- Use small bounded context (current request state, relevant upcoming visits, and explicitly approved notes); do not send the full conversation history or credentials to the model.
-- If model call fails or confidence is insufficient, ask a clarifying question or route to owner; the calendar remains usable.
-
-### 4.4 SMS adapter
-
-- Normalize E.164 phone numbers; map incoming caller number to a client record or a controlled unknown-client flow.
-- Verify Twilio webhook signatures before processing.
-- Keep the provider API behind an interface so SMS provider-specific webhook payloads and response codes do not leak into the scheduling domain.
-- Record provider message IDs and delivery state; deduplicate inbound retries.
-- Support provider-required STOP/HELP and business consent/opt-out rules before production messages are sent.
-- Restrict owner actions to the configured owner number and the specific pending request. If a natural reply such as “yes” is ambiguous, ask a question and perform no state change.
+Conversation tools derive identity from the verified receipt, validate strict arguments, and call existing domain services. Model failure never authorizes a write; a committed action is not retried just because reply generation fails. [CONVERSATION.md](CONVERSATION.md) defines transcript, tool-loop, stored-prompt and final-text rules.
 
 ## 5. Data architecture and conflict correctness
 
-### 5.1 DynamoDB design
+### 5.1 DynamoDB records and access patterns
 
-Use a small number of tables and access-pattern-first keys. A single table is a reasonable MVP option:
+| Record | Key/access pattern |
+| --- | --- |
+| Business policy/profile | `BUSINESS#<business_id>` with `POLICY#SCHEDULING` and `PROFILE#BUSINESS`; versioned configuration. |
+| Calendar/revision | Business `EVENT#<UTC-start>#<event_id>` projections and `CALENDAR#REVISION`. |
+| Appointment | `APPOINTMENT#<id> / META`, written with its calendar event. |
+| Blocks | Business `BLOCK#<id>` authoritative intervals; calendar events are UI projections. |
+| Clients and notes | Business/client-scoped records; dedicated verified-phone lookup and separate consent/opt-out records. |
+| Completed visit lookup | `VISITS#<business_id>#<sha256(client_id)> / END#<UTC-end>#<id>`; strongly consistent reverse query for retention. |
+| Identity | Hashed subject link, business target pointer and administrative events. |
+| Conversation/history | Receipt and accepted-send records, actor-scoped `SMS_HISTORY#` pointers and short-lived conversation state. |
+| Invitations | `SETTINGS#BOOKING_OUTREACH`, deterministic invitation intents, scheduled per-client guard. |
+| Due work | Sparse `HoldDueIndex` and `OutboxDueIndex`; wake-up indexes only, followed by authoritative rereads. |
 
-- Business partition key: `PK = BUSINESS#<business_id>`.
-- Calendar records have sort keys beginning `EVENT#<UTC-start>#<event_id>`; query the business partition by a bounded time range and use strongly consistent, fully paginated base-table reads for authoritative availability. The event is a compact projection of the appointment or block, including start/end, status, hold expiry, duration/buffer snapshots, and version.
-- Owner unavailable blocks also have authoritative `PK = BUSINESS#<business_id>, SK = BLOCK#<block_id>` records. Strongly query and fully paginate the `BLOCK#` prefix for every availability check, then filter interval intersections in memory. This small-business read avoids assuming a maximum block length: a vacation block that began before the appointment lookback still excludes the slot. A block's calendar event is a UI projection, not the only conflict source.
-- Appointment metadata may be stored at `PK = APPOINTMENT#<appointment_id>, SK = META` and written transactionally with its calendar event record.
-- Client records use `PK = BUSINESS#<business_id>, SK = CLIENT#<client_id>`; client-phone lookup can use a GSI or a dedicated phone-index item. Treat GSI reads as non-authoritative for writes because GSIs are eventually consistent.
-- Store a per-business calendar revision item: `PK = BUSINESS#<business_id>, SK = CALENDAR#REVISION`.
-- Owner booking-outreach settings use `PK = BUSINESS#<business_id>, SK = SETTINGS#BOOKING_OUTREACH`, with a conditional version and separate audit record. An absent record reads as disabled and unconfigured. The authenticated owner API and a future scheduled selector use the same repository read; a settings save does not start a worker or send SMS (#250).
-- Owner business profile (#336) uses `PK = BUSINESS#<business_id>, SK = PROFILE#BUSINESS`, one versioned record with a conditional write, an idempotency item, and a separate audit record, written in one transaction. Fields: `display_name` (100), `description` (300), `support_contact` (200, free text), one service `service_name` (100) and `service_description` (300), and `default_duration_minutes` (1 to 1440). All are required and trimmed; an unknown field is 422. An absent record reads `{profile: null, version: 0}` (unconfigured); a booking flow must not rely on the profile until it is configured. Owner API: `GET` and `PUT /v1/owner/businesses/{business_id}/profile`. `PUT` takes `{expected_version, profile}` and an `Idempotency-Key`; a stale version is 409 `STALE_VERSION` with the current record, a reused key with a different body is 409 `IDEMPOTENCY_KEY_REUSED`, and a duration above the saved scheduling policy's `maximum_visit_minutes` is 422. The business comes from the verified owner identity, so another business's read or edit is 403. The profile is the trusted source of business facts for owner UI, client UI, backend, and future SMS tools; a model never authors or edits these facts, and there is no multi-service catalog. The default duration is the one visit length for every booking path (#339, see `SCHEDULING_CONTRACTS.md` Service duration). The profile save checks the policy maximum after the idempotent replay lookup and inside the save transaction (a `ConditionCheck` on the policy version), so a retry of a stored save replays even after the maximum was lowered; the policy edit transaction carries a `ConditionCheck` on the profile version and refuses a maximum below the saved default. A hold that used the saved default adds a `ConditionCheck` that the profile payload still begins with the same `default_duration_minutes` (the payload is canonical sorted-key JSON, so no new attribute or backfill is needed). The owner reads and edits the profile in the regular Settings "Business details" card (#337).
-- The invitation selector writes `INVITATION#<deterministic-id>` and `INVITATION_GUARD#<sha256(client_id)>` under the business partition, conditionally on settings, calendar revision, verified profile, current in-person consent, no opt-out, and no client-erasure fence. The guard permits one queued intent per client and checks the last successful handoff cutoff. The intent contains run/window instants, client ID, phone hash, and verification instant but no phone or message text. A gated worker promotes one eligible intent to `OUTBOX#booking-invitation#<id>` and the ordinary delivery index. The sender conditionally claims the intent before provider handoff and records terminal sent or suppressed state; uncertain acceptance leaves a held claim for reconciliation. Client erasure removes intent and guard. The EventBridge schedule and invitation delivery gate default to disabled (#251, #252).
-- A separate `OutboxDueIndex` GSI uses `outbox_due_pk = OUTBOX#<PENDING|RETRYABLE|SENDING>` and `outbox_due_sk = <dispatch_after UTC>#<outbox_id>`. It can project only base-table keys. The dispatcher queries all three due states with pagination, then strongly rereads each base-table record; the eventually consistent GSI is only a wake-up index, never a source of truth for delivery ownership.
-- Keep separate records for appointments, unavailable blocks, client-level notes, appointment-level notes, conversation state, outbox events, and audit events. Exclude entry/access codes from the MVP data model.
-- Confirmed appointments also have a small base-table item under `PK = VISITS#<business_id>#<sha256(client_id)>`, `SK = END#<end_at UTC>#<appointment_id>`. Confirmation and owner creation insert it; cancellation and rescheduling remove or move it in the same calendar transaction. Note retention uses a strongly consistent reverse query bounded by the current time with `Limit=1`, then conditionally deletes notes only if the calendar revision is unchanged. This keeps visit lookup cost independent of table size and prevents a concurrent visit transition from authorizing a stale purge. No backfill is needed before real client records exist: the existing `dev` stack contains synthetic data only. Recreate any synthetic historical visits needed for retention tests after this change; backfill this collection before any deployment that already contains real confirmed visits.
+The table has PITR, `expires_at_epoch` TTL and retain policies on deletion/replacement. TTL cleans up eligible storage asynchronously; it does not define hold validity, consent, or send eligibility.
 
-Partitioning by business prepares the data model for additional businesses without introducing a multi-region or sharded system. The initial deployment is still one business and one schedulable crew/resource.
+The business profile is one versioned service record: display name, description, support contact, service name/description and default duration. Profile saves and policy saves guard each other's validated versions so the default cannot exceed the policy maximum. Default-duration hold commits also guard the quoted profile duration. Existing appointments keep snapshots. Exact field limits are declared by `BusinessProfileBody` in `owner_api.py` and its generated schema.
 
-### 5.2 No-double-booking strategy
+### 5.2 No-double-booking transaction
 
-DynamoDB does not provide SQL range-exclusion constraints. Do not implement availability as a read-then-write sequence with no concurrency protection.
+1. Strongly read the calendar revision **before** calendar, policy and block reads.
+2. Strongly read policy and fully paginate relevant events. The visit window is bounded by configured maximum duration and buffer, not by a result-count limit. Query all authoritative `BLOCK#` records separately so an arbitrarily long block is not lost to the visit lookback.
+3. Check working windows, exceptions, holidays, duration/caps, horizon where applicable, active reservations and buffers. Ignore holds with `hold_expires_at <= now`.
+4. Commit appointment/block/policy changes, projections, conditional revision advance, idempotency result, audit and required outbox records in one DynamoDB transaction. Reject changes that cannot fit atomically.
+5. On revision conflict, retry from the first read within a bounded budget; return current conflict information if the slot is no longer valid. A reused key with different content is rejected; an identical replay returns the committed result.
 
-Recommended low-volume single-business strategy:
-1. Strongly read the business calendar revision **before** reading any calendar events, blocks, or scheduling policy. Every calendar-affecting write, including an operating-hours or holiday edit, must advance this revision in its transaction. Reading the revision after events can combine stale events with a new revision and permit a conflicting write.
-2. Strongly read the persisted policy. Require finite `maximum_visit_minutes` and `maximum_buffer_minutes` before booking writes. For a candidate `[start, end)`, query visit/hold events starting at or after `start - maximum_visit_minutes - maximum_buffer_minutes` and before `end + maximum_buffer_minutes`, with strong consistency and all pages. Reject a new visit or buffer above those caps. This window includes an earlier long visit and a later adjacent visit; never cap the number of returned events. Query every calendar day touched by the window if the event index is later partitioned by day. Separately, strongly query all block records under the `BLOCK#` prefix; do not apply the visit lookback cap to blocks. A policy edit that lowers either cap must be rejected while an active confirmed visit or pending hold has a larger stored duration/buffer snapshot; otherwise the lookback could miss it.
-3. Calculate availability from the visit/hold events and authoritative blocks. Ignore pending holds with `hold_expires_at <= now` even if their expiry job has not run. For two visits, require a gap of at least `max(candidate.buffer_minutes, existing.buffer_minutes)`; do not add a gap at the first/last working-hours boundary or around an unavailable block.
-4. Use one `TransactWriteItems` operation to conditionally advance the revision **from step 1**, conditionally write/update appointment metadata and calendar event, and put the idempotency result, audit event, and required outbox records. Keep below DynamoDB transaction size/item limits; reject an operation that cannot fit instead of splitting the atomic change.
-5. If the revision condition fails, start again at step 1 and retry a bounded number of times. A changed calendar may make the requested slot unavailable; return a conflict with fresh alternatives. Replays with the same actor, operation, and idempotency key return the stored result; a reused key with a different payload is an error.
-6. Apply this discipline to hold creation, owner approval/decline, expiry, cancellation, block creation/editing, policy edits, owner appointment edits, and reschedule swaps. A replacement request may overlap only its own original appointment during validation. Approval checks all *other* active reservations and atomically cancels the old event while confirming the replacement. The original remains untouched on decline, expiry, or failed approval. When the original is a still-pending request replaced by an accepted owner counteroffer (#176), approval resolves it as declined and releases its event in the same transaction, and the original cannot itself be approved while that replacement is active.
+All calendar writes follow this discipline, including holds, approvals, declines, expiry, cancellation, owner edits, blocks, policy edits and replacement swaps. A replacement can overlap only its own original; approval validates every other reservation and atomically resolves both. An active replacement prevents independent approval/cancellation of the original where that would orphan the swap.
 
-This serializes competing changes to a small business calendar through optimistic concurrency without running a lock server. Keep transactions small and test overlapping requests under concurrency. If volume or multi-crew scheduling grows, revisit resource partitioning and a relational database with exclusion constraints.
+Approval checks status, expected version and a fresh `decision_at` immediately before transaction submission, requiring expiry strictly later than that time. The expiry worker uses the opposite condition; neither can overwrite the other's committed transition.
 
-Approval also checks `hold_expires_at > decision_at` against the scheduling service's fresh UTC time and the expected pending version. Because time passes without a revision write, use a fresh `decision_at` immediately before submitting the transaction, not the earlier availability-read time. The expiry worker uses the opposite expiry condition and cannot overwrite an approval. A conflicting owner duration increase or move leaves the confirmed appointment unchanged and emits no change notice.
+### 5.3 Time, duration and buffer
 
-### 5.3 Time, duration, and buffer
+Store timezone-aware UTC instants and resolve owner local inputs in the saved IANA business zone; reject ambiguous and nonexistent wall-clock times. The saved profile supplies one default service duration, with explicit owner overrides. There are no home-size categories or per-client default durations.
 
-- Store instants as UTC epoch/time values; pilot business timezone is the IANA identifier `America/Los_Angeles`, including daylight saving.
-- Interpret client local-date phrases in the business timezone; test daylight-saving transitions.
-- One saved service default duration (business profile, #339) replaces the earlier home-size categories and per-client durations; the pilot policy keeps a current 3-hour maximum. Snapshot duration on each appointment; allow an owner override even after approval. Migration and rollback: client records no longer read or write `home_size` or `default_duration_minutes`; stored items keep those attributes harmlessly until the next profile save replaces the item, so no backfill is needed and identity, consent, notes, and appointment history are untouched. Before the owner saves the business profile, SMS and portal booking are unavailable and the owner must save it first (an operational step at release). Rollback is NOT safe once any client has been saved by this release: the previous release indexes `item["home_size"]` and `item["default_duration_minutes"]`, so it cannot read such a client. There is no per-item version history; a point-in-time restore recovers the whole table into a new table. Do not edit clients until the release is accepted, or, to roll back, restore the two attributes on the affected client items by hand.
-- Appointment slots must fit the entire duration within business hours and must not overlap confirmed events, active pending holds, or unavailable blocks.
-- Default fixed travel buffer is 30 minutes between visits only, with none before the first or after the last. Keep it configurable; no route-aware estimation in the MVP.
-- Monday–Friday, 8:00 a.m.–5:00 p.m. is the pilot baseline. Close observed US federal holidays by default using the [OPM holiday schedule](https://www.opm.gov/policy-data-oversight/pay-leave/federal-holidays/), with owner-editable date exceptions. Holiday edits use the same calendar revision transaction as blocks so an old availability result cannot authorize a conflicting booking; reject a new closure that conflicts with an existing confirmed visit until the owner moves or cancels that visit explicitly.
-- The owner policy service seeds these approved defaults once into `POLICY#SCHEDULING` before production booking writes. Edits require the expected policy version and calendar revision. It checks every future active confirmed visit and pending hold against new hours, exceptions, duration and buffer caps, and visit gaps; a conflicting edit leaves the prior policy intact. It also refuses a `maximum_visit_minutes` below the saved service default duration and requires the business profile version it validated against to be unchanged in the commit (#339). The atomic write advances the calendar revision and stores the policy version, idempotency result, audit, and owner notice.
-- The owner Schedule Day and Week views draw each saved date exception from the policy the app already loads: a closed date is shaded "Closed (date exception)" for the whole day, and custom hours shade that weekday's normal weekly hours outside the exception's open windows (nothing if none remain). These shaded ranges are not calendar events: they are not appointments or manual blocks and cannot be selected. Observed federal holidays come from the holiday calendar setting, not date exceptions, and are not shaded.
-- Owner block create/move/remove commands use `BLOCK#<block_id>` records with expected block versions and the calendar revision. Create and move reject overlap with active reservations. Owner-created confirmed appointments use the same bounded strong-read availability check as holds, then atomically write appointment metadata and event plus idempotency, audit, and owner/client notice intents. The authenticated command API for these services is tracked in issue #18.
-- No dynamic address-based routing in MVP.
+Visits fit wholly inside working windows. The gap between visits is at least `max(candidate.buffer_minutes, existing.buffer_minutes)`; no opening/closing or block-edge buffer is added. Policy changes validate future reservations and reject caps below active snapshots or the profile default. Baseline values are in [HLD.md](HLD.md#6-availability-and-conflict-handling).
 
-### 5.4 Holds and expiry
+## 6. Work queues and notifications
 
-- Pending request stores `hold_expires_at` in UTC. Availability code treats a hold as inactive as soon as `hold_expires_at <= now`, regardless of whether cleanup has run.
-- Pending appointment metadata carries `hold_due_pk = HOLD#PENDING` and `hold_due_sk = <expiry UTC>#<hold_id>` for a sparse `HoldDueIndex` GSI projecting the base `PK` and `SK`. A terminal transition removes those attributes in the same transaction. The scheduled worker queries a bounded, paginated due batch, then strongly rereads each base appointment because the index is eventually consistent.
-- EventBridge invokes a lightweight expiry job periodically (e.g. every 5–15 minutes, exact cadence TBD) to transition expired holds and enqueue client notices.
-- The expiry job uses a stable per-hold/version idempotency key and the existing lifecycle transaction. Approval and expiry use conditional status/version writes; approval also requires `hold_expires_at > now`. A late approval cannot confirm an expired request, even before cleanup. Stale index entries and lost approval races are skipped; unexpected errors fail the invocation for EventBridge retry. The worker logs examined, expired, stale, and oldest-overdue metrics. Deployment must configure retries and alert on repeated failures or growing overdue age (issue #23).
-- DynamoDB TTL can be used only to clean up disposable records after their retention period; TTL is asynchronous and must never be relied on for availability or exact expiration timing.
+Scheduling commits store immutable, stable-ID notification intents with the state change. The dispatcher queries due `PENDING`, `RETRYABLE` and lease-expired `SENDING` records, rereads them, sends identifiers to SQS, and conditionally advances dispatch timing. Queue duplication is expected.
 
-## 6. Notifications and reliability
+The sender conditionally claims due work with a lease/attempt, checks current recipient and event state, then records provider acceptance or bounded retry/backoff. Partial-batch failures preserve successful queue work. Exhausted attempts become visible failures; delivery callbacks do not roll back appointments. Ordinary provider timeouts after acceptance may cause a duplicate on retry.
 
-- For every committed state change, transactionally write one immutable notification intent per recipient/template with a stable `outbox_id`, event version, and `PENDING` delivery state. The state write and outbox puts are one DynamoDB transaction. No direct SQS send is required in that transaction.
-- An EventBridge-triggered dispatcher queries the due-work GSI for due `PENDING`, `RETRYABLE`, and lease-expired `SENDING` records and sends `business_id` plus stable `outbox_id` to SQS. After a successful send, it conditionally pushes `dispatch_after` forward to avoid queue floods; `next_attempt_at` remains due so the consumer can claim the record. A periodic sweep repeats this query, so a crash after the database commit, a missed invocation, or a worker crash after claim cannot strand the record. GSI lag delays dispatch but cannot lose the record. A crash after `SendMessage` may enqueue a duplicate; the consumer always rereads the authoritative outbox item.
-- The SQS consumer conditionally claims a due record with a short lease and attempt number, setting `SENDING` and `next_attempt_at` to the lease expiry in the same conditional update. It marks `SENT` with provider ID on success, or records error, backoff, and a `RETRYABLE` due time on failure. An expired `SENDING` lease can be reclaimed up to the attempt limit; a later recovery marks it `FAILED` without calling the provider. Duplicate queue messages that cannot claim do nothing. A provider timeout after accepting a message can still produce a duplicate SMS on retry unless the provider supports an idempotency key; surface this limit and keep messages status-safe.
-- Configure SQS redrive to a DLQ and Lambda partial-batch failures so malformed messages or unexpected worker errors are retried without replaying successful batch members. The provider-independent consumer uses bounded exponential backoff for expected delivery failures and marks exhausted intents `FAILED`; unexpected errors are returned to SQS for redrive. Alarm on oldest due outbox age, expired leases, delivery failures, and DLQ depth. A DLQ entry does not delete its outbox record: operators can inspect and replay by resetting its due time after correcting the cause. Queue/DLQ resources and alarms are part of the pilot infrastructure issue #23.
-- Persist booking state before telling either party that it changed.
-- SMS delivery failure does not roll back the appointment. Exhausted attempts mark the outbox `FAILED` for visible owner follow-up, with redacted error details.
-- Webhook handler acknowledges only after durable message/event persistence. Deduplicate by provider event ID.
+Scheduled invitations use versioned owner settings, current consent/phone/opt-out/appointment checks, repeat history and a transactional selection guard. Manual invitations ignore the automatic enabled flag and repeat interval, use a retryable request key/cursor, and require a separate delivery gate plus retention. Settings edits suppress queued scheduled selections. Invitation acceptance uncertainty keeps a held claim for operator reconciliation instead of automatic retry. [CONVERSATION.md](CONVERSATION.md#scheduled-booking-invitations-249) owns eligibility and timing details.
 
-## 7. Security and privacy
+## 7. Privacy, retention and erasure
 
-- Public internet API, no Lambda VPC for MVP. Lambda uses IAM-authorized AWS service endpoints and outbound HTTPS to Twilio/OpenAI. Avoiding a NAT Gateway removes a potentially disproportionate always-on network cost. Reassess VPC only for a concrete private-resource requirement.
-- API Gateway Cognito authorizer on owner routes. Restrict inbound SMS endpoints to valid provider signatures; use rate limits/WAF only if abuse or traffic warrants its cost.
-- Owner SMS approvals are allowlisted by phone and resolved against pending request state; ambiguous approvals are rejected pending clarification.
-- Least-privilege Lambda execution role scoped to required DynamoDB keys/table, SQS queue, Parameter Store names/KMS key, and CloudWatch logs.
-- Store third-party keys as SecureString parameters; retrieve/cache at runtime. Never place keys in source, frontend bundles, model prompts, or logs.
-- Do not log raw SMS body, access code, full address, or model prompt by default. Use message/request IDs and redacted structured metadata for diagnostics.
-- Implement the issue #16 consent, opt-out, and retention decisions and define deletion/export handling before onboarding real customers.
-- Use separate client-level and booking-level notes. Do not let model extraction silently create permanent notes; use owner-reviewable drafts. Do not collect or store entry/access codes in this MVP.
-- Accounts are separated by environment inside one AWS Organization: a dedicated `dev` member account (`214965372605`, synthetic data only apart from the authorized testers' data in section 8.3, operator access through IAM Identity Center with MFA) and, when real clients are onboarded, a separate `pilot` account. The management account (`339713090487`) holds billing and organization administration only and runs no workload. Each environment gets its own budget and alerts.
+Provider signatures protect SMS ingress; verified sender/profile, consent, opt-out and live-delivery gates are rechecked when work runs and when it sends. A phone change clears verification. In-person consent capture atomically verifies the recorded phone; email account activation does neither. Runtime secrets come from SecureString paths and do not enter model prompts, app bundles or logs.
+
+Ordinary notes exclude recognized access-code phrases. A documented legal hold prevents purge. Completed-visit retention reads the strongly consistent `VISITS#` collection and conditionally deletes against the calendar revision, avoiding stale purge decisions. Notes expire 12 months after the last completed visit, or creation if none exists.
+
+Client SMS bodies expire 90 days after the last scheduling exchange; owner texts expire 90 days per message. Consent and immutable STOP evidence expire four calendar years after the last provider-verified inbound or accepted outbound program text (agreement date if none). An active phone suppression marker persists until fresh consent followed by START clears it. Evidence expiry alone cannot opt a sender back in. A trusted administrative method supports documented SMS evidence legal holds; an operational management path must be reviewed before real-data onboarding.
+
+Client erasure first creates an `ERASURE#sha256(client_id)` fence and temporary phone fence. Senders acquire a `CLIENT_SEND#sha256(client_id)` claim only when no erasure fence exists; deletion refuses while a claim exists. An uncertain/crashed send leaves a claim with no automatic expiry. Recovery is in [PILOT_INFRASTRUCTURE.md](PILOT_INFRASTRUCTURE.md#client-deletion-blocked-by-an-sms-send-claim).
+
+Explicit client erasure overrides ordinary retention and documented legal holds. It does not redact owner-thread texts naming the client; those retain their individual 90-day expiry. Completed erasure removes the client-associated personal records and the temporary phone fence, retaining only the approved hashed client-ID reuse marker and `SMS_ERASED#sha256(provider_message_id)` retry markers. Conversation writes check the fence; delivery callbacks require a live outbox record. Ingress checks provider creation time for verified clients and rejects messages predating current consent/profile creation; failed metadata checks fail closed.
 
 ## 8. Infrastructure and delivery
 
-### 8.1 Infrastructure as code
+`template.yaml` owns backend resources; `infra/dev-deploy-roles.yaml` owns separate scoped operator/execution roles and the runtime permissions boundary. Amplify, artifact storage, budgets and SecureString values have separate setup steps. The runtime stack does not provision their secret values.
 
-- Use AWS SAM (`template.yaml`) to declare Lambda, HTTP API, DynamoDB, Cognito, SQS/DLQ, EventBridge rule, IAM policies, and log retention.
-- Keep Amplify app configuration/build specification versioned; static frontend build deploys from the GitHub default branch or selected deployment branch.
-- Use one AWS region, one dev stack, and one pilot/prod stack when real clients are onboarded.
-- Enable DynamoDB point-in-time recovery before production use; use on-demand billing and review costs/backup policy.
+GitHub Actions validates code, generated contracts, templates, scripts and static export. Dev scripts deploy the local checkout through reviewed change sets and manual Amplify uploads. They guard target identity/region, dirty state and trigger changes. There is no automatic backend deploy or implemented OIDC deploy role. Pilot deployment needs its own reviewed configuration and role/runbook boundary.
 
-### 8.2 CI/CD
+EventBridge rules: hold expiry every five minutes, outbox and invitation selection every minute, note retention daily at 09:00 UTC and SMS retention daily at 10:00 UTC. Schedules, sender mapping and delivery gates default disabled; defaults do not describe current live settings. Lambda log groups retain 30 days. Error/DLQ/oldest-due alarms publish to a confirmed SNS email subscription.
 
-- GitHub Actions runs lint/type checks, unit/integration tests, and SAM validation/build.
-- GitHub Actions assumes a narrowly scoped AWS deployment role via OIDC; no static AWS access keys in repository secrets.
-- Require review before deploying production stack. Separate deployment role from Lambda runtime role.
-- Amplify deploys the static frontend from GitHub. Exception: the synthetic `dev` app is a manual deploy with no Git connection (owner decision, 2026-09-30, #43; see [DEV_STACK_PLAN.md](DEV_STACK_PLAN.md)), so a `customHttp.yml` change reaches `dev` only when the app's custom headers are updated too. Backend SAM deploy is triggered after tests and/or a manually approved release.
-- Roll back using previous Lambda version/alias and prior frontend deployment; keep database changes backward-compatible.
+For setup, IAM limitations, enablement, recovery and deployed proof, see [PILOT_INFRASTRUCTURE.md](PILOT_INFRASTRUCTURE.md), [AWS_DEPLOYMENT_ROLES.md](AWS_DEPLOYMENT_ROLES.md), [DEV_STACK_PLAN.md](DEV_STACK_PLAN.md), and [AWS_VALIDATION.md](AWS_VALIDATION.md).
 
-### 8.3 Environments
+## 9. Limits and deferred alternatives
 
-- `local`: FastAPI + DynamoDB Local or a lightweight local adapter; mocked Twilio/OpenAI by default.
-- `dev`: synthetic client data, except that once texting is enabled it may also hold authorized testers' real phone numbers, their message bodies (deleted after 90 days under the existing retention rule), and the minimal consent and opt-out evidence (kept four years after the last program text under the existing rule) (owner decision, 2026-10-01, #91), so once tester texting starts `dev` is not torn down while that evidence is retained; tester profiles use placeholder names and addresses (for example "Tester A"), so the phone number is the only real personal detail, and the owner keeps the full private consent records (name, number, time, method, the yes, and script version) himself for now, outside the repository, GitHub, and AWS; two-way SMS only with numbers onboarded in the owner app, which is the only send gate (the owner plus a few friends and family, each with documented in-person consent that also marks the profile phone verified, and a California number; numbers never go in the repo or GitHub), OpenAI plain-language texts approved with a budget limit set on the OpenAI side, the OpenAI key and Twilio auth token as Standard SecureString parameters at `/scheduling/dev/openai/api-key` and `/scheduling/dev/twilio/auth-token` (`alias/aws/ssm`), low-cost AWS stack in the dedicated member account `214965372605`; dev SMS ingress, sending, and conversations stay disabled until separately authorized.
-- `pilot`: in its own future account (not yet created); actual approved Twilio number and explicitly authorized California clients; human approval always enabled; the current A2P brand is a Sole proprietor brand in the owner's individual name, so a business-registered sender is required before real-business production use (#91). Do not send live SMS until number/campaign approval, consent records, STOP/HELP handling, and owner onboarding (in-person consent and phone verification, #91) are in place.
-- No need for Kubernetes, ECS/Fargate, RDS/Aurora, NAT Gateway, ElastiCache, or always-on EC2 in the MVP.
+One business calendar revision intentionally serializes low-volume writes. Multi-crew scheduling or higher contention requires revisiting resource partitioning or a relational database with exclusion constraints. Recurrence, routing, payments and multi-service catalogs are outside the current design. Model wording is not fully semantically validated, and component tests do not establish deployed end-to-end behavior.
 
-## 9. Cost strategy and tradeoffs
-
-The target is **near-zero idle compute**, not a guaranteed zero bill. Exact monthly cost cannot be responsibly estimated until region, request/message volume, build frequency, retention, and SMS/model usage are known.
-
-Cost controls:
-- Lambda scales to zero; set memory/timeout based on observed tests and avoid provisioned concurrency.
-- DynamoDB on-demand avoids provisioned read/write capacity; review table/index design to prevent expensive scans.
-- Use API Gateway HTTP API rather than REST API unless a missing feature requires REST API.
-- Static Amplify Hosting; avoid SSR compute and server-side rendering.
-- No NAT Gateway, always-on database, container orchestration, or cache cluster.
-- Bound CloudWatch log retention and redact large payloads.
-- Keep SMS/model calls short and bounded; apply model token/output caps, timeout, retry limits, and a per-request budget.
-- Use one or few Parameter Store secrets and avoid unnecessary scheduled invocations.
-- Set AWS Budgets and billing alarms; budgets/alerts do not themselves prevent all usage.
-
-Important cost caveats:
-- SMS and LLM usage are external variable costs and likely dominate AWS costs at very low application traffic.
-- Amplify build minutes/data transfer, API requests, Lambda execution, DynamoDB transactions/storage, CloudWatch retention, KMS calls, and SMS phone-number registration can be billable and depend on location/plan.
-- Free-tier eligibility and service pricing change; check linked official pricing pages for the deployment region before launch.
-- If Parameter Store secret rotation or advanced audit/rotation is required, prefer Secrets Manager even if its fixed per-secret cost is higher.
-
-## 10. Alternatives considered
-
-### RDS PostgreSQL / Aurora Serverless
-Not recommended for the MVP: relational overlap constraints are attractive, but a managed database adds capacity, networking, backup, and potentially idle/scale-to-zero complexity. Revisit if calendar constraints, reporting, or multi-resource scheduling make DynamoDB transactions cumbersome.
-
-### ECS/Fargate or EC2
-Not recommended: continuous service capacity and operational overhead are unnecessary for webhook-driven low-volume traffic. Lambda is a better cost shape for intermittent use.
-
-### DynamoDB vs PostgreSQL
-DynamoDB on-demand fits scale-to-zero and the existing project precedent. Calendar overlap safety requires explicit optimistic concurrency (documented above), not naive query-then-write. PostgreSQL is the simpler relational model if the team decides correctness implementation is more valuable than minimizing idle costs.
-
-### Lambda container image / ECR
-NeuroSpineDx currently deploys the FastAPI backend as an ECR container image to Lambda. Reuse that option if shared deployment scripts, binary dependencies, or developer experience are decisive. The proposed ZIP package is the lower-complexity/low-volume default for this smaller API; both options retain Lambda's scale-to-zero billing model.
-
-### S3 + CloudFront instead of Amplify
-Potentially lower-cost for a static single-page app and gives direct control over caching/CDN, but adds hosting/deployment wiring. Amplify is selected for continuity and simpler GitHub deploys; compare actual build/traffic cost after the first pilot.
-
-### Cognito vs custom account login
-Cognito is preferred for owner and client password, token, and email recovery management. Do not use SMS OTP as an MVP login factor because it adds SMS cost and operational dependency; use email/password with strong password policy and optional authenticator-app MFA. The existing owner-only deployment predates the approved client account work in #226–#229.
-
-## 11. Test and operational requirements
-
-- Unit-test availability calculation, business timezone, daylight-saving boundaries, buffer behavior, duration overrides, state transitions, hold expiry, and rescheduling.
-- Concurrency test two clients requesting overlapping intervals; exactly one hold may commit.
-- Test owner approval race with hold expiry and simultaneous owner edits.
-- Verify SMS webhook signature validation, retry deduplication, STOP/HELP/consent paths, invalid sender handling, and delivery callback behavior.
-- Test malformed or ambiguous natural-language dates and owner replies; ambiguity must not alter schedule state.
-- Test model timeout/unavailability and ensure the user gets a safe fallback.
-- Test outbox/SQS retry, DLQ handling, duplicate notification delivery, and replay.
-- Use only synthetic data before pilot, except the authorized testers' data allowed in `dev` (section 8.3); live SMS tests may use only numbers onboarded in the owner app with recorded consent (no deploy-time recipient list); fictional 555-0100 to 555-0199 numbers are always refused by the sender.
-- Track operational indicators: API errors/latency, Lambda throttles/errors, transaction conflicts, outbox age, SMS delivery failures, DLQ depth, expired holds, LLM timeout/rate, and estimated AWS spend.
-
-## 12. Pilot decisions and remaining gates
-
-1. Region `us-west-1` is confirmed. `dev` targets the dedicated member account `214965372605` (issue #43); `pilot` will use a separate account to be recorded when it is created. Resource provisioning and deployment need separate authorization.
-2. `America/Los_Angeles` with daylight saving, Monday–Friday 8:00 a.m.–5:00 p.m., and editable observed US federal holiday closures are confirmed.
-3. Twilio and California-only pilot messaging are confirmed. The in-person consent process and private yes/no evidence record are documented on the `a2p-policy-pages` branch. The owner records a clear in-person yes in the owner app (Clients tab, `POST .../clients/{client_id}/sms-consent`, which queues one welcome text, with the wording on the consent page, only for a client's first enrollment: outbox ID `welcome#<client_id>` is written in the same atomic write as the consent and phone verification, only when the phone was never verified, no such record exists, and the client has no earlier consent history record under any phone, so re-recording consent, including after STOP/START, sends nothing; the sender still enforces consent, opt-out, verified phone and the live-send gate at delivery); the full private consent record stays with the owner outside the app, and failed texts appear in the same tab (`GET .../sms-delivery-failures`). A US number is bought and the A2P 10DLC brand and campaign are approved (issue #91); STOP/HELP behavior and owner onboarding of each recipient (#91) remain before live SMS.
-4. OpenAI is confirmed, and `gpt-6-luna` is the initial pilot interpretation model ID after the synthetic malformed/ambiguous-message evaluation in #24 passed twice with the final clarification prompt. The model only proposes an interpretation; the backend must validate actors, request references, dates, and permissions before any write. The owner specified no additional data-handling or budget constraints (a budget limit is now set on the OpenAI side, issue #91). No live SMS is authorized by this model selection.
-5. The first POC includes the authenticated owner calendar.
-6. 15-minute start increments, a current 3-hour maximum, and a 30-minute between-visit buffer with no first/last boundary buffer are confirmed.
-7. One crew/resource is confirmed for the pilot.
-8. The owner approved deleting SMS message bodies 90 days after the last scheduling exchange and ordinary client/appointment notes 12 months after the last visit; keep minimal consent/opt-out evidence four years after the last program text, with documented legal holds as an exception. Entry/access codes are excluded from the MVP.
-9. The owner decided on 2026-10-03 that explicit client deletion overrides those retention periods and legal holds: cancel future appointments and pending requests, release reserved time, remove all client-associated records including consent and opt-out evidence, and require new onboarding and consent if the client returns. On 2026-10-04, the owner allowed only hashed markers for deleted client IDs and already-seen Twilio message IDs to reject ID reuse and delayed retries (#186, #189).
-
-### Deletion fence for issue #189
-
-The backend deletion transaction creates `BUSINESS#<business>/ERASURE#<sha256(client_id)>` with `state=ERASING` and the phone number only while deletion is running. It also creates a temporary `ERASURE_PHONE#<phone>` item. On completion it removes the phone item and phone attribute, leaving the client-ID hash key and `state=COMPLETE` without a TTL. The owner allows this hashed client-ID marker to reject ID reuse and prevent delayed commands from recreating data. The retained marker contains no phone number, name, message text, notes, or consent.
-
-A client SMS sender must acquire a `CLIENT_SEND#<sha256(client_id)>` claim in a transaction that checks the erasure fence. The claim records its acquisition time. Deletion checks that no claim exists before creating the fence. The sender releases the claim only after Twilio returns and outbound evidence is written. A process crash or uncertain provider result leaves the claim in place, blocking deletion until an operator follows the [send-claim recovery procedure](PILOT_INFRASTRUCTURE.md#client-deletion-blocked-by-an-sms-send-claim); the claim has no automatic expiry because that could permit a late send after deletion. Conversation state writes check the durable client fence, and status callbacks require a live outbox item so a late callback cannot recreate evidence.
-
-Deletion also leaves `SMS_ERASED#<sha256(provider_message_id)>` markers for inbound receipts it erased. The owner allows these hashed markers for already-seen Twilio message IDs to reject delayed retries; they contain no phone number, name, message text, notes, or consent. An old provider retry with one of those IDs is acknowledged without storing a receipt or queueing a command. Unknown senders are not persisted. For a verified client, ingress fetches the provider message's creation time through Twilio's Messages API and drops a message created before or at the latest in-person consent (or profile creation). A failed metadata fetch fails closed, allowing a provider retry without storing or queueing the message. This closes the case where an old message is first delivered after deletion and retried after fresh onboarding.
-
-## 13. References
-
-### Internal reference project inspected
-- [EA-AI-Projects/NeuroSpineDx](https://github.com/EA-AI-Projects/NeuroSpineDx)
-- Relevant files: `README.md`, `docs/NeuroSpineDx_Technical_Architecture.md`, `docs/aws-github-actions-oidc.md`, `scripts/deploy-on-demand-backend.sh`, `scripts/deploy-frontend.sh`, and `apps/backend/app/repositories/dynamodb_case_repository.py`.
-
-### AWS official pricing references (recheck before deployment)
-- [AWS Lambda pricing](https://aws.amazon.com/lambda/pricing/)
-- [Amazon API Gateway pricing](https://aws.amazon.com/api-gateway/pricing/)
-- [Amazon DynamoDB pricing](https://aws.amazon.com/dynamodb/pricing/)
-- [AWS Amplify pricing](https://aws.amazon.com/amplify/pricing/)
-- [Amazon EventBridge pricing](https://aws.amazon.com/eventbridge/pricing/)
-- [Amazon Cognito pricing](https://aws.amazon.com/cognito/pricing/)
-- [AWS Systems Manager Parameter Store pricing](https://aws.amazon.com/systems-manager/pricing/)
-- [Amazon SQS pricing](https://aws.amazon.com/sqs/pricing/)
-
-### External provider pricing/policy references
-- [Twilio SMS pricing](https://www.twilio.com/en-us/sms/pricing)
-- [OpenAI API pricing](https://openai.com/api/pricing/)
+Current costs depend on actual configuration and provider usage. Refresh estimates before spending; dated estimates and deployment checkpoints are historical evidence, not architecture requirements or standing authorization.

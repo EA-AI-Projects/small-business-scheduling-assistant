@@ -1,6 +1,6 @@
 # Owner Settings UI redesign
 
-Status: published as [parent issue #366](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/issues/366). Product decisions were confirmed on 2026-10-13 and are recorded in [PRD.md](PRD.md#61-scheduling-and-availability).
+**Status:** Implemented interaction specification; reviewed against the repository on 2026-10-14. Product requirements are in [PRD.md](PRD.md#61-scheduling-and-availability); delivery provenance (#366–#370) is in [DECISION_HISTORY.md](DECISION_HISTORY.md#client-portal-and-settings).
 
 ## Problem Statement
 
@@ -64,12 +64,3 @@ Show four compact Settings cards with concise summaries of saved values: Busines
 - Dragging or resizing time blocks in the week view; selection uses the strips and editing uses time inputs.
 - A dated month calendar for weekly hours.
 - Changing client-facing booking, the owner Schedule calendar, or invitation delivery policy.
-
-## Further Notes
-
-- The existing Current policy summary is removed only after its useful saved information is represented in the compact cards and Availability exceptions list.
-- Approved implementation issues:
-  1. [#367 Settings shell and Business details](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/issues/367): four saved-value cards, one pop-up editor at a time, Business details sections, focus return, dirty-close choice, first-time profile behavior, and rendered-flow verification. No blockers.
-  2. [#368 Availability](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/issues/368): repeating-week overview and selected-day editing, holidays and booking window, saved exception selection and restore, policy seeding, save and conflict behavior, and rendered-flow verification. Blocked by #367.
-  3. [#369 Advanced scheduling](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/issues/369): move limits and timezone into the editor, preserve its warning and save behavior, reveal/focus validation errors in collapsed sections, and rendered-flow verification. Blocked by #367.
-  4. [#370 Booking invitations](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/issues/370): recurring settings and message sections, a separate Send Invitations Now section, preserved manual-send flow, and rendered-flow verification. Blocked by #367.
