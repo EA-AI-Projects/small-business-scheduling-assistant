@@ -6,7 +6,6 @@ import type { OutreachState } from "@/api/types";
 
 import { OutreachForm } from "./OutreachForm";
 
-const change = vi.fn(async () => true);
 const get = vi.fn(async () => ({ eligible: 3, examined: 4, delivery_enabled: true }));
 const api = { businessId: "pilot", get, request: vi.fn(async (_path: string, options: {
   body: { settings: OutreachState["settings"] }
@@ -18,7 +17,7 @@ let profile: typeof savedProfile | null = savedProfile;
 let outreach: OutreachState = { settings: { enabled: false, weekday: null,
   local_time: null, lookahead_weeks: null }, version: 0 };
 vi.mock("@/owner/OwnerContext", () => ({
-  useOwner: () => ({ api, change, notify: vi.fn(), refresh: vi.fn(),
+  useOwner: () => ({ api, notify: vi.fn(), refresh: vi.fn(),
     data: { outreach, businessProfile: { profile, version: 1 }, zone: "America/Los_Angeles" } }),
 }));
 
@@ -27,7 +26,6 @@ describe("Booking invitation settings", () => {
   let root: Root;
   beforeEach(async () => {
     profile = savedProfile;
-    change.mockClear();
     get.mockClear();
     api.request.mockClear();
     outreach = { settings: { enabled: false, weekday: null,
@@ -59,11 +57,11 @@ describe("Booking invitation settings", () => {
       + "Dog grooming with Example Pet Care in the next two weeks? Reply with a day and time that works for you, or STOP to opt out.");
     await act(async () => [...host.querySelectorAll<HTMLButtonElement>("button")]
       .find((button) => button.textContent === "Save invitation settings")!.click());
-    expect(change).toHaveBeenCalledWith("/booking-outreach", "PUT", {
+    expect(api.request).toHaveBeenCalledWith("/booking-outreach", expect.objectContaining({ body: {
       expected_version: 0, settings: { enabled: true, weekday: 0,
         local_time: "09:00", lookahead_weeks: 2,
         message: null },
-    }, "Booking invitation settings saved");
+    } }));
   });
 
   it("saves the schedule without a message while the business details are unsaved", async () => {
@@ -84,10 +82,10 @@ describe("Booking invitation settings", () => {
     });
     await act(async () => [...host.querySelectorAll<HTMLButtonElement>("button")]
       .find((button) => button.textContent === "Save invitation settings")!.click());
-    expect(change).toHaveBeenCalledWith("/booking-outreach", "PUT", {
+    expect(api.request).toHaveBeenCalledWith("/booking-outreach", expect.objectContaining({ body: {
       expected_version: 0, settings: { enabled: true, weekday: 1,
         local_time: "10:30", lookahead_weeks: 1, message: null },
-    }, "Booking invitation settings saved");
+    } }));
   });
 
   it("allows custom text without STOP for the shared invitation message", async () => {
@@ -99,14 +97,16 @@ describe("Booking invitation settings", () => {
     });
     await act(async () => [...host.querySelectorAll<HTMLButtonElement>("button")]
       .find((button) => button.textContent === "Save invitation settings")!.click());
-    expect(change).toHaveBeenCalledWith("/booking-outreach", "PUT", expect.objectContaining({
-      settings: expect.objectContaining({ message: "Please book a cleaning visit." }),
-    }), "Booking invitation settings saved");
+    expect(api.request).toHaveBeenCalledWith("/booking-outreach", expect.objectContaining({
+      body: expect.objectContaining({ settings: expect.objectContaining({ message: "Please book a cleaning visit." }) }),
+    }));
   });
 
   it("keeps the new settings version after cancelling a manual send", async () => {
     outreach = { settings: { enabled: true, weekday: 0, local_time: "09:00",
       lookahead_weeks: 1, message: "Old text" }, version: 1 };
+    await act(async () => root.unmount());
+    root = createRoot(host);
     await act(async () => root.render(<OutreachForm />));
     const textarea = host.querySelector<HTMLTextAreaElement>("textarea")!;
     await act(async () => {

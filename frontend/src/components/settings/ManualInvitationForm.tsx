@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { useOwner } from "@/owner/OwnerContext";
 
 import { BusyButton } from "../BusyButton";
+import { SettingsAccordion } from "./SettingsAccordion";
 
 interface Preview {
   eligible: number;
@@ -41,11 +42,14 @@ function savedAttempt(storageKey: string): PendingAttempt | null {
   return null;
 }
 
-export function ManualInvitationForm({ message, onMessageChange, prepareSend, lookaheadWeeks }: {
+export function ManualInvitationForm({ message, onMessageChange, prepareSend, lookaheadWeeks,
+  openMessage = true, openSend = true, onToggleMessage = () => undefined, onToggleSend = () => undefined }: {
   message: string;
   onMessageChange: (value: string) => void;
   prepareSend: (key: string) => Promise<boolean>;
   lookaheadWeeks: number | null;
+  openMessage?: boolean; openSend?: boolean;
+  onToggleMessage?: () => void; onToggleSend?: () => void;
 }) {
   const { api, data, notify, refresh } = useOwner();
   const storageKey = `manual-booking-invitation-pending:${api.businessId}`;
@@ -122,6 +126,7 @@ export function ManualInvitationForm({ message, onMessageChange, prepareSend, lo
   }
 
   return <div className="form-stack">
+    <SettingsAccordion title="Invitation message" open={openMessage} onToggle={onToggleMessage}>
     <label>Invitation message
       <textarea value={message} maxLength={500} rows={5} disabled={pending !== null}
         onChange={(event) => onMessageChange(event.target.value)}
@@ -129,6 +134,8 @@ export function ManualInvitationForm({ message, onMessageChange, prepareSend, lo
     </label>
     <p className="hint">This message is used for weekly invitations and Send Invitations Now.
       Sending now saves changes first and has no repeat limit.</p>
+    </SettingsAccordion>
+    <SettingsAccordion title="Send Invitations Now" open={openSend} onToggle={onToggleSend}>
     <p className="meta">{preview
       ? `${preview.eligible} of ${preview.examined} clients currently eligible`
       : "Save a lookahead window to preview eligible clients."}</p>
@@ -137,5 +144,6 @@ export function ManualInvitationForm({ message, onMessageChange, prepareSend, lo
       (!message.trim() && !pending) || (!lookaheadWeeks && !pending)
       || preview?.delivery_enabled === false}>{pending ? "Retry same send" : "Send Invitations Now"}</BusyButton></div>
     {result && <p role="status">{result}</p>}
+    </SettingsAccordion>
   </div>;
 }

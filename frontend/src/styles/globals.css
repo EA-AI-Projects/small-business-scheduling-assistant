@@ -373,4 +373,13 @@ code { font-size: .9em; }
 .weekly-hours { border: 1px solid var(--color-border); border-radius: 8px; padding: .7rem; display: grid; gap: .7rem; }
 .weekday-row { display: grid; gap: .4rem; }
 .weekday-row .two-col { align-items: end; }
+.weekly-overview { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: .35rem; }
+.weekly-day { display: grid; align-content: start; gap: .3rem; min-width: 0; padding: .5rem .3rem;
+  border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-surface); color: var(--color-text); }
+.weekly-day strong { font-size: .75rem; overflow-wrap: anywhere; }
+.weekly-day span { font-size: .72rem; overflow-wrap: anywhere; }
+.weekly-day.selected { border-color: var(--color-primary); background: var(--color-primary-faint); }
+.exception-list { display: grid; gap: .35rem; }
+.exception-list button { text-align: left; }
+@media (max-width: 600px) { .weekly-overview { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 .advanced-policy-card summary { cursor: pointer; }

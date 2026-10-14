@@ -16,7 +16,8 @@ type Editor = "business" | "availability" | "advanced" | "invitations";
 export function SettingsTab() {
   const { data } = useOwner();
   const [open, setOpen] = useState<Editor | null>(null);
-  const [businessDirty, setBusinessDirty] = useState(false);
+  const [dirty, setDirty] = useState({ business: false, regular: false, exception: false,
+    advanced: false, invitations: false });
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const buttons = useRef<Record<Editor, HTMLButtonElement | null>>({ business: null,
     availability: null, advanced: null, invitations: null });
@@ -41,14 +42,15 @@ export function SettingsTab() {
   }, [confirmDiscard]);
 
   function show(editor: Editor) {
-    setBusinessDirty(false);
+    setDirty({ business: false, regular: false, exception: false, advanced: false, invitations: false });
     setConfirmDiscard(false);
     setOpen(editor);
   }
 
   function close() {
     if (confirmDiscard) { setConfirmDiscard(false); return; }
-    if (open === "business" && businessDirty) {
+    if (open && (open === "business" ? dirty.business : open === "availability"
+      ? dirty.regular || dirty.exception : dirty[open])) {
       const active = document.activeElement;
       resumeFocus.current = active instanceof HTMLElement && active.closest(".popover-card")
         ? active : document.querySelector<HTMLElement>(".popover-close");
@@ -70,13 +72,15 @@ export function SettingsTab() {
         <strong>Business details</strong>
         <span id="settings-business-summary">{profile ? `${profile.display_name} · ${profile.service_name} · ${
           profile.default_duration_minutes} min default visit` : "Not set up yet"}</span>
-        {open === "business" && businessDirty && <span className="settings-unsaved">Unsaved changes</span>}
+        {open === "business" && dirty.business && <span className="settings-unsaved">Unsaved changes</span>}
       </button>
       <button ref={(node) => { buttons.current.availability = node; }} type="button" className="settings-card"
         aria-haspopup="dialog" aria-label="Edit Availability" aria-describedby="settings-availability-summary"
         onClick={() => show("availability")}>
         <strong>Availability</strong>
         <span id="settings-availability-summary">{availabilityText}</span>
+        {open === "availability" && (dirty.regular || dirty.exception)
+          && <span className="settings-unsaved">Unsaved changes</span>}
       </button>
       <button ref={(node) => { buttons.current.advanced = node; }} type="button" className="settings-card"
         aria-haspopup="dialog" aria-label="Edit Advanced scheduling" aria-describedby="settings-advanced-summary"
@@ -84,6 +88,7 @@ export function SettingsTab() {
         <strong>Advanced scheduling</strong>
         <span id="settings-advanced-summary">{policy ? `${policy.slot_increment_minutes}-minute starts · ${
           policy.maximum_visit_minutes}-minute maximum visit · ${policy.timezone}` : "Set up availability first"}</span>
+        {open === "advanced" && dirty.advanced && <span className="settings-unsaved">Unsaved changes</span>}
       </button>
       <button ref={(node) => { buttons.current.invitations = node; }} type="button" className="settings-card"
         aria-haspopup="dialog" aria-label="Edit Booking invitations" aria-describedby="settings-invitations-summary"
@@ -91,25 +96,31 @@ export function SettingsTab() {
         <strong>Booking invitations</strong>
         <span id="settings-invitations-summary">{outreach ? outreach.enabled ? `Weekly · ${outreach.lookahead_weeks ?? "?"}-week lookahead`
           : "Recurring invitations off" : "Loading invitation settings"}</span>
+        {open === "invitations" && dirty.invitations && <span className="settings-unsaved">Unsaved changes</span>}
       </button>
     </div>
     {open && <PopoverCard variant="modal" title={titles[open]} getAnchor={getAnchor} onClose={close}
       returnFocus={() => buttons.current[open]}>
       <div className="settings-editor">
         <div className="settings-editor-content" hidden={confirmDiscard}>
-        {open === "business" && <BusinessProfileForm onDirtyChange={setBusinessDirty} />}
+        {open === "business" && <BusinessProfileForm onDirtyChange={(value) => setDirty((current) =>
+          current.business === value ? current : { ...current, business: value })} />}
         {open === "availability" && <>
-          <PolicySummary policy={data.policy} mode="availability" />
-          {data.policy && <RegularPolicyForm />}
-          {data.policy && <ExceptionForm />}
+          {!data.policy && <PolicySummary policy={null} mode="availability" />}
+          {data.policy && <RegularPolicyForm onDirtyChange={(value) => setDirty((current) =>
+            current.regular === value ? current : { ...current, regular: value })} />}
+          {data.policy && <ExceptionForm onDirtyChange={(value) => setDirty((current) =>
+            current.exception === value ? current : { ...current, exception: value })} />}
         </>}
-        {open === "advanced" && (data.policy ? <AdvancedPolicyForm />
+        {open === "advanced" && (data.policy ? <AdvancedPolicyForm onDirtyChange={(value) => setDirty((current) =>
+          current.advanced === value ? current : { ...current, advanced: value })} />
           : <p className="empty">Load the pilot policy under Availability first.</p>)}
-        {open === "invitations" && <OutreachForm />}
+        {open === "invitations" && <OutreachForm onDirtyChange={(value) => setDirty((current) =>
+          current.invitations === value ? current : { ...current, invitations: value })} />}
         </div>
         {confirmDiscard && <div className="settings-discard" role="alertdialog"
           aria-label="Discard unsaved changes?">
-          <p>Discard your unsaved Business details changes?</p>
+          <p>Discard your unsaved {titles[open]} changes?</p>
           <div className="row-actions">
             <button type="button" ref={keepEditingButton} onClick={() => setConfirmDiscard(false)}>Keep editing</button>
             <button type="button" className="danger" onClick={() => { setConfirmDiscard(false); setOpen(null); }}>
