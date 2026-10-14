@@ -1,10 +1,10 @@
 # Scheduling service contracts
 
-**Status:** implementation contract, 2026-09-26
+**Status:** Current implementation contract; reviewed 2026-10-14
 
 **Related:** [PRD](PRD.md), [HLD](HLD.md), [data architecture](ARCHITECTURE.md#5-data-architecture-and-conflict-correctness), [issue #3](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/issues/3)
 
-The scheduling service is the sole writer of appointments, holds, calendar blocks, audit events, and notification intents. SMS and owner UI call the same operations. Every successful state-changing operation returns the persisted state and its calendar revision; callers must not announce success before that response. Times are RFC 3339 UTC instants at the boundary and are rendered in the configured business timezone. Intervals are half-open `[start_at, end_at)`.
+The scheduling service is the sole writer of appointments, holds, calendar blocks, audit events, and notification intents. SMS, owner UI and client portal call the same operations. Every successful state-changing operation returns the persisted state and its calendar revision; callers must not announce success before that response. Times are RFC 3339 UTC instants at the boundary and are rendered in the configured business timezone. Intervals are half-open `[start_at, end_at)`.
 
 ## Shared rules
 
@@ -17,7 +17,7 @@ The scheduling service is the sole writer of appointments, holds, calendar block
 - Signed-in clients read the same availability through `GET /v1/client/availability?day=YYYY-MM-DD` (the visit length is the business's saved default service duration from the owner profile, never caller-supplied and checked against the current policy maximum; a missing or inactive client profile, an unsaved business profile, or a duration the policy rejects returns 503) and their own live requests through `GET /v1/client/bookings` (#231); identity comes from the verified link and the response carries no other client's or owner-block data.
 - A signed-in client requests a visit through `POST /v1/client/requests` with only `start_at` and an `Idempotency-Key` (#233). Identity comes from the verified link and the duration is the business's saved default. A caller may also send `quoted_duration_minutes`, the length its offered times were quoted at; if the owner has changed the default since, the request is refused with 409 `DURATION_CHANGED` and nothing is held (#339). The route calls the same `HoldService.create` as the SMS path, so availability is revalidated atomically, the result is a pending hold with the standard owner and client notices and expiry, a replay of the same key returns the same request, and a stale or conflicting start returns `SLOT_CONFLICT`/`CALENDAR_BUSY` with current alternatives and no hold. Like the SMS path it requires an active profile with a verified phone.
 - A signed-in client cancels with `POST /v1/client/bookings/{appointment_id}/cancel` (`{expected_version}`) and asks to move a confirmed visit with `POST /v1/client/bookings/{appointment_id}/reschedule` (`{start_at, expected_version}`), each with an `Idempotency-Key` stored as `portal:<key>` (#234). Authorization is the verified link's client and the specific booking; an absent, other-business, or other-client booking is one 404, and a changed version is `STALE_BOOKING`. Cancel is the client `CANCEL` lifecycle command (the SMS path's), so it queues the standard owner and client notices; a confirmed visit with an active replacement cannot be cancelled until the replacement is withdrawn (`REPLACEMENT_PENDING`). A move is a `HoldService.create` hold with `replaces_appointment_id` and `replaces_confirmed_version`: it is revalidated against current availability and hold rules, keeps the original confirmed and its time blocked, and is confirmed only by the owner's approval, which swaps both in one transaction; decline, withdrawal, or expiry clears the replacement guard and leaves the original intact.
-- The API may expose `GET /availability` for suggestions. Suggestions are advisory and never reserve time. A returned slot is revalidated by `create_hold` and, where applicable, `approve`.
+- Owner and client availability endpoints return advisory suggestions, never reservations. The selected time is revalidated by `create_hold` and, where applicable, `approve`.
 
 ## Operations and transitions
 
@@ -63,49 +63,17 @@ The verified owner's strict JSON tool loop exposes `get_business_info`, `list_pe
 
 ## API envelope and examples
 
-Internal scheduling commands use typed request/response schemas. An owner HTTP adapter can expose `POST /v1/requests`, `POST /v1/requests/{id}/approve`, `POST /v1/requests/{id}/decline`, `POST /v1/appointments/{id}/cancel`, `PATCH /v1/appointments/{id}`, and `POST /v1/blocks`. Provider webhooks are separate and verify signatures before calling the service. Mutating HTTP calls require an `Idempotency-Key` header and server-derived actor context.
+Internal commands use typed schemas. Owner HTTP commands are under `/v1/owner/businesses/{business_id}` and client commands under `/v1/client`. Use the generated [owner OpenAPI](../frontend/openapi/owner.json) for exact request/response shapes and `backend/scheduling/client_api.py` for client schemas. Provider webhooks verify signatures before passing actor context to the domain.
 
-Create a replacement hold (the original stays confirmed):
+| Action | Current route suffix | Required input |
+| --- | --- | --- |
+| Owner request | `POST /requests` | Client, start, optional duration/replace target, idempotency key. |
+| Owner decision | `POST /requests/{request_id}/approve` or `/decline` | Expected request version and idempotency key. |
+| Owner appointment edit | `PATCH /appointments/{appointment_id}` | Expected version, changed fields and idempotency key. |
+| Client request | `POST /v1/client/requests` | Start, optional quoted duration and idempotency key; identity derives from link. |
+| Client cancel / move | `POST /v1/client/bookings/{appointment_id}/cancel` or `/reschedule` | Expected version, idempotency key and replacement start for a move. |
 
-```http
-POST /v1/requests
-Idempotency-Key: sms-SM123-request
-Content-Type: application/json
-
-{"client_id":"client-42","start_at":"2026-10-06T16:00:00Z","duration_minutes":180,"replaces_appointment_id":"appt-9"}
-```
-
-```json
-{"request_id":"req-12","status":"PENDING_APPROVAL","start_at":"2026-10-06T16:00:00Z","end_at":"2026-10-06T19:00:00Z","hold_expires_at":"2026-10-05T16:00:00Z","replaces_appointment_id":"appt-9","original_status":"CONFIRMED","calendar_revision":81}
-```
-
-Approve an exact request:
-
-```http
-POST /v1/requests/req-12/approve
-Idempotency-Key: owner-SM456-approve
-Content-Type: application/json
-
-{"expected_version":1}
-```
-
-```json
-{"request_id":"req-12","status":"CONFIRMED","replaced_appointment_id":"appt-9","replaced_status":"CANCELLED","calendar_revision":82}
-```
-
-Conflicting duration edit (no state change, no notification):
-
-```http
-PATCH /v1/appointments/appt-9
-Idempotency-Key: owner-edit-17
-Content-Type: application/json
-
-{"expected_version":4,"duration_minutes":180}
-```
-
-```json
-{"error":{"code":"SLOT_CONFLICT","message":"The longer visit conflicts with another reservation."},"current":{"appointment_id":"appt-9","status":"CONFIRMED","duration_minutes":120,"version":4}}
-```
+A conflicting duration edit leaves the original appointment unchanged and sends no change notification. These routes do not accept arbitrary destinations or caller-supplied approval identity.
 
 Business profile (#336): `GET`/`PUT /v1/owner/businesses/{business_id}/profile` reads and edits the single versioned, owner-managed business profile (not a calendar write; it does not advance the calendar revision). `PUT` requires `expected_version` and an `Idempotency-Key`, follows the same `STALE_VERSION` and `IDEMPOTENCY_KEY_REUSED` mapping, and is scoped to the verified owner's business. Field limits and storage are in `doc/ARCHITECTURE.md`.
 

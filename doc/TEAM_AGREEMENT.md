@@ -5,7 +5,7 @@ This agreement governs work on Smart Scheduling Assistant. Enrique owns business
 ## Where decisions and progress live
 
 - The [GitHub Project board](https://github.com/orgs/EA-AI-Projects/projects/2), issues, and pull requests are the source of truth for work state. An issue states the outcome, acceptance checks, dependencies, and next owner. A pull request shows the proposed change and validation.
-- The PRD, HLD, architecture, and scheduling contracts record accepted product and technical decisions. A chat discussion or issue comment that changes a decision must be reflected in the relevant document.
+- The PRD, HLD, architecture, and scheduling contracts record current accepted product and technical decisions. A changed decision replaces the owning section's superseded wording; material prior choices and provenance go in [decision history](DECISION_HISTORY.md). Follow the [documentation index](README.md#maintenance-rules) for document scope. A chat discussion or issue comment that changes a decision must be reflected in the relevant reference.
 - Chats are for coordination. The dedicated implementation-manager chat runs the project workflow; it does not replace GitHub records.
 - Keep questions, issues, documents, and progress updates concise. Use short sentences and only the detail needed to make the outcome, decision, or next action clear.
 

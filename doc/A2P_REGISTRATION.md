@@ -1,6 +1,6 @@
 # A2P registration notes for the scheduling pilot
 
-The public policy pages are in `docs/`. They describe the Smart Scheduling Assistant proof of concept and contain no placeholder brand or contact details. The stated support email is `ealeman.kikito@gmail.com`. Review the policies against actual behavior before publishing or submitting them to Twilio.
+The public policy pages are in `docs/`. They describe the Smart Scheduling Assistant proof of concept and contain no placeholder brand or contact details. Use the actual published support contact from the policy pages; keep private registration/account details outside this reference. Review the policies against actual behavior before publishing or submitting them to Twilio.
 
 Status (issue #91): the Twilio account is upgraded, a US number is bought, and the A2P 10DLC brand and campaign are approved; the approved brand is a Sole proprietor brand in the owner's individual name with verified identity (created 2026-09-27), which is fine for dev and pilot testing, and a business sender is needed before a real business uses the program in production (owner decision, #91); the owner verified that API sending works. Approval does not authorize live SMS, deployment, or real clients. Until launch approval, send only to explicitly authorized test numbers.
 
