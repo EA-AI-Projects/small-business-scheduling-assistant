@@ -31,12 +31,13 @@ export function toPolicyBody(policy: AvailabilityPolicy): PolicyBody {
 
 /** The policy with one date closed, given custom hours, or restored to normal hours. */
 export function withDateException(policy: AvailabilityPolicy, date: string, mode: ExceptionMode,
-  window: LocalWindow): PolicyBody {
+  window: LocalWindow | LocalWindow[]): PolicyBody {
   const body = toPolicyBody(policy);
   const exceptions = body.date_exceptions ?? {};
   if (mode === "normal") delete exceptions[date];
   else if (mode === "closed") exceptions[date] = [];
-  else exceptions[date] = [{ opens: window.opens, closes: window.closes }];
+  else exceptions[date] = (Array.isArray(window) ? window : [window])
+    .map(({ opens, closes }) => ({ opens, closes }));
   return { ...body, date_exceptions: exceptions };
 }
 

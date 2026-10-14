@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { useOwner } from "@/owner/OwnerContext";
 
@@ -9,6 +9,7 @@ import { ADVANCED_FIELDS, ADVANCED_LABELS, advancedDraft, advancedErrors, applyA
 import { ConflictNotice, FailureAlert } from "./FailureAlert";
 import { usePolicySave } from "./usePolicySave";
 import { useSyncedDraft } from "./useSyncedDraft";
+import { SettingsAccordion } from "./SettingsAccordion";
 
 const HINTS: Record<AdvancedField, string> = {
   slot_increment_minutes: "Bookable start times fall on this many minutes within open hours.",
@@ -25,13 +26,21 @@ function timezoneNames(): string[] {
   try { return supported ? supported("timeZone") : []; } catch { return []; }
 }
 
-export function AdvancedPolicyForm() {
+export function AdvancedPolicyForm({ onDirtyChange }: { onDirtyChange?: (dirty: boolean) => void } = {}) {
   const { data } = useOwner();
   const policy = data.policy?.record.policy ?? null;
   const { draft, setDraft, dirty, reset, conflicts, rebase } = useSyncedDraft<AdvancedDraft>(policy ? advancedDraft(policy) : null);
   const { save, failure, clearFailure } = usePolicySave("Advanced scheduling settings saved");
   const [shown, setShown] = useState(false);
   const [summary, setSummary] = useState<string | null>(null);
+  const [openSection, setOpenSection] = useState({ limits: true, timezone: false });
+  const invalidRef = useRef<string | null>(null);
+  useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
+  useEffect(() => {
+    if (!invalidRef.current) return;
+    document.getElementById(invalidRef.current)?.focus();
+    invalidRef.current = null;
+  }, [shown, openSection]);
   if (!policy || !draft) return null;
 
   const found = advancedErrors(draft);
@@ -49,6 +58,9 @@ export function AdvancedPolicyForm() {
     clearFailure();
     if (count) {
       setSummary(`Fix ${count} ${count === 1 ? "field" : "fields"} before saving.`);
+      const first = Object.keys(found)[0];
+      invalidRef.current = `advanced-policy-${first}`;
+      setOpenSection((current) => ({ ...current, [first === "timezone" ? "timezone" : "limits"]: true }));
       return;
     }
     if (!draft) return;
@@ -59,16 +71,19 @@ export function AdvancedPolicyForm() {
   }
 
   return <section className="card advanced-policy-card">
-    <details>
-      <summary><strong>Advanced scheduling</strong></summary>
       <p className="hint">Technical limits for how visits are placed. Most owners never change these. An edit that
         would invalidate an active booking or pending request is rejected.</p>
       <div className="form-stack">
+        <SettingsAccordion title="Scheduling limits" open={openSection.limits}
+          onToggle={() => setOpenSection((current) => ({ ...current, limits: !current.limits }))}>
         {ADVANCED_FIELDS.map((key) => <PolicyField key={key} id={`advanced-policy-${key}`}
           label={`${ADVANCED_LABELS[key].label} (minutes)`} error={found[key]} shown={shown} hint={HINTS[key]}>
           {(props) => <input {...props} type="number" inputMode="numeric" min={ADVANCED_LABELS[key].minimum}
             step={1} value={draft[key]} onChange={(event) => edit(key, event.target.value)} />}
         </PolicyField>)}
+        </SettingsAccordion>
+        <SettingsAccordion title="Business timezone" open={openSection.timezone}
+          onToggle={() => setOpenSection((current) => ({ ...current, timezone: !current.timezone }))}>
         <PolicyField id="advanced-policy-timezone" label="Business timezone" error={found.timezone} shown={shown}>
           {(props) => <>
             <input {...props} list="advanced-policy-timezones" value={draft.timezone}
@@ -85,6 +100,7 @@ export function AdvancedPolicyForm() {
           clock times, and the new hours may no longer fit them. A change that conflicts with an active booking or
           pending request is rejected.
         </p>
+        </SettingsAccordion>
         {summary && <p className="field-error" role="alert">{summary}</p>}
         <ConflictNotice labels={conflicts.map((key) => key === "timezone" ? "Business timezone"
           : ADVANCED_LABELS[key as AdvancedField].label)} />
@@ -96,6 +112,5 @@ export function AdvancedPolicyForm() {
             Discard my edits</button>}
         </div>
       </div>
-    </details>
   </section>;
 }

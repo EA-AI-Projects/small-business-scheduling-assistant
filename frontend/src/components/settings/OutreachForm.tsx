@@ -1,10 +1,12 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { BusinessProfileBody, OutreachEditBody, OutreachState } from "@/api/types";
 import { useOwner } from "@/owner/OwnerContext";
+import { ApiError } from "@/lib/api";
 
 import { BusyButton } from "../BusyButton";
 import { ManualInvitationForm } from "./ManualInvitationForm";
+import { SettingsAccordion } from "./SettingsAccordion";
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
@@ -21,7 +23,7 @@ function approvedMessage(weeks: number, profile: BusinessProfileBody | null): st
     + `${profile.display_name} in the next ${window}? Reply with a day and time that works for you, or STOP to opt out.`;
 }
 
-export function OutreachForm() {
+export function OutreachForm({ onDirtyChange }: { onDirtyChange?: (dirty: boolean) => void } = {}) {
   const { data } = useOwner();
   return (
     <section className="card outreach-card">
@@ -32,16 +34,23 @@ export function OutreachForm() {
         window are eligible. A pending request does not count as confirmed. Each client can receive
         at most one invitation within the chosen number of weeks, measured from their last
         invitation. Changing these settings does not reset that limit.</p>
-      {data.outreach && <Form key={data.outreach.version} state={data.outreach} zone={data.zone}
-        profile={data.businessProfile?.profile ?? null} />}
+      {data.outreach && <Form state={data.outreach} zone={data.zone}
+        profile={data.businessProfile?.profile ?? null} onDirtyChange={onDirtyChange} />}
     </section>
   );
 }
 
-function Form({ state, zone, profile }: { state: OutreachState; zone: string;
-  profile: BusinessProfileBody | null }) {
-  const { api, change, notify } = useOwner();
+function Form({ state, zone, profile, onDirtyChange }: { state: OutreachState; zone: string;
+  profile: BusinessProfileBody | null; onDirtyChange?: (dirty: boolean) => void }) {
+  const { api, notify, refresh } = useOwner();
   const [saved, setSaved] = useState(state);
+  const externalVersion = useRef(state.version);
+  useEffect(() => {
+    if (state.version !== externalVersion.current) {
+      externalVersion.current = state.version;
+      setSaved(state);
+    }
+  }, [state]);
   const [enabled, setEnabled] = useState(state.settings.enabled);
   const [weekday, setWeekday] = useState(state.settings.weekday?.toString() ?? "");
   const [localTime, setLocalTime] = useState(state.settings.local_time?.slice(0, 5) ?? "");
@@ -53,6 +62,9 @@ function Form({ state, zone, profile }: { state: OutreachState; zone: string;
   const [customized, setCustomized] = useState(
     state.settings.message != null && !LEGACY_DEFAULTS.includes(state.settings.message)
       && state.settings.message !== approvedMessage(state.settings.lookahead_weeks ?? 1, profile));
+  const [openSection, setOpenSection] = useState({ schedule: true, message: false, send: false });
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const attempt = useRef<{ signature: string; key: string } | null>(null);
   const updateMessage = useCallback((value: string) => {
     setCustomized(true);
     setMessage(value);
@@ -71,6 +83,7 @@ function Form({ state, zone, profile }: { state: OutreachState; zone: string;
     || localTime !== (saved.settings.local_time?.slice(0, 5) ?? "")
     || lookahead !== (saved.settings.lookahead_weeks?.toString() ?? "")
     || current.trim() !== savedMessage;
+  useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
 
   function body(): OutreachEditBody {
     return {
@@ -87,8 +100,36 @@ function Form({ state, zone, profile }: { state: OutreachState; zone: string;
   }
 
   async function save() {
-    if (missing || invalidSave) return;
-    await change("/booking-outreach", "PUT", body(), "Booking invitation settings saved");
+    if (missing || invalidSave) {
+      setOpenSection((current) => ({ ...current, schedule: current.schedule || missing,
+        message: current.message || invalidSave }));
+      window.setTimeout(() => document.querySelector<HTMLElement>(missing ? '.outreach-card select' :
+        '.outreach-card textarea')?.focus(), 0);
+      return;
+    }
+    setSaveError(null);
+    const sent = body();
+    const signature = JSON.stringify(sent);
+    if (attempt.current?.signature !== signature) attempt.current = { signature, key: crypto.randomUUID() };
+    try {
+      const updated = await api.request<OutreachState>("/booking-outreach", { method: "PUT", body: sent,
+        idempotencyKey: attempt.current.key });
+      attempt.current = null;
+      setSaved(updated);
+      try {
+        await refresh();
+        notify("Booking invitation settings saved");
+      } catch (error) {
+        notify(`Booking invitation settings saved, but the latest view could not load: ${
+          error instanceof Error ? error.message : String(error)}`, true);
+      }
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409 && error.code === "STALE_VERSION") {
+        await refresh(true).catch(() => undefined);
+        setSaveError("Invitation settings changed elsewhere. Your edits are kept; review and save again.");
+      } else setSaveError(error instanceof Error ? error.message : String(error));
+      notify("Invitation settings were not saved", true);
+    }
   }
 
   async function prepareSend(key: string): Promise<boolean> {
@@ -98,6 +139,9 @@ function Form({ state, zone, profile }: { state: OutreachState; zone: string;
       const updated = await api.request<OutreachState>("/booking-outreach", { method: "PUT", body: body(),
         idempotencyKey: `${key}-settings` });
       setSaved(updated);
+      try { await refresh(); } catch {
+        notify("Invitation settings saved, but the latest view could not load", true);
+      }
       return true;
     } catch (error) {
       notify(`Invitation settings were not saved: ${error instanceof Error ? error.message : String(error)}`, true);
@@ -106,6 +150,8 @@ function Form({ state, zone, profile }: { state: OutreachState; zone: string;
   }
 
   return <div className="form-stack">
+    <SettingsAccordion title="Recurring schedule" open={openSection.schedule}
+      onToggle={() => setOpenSection((current) => ({ ...current, schedule: !current.schedule }))}>
     <label className="inline"><input type="checkbox" checked={enabled}
       onChange={(event) => setEnabled(event.target.checked)} /> Enable invitations</label>
     <div className="two-col">
@@ -129,12 +175,17 @@ function Form({ state, zone, profile }: { state: OutreachState; zone: string;
         <option value="2">Two weeks</option>
       </select>
     </label>
-    <ManualInvitationForm message={current} onMessageChange={updateMessage}
-      prepareSend={prepareSend} lookaheadWeeks={lookahead ? Number(lookahead) : null} />
     {missing && <p className="field-error" role="alert">Choose a day, time, and lookahead to enable invitations.</p>}
+    </SettingsAccordion>
+    <ManualInvitationForm message={current} onMessageChange={updateMessage}
+      prepareSend={prepareSend} lookaheadWeeks={lookahead ? Number(lookahead) : null}
+      openMessage={openSection.message} openSend={openSection.send}
+      onToggleMessage={() => setOpenSection((current) => ({ ...current, message: !current.message }))}
+      onToggleSend={() => setOpenSection((current) => ({ ...current, send: !current.send }))} />
     {!profile && !customized && <p className="hint">Save the business name and service under Business details to
       get the default invitation text, or write your own message.</p>}
     {invalidSave && <p className="field-error" role="alert">Enter an invitation message of up to 500 characters.</p>}
+    {saveError && <p className="field-error" role="alert">{saveError}</p>}
     <div><BusyButton className="primary" onClick={save}>Save invitation settings</BusyButton></div>
     <p className="meta">Version {saved.version} · Schedule uses the business timezone above.</p>
   </div>;
