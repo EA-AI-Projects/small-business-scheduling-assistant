@@ -67,6 +67,7 @@ export function ClientDetails({ client, blankKey, initialSection, onCreated, onD
     notes: initialSection === "notes",
   });
   const [phoneDraft, setPhoneDraft] = useState<{ key: string; phone: string } | null>(null);
+  const [emailDraft, setEmailDraft] = useState<{ clientId: string | null; email: string } | null>(null);
   const [onboardingId, setOnboardingId] = useState<string | null>(null);
   const clientId = client?.client_id ?? null;
   const onboarding = client !== undefined && client.client_id === onboardingId
@@ -75,6 +76,8 @@ export function ClientDetails({ client, blankKey, initialSection, onCreated, onD
   const profileKey = client ? `client:${client.client_id}:${stamp.version}` : `new:${blankKey}`;
   const phoneUnsaved = client !== undefined && phoneDraft?.key === profileKey
     && normalizePhone(phoneDraft.phone) !== client.phone_e164;
+  const draftEmail = emailDraft?.clientId === clientId ? emailDraft.email : undefined;
+  const emailUnsaved = draftEmail !== undefined && draftEmail.trim() !== (client?.email ?? "");
   const toggle = (name: SectionName) => setOpen((current) => ({ ...current, [name]: !current[name] }));
   const waiting = "Save the profile first.";
 
@@ -98,7 +101,10 @@ export function ClientDetails({ client, blankKey, initialSection, onCreated, onD
             setOpen((current) => ({ ...current, consent: true }));
             onCreated(id);
           }}
-          onPhoneDraft={(phone) => setPhoneDraft({ key: profileKey, phone })} />
+          onPhoneDraft={(phone) => setPhoneDraft({ key: profileKey, phone })}
+          emailDraft={draftEmail}
+          onEmailDraft={(email) => setEmailDraft({ clientId, email })}
+          onSaved={() => setEmailDraft(null)} />
       </Accordion>
       {client && <section className="stack" aria-label="Delete client">
         {!confirmDelete ? (
@@ -131,7 +137,7 @@ export function ClientDetails({ client, blankKey, initialSection, onCreated, onD
       </Accordion>
       <Accordion title="Account invitation" open={open.account} onToggle={() => toggle("account")}
         disabledReason={client ? undefined : `${waiting} Account invitations require a saved client.`}>
-        {client && <AccountInvitationForm clientId={client.client_id} />}
+        {client && <AccountInvitationForm client={client} emailUnsaved={emailUnsaved} />}
       </Accordion>
       <Accordion title="Notes" open={open.notes} onToggle={() => toggle("notes")}
         disabledReason={client ? undefined : `${waiting} Notes are kept for a saved client.`}>

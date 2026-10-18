@@ -118,11 +118,65 @@ class Directory:
         self.sent.append(email)
 
 
+def test_invitation_uses_saved_email_and_profile_edits_preserve_existing_access() -> None:
+    profiles = InMemoryCalendarRepository()
+    records = Records(profiles)
+    directory = Directory()
+    links = IdentityLinks(records)
+    service = ClientAccountInvitations(records, links, directory, lambda: NOW)
+    api = TestClient(create_owner_app(
+        profiles, lambda _: OwnerPrincipal("owner-sub", "pilot"), lambda: NOW,
+        account_invitations=service,
+        verify_account=lambda _: VerifiedAccount("sub-1", "first@example.test", True)))
+    base = "/v1/owner/businesses/pilot/clients/client-a"
+    owner = {"Authorization": "Bearer owner-token"}
+    body = {"name": "Synthetic Client", "phone_e164": "+14155550101",
+            "service_address": "123 Test Street"}
+    assert api.put(base, json={**body, "expected_version": 0}, headers=owner).status_code == 200
+    invite = f"{base}/account-invitation"
+    missing = api.post(invite, json={"expected_version": 1}, headers=owner)
+    assert missing.status_code == 409
+    assert "email" in missing.json()["error"]["message"].lower()
+    assert api.put(base, json={**body, "expected_version": 1, "email": "first@example.test"},
+                   headers=owner).status_code == 200
+    assert api.post(invite, json={"expected_version": 1}, headers=owner).status_code == 409
+    assert api.post(invite, json={"expected_version": 2, "email": "other@example.test"},
+                    headers=owner).status_code == 422
+    assert directory.sent == []
+    assert api.post(invite, json={"expected_version": 2}, headers=owner).status_code == 200
+    assert directory.sent == ["first@example.test"]
+    # A contact edit neither redirects the pending invitation nor prevents its activation.
+    assert api.put(base, json={**body, "expected_version": 2, "email": "new@example.test"},
+                   headers=owner).status_code == 200
+    assert api.get(invite, headers=owner).json()["state"] == "pending"
+    assert api.post(invite, json={"expected_version": 3}, headers=owner).status_code == 409
+    assert api.post("/v1/account/invitations/activate", headers=owner).status_code == 200
+    assert api.put(base, json={**body, "expected_version": 3, "email": None},
+                   headers=owner).status_code == 200
+    assert api.get(invite, headers=owner).json()["state"] == "active"
+    assert links.resolve("sub-1").client_id == "client-a"
+    assert api.post(invite, json={"expected_version": 4}, headers=owner).status_code == 409
+    assert directory.sent == ["first@example.test"]
+    assert api.delete(invite, headers=owner).status_code == 204
+    assert links.resolve("sub-1") is None
+    assert api.put(base, json={**body, "expected_version": 4, "email": "new@example.test"},
+                   headers=owner).status_code == 200
+    assert api.post(invite, json={"expected_version": 5}, headers=owner).status_code == 200
+    assert directory.sent == ["first@example.test", "new@example.test"]
+    # Sharing contact email does not let a second profile claim the invited identity.
+    other = base.replace("client-a", "client-b")
+    assert api.put(other, json={**body, "expected_version": 0, "phone_e164": "+14155550102",
+                               "email": "new@example.test"}, headers=owner).status_code == 200
+    assert api.post(f"{other}/account-invitation", json={"expected_version": 1},
+                    headers=owner).status_code == 409
+    assert len(directory.sent) == 2
+
+
 def test_owner_invite_activation_and_rejected_claims() -> None:
     profiles = InMemoryCalendarRepository()
     ClientRecordService(profiles).save_profile(
         "pilot", "client-a", "Synthetic Client", "+14155550101",
-        "123 Test Street", True, 0, NOW)
+        "123 Test Street", True, 0, NOW, email="client@example.test")
     records = Records(profiles)
     directory = Directory()
     links = IdentityLinks(records)
@@ -148,19 +202,22 @@ def test_owner_invite_activation_and_rejected_claims() -> None:
     invite_url = "/v1/owner/businesses/pilot/clients/client-a/account-invitation"
     activate_url = "/v1/account/invitations/activate"
     owner = {"Authorization": "Bearer owner-token"}
-    assert api.post(invite_url, json={"email": "client@example.test"}).status_code == 401
+    assert api.post(invite_url, json={"expected_version": 1}).status_code == 401
     assert api.post(invite_url.replace("/pilot/", "/other/"),
-                    json={"email": "client@example.test"}, headers=owner).status_code == 403
+                    json={"expected_version": 1}, headers=owner).status_code == 403
     assert api.post(invite_url.replace("client-a", "missing"),
-                    json={"email": "client@example.test"}, headers=owner).status_code == 409
-    response = api.post(invite_url, json={"email": "Client@Example.Test"}, headers=owner)
+                    json={"expected_version": 1}, headers=owner).status_code == 409
+    response = api.post(invite_url, json={"expected_version": 1}, headers=owner)
     assert response.status_code == 200
     assert datetime.fromisoformat(response.json()["expires_at"]) == NOW + timedelta(hours=24)
     assert directory.sent == ["client@example.test"]
-    assert api.post(invite_url, json={"email": "client@example.test"},
+    assert api.post(invite_url, json={"expected_version": 1},
                     headers=owner).status_code == 200
     assert directory.sent == ["client@example.test"]
-    assert api.post(invite_url, json={"email": "changed@example.test"},
+    ClientRecordService(profiles).save_profile(
+        "pilot", "client-a", "Synthetic Client", "+14155550101",
+        "123 Test Street", True, 1, NOW, email="changed@example.test")
+    assert api.post(invite_url, json={"expected_version": 2},
                     headers=owner).status_code == 409
     for token in ("unverified", "other-email", "other-sub"):
         assert api.post(activate_url, headers={"Authorization": f"Bearer {token}"}).status_code == 403
@@ -172,7 +229,7 @@ def test_owner_invite_activation_and_rejected_claims() -> None:
     assert api.delete(invite_url, headers=owner).status_code == 204
     assert links.resolve("sub-1") is None
     assert api.get(invite_url, headers=owner).json()["state"] == "revoked"
-    assert api.post(invite_url, json={"email": "changed@example.test"},
+    assert api.post(invite_url, json={"expected_version": 2},
                     headers=owner).status_code == 200
     assert directory.sent[-1] == "changed@example.test"
     assert profiles.read_profile("pilot", "client-a").phone_verified_at is None

@@ -15,6 +15,12 @@ from uuid import uuid4
 from scheduling.domain.appointments import Appointment
 
 PHONE_PATTERN = re.compile(r"^\+[1-9][0-9]{1,14}$")
+# Match the profile form's HTML email input: one local part and valid domain labels.
+EMAIL_PATTERN = re.compile(
+    r"[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+    r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?"
+    r"(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*"
+)
 ACCESS_CODE_PATTERN = re.compile(
     r"\b(?:door|gate|entry|access|lockbox|alarm|keypad)\s*"
     r"(?:code|pin|password|combination)\b|"
@@ -44,12 +50,16 @@ class ClientProfile:
     created_at: datetime
     updated_at: datetime
     phone_verified_at: datetime | None = None
+    email: str | None = None
 
     def __post_init__(self) -> None:
         if not self.business_id or not self.client_id or not self.name.strip():
             raise ValueError("Business, client, and name are required")
         if len(self.name) > 200:
             raise ValueError("Client name is too long")
+        if self.email is not None and (len(self.email) > 320
+                or EMAIL_PATTERN.fullmatch(self.email) is None):
+            raise ValueError("Enter a valid client email address")
         if not PHONE_PATTERN.fullmatch(self.phone_e164):
             raise ValueError("Phone must use E.164 format")
         if not self.service_address.strip():
@@ -128,7 +138,7 @@ class ClientRecordService:
 
     def save_profile(self, business_id: str, client_id: str, name: str, phone_e164: str,
                      service_address: str, active: bool, expected_version: int,
-                     now: datetime) -> ClientProfile:
+                     now: datetime, *, email: str | None = None) -> ClientProfile:
         if expected_version < 0:
             raise ValueError("Profile version is invalid")
         phone_e164 = clean_phone(phone_e164)
@@ -141,6 +151,7 @@ class ClientRecordService:
             active, expected_version + 1,
             current.created_at if current else instant, instant,
             current.phone_verified_at if current and current.phone_e164 == phone_e164 else None,
+            email.strip() or None if email is not None else None,
         )
         self._repository.save_profile(profile, expected_version,
                                       current.phone_e164 if current else None)

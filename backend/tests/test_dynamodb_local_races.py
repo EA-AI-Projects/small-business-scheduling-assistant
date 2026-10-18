@@ -244,6 +244,31 @@ def _seed(env: RaceEnv, appointments: tuple[Appointment, ...],
         )
 
 
+def test_profile_email_persists_and_clears_without_changing_verified_phone(
+    race_env: RaceEnv,
+) -> None:
+    env = race_env
+    repo = DynamoDBCalendarRepository(env.client, env.table)
+    service = ClientRecordService(repo)
+    service.save_profile(env.business, "synthetic-client", "Synthetic Client", "+14155550101",
+                         "123 Test Street", True, 0, START)
+    assert repo.read_profile(env.business, "synthetic-client").email is None
+    verified = service.verify_phone(env.business, "synthetic-client", "+14155550101", START)
+    saved = service.save_profile(
+        env.business, "synthetic-client", "Synthetic Client", "+14155550101",
+        "123 Test Street", True, verified.version, START, email="household@example.test")
+    assert repo.read_profile(env.business, "synthetic-client").email == "household@example.test"
+    service.save_profile(env.business, "synthetic-other", "Synthetic Other", "+14155550102",
+                         "123 Test Street", True, 0, START, email="household@example.test")
+    assert [p.email for p in repo.list_profiles(env.business)] == [
+        "household@example.test", "household@example.test"]
+    service.save_profile(env.business, "synthetic-client", "Synthetic Client", "+14155550101",
+                         "123 Test Street", True, saved.version, START, email=None)
+    restored = repo.read_verified_phone(env.business, "+14155550101")
+    assert restored is not None and restored.email is None
+    assert restored.phone_verified_at == verified.phone_verified_at
+
+
 def test_client_erasure_releases_reservations_and_removes_linked_records(
     race_env: RaceEnv,
 ) -> None:

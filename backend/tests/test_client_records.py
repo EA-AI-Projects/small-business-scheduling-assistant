@@ -34,6 +34,53 @@ def save(service: ClientRecordService, client_id: str, phone: str,
                                 "123 Test Street", True, version, NOW)
 
 
+def test_profile_email_round_trip_shared_address_and_clearing() -> None:
+    repository, service = ready()
+    save(service, "client-1", "+14155550101")
+    service.verify_phone(BUSINESS, "client-1", "+14155550101", NOW)
+    api = TestClient(create_owner_app(
+        repository, lambda _: OwnerPrincipal("owner-1", BUSINESS), lambda: NOW))
+    base = f"/v1/owner/businesses/{BUSINESS}/clients"
+    headers = {"Authorization": "Bearer good"}
+    original = api.get(f"{base}/client-1", headers=headers).json()
+    assert original["email"] is None
+    body = {"expected_version": original["version"], "name": "Synthetic Client",
+            "phone_e164": "+14155550101", "service_address": "123 Test Street",
+            "email": "  household@example.test  "}
+    saved = api.put(f"{base}/client-1", json=body, headers=headers)
+    assert saved.status_code == 200
+    assert api.get(f"{base}/client-1", headers=headers).json()["email"] == "household@example.test"
+    assert saved.json()["phone_verified_at"] == original["phone_verified_at"]
+    shared = api.put(f"{base}/client-2", json={
+        **body, "expected_version": 0, "phone_e164": "+14155550102"}, headers=headers)
+    assert shared.status_code == 200
+    assert {client["email"] for client in api.get(base, headers=headers).json()} == {
+        "household@example.test"}
+    cleared = api.put(f"{base}/client-1", json={
+        **body, "expected_version": saved.json()["version"], "email": "  "}, headers=headers)
+    assert cleared.status_code == 200
+    assert api.get(f"{base}/client-1", headers=headers).json()["email"] is None
+
+
+@pytest.mark.parametrize("email", ["missing-at", "@example.test", "client@", "a b@example.test",
+                                   "client@@example.test", "x" * 310 + "@example.test",
+                                   "client@.test", "client@#", "client@example..test",
+                                   "client<@example.test"])
+def test_invalid_profile_email_is_rejected_without_saving(email: str) -> None:
+    repository, service = ready()
+    save(service, "client-1", "+14155550101")
+    api = TestClient(create_owner_app(
+        repository, lambda _: OwnerPrincipal("owner-1", BUSINESS), lambda: NOW))
+    base = f"/v1/owner/businesses/{BUSINESS}/clients/client-1"
+    headers = {"Authorization": "Bearer good"}
+    response = api.put(base, json={
+        "expected_version": 1, "name": "Synthetic Client", "phone_e164": "+14155550101",
+        "service_address": "123 Test Street", "email": email}, headers=headers)
+    assert response.status_code == 422
+    assert "email" in str(response.json()).lower()
+    assert api.get(base, headers=headers).json()["version"] == 1
+
+
 def test_note_scope_retention_and_access_code_exclusion() -> None:
     repository, service = ready()
     save(service, "client-1", "+14155550101")

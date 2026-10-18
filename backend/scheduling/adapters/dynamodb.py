@@ -749,6 +749,7 @@ class DynamoDBCalendarRepository:
             updated_at=datetime.fromisoformat(item["updated_at"]["S"]),
             phone_verified_at=(datetime.fromisoformat(item["phone_verified_at"]["S"])
                                if "phone_verified_at" in item else None),
+            email=item["email"]["S"] if "email" in item else None,
         )
 
     def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None:
@@ -1079,6 +1080,8 @@ class DynamoDBCalendarRepository:
         }
         if profile.phone_verified_at is not None:
             item["phone_verified_at"] = {"S": _instant(profile.phone_verified_at)}
+        if profile.email is not None:
+            item["email"] = {"S": profile.email}
         profile_put: dict[str, Any] = {"TableName": self._table, "Item": item,
                                         "ConditionExpression": ("attribute_not_exists(PK)"
                                                                 if expected_version == 0
