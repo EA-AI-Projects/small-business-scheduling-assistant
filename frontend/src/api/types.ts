@@ -89,6 +89,7 @@ export interface ClientProfile {
   name: string;
   phone_e164: string;
   service_address: string;
+  email: string | null;
   active: boolean;
   version: number;
   created_at: string;

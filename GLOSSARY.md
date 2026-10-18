@@ -1,8 +1,18 @@
 # Scheduling language
 
-Terms used when discussing a client's schedule and SMS conversation.
+Terms used when discussing client profiles, account access, schedules, and SMS conversations.
 
 ## Language
+
+**Client profile**:
+The business's record of a client and their contact details, whether or not the client has account access.
+
+**Profile email**:
+The optional contact email saved in a client profile, used as the destination for a new account invitation. It may differ from the email associated with existing account access.
+
+**Account invitation**:
+An owner's invitation for a client to gain sign-in access to their existing client profile. It is separate from an invitation to book a visit.
+_Avoid_: Booking invitation
 
 **Confirmed visit**:
 A service visit the owner has approved and placed on the schedule.

@@ -285,11 +285,12 @@ class ClientProfileBody(StrictModel):
     name: str = Field(min_length=1, max_length=200)
     phone_e164: str = Field(min_length=2, max_length=16)
     service_address: str = Field(min_length=1, max_length=500)
+    email: str | None = Field(default=None, max_length=320)
     active: bool = True
 
 
 class AccountInvitationBody(StrictModel):
-    email: str = Field(min_length=3, max_length=320)
+    expected_version: int = Field(gt=0)
 
 
 class ClientNoteBody(StrictModel):
@@ -415,9 +416,16 @@ def create_owner_app(
                               owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:
         if account_invitations is None:
             raise _error("UNAVAILABLE", "Account invitations are unavailable", 503)
+        profile = cast(ClientRecordRepository, repository).read_profile(business_id, client_id)
+        if profile is None:
+            raise _error("INVITATION_DENIED", "Client profile does not exist", 409)
+        if profile.version != body.expected_version:
+            raise _error("RECORD_CONFLICT", "Client profile changed. Review the saved email.", 409)
+        if not profile.email:
+            raise _error("INVITATION_DENIED", "Add an email to the profile first.", 409)
         try:
             invitation = account_invitations.invite(
-                business_id, client_id, body.email, owner.actor_id)
+                business_id, client_id, profile.email, owner.actor_id)
         except InvitationDenied as exc:
             raise _error("INVITATION_DENIED", str(exc), 409) from exc
         return {"expires_at": invitation.expires_at}
@@ -565,7 +573,7 @@ def create_owner_app(
         del owner
         return run(lambda: clients.save_profile(
             business_id, client_id, body.name, body.phone_e164, body.service_address,
-            body.active, body.expected_version, now()))
+            body.active, body.expected_version, now(), email=body.email))
 
     if sms_store is not None:
         @app.post("/v1/owner/businesses/{business_id}/clients/{client_id}/sms-consent")

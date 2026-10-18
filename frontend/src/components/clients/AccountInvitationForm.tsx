@@ -1,33 +1,52 @@
 import { useEffect, useState, type FormEvent } from "react";
 
+import type { ClientProfile } from "@/api/types";
 import { path } from "@/lib/api";
 import { useOwner } from "@/owner/OwnerContext";
 
 type AccountStatus = { state: string; expires_at: string | null };
 
 /** Email account access is separate from the client's phone and text consent. */
-export function AccountInvitationForm({ clientId }: { clientId: string }) {
-  const { api, change, notify } = useOwner();
-  const [email, setEmail] = useState("");
+export function AccountInvitationForm({ client, emailUnsaved }: {
+  client: ClientProfile; emailUnsaved: boolean;
+}) {
+  const { api, change, notify, stamp } = useOwner();
   const [sending, setSending] = useState(false);
   const [status, setStatus] = useState<AccountStatus | null>(null);
   const [confirmRevoke, setConfirmRevoke] = useState(false);
-  const route = path`/clients/${clientId}/account-invitation`;
+  const route = path`/clients/${client.client_id}/account-invitation`;
+  const blockedReason = emailUnsaved ? "Save email changes before sending an invitation."
+    : !client.email ? "Add an email to the profile first."
+    : !status ? "Account status must load before sending an invitation."
+    : ["pending", "active"].includes(status.state) ? "Revoke account access before sending a new invitation."
+    : null;
 
   useEffect(() => {
     let current = true;
-    api.get<AccountStatus>(route)
-      .then((value) => { if (current) setStatus(value); })
-      .catch((error: unknown) => { if (current) notify(error instanceof Error ? error.message : String(error), true); });
-    return () => { current = false; };
-  }, [api, route, notify]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    async function loadStatus() {
+      try {
+        const value = await api.get<AccountStatus>(route);
+        if (!current) return;
+        setStatus(value);
+        if (value.state === "pending" && value.expires_at) {
+          timer = setTimeout(() => { void loadStatus(); },
+            Math.max(1000, Date.parse(value.expires_at) - Date.now() + 50));
+        }
+      } catch (error) {
+        if (current) notify(error instanceof Error ? error.message : String(error), true);
+      }
+    }
+    void loadStatus();
+    return () => { current = false; clearTimeout(timer); };
+  }, [api, route, notify, stamp.version]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (sending) return;
+    if (sending || blockedReason) return;
     setSending(true);
     try {
-      if (await change(route, "POST", { email },
+      if (await change(route, "POST", { expected_version: client.version },
         "Account invitation requested. It expires in 24 hours.", false)) {
         setStatus(await api.get<AccountStatus>(route));
       }
@@ -54,9 +73,9 @@ export function AccountInvitationForm({ clientId }: { clientId: string }) {
       {status && status.state !== "none" && <p className="hint">Account: {status.state}
         {status.state === "pending" && status.expires_at
           ? ` (expires ${new Date(status.expires_at).toLocaleString()})` : ""}.</p>}
-      <label>Email <input type="email" autoComplete="email" required maxLength={320}
-        value={email} onChange={(event) => setEmail(event.target.value)} /></label>
-      <button type="submit" disabled={sending}>{sending ? "Inviting…" : "Send email invitation"}</button>
+      {client.email && <p className="hint">Send to: {client.email}</p>}
+      {blockedReason && <p className="hint">{blockedReason}</p>}
+      <button type="submit" disabled={sending || blockedReason !== null}>{sending ? "Inviting…" : "Send email invitation"}</button>
       {status && ["pending", "active"].includes(status.state) && (
         <div className="stack">
           {!confirmRevoke ? <button type="button" disabled={sending} onClick={() => setConfirmRevoke(true)}>

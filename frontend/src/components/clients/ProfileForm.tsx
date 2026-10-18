@@ -13,12 +13,16 @@ function text(form: FormData, name: string): string {
  * Create or update one client profile. Uncontrolled: the parent remounts it (by key)
  * whenever the selection changes or a refresh delivers the selected client's current data.
  */
-export function ProfileForm({ client, onCreated, onPhoneDraft }: {
+export function ProfileForm({ client, onCreated, onPhoneDraft, emailDraft, onEmailDraft, onSaved }: {
   client: ClientProfile | undefined;
   /** Called with the id after a new client is saved, to start onboarding. */
   onCreated?: (clientId: string) => void;
   /** Reports the phone as typed, so the consent step can wait for a saved number. */
   onPhoneDraft?: (phone: string) => void;
+  /** Kept by the details view so a failed save's refresh cannot discard email edits. */
+  emailDraft?: string;
+  onEmailDraft?: (email: string) => void;
+  onSaved?: () => void;
 }) {
   const { data, change, selectClient } = useOwner();
   const [phoneError, setPhoneError] = useState<string | null>(null);
@@ -39,9 +43,11 @@ export function ProfileForm({ client, onCreated, onPhoneDraft }: {
       name: text(form, "name"),
       phone_e164: phone,
       service_address: text(form, "service_address"),
+      email: text(form, "email") || null,
       active: form.get("active") === "on",
     };
     if (await change(path`/clients/${id}`, "PUT", body, "Client profile saved", false)) {
+      onSaved?.();
       selectClient(id);
       if (!current) onCreated?.(id);
     }
@@ -65,6 +71,9 @@ export function ProfileForm({ client, onCreated, onPhoneDraft }: {
           aria-invalid={phoneError !== null} aria-describedby={phoneError ? "phone-error" : undefined}
           onChange={(event) => { setPhoneError(null); onPhoneDraft?.(normalizePhone(event.target.value)); }} /></label>
         {phoneError && <span id="phone-error" role="alert" className="field-error">{phoneError}</span>}
+        <label>Email <input name="email" type="email" autoComplete="email" maxLength={320}
+          defaultValue={emailDraft ?? client?.email ?? ""}
+          onChange={(event) => onEmailDraft?.(event.target.value)} /></label>
         <label>Service address <input name="service_address" required maxLength={500}
           defaultValue={client?.service_address ?? ""} /></label>
         <label className="inline"><input name="active" type="checkbox"

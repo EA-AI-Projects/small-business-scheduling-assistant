@@ -465,8 +465,8 @@ export interface components {
     schemas: {
         /** AccountInvitationBody */
         AccountInvitationBody: {
-            /** Email */
-            email: string;
+            /** Expected Version */
+            expected_version: number;
         };
         /** BlockBody */
         BlockBody: {
@@ -518,6 +518,8 @@ export interface components {
              * @default true
              */
             active: boolean;
+            /** Email */
+            email?: string | null;
             /** Expected Version */
             expected_version: number;
             /** Name */
