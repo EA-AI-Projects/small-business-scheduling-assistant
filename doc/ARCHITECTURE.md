@@ -107,7 +107,9 @@ Visits fit wholly inside working windows. The gap between visits is at least `ma
 
 ## 6. Work queues and notifications
 
-Scheduling commits store immutable, stable-ID notification intents with the state change. The dispatcher queries due `PENDING`, `RETRYABLE` and lease-expired `SENDING` records, rereads them, sends identifiers to SQS, and conditionally advances dispatch timing. Queue duplication is expected.
+Scheduling commits store immutable, stable-ID notification intents with the state change. During SMS conversation processing, successful reply, hold, lifecycle and confirmed-counteroffer writes collect the new outbox references. After each receipt finishes processing (including failure after a commit), the worker immediately hands off due saved intents to the existing SQS sender. Handoff waits for processing to finish so a validated model draft can attach to the original notification first. Immediate handoff rereads authoritative state and conditionally advances dispatch timing; a failure leaves saved work for recovery without replaying a committed conversation.
+
+The once-a-minute dispatcher remains the recovery and retry path and handles notifications created outside conversation processing. It queries due `PENDING`, `RETRYABLE` and lease-expired `SENDING` records, rereads them, sends identifiers to SQS, and conditionally advances dispatch timing. Queue duplication is expected. Both dispatch paths use the same sender claims and eligibility checks. Conversation workers log immediate-handoff counts without message content or recipient identifiers.
 
 The sender conditionally claims due work with a lease/attempt, checks current recipient and event state, then records provider acceptance or bounded retry/backoff. Partial-batch failures preserve successful queue work. Exhausted attempts become visible failures; delivery callbacks do not roll back appointments. Ordinary provider timeouts after acceptance may cause a duplicate on retry.
 

@@ -120,7 +120,9 @@ class ReceiptProcessor:
 
 
 def process_sqs_batch(records: Iterable[dict[str, str]],
-                      processor: ReceiptProcessor) -> dict[str, list[dict[str, str]]]:
+                      processor: ReceiptProcessor,
+                      after_record: Callable[[], None] | None = None,
+                      ) -> dict[str, list[dict[str, str]]]:
     failures: list[dict[str, str]] = []
     for message in records:
         message_id = message["messageId"]
@@ -134,4 +136,7 @@ def process_sqs_batch(records: Iterable[dict[str, str]],
             processor.process(business_id, provider_id)
         except Exception:  # noqa: BLE001 - failed records must reach SQS redrive
             failures.append({"itemIdentifier": message_id})
+        finally:
+            if after_record is not None:
+                after_record()
     return {"batchItemFailures": failures}

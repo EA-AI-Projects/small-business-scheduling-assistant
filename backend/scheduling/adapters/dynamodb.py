@@ -1,6 +1,7 @@
 """Strong-read and conditional-transaction adapter for the single-crew calendar."""
 
 import json
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import UTC, date, datetime, time, timedelta
 from hashlib import sha256
@@ -214,10 +215,12 @@ class DynamoDBCalendarRepository:
     """The caller supplies an IAM-scoped boto3 DynamoDB client and table name."""
 
     def __init__(self, client: DynamoClient, table_name: str,
-                 *, sms_sender_guard: str | None = None) -> None:
+                 *, sms_sender_guard: str | None = None,
+                 outbox_created: Callable[[str, str], None] | None = None) -> None:
         self._client = client
         self._table = table_name
         self._sms_sender_guard = sms_sender_guard
+        self._outbox_created = outbox_created
 
     def read_business_profile(self, business_id: str) -> BusinessProfileRecord:
         item = self._get(self._business_key(business_id, "PROFILE#BUSINESS"))
@@ -1965,6 +1968,10 @@ class DynamoDBCalendarRepository:
                     raise ServiceDurationChanged("The default visit duration changed") from exc
             raise
 
+        if self._outbox_created is not None:
+            for intent in commit.outbox:
+                self._outbox_created(hold.business_id, intent.outbox_id)
+
     @staticmethod
     def _appointment_item(appointment: Appointment) -> dict[str, Any]:
         item: dict[str, Any] = {
@@ -2190,3 +2197,6 @@ class DynamoDBCalendarRepository:
             ):
                 raise RevisionConflict("Appointment transaction condition changed") from exc
             raise
+        if self._outbox_created is not None:
+            for intent in commit.outbox:
+                self._outbox_created(before.business_id, intent.outbox_id)

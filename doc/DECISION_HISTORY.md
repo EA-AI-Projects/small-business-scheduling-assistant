@@ -26,6 +26,11 @@ This is a selected record of material changes, not a second specification. Curre
 - **Accepted wording boundary (#283, #359, #361; October 2026):** backend checks facts/format and authoritative state, but does not prove status prose or option presentation. The loop uses a 480-septet limit and one rewrite; the legacy result drafter uses one GSM-7 segment. Model phrasing risk remains explicit.
 - **Names and concise replies (#348; 2026-10-13 wording decision):** saved business/service names replace hard-coded trade wording. Routine receipts omit unnecessary references/help tails; references remain available for disambiguation. Next appointment means the earliest upcoming confirmed visit, with pending requests separate.
 
+## SMS response dispatch
+
+- **Earlier approach:** every saved conversation reply waited for the once-a-minute outbox dispatcher before reaching the sending queue.
+- **Replacement (#384; owner decision, 2026-10-19):** immediately hand off notifications saved during receipt processing after reply drafting finishes, retaining the scheduled sweep for recovery and retries. This reduces avoidable response latency without adding paid acknowledgment texts. Transactional persistence, sender claims and recipient checks remain in place. This records the repository change, not deployment or measured live latency.
+
 ## Service duration
 
 - **Earlier choice:** small/medium/large home-size categories with 1/2/3-hour client defaults.

@@ -118,6 +118,58 @@ class Sender:
         return f"provider-{self.calls}"
 
 
+def test_immediate_handoff_and_overlapping_sweep_send_once() -> None:
+    store = MemoryStore()
+    queue = MemoryQueue()
+    dispatcher = DispatchService(store, queue, lambda: NOW)
+
+    # Simulate the scheduled dispatcher reading before the immediate handoff.
+    scheduled_snapshot = list(store.due(NOW, 100))
+    assert dispatcher.dispatch_one("business-1", "notice-1")
+    queue.enqueue(*scheduled_snapshot[0])
+    assert not dispatcher.dispatch_one("business-1", "notice-1")
+    assert dispatcher.run_once().enqueued == 0
+
+    sender = Sender()
+    consumer = ConsumeService(store, sender, lambda: NOW)
+    assert [consumer.consume(*message) for message in queue.messages] == [
+        ConsumeOutcome.SENT, ConsumeOutcome.SKIPPED,
+    ]
+    assert sender.calls == 1
+
+
+def test_failed_immediate_handoff_stays_due_for_sweep() -> None:
+    class UnavailableQueue(MemoryQueue):
+        def enqueue(self, business_id: str, outbox_id: str) -> None:
+            raise RuntimeError("queue unavailable")
+
+    store = MemoryStore()
+    with pytest.raises(RuntimeError, match="queue unavailable"):
+        DispatchService(store, UnavailableQueue(), lambda: NOW).dispatch_one(
+            "business-1", "notice-1")
+    assert store.record == pending()
+    queue = MemoryQueue()
+    later = NOW + timedelta(minutes=1)
+    assert DispatchService(store, queue, lambda: later).run_once().enqueued == 1
+    sender = Sender()
+    assert ConsumeService(store, sender, lambda: later).consume(*queue.messages[0]) == (
+        ConsumeOutcome.SENT)
+
+
+def test_immediate_handoff_respects_retry_time_and_terminal_state() -> None:
+    store = MemoryStore()
+    queue = MemoryQueue()
+    dispatcher = DispatchService(store, queue, lambda: NOW)
+    for state in (DeliveryState.SENT, DeliveryState.FAILED):
+        store.record = replace(pending(), state=state)
+        assert not dispatcher.dispatch_one("business-1", "notice-1")
+    store.record = replace(pending(), state=DeliveryState.RETRYABLE,
+                           next_attempt_at=NOW + timedelta(seconds=30),
+                           dispatch_after=NOW + timedelta(seconds=30))
+    assert not dispatcher.dispatch_one("business-1", "notice-1")
+    assert queue.messages == []
+
+
 def test_crash_after_enqueue_requeues_but_only_one_logical_delivery() -> None:
     class CrashAfterEnqueue(MemoryStore):
         def __init__(self) -> None:

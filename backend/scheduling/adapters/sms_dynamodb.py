@@ -1,5 +1,6 @@
 """Conditional SMS ingress and consent records in the business table."""
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Any, Protocol
@@ -47,9 +48,11 @@ def _four_year_cutoff(now: datetime) -> str:
 class DynamoSmsIngressStore(SmsIngressStore):
     _HISTORY_READ_LIMIT = 64
 
-    def __init__(self, client: SmsDynamoClient, table_name: str) -> None:
+    def __init__(self, client: SmsDynamoClient, table_name: str,
+                 *, outbox_created: Callable[[str, str], None] | None = None) -> None:
         self._client = client
         self._table = table_name
+        self._outbox_created = outbox_created
 
     @staticmethod
     def _key(business_id: str, sort_key: str) -> dict[str, Any]:
@@ -450,6 +453,8 @@ class DynamoSmsIngressStore(SmsIngressStore):
                 # replay the old text after either state changes again.
                 raise SmsCommandInterrupted from exc
             raise
+        if self._outbox_created is not None:
+            self._outbox_created(receipt.business_id, outbox_id)
         return True
 
     def put_received(self, receipt: InboundReceipt) -> bool:
