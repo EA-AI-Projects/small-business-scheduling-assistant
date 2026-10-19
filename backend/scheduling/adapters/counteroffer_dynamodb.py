@@ -8,6 +8,7 @@ transaction: the version-guarded state change, the single client outbox intent,
 and the client pointer commit together or not at all.
 """
 
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -32,9 +33,11 @@ def _instant(value: datetime) -> str:
 
 
 class DynamoCounterofferStore:
-    def __init__(self, client: CounterofferDynamoClient, table_name: str) -> None:
+    def __init__(self, client: CounterofferDynamoClient, table_name: str,
+                 *, outbox_created: Callable[[str, str], None] | None = None) -> None:
         self._client = client
         self._table = table_name
+        self._outbox_created = outbox_created
 
     @staticmethod
     def _key(business_id: str, sort_key: str) -> dict[str, Any]:
@@ -208,6 +211,8 @@ class DynamoCounterofferStore:
             if not _record_transaction_conflict(exc):
                 raise
             return None
+        if self._outbox_created is not None:
+            self._outbox_created(outbox.business_id, outbox.outbox_id)
         return confirmed
 
     def _move_offer(self, offer: Counteroffer, state: OfferState,

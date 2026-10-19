@@ -116,16 +116,28 @@ class DispatchService:
             assert record.next_attempt_at is not None and record.dispatch_after is not None
             due_at = max(record.next_attempt_at, record.dispatch_after)
             oldest_age = max(oldest_age, (now - due_at).total_seconds())
-            # A crash here can create another queue message. The consumer's
-            # conditional claim makes duplicate messages harmless to state.
-            self._queue.enqueue(record.business_id, record.outbox_id)
+            self._enqueue(record, now)
             enqueued += 1
-            try:
-                self._store.mark_enqueued(record, now, now + self._redispatch_delay)
-            except OutboxConflict:
-                # The consumer may already have claimed or completed this intent.
-                pass
         return DispatchReport(examined, enqueued, stale, oldest_age)
+
+    def dispatch_one(self, business_id: str, outbox_id: str) -> bool:
+        """Hand off a saved intent without waiting for the scheduled sweep."""
+        now = _utc(self._clock())
+        record = self._store.get(business_id, outbox_id)
+        if record is None or not _is_dispatch_due(record, now):
+            return False
+        self._enqueue(record, now)
+        return True
+
+    def _enqueue(self, record: OutboxRecord, now: datetime) -> None:
+        # Enqueue before advancing timing so a failed handoff stays recoverable.
+        # A crash can duplicate queue entries; the consumer conditionally claims.
+        self._queue.enqueue(record.business_id, record.outbox_id)
+        try:
+            self._store.mark_enqueued(record, now, now + self._redispatch_delay)
+        except OutboxConflict:
+            # The consumer may already have claimed or completed this intent.
+            pass
 
 
 class ConsumeOutcome(StrEnum):

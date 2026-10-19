@@ -482,6 +482,7 @@ Resources:
       Timeout: 60
       Environment:
         Variables:
+          OUTBOX_QUEUE_URL: !Ref OutboxQueue
           SMS_CONVERSATION_ENABLED: !If
             - SmsConversationRequested
             - authorized
@@ -504,6 +505,9 @@ Resources:
             - Effect: Allow
               Action: [sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes, sqs:ChangeMessageVisibility]
               Resource: !GetAtt SmsConversationQueue.Arn
+            - Effect: Allow
+              Action: [sqs:SendMessage]
+              Resource: !GetAtt OutboxQueue.Arn
       Events:
         Receipts:
           Type: SQS
