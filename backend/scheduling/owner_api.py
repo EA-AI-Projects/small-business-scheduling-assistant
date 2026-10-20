@@ -90,6 +90,19 @@ from scheduling.domain.owner_policy import (
     PolicyRecord,
     PolicyRepository,
 )
+from scheduling.domain.scheduling_preferences import (
+    REVIEW_TTL,
+    PreferenceInterpreter,
+    ReviewMismatch,
+    SchedulingPreferencesRecord,
+    SchedulingPreferencesRepository,
+    StoredReview,
+    clean_text,
+    review_preferences,
+    reviewed_preferences,
+    rules_payload,
+    save_preferences,
+)
 from scheduling.domain.service_duration import (
     ServiceDurationChanged,
     ServiceDurationSource,
@@ -219,6 +232,26 @@ class BusinessProfileBody(StrictModel):
 class BusinessProfileEditBody(StrictModel):
     expected_version: int = Field(ge=0)
     profile: BusinessProfileBody
+
+
+class PreferenceTextBody(StrictModel):
+    text: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("text")
+    @classmethod
+    def valid_text(cls, value: str) -> str:
+        return clean_text(value)
+
+
+class PreferenceActivateBody(StrictModel):
+    """Only the token of a review this server produced; text and rules come from that review."""
+
+    expected_version: int = Field(ge=0)
+    review_token: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PreferenceClearBody(StrictModel):
+    expected_version: int = Field(ge=0)
 
 
 class ManualInvitationBody(StrictModel):
@@ -357,6 +390,7 @@ def create_owner_app(
     verify_account: Callable[[str], VerifiedAccount] | None = None,
     cors_origins: tuple[str, ...] = (),
     allow_loopback_http: bool = False,
+    preference_interpreter: PreferenceInterpreter | None = None,
 ) -> FastAPI:
     """Mount only authenticated owner routes; local synthetic API stays separate.
 
@@ -689,6 +723,78 @@ def create_owner_app(
                                                    body.profile.profile(), guard),
                    lambda: jsonable_encoder(profiles.read_business_profile(business_id)))
 
+    def preferences_view(record: SchedulingPreferencesRecord) -> dict[str, object]:
+        active = record.preferences
+        return {"version": record.version, "active": None if active is None else {
+            "text": active.text, "rules": rules_payload(active.rules),
+            "timezone": active.timezone, "review_token": active.review_token}}
+
+    @app.get("/v1/owner/businesses/{business_id}/scheduling-preferences")
+    def get_scheduling_preferences(business_id: str,
+                                   owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:
+        del owner
+        return preferences_view(cast(SchedulingPreferencesRepository, repository)
+                                .read_scheduling_preferences(business_id))
+
+    def business_timezone(business_id: str) -> str:
+        record = store.read_policy_record(business_id)
+        if record is None:
+            raise _error("POLICY_NOT_CONFIGURED",
+                         "Save the business timezone policy before setting preferences", 409)
+        return record.policy.timezone
+
+    @app.post("/v1/owner/businesses/{business_id}/scheduling-preferences/review")
+    def review_scheduling_preferences(business_id: str, body: PreferenceTextBody,
+                                      owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:
+        """Interpret and validate only; nothing is stored and nothing becomes active."""
+        del owner
+        zone = business_timezone(business_id)
+        if preference_interpreter is None:
+            raise _error("INTERPRETER_UNAVAILABLE", "Preference review is not available", 503)
+        try:
+            review = review_preferences(preference_interpreter, body.text, zone)
+        except Exception as exc:  # any model failure leaves the draft untouched
+            raise _error("INTERPRETER_UNAVAILABLE",
+                         "The assistant could not review these preferences. Try again.",
+                         503) from exc
+        if review.token is not None:
+            # Activation applies this stored review, never rules the caller sends back.
+            cast(SchedulingPreferencesRepository, repository).save_preference_review(
+                business_id, StoredReview(body.text, review.rules, review.timezone, review.token),
+                now() + REVIEW_TTL)
+        return {"ready": review.ready, "timezone": review.timezone,
+                "rules": rules_payload(review.rules), "review_token": review.token,
+                "problems": [{"kind": item.kind, "message": item.message}
+                             for item in review.problems]}
+
+    @app.put("/v1/owner/businesses/{business_id}/scheduling-preferences")
+    def activate_scheduling_preferences(business_id: str, body: PreferenceActivateBody,
+                                        owner: Annotated[OwnerPrincipal, Depends(principal)],
+                                        request_key: Annotated[str, Depends(key)]) -> object:
+        repo = cast(SchedulingPreferencesRepository, repository)
+        zone = business_timezone(business_id)
+        try:
+            reviewed = reviewed_preferences(repo, business_id, body.review_token, zone, now())
+        except ReviewMismatch as exc:
+            raise _error("REVIEW_MISMATCH", str(exc) + ". Review the preferences again.",
+                         409) from exc
+        except ValueError as exc:
+            raise _error("INVALID_REQUEST", str(exc), 422) from exc
+        record = run(lambda: save_preferences(repo, business_id, owner.actor_id, request_key,
+                                              body.expected_version, reviewed),
+                     lambda: preferences_view(repo.read_scheduling_preferences(business_id)))
+        return preferences_view(cast(SchedulingPreferencesRecord, record))
+
+    @app.delete("/v1/owner/businesses/{business_id}/scheduling-preferences")
+    def clear_scheduling_preferences(business_id: str, body: PreferenceClearBody,
+                                     owner: Annotated[OwnerPrincipal, Depends(principal)],
+                                     request_key: Annotated[str, Depends(key)]) -> object:
+        repo = cast(SchedulingPreferencesRepository, repository)
+        record = run(lambda: save_preferences(repo, business_id, owner.actor_id, request_key,
+                                              body.expected_version, None),
+                     lambda: preferences_view(repo.read_scheduling_preferences(business_id)))
+        return preferences_view(cast(SchedulingPreferencesRecord, record))
+
     @app.get("/v1/owner/businesses/{business_id}/booking-outreach")
     def get_booking_outreach(business_id: str,
                              owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:
@@ -908,7 +1014,8 @@ def create_persisted_owner_app(client: DynamoClient, table_name: str,
                                clock: Callable[[], datetime] | None = None,
                                *, cors_origins: tuple[str, ...] = (),
                                account_invitations: ClientAccountInvitations | None = None,
-                               verify_account: Callable[[str], VerifiedAccount] | None = None) -> FastAPI:
+                               verify_account: Callable[[str], VerifiedAccount] | None = None,
+                               preference_interpreter: PreferenceInterpreter | None = None) -> FastAPI:
     """Build the non-local owner API with strongly read DynamoDB state."""
     return create_owner_app(DynamoDBCalendarRepository(client, table_name), verify_token,
                             clock, DynamoSmsIngressStore(client, table_name),
@@ -918,4 +1025,5 @@ def create_persisted_owner_app(client: DynamoClient, table_name: str,
                                 and os.environ.get("SMS_SEND_ENABLED") == "authorized"),
                             account_invitations=account_invitations,
                             verify_account=verify_account,
-                            cors_origins=cors_origins)
+                            cors_origins=cors_origins,
+                            preference_interpreter=preference_interpreter)

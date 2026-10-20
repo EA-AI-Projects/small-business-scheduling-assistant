@@ -2,6 +2,8 @@
 
 **Status:** Implemented interaction specification; reviewed against the repository on 2026-10-14. Product requirements are in [PRD.md](PRD.md#61-scheduling-and-availability); delivery provenance (#366–#370) is in [DECISION_HISTORY.md](DECISION_HISTORY.md#client-portal-and-settings).
 
+> **Scheduling preferences (#380) addendum:** Settings now has a fifth card, Scheduling preferences, using the same modal/phone-sheet editor. It shows the active preferences (text, exact weekdays and start-time ranges, timezone, Clear) apart from the draft textarea. Review changes interprets the draft; a ready review lists what was understood and offers Activate, a blocked one lists each problem (unsupported, unclear, contradictory, client-specific, booking rule) and offers no Activate. Editing the text after a review hides Activate until reviewed again. Failed reviews and activations keep the draft and the active preferences; stale activations keep the draft and show the newer active version; retries reuse one idempotency key. A dirty draft uses the standard Keep editing / Discard changes close choice, and review results take focus. Behavior is in [SCHEDULING_CONTRACTS.md](SCHEDULING_CONTRACTS.md#scheduling-preferences-379-380).
+
 ## Problem Statement
 
 As an owner, Settings is too long and cluttered to scan. The page stacks editable forms under a full Current policy summary that repeats much of the same information. Weekly hours take many rows, making it hard to understand a normal week at a glance or reach other settings quickly.

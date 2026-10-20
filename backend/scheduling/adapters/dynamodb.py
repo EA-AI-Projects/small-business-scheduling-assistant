@@ -61,6 +61,13 @@ from scheduling.domain.owner_policy import (
     PolicyReplay,
     PolicyResult,
 )
+from scheduling.domain.scheduling_preferences import (
+    SchedulingPreferences,
+    SchedulingPreferencesRecord,
+    StoredReview,
+    rules_from_payload,
+    rules_payload,
+)
 from scheduling.domain.service_duration import ServiceDurationChanged
 from scheduling.domain.sms_ingress import SmsCommandInterrupted
 
@@ -299,6 +306,96 @@ class DynamoDBCalendarRepository:
                 return existing
             raise RevisionConflict("Business profile version changed") from exc
         return BusinessProfileRecord(profile, next_version)
+
+    def save_preference_review(self, business_id: str, review: StoredReview,
+                               expires_at: datetime) -> None:
+        # Same token means same content, so an overwrite only extends the expiry.
+        self._client.transact_write_items(TransactItems=[{"Put": {
+            "TableName": self._table,
+            "Item": {
+                **self._business_key(business_id, f"PREFERENCES#REVIEW#{review.token}"),
+                "payload": {"S": json.dumps({
+                    "text": review.text, "rules": rules_payload(review.rules),
+                    "timezone": review.timezone}, sort_keys=True)},
+                "expires_at_epoch": {"N": str(int(expires_at.timestamp()))}}}}])
+
+    def read_preference_review(self, business_id: str, token: str,
+                               now: datetime) -> StoredReview | None:
+        item = self._get(self._business_key(business_id, f"PREFERENCES#REVIEW#{token}"))
+        # TTL deletion is lazy, so expiry is checked here as well.
+        if item is None or int(item["expires_at_epoch"]["N"]) <= int(now.timestamp()):
+            return None
+        stored = json.loads(item["payload"]["S"])
+        return StoredReview(stored["text"], rules_from_payload(stored["rules"]),
+                            stored["timezone"], token)
+
+    def read_scheduling_preferences(self, business_id: str) -> SchedulingPreferencesRecord:
+        item = self._get(self._business_key(business_id, "PREFERENCES#SCHEDULING"))
+        if item is None:
+            return SchedulingPreferencesRecord(None, 0)
+        stored = json.loads(item["payload"]["S"])
+        preferences = None if stored is None else SchedulingPreferences(
+            stored["text"], rules_from_payload(stored["rules"]), stored["timezone"],
+            stored["review_token"])
+        return SchedulingPreferencesRecord(preferences, int(item["version"]["N"]))
+
+    def save_scheduling_preferences(self, business_id: str, actor_id: str, key: str,
+                                    expected_version: int,
+                                    preferences: SchedulingPreferences | None,
+                                    ) -> SchedulingPreferencesRecord:
+        identity = self._business_key(business_id,
+            _command_sort_key(actor_id, "edit_scheduling_preferences", key))
+        payload = json.dumps(None if preferences is None else {
+            "text": preferences.text, "rules": rules_payload(preferences.rules),
+            "timezone": preferences.timezone, "review_token": preferences.review_token},
+            sort_keys=True)
+        request_hash = sha256(json.dumps([expected_version, payload]).encode()).hexdigest()
+
+        def replay() -> SchedulingPreferencesRecord | None:
+            old = self._get(identity)
+            if old is None:
+                return None
+            if old["request_hash"]["S"] != request_hash:
+                raise IdempotencyKeyReused("Key already used for another preferences edit")
+            return SchedulingPreferencesRecord(preferences, int(old["version"]["N"]))
+
+        existing = replay()
+        if existing is not None:
+            return existing
+        next_version = expected_version + 1
+        put: dict[str, Any] = {"TableName": self._table,
+            "Item": {**self._business_key(business_id, "PREFERENCES#SCHEDULING"),
+                     "payload": {"S": payload}, "version": {"N": str(next_version)}},
+            "ConditionExpression": "attribute_not_exists(PK)" if expected_version == 0
+                                   else "#version = :old"}
+        if expected_version:
+            put["ExpressionAttributeNames"] = {"#version": "version"}
+            put["ExpressionAttributeValues"] = {":old": {"N": str(expected_version)}}
+        audit_key = sha256(json.dumps([business_id, actor_id, key]).encode()).hexdigest()
+        try:
+            self._client.transact_write_items(TransactItems=[
+                {"Put": put},
+                {"Put": {"TableName": self._table,
+                    "Item": {**identity, "request_hash": {"S": request_hash},
+                             "version": {"N": str(next_version)}},
+                    "ConditionExpression": "attribute_not_exists(PK)"}},
+                {"Put": {"TableName": self._table,
+                    "Item": {**self._business_key(business_id, f"AUDIT#preferences#{audit_key}"),
+                             "action": {"S": "edit_scheduling_preferences"},
+                             "actor_id": {"S": actor_id},
+                             "source": {"S": "owner_api"},
+                             "created_at": {"S": _instant(datetime.now(UTC))},
+                             "version": {"N": str(next_version)}},
+                    "ConditionExpression": "attribute_not_exists(PK)"}},
+            ])
+        except Exception as exc:
+            if not _record_transaction_conflict(exc):
+                raise
+            existing = replay()
+            if existing is not None:
+                return existing
+            raise RevisionConflict("Scheduling preferences version changed") from exc
+        return SchedulingPreferencesRecord(preferences, next_version)
 
     def read_outreach(self, business_id: str) -> OutreachRecord:
         item = self._get(self._business_key(business_id, "SETTINGS#BOOKING_OUTREACH"))

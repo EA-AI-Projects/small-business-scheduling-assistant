@@ -192,7 +192,9 @@ def create_local_owner_app(token: str | None, now: datetime | None = None,
     app = create_owner_app(repository, verifier, clock, invitation_consent=LocalConsent(repository),
                            manual_invitation_enabled=lambda: True,
                            cors_origins=LOCAL_APP_ORIGINS,
-                           allow_loopback_http=True)
+                           allow_loopback_http=True,
+                           preference_interpreter=interpreter if isinstance(
+                               interpreter, OpenAIMessageInterpreter) else None)
     # The production client routes, on the same repository and clock as the owner routes.
     add_client_session_route(app, client_verifier, repository, clock)
     simulator = TextSimulator(repository, interpreter or OfflineInterpreter(), BUSINESS_ID,

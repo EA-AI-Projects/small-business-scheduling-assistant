@@ -134,7 +134,8 @@ def test_availability_hides_owner_blocks_without_exposing_them() -> None:
     assert set(baseline) - set(after)
     response = api.get(f"/v1/client/availability?day={DAY}",
                        headers=auth("a"))
-    assert set(response.json()) == {"day", "duration_minutes", "starts_at"}
+    assert set(response.json()) == {"day", "duration_minutes", "starts_at",
+                                    "recommended_starts_at"}
 
 
 def test_availability_uses_the_business_default_duration_for_every_client() -> None:

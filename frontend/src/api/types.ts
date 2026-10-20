@@ -31,6 +31,42 @@ export interface BusinessProfileState {
   version: number;
 }
 
+/** Weekdays 0 (Monday) to 6 (Sunday) with HH:MM start windows; no windows means any start time. */
+export interface PreferenceRule {
+  weekdays: number[];
+  windows: { start: string; end: string }[];
+}
+export type PreferenceActivateBody = Schemas["PreferenceActivateBody"];
+
+/** The reviewed, validated configuration stored with the owner's text. */
+export interface ActivePreferences {
+  text: string;
+  rules: PreferenceRule[];
+  /** Business timezone the times were reviewed in. */
+  timezone: string;
+  review_token: string;
+}
+
+/** Active scheduling preferences; `active` is null until the owner activates one (or after Clear). */
+export interface PreferencesState {
+  version: number;
+  active: ActivePreferences | null;
+}
+
+export interface PreferenceProblem {
+  kind: "unclear" | "contradictory" | "unsupported" | "client_specific" | "constraint_override";
+  message: string;
+}
+
+/** The assistant's interpretation of a draft. Nothing is active until it is activated. */
+export interface PreferenceReview {
+  ready: boolean;
+  timezone: string;
+  rules: PreferenceRule[];
+  review_token: string | null;
+  problems: PreferenceProblem[];
+}
+
 export interface OutreachState {
   settings: {
     enabled: boolean;

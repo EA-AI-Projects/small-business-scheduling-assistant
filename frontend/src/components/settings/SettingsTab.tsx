@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import type { PreferencesState } from "@/api/types";
 import { useOwner } from "@/owner/OwnerContext";
 
 import { PopoverCard } from "../PopoverCard";
@@ -10,17 +11,29 @@ import { ExceptionForm } from "./ExceptionForm";
 import { PolicySummary } from "./PolicySummary";
 import { OutreachForm } from "./OutreachForm";
 import { RegularPolicyForm } from "./RegularPolicyForm";
+import { SchedulingPreferencesForm } from "./SchedulingPreferencesForm";
+import { summarize } from "./preferencesText";
 
-type Editor = "business" | "availability" | "advanced" | "invitations";
+type Editor = "business" | "availability" | "advanced" | "invitations" | "preferences";
 
 export function SettingsTab() {
-  const { data } = useOwner();
+  const { api, data } = useOwner();
+  const [preferences, setPreferences] = useState<PreferencesState | null>(null);
+  const [preferencesError, setPreferencesError] = useState(false);
+  const [preferencesAttempt, setPreferencesAttempt] = useState(0);
+  useEffect(() => {
+    let live = true;
+    api.get<PreferencesState>("/scheduling-preferences").then((state) => {
+      if (live) { setPreferences(state); setPreferencesError(false); }
+    }, () => { if (live) setPreferencesError(true); });
+    return () => { live = false; };
+  }, [api, preferencesAttempt]);
   const [open, setOpen] = useState<Editor | null>(null);
   const [dirty, setDirty] = useState({ business: false, regular: false, exception: false,
-    advanced: false, invitations: false });
+    advanced: false, invitations: false, preferences: false });
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const buttons = useRef<Record<Editor, HTMLButtonElement | null>>({ business: null,
-    availability: null, advanced: null, invitations: null });
+    availability: null, advanced: null, invitations: null, preferences: null });
   const keepEditingButton = useRef<HTMLButtonElement>(null);
   const resumeFocus = useRef<HTMLElement | null>(null);
   const getAnchor = useCallback(() => null, []);
@@ -42,7 +55,8 @@ export function SettingsTab() {
   }, [confirmDiscard]);
 
   function show(editor: Editor) {
-    setDirty({ business: false, regular: false, exception: false, advanced: false, invitations: false });
+    setDirty({ business: false, regular: false, exception: false, advanced: false, invitations: false,
+      preferences: false });
     setConfirmDiscard(false);
     setOpen(editor);
   }
@@ -61,7 +75,8 @@ export function SettingsTab() {
   }
 
   const titles: Record<Editor, string> = { business: "Business details", availability: "Availability",
-    advanced: "Advanced scheduling", invitations: "Booking invitations" };
+    advanced: "Advanced scheduling", invitations: "Booking invitations",
+    preferences: "Scheduling preferences" };
 
   return <>
     <SectionHeading eyebrow="AVAILABILITY" title="Settings" />
@@ -98,6 +113,15 @@ export function SettingsTab() {
           : "Recurring invitations off" : "Loading invitation settings"}</span>
         {open === "invitations" && dirty.invitations && <span className="settings-unsaved">Unsaved changes</span>}
       </button>
+      <button ref={(node) => { buttons.current.preferences = node; }} type="button" className="settings-card"
+        aria-haspopup="dialog" aria-label="Edit Scheduling preferences" aria-describedby="settings-preferences-summary"
+        onClick={() => show("preferences")}>
+        <strong>Scheduling preferences</strong>
+        <span id="settings-preferences-summary">{preferencesError ? "Preferences could not load"
+          : preferences === null ? "Loading scheduling preferences"
+          : preferences.active ? `Active · ${summarize(preferences.active.rules)}` : "None active"}</span>
+        {open === "preferences" && dirty.preferences && <span className="settings-unsaved">Unsaved changes</span>}
+      </button>
     </div>
     {open && <PopoverCard variant="modal" title={titles[open]} getAnchor={getAnchor} onClose={close}
       returnFocus={() => buttons.current[open]}>
@@ -117,6 +141,10 @@ export function SettingsTab() {
           : <p className="empty">Load the pilot policy under Availability first.</p>)}
         {open === "invitations" && <OutreachForm onDirtyChange={(value) => setDirty((current) =>
           current.invitations === value ? current : { ...current, invitations: value })} />}
+        {open === "preferences" && <SchedulingPreferencesForm key={preferences ? "loaded" : "loading"} state={preferences}
+          loadError={preferencesError} onRetry={() => { setPreferencesError(false); setPreferencesAttempt((count) => count + 1); }} onState={setPreferences}
+          onDirtyChange={(value) => setDirty((current) =>
+            current.preferences === value ? current : { ...current, preferences: value })} />}
         </div>
         {confirmDiscard && <div className="settings-discard" role="alertdialog"
           aria-label="Discard unsaved changes?">

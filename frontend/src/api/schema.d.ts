@@ -442,6 +442,45 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/owner/businesses/{business_id}/scheduling-preferences": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Scheduling Preferences */
+        get: operations["get_scheduling_preferences_v1_owner_businesses__business_id__scheduling_preferences_get"];
+        /** Activate Scheduling Preferences */
+        put: operations["activate_scheduling_preferences_v1_owner_businesses__business_id__scheduling_preferences_put"];
+        post?: never;
+        /** Clear Scheduling Preferences */
+        delete: operations["clear_scheduling_preferences_v1_owner_businesses__business_id__scheduling_preferences_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/owner/businesses/{business_id}/scheduling-preferences/review": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Review Scheduling Preferences
+         * @description Interpret and validate only; nothing is stored and nothing becomes active.
+         */
+        post: operations["review_scheduling_preferences_v1_owner_businesses__business_id__scheduling_preferences_review_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/owner/businesses/{business_id}/sms-delivery-failures": {
         parameters: {
             query?: never;
@@ -697,6 +736,26 @@ export interface components {
             /** Expected Version */
             expected_version: number;
             policy: components["schemas"]["PolicyBody"];
+        };
+        /**
+         * PreferenceActivateBody
+         * @description Only the token of a review this server produced; text and rules come from that review.
+         */
+        PreferenceActivateBody: {
+            /** Expected Version */
+            expected_version: number;
+            /** Review Token */
+            review_token: string;
+        };
+        /** PreferenceClearBody */
+        PreferenceClearBody: {
+            /** Expected Version */
+            expected_version: number;
+        };
+        /** PreferenceTextBody */
+        PreferenceTextBody: {
+            /** Text */
+            text: string;
         };
         /** RemoveBlockBody */
         RemoveBlockBody: {
@@ -1995,6 +2054,146 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["DecisionBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_scheduling_preferences_v1_owner_businesses__business_id__scheduling_preferences_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                business_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    activate_scheduling_preferences_v1_owner_businesses__business_id__scheduling_preferences_put: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                business_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PreferenceActivateBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    clear_scheduling_preferences_v1_owner_businesses__business_id__scheduling_preferences_delete: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                business_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PreferenceClearBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    review_scheduling_preferences_v1_owner_businesses__business_id__scheduling_preferences_review_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                business_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PreferenceTextBody"];
             };
         };
         responses: {

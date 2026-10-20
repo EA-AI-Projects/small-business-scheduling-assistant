@@ -30,13 +30,15 @@ const noSlot = () => undefined;
  * Tapping a day in Month, Year, or a Week heading opens Day.
  */
 export function ClientCalendarViews({ items, bookings, calendar, zone, nowMs, loading, error, maxDate = null,
-  availableStarts = [], selectedStart = null, onAvailableSelect, onEventSelect, confirming, changing = false,
+  availableStarts = [], recommendedStarts = [], selectedStart = null, onAvailableSelect, onEventSelect, confirming, changing = false,
   changeError, onCancel, onConfirmCancel, onDismissCancel, onMove }: {
   items: CalendarItem[]; bookings: ClientBooking[]; calendar: CalendarState; zone: string; nowMs: number;
   loading: boolean; error: string | null;
   /** Last browsable date (booking horizon); Schedule offers no Load more past it. */
   maxDate?: string | null;
   availableStarts?: string[]; selectedStart?: string | null;
+  /** The offered starts the business recommends; all of availableStarts stay selectable. */
+  recommendedStarts?: string[];
   onAvailableSelect?: (start: string, element: HTMLElement) => void;
   onEventSelect?: () => void;
   confirming?: ClientBooking | null; changing?: boolean; changeError?: string | null;
@@ -100,6 +102,7 @@ export function ClientCalendarViews({ items, bookings, calendar, zone, nowMs, lo
         <li><i className="confirmed" aria-hidden="true" />Confirmed</li>
         <li><i className="pending" aria-hidden="true" />Waiting for approval (not confirmed)</li>
         <li><i className="move" aria-hidden="true" />Move request (not confirmed)</li>
+        {recommendedStarts.length > 0 && <li><i className="recommended" aria-hidden="true" />★ Recommended time (every open time can still be chosen)</li>}
       </ul>
       {error ? <p className="notice error" role="alert">{error}</p>
         : loading ? <p role="status">Loading your appointments…</p> : null}
@@ -115,7 +118,7 @@ export function ClientCalendarViews({ items, bookings, calendar, zone, nowMs, lo
             onDismiss={close} onNavigate={calendar.goToDate} onDay={goDay} />
         ) : (
           <CalendarGrid days={days} events={items} zone={zone} selectedId={selectedId} onSelect={select}
-            onSlotPress={noSlot} onDay={goDay} availableStarts={availableStarts} selectedStart={selectedStart}
+            onSlotPress={noSlot} onDay={goDay} availableStarts={availableStarts} recommendedStarts={recommendedStarts} selectedStart={selectedStart}
             onAvailableSelect={(start, element) => { setSelectedId(null); onAvailableSelect?.(start, element); }} />
         )}
       </div>

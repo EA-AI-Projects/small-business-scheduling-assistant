@@ -24,6 +24,7 @@ const get = vi.fn(async (path: string) => {
   if (path === "/profile") return profileState;
   if (path === "/policy") return policyState;
   if (path === "/booking-outreach") return outreachState;
+  if (path === "/scheduling-preferences") return { version: 0, active: null };
   if (path === "/calendar") return { revision: 1, events: [] };
   return [];
 });
@@ -54,12 +55,13 @@ describe("owner Settings", () => {
   });
   afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
 
-  it("shows four saved-value cards and opens Business details with collapsible sections", async () => {
+  it("shows five saved-value cards and opens Business details with collapsible sections", async () => {
     const cards = [...host.querySelectorAll<HTMLButtonElement>('button[aria-haspopup="dialog"]')];
-    expect(cards).toHaveLength(4);
+    expect(cards).toHaveLength(5);
     expect(cards.map((card) => card.textContent)).toEqual([
       expect.stringContaining("Business details"), expect.stringContaining("Availability"),
       expect.stringContaining("Advanced scheduling"), expect.stringContaining("Booking invitations"),
+      expect.stringContaining("Scheduling preferences"),
     ]);
     expect(cards[0]!.textContent).toContain("Example Cleaning");
     expect(cards[1]!.textContent).toContain("1 open day");

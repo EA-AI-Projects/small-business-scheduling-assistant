@@ -83,6 +83,47 @@ describe("client calendar and bookings", () => {
       || ((call as unknown[])[1] as RequestInit).method === undefined)).toBe(true);
   });
 
+  it("labels recommended starts neutrally while every open start stays selectable", async () => {
+    const other = "2026-10-09T22:00:00Z"; // 11:00 AM Auckland, not recommended
+    const fetcher = vi.fn(async (url: string) => url.includes("availability")
+      ? json({ day: TODAY, duration_minutes: 90, starts_at: [START, other], recommended_starts_at: [START] })
+      : json({ bookings: [] }));
+    vi.stubGlobal("fetch", fetcher);
+    await render("calendar");
+    const [preferred, ordinary] = Array.from(host.querySelectorAll<HTMLButtonElement>("[data-available-start]"));
+    expect(preferred!.textContent).toContain("Recommended");
+    expect(preferred!.getAttribute("aria-label")).toContain("Recommended");
+    expect(ordinary!.textContent).toBe("11:00 AM");
+    expect(ordinary!.getAttribute("aria-label")).not.toContain("Recommended");
+    expect(host.textContent).not.toMatch(/owner prefers|preference/i);
+    // The nonrecommended start is selected exactly as before.
+    await act(async () => ordinary!.click());
+    expect(document.body.textContent).toContain("2026-10-10 · 11:00 AM");
+    expect(document.body.textContent).toContain("Send request for owner approval");
+  });
+
+  it("shows ordinary starts without labels when none is recommended", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => url.includes("availability")
+      ? json({ day: TODAY, duration_minutes: 90, starts_at: [START], recommended_starts_at: [] })
+      : json({ bookings: [] })));
+    await render("calendar");
+    expect(host.querySelector("[data-available-start]")?.textContent).toBe("10:00 AM");
+    expect(host.textContent).not.toContain("Recommended");
+  });
+
+  it("marks recommended starts in a move (reschedule) and ignores a recommendation that is not offered", async () => {
+    const confirmed = booking("visit-1", "CONFIRMED", 30);
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => url.includes("availability")
+      ? json({ day: TODAY, duration_minutes: 90, starts_at: [START], recommended_starts_at: [START, "2026-10-09T23:00:00Z"] })
+      : json({ bookings: [confirmed] })));
+    await render("appointments");
+    await act(async () => Array.from(host.querySelectorAll("button")).find((b) => b.textContent === "Move to another time")!.click());
+    expect(host.textContent).toContain("You are moving your appointment");
+    const starts = Array.from(host.querySelectorAll<HTMLButtonElement>("[data-available-start]"));
+    expect(starts).toHaveLength(1);
+    expect(starts[0]!.textContent).toContain("Recommended");
+  });
+
   it("shows the saved service and business name, and nothing cleaning-specific", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => json({ bookings: [] })));
     await act(async () => root.render(<ClientHome config={config} token="access" zone={ZONE}

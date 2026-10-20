@@ -192,7 +192,7 @@ Resources:
           Projection: {ProjectionType: KEYS_ONLY}
       PointInTimeRecoverySpecification: {PointInTimeRecoveryEnabled: true}
       SSESpecification: {SSEEnabled: true}
-      # Only 30-minute SMS offer/confirmation memory sets this attribute.
+      # Set by 30-minute SMS offer/confirmation memory and one-hour scheduling-preference reviews.
       TimeToLiveSpecification: {AttributeName: expires_at_epoch, Enabled: true}
 
   OutboxDeadLetterQueue:
@@ -302,6 +302,7 @@ Resources:
           SMS_SEND_ENABLED: !Ref SmsSendEnabled
           MANUAL_INVITATION_DELIVERY_ENABLED: !Ref ManualInvitationDeliveryEnabled
           SMS_RETENTION_SCHEDULE_STATE: !Ref SmsRetentionScheduleState
+          OPENAI_API_KEY_PARAM: !Sub '/scheduling/${Environment}/openai/api-key'
       Policies:
         - Statement:
             - Effect: Allow
@@ -318,6 +319,9 @@ Resources:
             - Effect: Allow
               Action: [cognito-idp:AdminGetUser, cognito-idp:AdminCreateUser]
               Resource: !GetAtt OwnerUserPool.Arn
+            - Effect: Allow
+              Action: [ssm:GetParameter]
+              Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/scheduling/${Environment}/openai/api-key'
       Events:
         ClientAccountActivation:
           Type: HttpApi

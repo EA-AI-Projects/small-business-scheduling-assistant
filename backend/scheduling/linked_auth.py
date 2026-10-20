@@ -15,6 +15,7 @@ from scheduling.adapters.account_invitations_aws import (
 )
 from scheduling.adapters.dynamodb import DynamoClient, DynamoDBCalendarRepository
 from scheduling.client_api import add_client_session_route
+from scheduling.domain.scheduling_preferences import PreferenceInterpreter
 from scheduling.identity_links import DynamoIdentityLinkStore, IdentityLink, IdentityLinks, LinkRole
 from scheduling.owner_api import OwnerPrincipal, create_persisted_owner_app
 from scheduling.owner_auth import CognitoVerifiedAccountVerifier
@@ -61,6 +62,7 @@ def create_cognito_linked_app(
     clock: Callable[[], datetime] | None = None, *,
     cors_origins: tuple[str, ...] = (),
     cognito_client: Any | None = None,
+    preference_interpreter: PreferenceInterpreter | None = None,
 ) -> FastAPI:
     """Mount owner and client routes behind the same verified link resolver."""
     records = DynamoDBCalendarRepository(client, table_name)
@@ -83,6 +85,7 @@ def create_cognito_linked_app(
         verify_account = CognitoVerifiedAccountVerifier(issuer, client_id)
     app = create_persisted_owner_app(
         client, table_name, owner, clock, cors_origins=cors_origins,
-        account_invitations=invitations, verify_account=verify_account)
+        account_invitations=invitations, verify_account=verify_account,
+        preference_interpreter=preference_interpreter)
     add_client_session_route(app, verify, records, clock)
     return app
