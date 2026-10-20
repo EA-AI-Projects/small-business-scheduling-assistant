@@ -39,10 +39,14 @@ export interface PreferenceRule {
   client_id?: string;
 }
 
-/** An affected profile by its current display name (null when the profile no longer exists). */
+/** An affected profile by its current display name (erasing a client removes their rules). */
 export interface PreferenceClient {
   client_id: string;
-  name: string | null;
+  name: string;
+  /** Owner-only detail that tells apart profiles sharing a name. */
+  phone_last4: string;
+  service_address: string;
+  shared_name: boolean;
 }
 
 /** A written name that matches several profiles; the owner picks one and reviews again. */

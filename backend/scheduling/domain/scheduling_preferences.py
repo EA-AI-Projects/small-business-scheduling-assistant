@@ -205,6 +205,45 @@ class SchedulingPreferencesRepository(Protocol):
         """Atomically compare version, replace (or clear with None), audit, replay a key."""
         ...
 
+    def scrub_client_preferences(self, business_id: str, client_id: str) -> None:
+        """Client erasure: drop the client's rules from the active record (neutral text, new
+        version, audit without identifiers; cleared when nothing remains) and delete every
+        stored review that binds the client. Idempotent."""
+        ...
+
+
+_DAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
+def _clock(value: time) -> str:
+    return f"{value.hour % 12 or 12}:{value.minute:02d} {'AM' if value.hour < 12 else 'PM'}"
+
+
+def neutral_text(rules: tuple[PreferenceRule, ...]) -> str:
+    """Owner-facing text rebuilt from rules alone, so it can name no client."""
+    parts = []
+    for rule in rules:
+        days = "Every day" if len(rule.weekdays) == 7 else ", ".join(
+            _DAY_NAMES[day] for day in rule.weekdays)
+        times = ("starts " + " or ".join(f"{_clock(w.start)}–{_clock(w.end)}" for w in rule.windows)
+                 if rule.windows else "any start time")
+        parts.append(f"{'One client: ' if rule.client_id else ''}{days}: {times}")
+    return "; ".join(parts)[:MAX_TEXT_CHARACTERS]
+
+
+def without_client(preferences: SchedulingPreferences, client_id: str,
+                   ) -> SchedulingPreferences | None:
+    """The configuration after erasing a client: their rules removed, the text regenerated from
+    the remaining rules (the original may name the client), or None if nothing remains."""
+    rules = tuple(rule for rule in preferences.rules if rule.client_id != client_id)
+    if len(rules) == len(preferences.rules):
+        return preferences
+    if not rules:
+        return None
+    text = neutral_text(rules)
+    return SchedulingPreferences(text, rules, preferences.timezone,
+                                 review_token(text, rules, preferences.timezone))
+
 
 def clean_text(text: str) -> str:
     stripped = text.strip()
@@ -273,16 +312,18 @@ def normalize_name(name: str) -> str:
 
 
 def candidate_profiles(name: str, profiles: Sequence[ClientReference]) -> tuple[ClientReference, ...]:
-    """Active profiles the written name can mean: exact full-name matches, else every profile
-    whose name contains all the written words (so a first name finds its profile)."""
-    wanted = normalize_name(name)
-    if not wanted:
+    """Active profiles whose name contains every word the owner wrote (so a first name or a
+    surname finds candidates). The caller binds automatically only when this is a single
+    profile whose whole name matches (``is_exact``); anything else needs the owner's pick."""
+    words = set(normalize_name(name).split())
+    if not words:
         return ()
-    exact = tuple(profile for profile in profiles if normalize_name(profile.name) == wanted)
-    if exact:
-        return exact
-    words = set(wanted.split())
-    return tuple(profile for profile in profiles if words <= set(normalize_name(profile.name).split()))
+    return tuple(profile for profile in profiles
+                 if words <= set(normalize_name(profile.name).split()))
+
+
+def is_exact(name: str, profile: ClientReference) -> bool:
+    return normalize_name(name) == normalize_name(profile.name)
 
 
 def resolve_client_names(rules: tuple[PreferenceRule, ...], names: Sequence[str],
@@ -320,12 +361,14 @@ def resolve_client_names(rules: tuple[PreferenceRule, ...], names: Sequence[str]
                     "unknown_client", f"No client named \"{name}\" was found. Correct the name "
                                       "or add the client first, then review again."))
             continue
-        if len(candidates) > 1 and pick is None:
+        sure = len(candidates) == 1 and is_exact(name, candidates[0])
+        if not sure and pick is None:
             if key not in ambiguities:
                 ambiguities[key] = AmbiguousClient(name, candidates)
                 problems.append(PreferenceProblem(
-                    "ambiguous_client", f"\"{name}\" matches more than one client. Choose the "
-                                        "one you mean, then review again."))
+                    "ambiguous_client", f"\"{name}\" may mean more than one client, or only part "
+                                        "of a client's name. Choose the one you mean, then "
+                                        "review again."))
             continue
         resolved.append(PreferenceRule(rule.weekdays, rule.windows,
                                        pick if pick is not None else candidates[0].client_id))

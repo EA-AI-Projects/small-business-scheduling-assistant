@@ -19,7 +19,12 @@ from scheduling.domain.business_profile import (
     PolicyGuard,
 )
 from scheduling.domain.calendar import CalendarEvent, CalendarSnapshot, CalendarStatus
-from scheduling.domain.client_records import ClientNote, ClientProfile, RecordConflict
+from scheduling.domain.client_records import (
+    ClientNote,
+    ClientProfile,
+    RecordConflict,
+    RecordNotFound,
+)
 from scheduling.domain.holds import (
     CreateHold,
     HoldCommit,
@@ -41,6 +46,7 @@ from scheduling.domain.scheduling_preferences import (
     SchedulingPreferences,
     SchedulingPreferencesRecord,
     StoredReview,
+    without_client,
 )
 from scheduling.domain.service_duration import ServiceDurationChanged
 
@@ -146,6 +152,34 @@ class InMemoryCalendarRepository:
             self._preference_replays[identity] = (preferences, expected_version, result)
             self._audit[f"scheduling_preferences#{business_id}#{actor_id}#{key}"] = result
             return result
+
+    def scrub_client_preferences(self, business_id: str, client_id: str) -> None:
+        with self._lock:
+            def binds(preferences: SchedulingPreferences | StoredReview | None) -> bool:
+                return preferences is not None and any(
+                    rule.client_id == client_id for rule in preferences.rules)
+
+            record = self._preferences.get(business_id)
+            if record is not None and binds(record.preferences):
+                assert record.preferences is not None
+                self._preferences[business_id] = SchedulingPreferencesRecord(
+                    without_client(record.preferences, client_id), record.version + 1)
+            for key in [key for key, (review, _) in self._preference_reviews.items()
+                        if key[0] == business_id and binds(review)]:
+                del self._preference_reviews[key]
+            # Replay and audit copies would otherwise keep the erased client's rules and text.
+            for identity in [identity for identity, (old, _, _) in self._preference_replays.items()
+                             if identity[0] == business_id and binds(old)]:
+                del self._preference_replays[identity]
+                self._audit.pop(f"scheduling_preferences#{identity[0]}#{identity[1]}#{identity[2]}",
+                                None)
+
+    def erase_client(self, business_id: str, client_id: str) -> None:
+        """Test double of the DynamoDB erasure: removes the profile and its preference data."""
+        with self._lock:
+            if self._clients.pop((business_id, client_id), None) is None:
+                raise RecordNotFound("Client was not found")
+        self.scrub_client_preferences(business_id, client_id)
 
     def read_outreach(self, business_id: str) -> OutreachRecord:
         with self._lock:

@@ -40,6 +40,10 @@ NOW = datetime(2026, 9, 28, 15, tzinfo=UTC)
 BASE = "/v1/owner/businesses/biz-a/scheduling-preferences"
 OWNER_A = {"Authorization": "Bearer a"}
 ZONE = "America/Los_Angeles"
+CLIENT_ALDER = {"client_id": "client-1", "name": "Client Alder", "phone_last4": "0001",
+                "service_address": "1 Test Street", "shared_name": False}
+CLIENT_BIRCH = {**CLIENT_ALDER, "client_id": "client-2", "name": "Client Birch",
+                "phone_last4": "0002"}
 
 
 class Scripted:
@@ -125,13 +129,13 @@ def test_review_names_affected_profiles_and_exact_ranges_then_activation_binds_t
     world = World()
     world.interpreter.answers[OVERRIDE.text] = OVERRIDE.answer
     reviewed = world.review(OVERRIDE.text)
-    assert reviewed["clients"] == [{"client_id": "client-1", "name": "Client Alder"}]
+    assert reviewed["clients"] == [CLIENT_ALDER]
     assert reviewed["rules"][0] == {"weekdays": [0, 1, 2, 3, 4], "windows": [MORNING]}
     assert reviewed["rules"][1]["client_id"] == "client-1"
     assert reviewed["rules"][1]["windows"] == [{"start": "13:00", "end": "16:00"}]
     assert world.api.get(BASE, headers=OWNER_A).json()["active"] is None  # review activates nothing
     done = world.activate(reviewed, 0).json()
-    assert done["active"]["clients"] == [{"client_id": "client-1", "name": "Client Alder"}]
+    assert done["active"]["clients"] == [CLIENT_ALDER]
 
 
 def test_a_rename_keeps_the_preference_on_the_same_profile() -> None:
@@ -144,7 +148,7 @@ def test_a_rename_keeps_the_preference_on_the_same_profile() -> None:
     assert world.hours(1, "2026-10-01")[0] == before == {13, 14, 15}
     assert world.hours(2, "2026-10-01")[0] == {8, 9, 10, 11}
     shown = world.api.get(BASE, headers=OWNER_A).json()["active"]["clients"]
-    assert shown == [{"client_id": "client-1", "name": "Renamed Household"}]
+    assert shown == [{**CLIENT_ALDER, "name": "Renamed Household"}]
     # The old name no longer matches anyone, and the new name is not what was bound.
     world.interpreter.answers["old"] = {"rules": [{"client_name": "Client Alder", "weekdays": [1],
                                                     "windows": []}], "problems": []}
@@ -186,6 +190,8 @@ def test_ambiguous_names_need_an_explicit_selection_and_a_new_review_per_change(
     second = world.review("dup", [{"name": ask["name"], "client_id": "client-2"}])
     assert first["ready"] and second["ready"]
     assert first["review_token"] != second["review_token"]  # a changed selection is a new review
+    assert [(c["client_id"], c["shared_name"], c["phone_last4"]) for c in first["clients"]] == [
+        ("client-1", True, "0001")]  # the ready review tells the owner which profile is bound
     assert world.activate(first, 0).status_code == 200
     # Activation applied exactly the first review: only client-1 is guided.
     assert world.hours(1, "2026-10-02")[0] == {8, 9, 10, 11}
@@ -284,3 +290,55 @@ def test_precedence_is_per_weekday_and_never_leaks_between_clients() -> None:
     assert recommended_starts(preferences, ZONE, [start], "a") == frozenset()
     assert recommended_starts(preferences, ZONE, [start], "zzz") == frozenset({start})
     assert ClientReference("a", "A").phone_last4 == ""
+
+
+def test_a_first_name_or_a_longer_name_needs_confirmation_but_a_whole_name_binds() -> None:
+    world = World()
+    world.repository.save_profile(
+        profile("biz-a", "client-4", "Client Alder Ortiz", "+15550100004"), 0, None)
+    for written, kind_or_ready in (("Client Birch", True), ("Birch", "ambiguous_client"),
+                                   ("Client Alder", "ambiguous_client")):
+        world.interpreter.answers[written] = {"rules": [
+            {"client_name": written, "weekdays": [4], "windows": []}], "problems": []}
+        result = world.review(written)
+        if kind_or_ready is True:
+            assert result["ready"] is True
+        else:
+            assert [p["kind"] for p in result["problems"]] == [kind_or_ready]
+    # "Client Alder" is a whole name for client-1 but also part of client-4's: both are offered.
+    [ask] = world.review("Client Alder")["ambiguities"]
+    assert {c["client_id"] for c in ask["candidates"]} == {"client-1", "client-4"}
+    # A lone containment match still shows a one-option picker, and picking it makes it ready.
+    [lone] = world.review("Birch")["ambiguities"]
+    assert [c["client_id"] for c in lone["candidates"]] == ["client-2"]
+    assert world.review("Birch", [{"name": "Birch", "client_id": "client-2"}])["ready"] is True
+
+
+def test_erasing_a_bound_client_removes_their_rules_text_and_reviews_but_keeps_the_rest() -> None:
+    world = World()
+    other = Scenario("x", "Mornings; Client Alder Thursday; Client Birch Wednesday", {"rules": [
+        {"client_name": "", "weekdays": [0, 1], "windows": [MORNING]},
+        {"client_name": "Client Alder", "weekdays": [3], "windows": [MORNING]},
+        {"client_name": "Client Birch", "weekdays": [2], "windows": []}], "problems": []}, ())
+    adopt(world, other)
+    pending = world.review(other.text)  # a stored review that binds the client too
+    version = world.api.get(BASE, headers=OWNER_A).json()["version"]
+    erased = world.api.delete("/v1/owner/businesses/biz-a/clients/client-1", headers=OWNER_A)
+    assert erased.status_code == 204
+    active = world.api.get(BASE, headers=OWNER_A).json()
+    assert active["version"] == version + 1  # open editors get a stale write
+    text = str(active)
+    for gone in ("Alder", "client-1", "Thursday mornings"):
+        assert gone not in text
+    assert "Client Alder" not in active["active"]["text"]
+    assert [rule.get("client_id") for rule in active["active"]["rules"]] == [None, "client-2"]
+    assert active["active"]["clients"] == [CLIENT_BIRCH]
+    assert world.repository.read_preference_review("biz-a", pending["review_token"], NOW) is None
+    assert world.hours(2, "2026-09-30")[0] == set(range(8, 17))  # other guidance still active
+    stale = world.activate(pending, version)
+    assert stale.status_code == 409
+    # Erasing the only bound client clears the record rather than leaving empty text.
+    world.api.delete("/v1/owner/businesses/biz-a/clients/client-2", headers=OWNER_A)
+    after = world.api.get(BASE, headers=OWNER_A).json()["active"]
+    assert [rule.get("client_id") for rule in after["rules"]] == [None]
+    assert "Birch" not in str(after)

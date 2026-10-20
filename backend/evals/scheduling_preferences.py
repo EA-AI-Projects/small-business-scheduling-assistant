@@ -67,6 +67,8 @@ CASES = (
          clients=frozenset({"client-alder", "client-birch"})),
     Case("duplicate-names", "Cedar Household prefers Fridays in the morning.",
          kinds=("ambiguous_client",)),
+    Case("same-scope-contradiction", "Client Alder prefers Mondays. Client Alder only Thursdays.",
+         kinds=("contradictory", "unclear", "unsupported")),
     Case("unknown-client", "Client Zed prefers Mondays.", kinds=("unknown_client",)),
     Case("client-group", "All the clients on Oak Street prefer Tuesdays.",
          kinds=("unsupported", "unclear")),

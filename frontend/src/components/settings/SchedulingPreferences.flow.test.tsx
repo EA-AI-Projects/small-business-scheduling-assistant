@@ -107,26 +107,76 @@ describe("owner Scheduling preferences", () => {
     expect(opener().textContent).toContain("Client Alder — Thursday: visits start 1:00 PM–4:00 PM");
   });
 
-  it("asks which profile an ambiguous name means and needs a new review after the choice", async () => {
+  const CEDARS = [
+    { client_id: "c1", name: "Cedar Household", phone_last4: "0003", service_address: "1 Test Street" },
+    { client_id: "c2", name: "Cedar Household", phone_last4: "0004", service_address: "2 Test Street" }];
+  const ambiguous = { ready: false, timezone: "America/Los_Angeles", rules: [], clients: [], review_token: null,
+    problems: [{ kind: "ambiguous_client", message: "\"Cedar Household\" may mean more than one client." }],
+    ambiguities: [{ name: "Cedar Household", candidates: CEDARS }] };
+  const readyFor = (id: string) => ({ ...READY, rules: [{ weekdays: [4], windows: [], client_id: id }],
+    clients: [{ ...CEDARS.find((c) => c.client_id === id)!, shared_name: true }] });
+
+  it("keeps the picker while picks change, then re-reviews and shows which profile is bound", async () => {
     await act(async () => opener().click());
     await act(async () => setText(text(), "Cedar Household prefers Fridays"));
-    request.mockResolvedValueOnce({ ready: false, timezone: "America/Los_Angeles", rules: [], clients: [],
-      review_token: null, problems: [{ kind: "ambiguous_client", message: "\"Cedar Household\" matches more than one client." }],
-      ambiguities: [{ name: "Cedar Household", candidates: [
-        { client_id: "c1", name: "Cedar Household", phone_last4: "0003", service_address: "1 Test Street" },
-        { client_id: "c2", name: "Cedar Household", phone_last4: "0004", service_address: "2 Test Street" }] }] });
+    request.mockResolvedValueOnce(ambiguous);
     await press("Review changes");
     expect(button("Activate preferences")).toBeUndefined();
-    const second = document.querySelector<HTMLInputElement>('input[type="radio"][value="c2"]')!;
+    const radio = (id: string) => document.querySelector<HTMLInputElement>(`input[type="radio"][value="${id}"]`)!;
     expect(document.querySelector("fieldset legend")!.textContent).toContain("Cedar Household");
-    expect(document.querySelector(`label[for="${second.id}"]`)!.textContent).toContain("phone ending 0004");
-    await act(async () => second.click());
-    request.mockResolvedValueOnce({ ...READY, rules: [{ weekdays: [4], windows: [], client_id: "c2" }],
-      clients: [{ client_id: "c2", name: "Cedar Household" }] });
+    expect(document.querySelector(`label[for="${radio("c2").id}"]`)!.textContent).toContain("phone ending 0004");
+
+    const first = radio("c1");
+    await act(async () => first.click());
+    // The picker stays mounted (same node), Activate stays hidden, and the message is about the selection.
+    expect(radio("c1")).toBe(first);
+    expect(first.checked).toBe(true);
+    expect(document.querySelector(".preference-review")!.textContent).toContain("Review again to apply your selection");
+    expect(document.querySelector(".preference-review")!.textContent).not.toContain("The text changed");
+    await act(async () => radio("c2").click());
+    expect(radio("c1")).toBe(first);
+    expect(button("Activate preferences")).toBeUndefined();
+
+    request.mockResolvedValueOnce(readyFor("c2"));
     await press("Review changes");
     expect(request).toHaveBeenLastCalledWith("/scheduling-preferences/review", { method: "POST",
       body: { text: "Cedar Household prefers Fridays", client_selections: [{ name: "Cedar Household", client_id: "c2" }] } });
+    const result = document.querySelector<HTMLElement>(".preference-review")!;
+    expect(result.textContent).toContain("Cedar Household (phone ending 0004, 2 Test Street)");
+    expect(result.textContent).not.toContain("0003");
     expect(button("Activate preferences")).toBeDefined();
+  });
+
+  it("shows every ambiguous name's picker at once", async () => {
+    await act(async () => opener().click());
+    await act(async () => setText(text(), "Cedar Household Fridays, Pine Household Mondays"));
+    request.mockResolvedValueOnce({ ...ambiguous, ambiguities: [...ambiguous.ambiguities,
+      { name: "Pine Household", candidates: [{ ...CEDARS[0]!, client_id: "p1", name: "Pine Household" },
+        { ...CEDARS[1]!, client_id: "p2", name: "Pine Household" }] }] });
+    await press("Review changes");
+    expect(document.querySelectorAll("fieldset.client-picker")).toHaveLength(2);
+  });
+
+  it("refuses a rejected selection, clears the picks, and keeps the draft", async () => {
+    await act(async () => opener().click());
+    await act(async () => setText(text(), "Cedar Household prefers Fridays"));
+    request.mockResolvedValueOnce(ambiguous);
+    await press("Review changes");
+    await act(async () => document.querySelector<HTMLInputElement>('input[type="radio"][value="c1"]')!.click());
+    request.mockRejectedValueOnce(new ApiError("Choose a client from this business", 422,
+      "INVALID_CLIENT_SELECTION", undefined));
+    await press("Review changes");
+    expect(document.querySelector('.preference-review [role="alert"]')!.textContent)
+      .toContain("Choose a client from this business");
+    expect(button("Activate preferences")).toBeUndefined();
+    expect(text().value).toBe("Cedar Household prefers Fridays");
+    expect(opener().textContent).toContain("None active");
+    // The next review starts without the rejected pick.
+    request.mockResolvedValueOnce(ambiguous);
+    await press("Review changes");
+    expect(request).toHaveBeenLastCalledWith("/scheduling-preferences/review",
+      { method: "POST", body: { text: "Cedar Household prefers Fridays" } });
+    expect(document.querySelector<HTMLInputElement>('input[type="radio"][value="c1"]')!.checked).toBe(false);
   });
 
   it("explains an unknown client and keeps Activate hidden", async () => {

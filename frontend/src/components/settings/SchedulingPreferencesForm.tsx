@@ -5,7 +5,7 @@ import { ApiError } from "@/lib/api";
 import { useOwner } from "@/owner/OwnerContext";
 
 import { BusyButton } from "../BusyButton";
-import { describeRule } from "./preferencesText";
+import { clientLabel, describeRule } from "./preferencesText";
 
 const MAX_CHARACTERS = 1000;
 const KIND_LABELS: Record<string, string> = { unclear: "Unclear", contradictory: "Contradictory",
@@ -50,7 +50,11 @@ export function SchedulingPreferencesForm({ state, loadError = false, onRetry, o
   const timezone = data.policy?.record.policy.timezone ?? null;
   const active = state?.active ?? null;
   const picks = JSON.stringify(Object.entries(selections).sort());
-  const current = reviewed !== null && reviewed.text === text && reviewed.picks === picks ? reviewed.review : null;
+  const sameText = reviewed !== null && reviewed.text === text;
+  const picksCurrent = sameText && reviewed.picks === picks;
+  // A ready review stands only for the exact text and picks; a blocked one keeps its pickers while picks change.
+  const current = reviewed !== null && picksCurrent ? reviewed.review : null;
+  const blocked = sameText && !reviewed.review.ready ? reviewed.review : null;
 
   function edit(value: string) {
     setDraft(value);
@@ -177,34 +181,39 @@ export function SchedulingPreferencesForm({ state, loadError = false, onRetry, o
           onChange={(event) => edit(event.target.value)} />
         <p id="scheduling-preferences-hint" className="hint">For example: Prefer mornings generally, and Thursday
           afternoons, and Thursday mornings for Client A. A client&apos;s preference replaces the general one on the
-          weekdays it names. Times are in {timezone}.</p>
+          weekdays it names (default, pending the owner&apos;s confirmation). Times are in {timezone}.</p>
         {fieldError && <p id="scheduling-preferences-error" className="field-error">{fieldError}</p>}
       </div>
       <div><BusyButton onClick={review}>Review changes</BusyButton></div>
       <div ref={result} tabIndex={-1} className="preference-review" aria-label="Review result">
-        {reviewed && !current && <p className="meta" role="status">The text changed since it was reviewed.
+        {reviewed && !sameText && <p className="meta" role="status">The text changed since it was reviewed.
           Review changes again before activating.</p>}
-        {current && !current.ready && <div className="field-error" role="alert">
+        {reviewed && sameText && !picksCurrent && reviewed.review.ready && <p className="meta" role="status">Your
+          selection changed since it was reviewed. Review changes again before activating.</p>}
+        {blocked && <div className="field-error" role="alert">
           <p>This cannot be activated yet. Correct the text and review again; nothing was changed.</p>
-          <ul>{current.problems.map((problem, index) => <li key={index}>
+          <ul>{blocked.problems.map((problem, index) => <li key={index}>
             <strong>{KIND_LABELS[problem.kind] ?? "Needs correction"}:</strong> {problem.message}</li>)}</ul>
-          {current.ambiguities.map((ambiguity) => <fieldset key={ambiguity.name} className="client-picker">
+          {blocked.ambiguities.map((ambiguity, group) => <fieldset key={ambiguity.name} className="client-picker">
             <legend>Which client is “{ambiguity.name}”?</legend>
             {ambiguity.candidates.map((candidate) => {
-              const id = `pick-${ambiguity.name}-${candidate.client_id}`;
+              const id = `pick-${group}-${candidate.client_id}`;
               return <div key={candidate.client_id} className="radio-row">
-                <input type="radio" id={id} name={`pick-${ambiguity.name}`} value={candidate.client_id}
+                <input type="radio" id={id} name={`pick-${group}`} value={candidate.client_id}
                   checked={selections[ambiguity.name] === candidate.client_id}
                   onChange={() => setSelections((existing) => ({ ...existing, [ambiguity.name]: candidate.client_id }))} />
                 <label htmlFor={id}>{candidate.name}, phone ending {candidate.phone_last4}, {candidate.service_address}</label>
               </div>;
             })}
           </fieldset>)}
-          {current.ambiguities.length > 0 && <p className="meta">After choosing, press Review changes again.</p>}
+          {blocked.ambiguities.length > 0 && !picksCurrent && <p className="meta" role="status">Review again to
+            apply your selection.</p>}
+          {blocked.ambiguities.length > 0 && picksCurrent && <p className="meta">After choosing, press Review
+            changes again.</p>}
         </div>}
         {current?.ready && <div role="status">
           <h4>What the assistant understood</h4>
-          {current.clients.length > 0 && <p>Applies to: {current.clients.map((client) => client.name ?? "Removed client").join(", ")}.
+          {current.clients.length > 0 && <p>Applies to: {current.clients.map((client) => clientLabel(client)).join(", ")}.
             Each preference stays with that profile if the client is renamed.</p>}
           <ul>{current.rules.map((rule) => <li key={JSON.stringify(rule)}>{describeRule(rule, current.clients)}</li>)}</ul>
           <p className="meta">Times are in {current.timezone}. Nothing is active until you activate it.</p>

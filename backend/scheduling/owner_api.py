@@ -101,6 +101,7 @@ from scheduling.domain.scheduling_preferences import (
     SchedulingPreferencesRepository,
     StoredReview,
     clean_text,
+    normalize_name,
     review_preferences,
     reviewed_preferences,
     rules_payload,
@@ -745,11 +746,16 @@ def create_owner_app(
                      ) -> list[dict[str, object]]:
         """Affected profiles by their current display name, so a rename shows immediately."""
         wanted = list(dict.fromkeys(rule.client_id for rule in rules if rule.client_id))
-        profiles = {profile.client_id: profile for profile in
-                    cast(ClientRecordRepository, repository).list_profiles(business_id)}
-        return [{"client_id": client_id,
-                 "name": profiles[client_id].name if client_id in profiles else None}
-                for client_id in wanted]
+        listed = cast(ClientRecordRepository, repository).list_profiles(business_id)
+        profiles = {profile.client_id: profile for profile in listed}
+        names = [normalize_name(profile.name) for profile in listed]
+        # Erasure removes a client's rules, so every bound client still has a profile.
+        # Owner-only detail that tells apart profiles sharing a name.
+        return [{"client_id": client_id, "name": profiles[client_id].name,
+                 "phone_last4": profiles[client_id].phone_e164[-4:],
+                 "service_address": profiles[client_id].service_address,
+                 "shared_name": names.count(normalize_name(profiles[client_id].name)) > 1}
+                for client_id in wanted if client_id in profiles]
 
     def preferences_view(record: SchedulingPreferencesRecord, business_id: str,
                          ) -> dict[str, object]:

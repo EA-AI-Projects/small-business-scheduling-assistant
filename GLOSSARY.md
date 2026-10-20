@@ -31,7 +31,7 @@ Hours for one calendar date that override the weekly hours, including a closure 
 _Avoid_: Weekly hours override
 
 **Scheduling preference**:
-The owner's soft guidance about preferred weekdays and visit start-time windows, reviewed and activated from Settings. It marks some valid starts as recommended; it never restricts, adds, or approves a visit. It applies to the whole business or to one client profile, bound to the profile's stable id so a rename does not move it; a client's preference replaces the business-wide one on the weekdays it names.
+The owner's soft guidance about preferred weekdays and visit start-time windows, reviewed and activated from Settings. It marks some valid starts as recommended; it never restricts, adds, or approves a visit. It applies to the whole business or to one client profile, bound to the profile's stable id so a rename does not move it; by default a client's preference replaces the business-wide one on the weekdays it names (pending owner confirmation).
 _Avoid_: Scheduling rule, restriction, booking policy
 
 **Recommended start**:
