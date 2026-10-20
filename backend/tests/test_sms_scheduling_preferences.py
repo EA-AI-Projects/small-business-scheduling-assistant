@@ -304,7 +304,7 @@ def test_the_deterministic_explicit_window_is_honored_without_a_preferred_start(
 
 
 WED_AND_THU: Scenario = (
-    PreferenceRule((2,), (window("15:30", "16:30"),)),
+    PreferenceRule((2,), (window("15:00", "15:30"),)),  # Only the 15:00 start (120-minute visits, 17:00 close).
     PreferenceRule((3,), (window("13:00", "15:00"),)))
 
 
