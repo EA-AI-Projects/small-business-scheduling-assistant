@@ -44,6 +44,8 @@ from scheduling.domain.lifecycle import (
     StaleVersion,
 )
 from scheduling.domain.owner_policy import PolicyNotConfigured
+from scheduling.domain.recommendations import recommended_starts
+from scheduling.domain.scheduling_preferences import SchedulingPreferencesRecord
 from scheduling.domain.service_duration import (
     ServiceDurationChanged,
     ServiceDurationSource,
@@ -78,6 +80,9 @@ class ClientAvailability(BaseModel):
     day: date
     duration_minutes: int
     starts_at: list[datetime]
+    # A subset of starts_at the business recommends; every start stays selectable. Neutral by
+    # design: no owner text, reason, or other client's information.
+    recommended_starts_at: list[datetime] = Field(default_factory=list)
 
 
 class ClientBooking(BaseModel):
@@ -148,6 +153,8 @@ class ClientReschedule(BaseModel):
 
 class ClientBookingRepository(AvailabilityRepository, ServiceDurationSource, Protocol):
     def read_appointment(self, appointment_id: str) -> Appointment | None: ...
+
+    def read_scheduling_preferences(self, business_id: str) -> SchedulingPreferencesRecord: ...
 
     def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None: ...
 
@@ -261,8 +268,16 @@ def add_client_session_route(
                 ServiceNotConfigured) as exc:
             # A missing or policy-rejected duration is the owner's to fix, not the client's.
             raise HTTPException(status_code=503, detail="Booking is unavailable") from exc
+        try:
+            preferences = store.read_scheduling_preferences(session.business_id).preferences
+            flagged = recommended_starts(
+                preferences, store.read_policy(session.business_id).timezone, starts)
+        except (OSError, ValueError, KeyError, RuntimeError):
+            # Recommendations are optional guidance; ordinary availability must still show.
+            flagged = frozenset()
         return ClientAvailability(
-            day=query.day, duration_minutes=duration, starts_at=list(starts))
+            day=query.day, duration_minutes=duration, starts_at=list(starts),
+            recommended_starts_at=[start for start in starts if start in flagged])
 
     @app.get("/v1/client/bookings", response_model=ClientBookings)
     def client_bookings(

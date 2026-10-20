@@ -54,7 +54,7 @@ The browser keeps access tokens in page memory. The ID-token email is display-on
 
 `owner_lambda.py` constructs `create_cognito_linked_app` from `linked_auth.py`. The API verifies signature, issuer, expiry, app client and access-token type, then resolves the active application link. API Gateway also uses a JWT authorizer. Owner routes under `/v1/owner/businesses/{business_id}` require an owner link for that business; `/v1/client/` routes derive business/client from the link. Browser-supplied business or role never grants access. The `OwnerSub` template parameter remains a bootstrap configuration value; current linked authorization derives owner access from the stored link.
 
-Owner API schemas are generated into `frontend/openapi/owner.json` and `frontend/src/api/schema.d.ts`. Client routes expose session, availability, bookings, requests, cancellation and rescheduling. Internal contracts and error mapping are in [SCHEDULING_CONTRACTS.md](SCHEDULING_CONTRACTS.md).
+Owner API schemas are generated into `frontend/openapi/owner.json` and `frontend/src/api/schema.d.ts`. Client routes expose session, availability, bookings, requests, cancellation and rescheduling. Owner scheduling preferences (#380) add `GET`/`PUT`/`DELETE /scheduling-preferences` and `POST /scheduling-preferences/review`; `owner_lambda.py` reads the OpenAI key from the same `/scheduling/<env>/openai/api-key` SecureString as the SMS worker (the owner function has `ssm:GetParameter` on that one parameter only), and review reports `INTERPRETER_UNAVAILABLE` (503) when the key or model is unavailable. Internal contracts and error mapping are in [SCHEDULING_CONTRACTS.md](SCHEDULING_CONTRACTS.md).
 
 An owner is administratively approved and linked. A client invitation uses the optional email saved in an existing profile, creates a pending link, and expires after 24 hours. The invitation API requires the expected profile version and resolves its saved email on the server. Contact email edits preserve pending invitations and active links; replacing account access requires explicit revocation and a new invitation (#375). Activation validates the Cognito ID token, invited verified email, subject, profile and expiry. Email recovery restores sign-in, not record scope. Revocation removes access; a subject cannot be silently retargeted. Provisioning details are in the [README](../README.md#account-provisioning-and-recovery).
 
@@ -80,6 +80,7 @@ Conversation tools derive identity from the verified receipt, validate strict ar
 | Completed visit lookup | `VISITS#<business_id>#<sha256(client_id)> / END#<UTC-end>#<id>`; strongly consistent reverse query for retention. |
 | Identity | Hashed subject link, business target pointer and administrative events. |
 | Conversation/history | Receipt and accepted-send records, actor-scoped `SMS_HISTORY#` pointers and short-lived conversation state. |
+| Scheduling preferences | `PREFERENCES#SCHEDULING` under the business: versioned `payload` (owner text, validated rules, reviewed timezone, review token), idempotency item and audit written in one transaction like the business profile. |
 | Invitations | `SETTINGS#BOOKING_OUTREACH`, deterministic invitation intents, scheduled per-client guard. |
 | Due work | Sparse `HoldDueIndex` and `OutboxDueIndex`; wake-up indexes only, followed by authoritative rereads. |
 

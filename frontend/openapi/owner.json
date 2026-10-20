@@ -740,6 +740,119 @@
         "title": "PolicyEditBody",
         "type": "object"
       },
+      "PreferenceActivateBody": {
+        "additionalProperties": false,
+        "description": "The reviewed text and interpretation, bound together by the review token.",
+        "properties": {
+          "expected_version": {
+            "minimum": 0.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "review_token": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Review Token",
+            "type": "string"
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/PreferenceRuleBody"
+            },
+            "title": "Rules",
+            "type": "array"
+          },
+          "text": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "expected_version",
+          "rules",
+          "review_token"
+        ],
+        "title": "PreferenceActivateBody",
+        "type": "object"
+      },
+      "PreferenceClearBody": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_version": {
+            "minimum": 0.0,
+            "title": "Expected Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "expected_version"
+        ],
+        "title": "PreferenceClearBody",
+        "type": "object"
+      },
+      "PreferenceRuleBody": {
+        "additionalProperties": false,
+        "properties": {
+          "weekdays": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Weekdays",
+            "type": "array"
+          },
+          "windows": {
+            "items": {
+              "$ref": "#/components/schemas/PreferenceWindowBody"
+            },
+            "title": "Windows",
+            "type": "array"
+          }
+        },
+        "required": [
+          "weekdays",
+          "windows"
+        ],
+        "title": "PreferenceRuleBody",
+        "type": "object"
+      },
+      "PreferenceTextBody": {
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "PreferenceTextBody",
+        "type": "object"
+      },
+      "PreferenceWindowBody": {
+        "additionalProperties": false,
+        "properties": {
+          "end": {
+            "title": "End",
+            "type": "string"
+          },
+          "start": {
+            "title": "Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "title": "PreferenceWindowBody",
+        "type": "object"
+      },
       "RemoveBlockBody": {
         "additionalProperties": false,
         "properties": {
@@ -2961,6 +3074,229 @@
           }
         ],
         "summary": "Decline"
+      }
+    },
+    "/v1/owner/businesses/{business_id}/scheduling-preferences": {
+      "delete": {
+        "operationId": "clear_scheduling_preferences_v1_owner_businesses__business_id__scheduling_preferences_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "business_id",
+            "required": true,
+            "schema": {
+              "title": "Business Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreferenceClearBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Clear Scheduling Preferences V1 Owner Businesses  Business Id  Scheduling Preferences Delete"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Clear Scheduling Preferences"
+      },
+      "get": {
+        "operationId": "get_scheduling_preferences_v1_owner_businesses__business_id__scheduling_preferences_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "business_id",
+            "required": true,
+            "schema": {
+              "title": "Business Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Get Scheduling Preferences V1 Owner Businesses  Business Id  Scheduling Preferences Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Scheduling Preferences"
+      },
+      "put": {
+        "operationId": "activate_scheduling_preferences_v1_owner_businesses__business_id__scheduling_preferences_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "business_id",
+            "required": true,
+            "schema": {
+              "title": "Business Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreferenceActivateBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Activate Scheduling Preferences V1 Owner Businesses  Business Id  Scheduling Preferences Put"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Activate Scheduling Preferences"
+      }
+    },
+    "/v1/owner/businesses/{business_id}/scheduling-preferences/review": {
+      "post": {
+        "description": "Interpret and validate only; nothing is stored and nothing becomes active.",
+        "operationId": "review_scheduling_preferences_v1_owner_businesses__business_id__scheduling_preferences_review_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "business_id",
+            "required": true,
+            "schema": {
+              "title": "Business Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreferenceTextBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Review Scheduling Preferences V1 Owner Businesses  Business Id  Scheduling Preferences Review Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Review Scheduling Preferences"
       }
     },
     "/v1/owner/businesses/{business_id}/sms-delivery-failures": {

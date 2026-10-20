@@ -238,6 +238,8 @@ code { font-size: .9em; }
 .cal-event { position: absolute; z-index: 1; display: block; overflow: hidden; min-height: 1.4rem; padding: .15rem .3rem; border-radius: 6px; border: 1px solid var(--color-surface); border-left-width: 4px; text-align: left; font-size: .78rem; font-weight: 400; line-height: 1.25; }
 .cal-available { position: absolute; z-index: 2; left: .15rem; right: .15rem; width: calc(100% - .3rem); height: 26px; padding: .12rem .25rem; border: 1px solid var(--color-primary); border-radius: 5px; background: var(--color-primary-faint); color: var(--color-primary); text-align: left; font-size: .72rem; font-weight: 700; white-space: nowrap; }
 .cal-grid.week .cal-available { overflow: hidden; padding-inline: .12rem; font-size: .62rem; }
+.cal-available.recommended { border-width: 2px; border-style: solid; font-weight: 800; }
+.client-legend .recommended { background: var(--color-primary-faint); border-color: var(--color-primary); }
 .cal-available:hover, .cal-available[aria-pressed="true"] { background: var(--color-primary); color: var(--color-on-primary); }
 .cal-available:focus-visible { outline: 3px solid var(--color-focus); outline-offset: 2px; z-index: 3; }
 .cal-event { z-index: 3; }

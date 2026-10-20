@@ -52,7 +52,7 @@ function placeStarts(starts: string[], day: string, zone: string) {
 }
 
 export function CalendarGrid({ days, events, policy, zone, selectedId, onSelect, onSlotPress, onDay,
-  availableStarts, selectedStart, onAvailableSelect }: {
+  availableStarts, recommendedStarts, selectedStart, onAvailableSelect }: {
   days: string[]; events: CalendarItem[]; policy?: AvailabilityPolicy | null; zone: string; selectedId: string | null;
   onSelect: (id: string, element: HTMLElement) => void;
   /** A press on an empty part of a day column (not on an item, heading, or the gutter). */
@@ -61,6 +61,8 @@ export function CalendarGrid({ days, events, policy, zone, selectedId, onSelect,
   onDay?: (date: string) => void;
   /** Client-scoped starts returned by availability; omitted for the owner calendar. */
   availableStarts?: string[];
+  /** Subset of availableStarts to label Recommended; the others stay equally selectable. */
+  recommendedStarts?: string[];
   selectedStart?: string | null;
   onAvailableSelect?: (start: string, element: HTMLElement) => void;
 }) {
@@ -133,13 +135,15 @@ export function CalendarGrid({ days, events, policy, zone, selectedId, onSelect,
               ))}
               {placeStarts(availableStarts ?? [], day, zone).map(({ start, minute, lane, lanes }) => {
                 const label = localTime(start, zone);
-                return <button key={start} type="button" className="cal-available" data-popover-anchor=""
-                  data-available-start={start} aria-haspopup="dialog" aria-pressed={selectedStart === start}
-                  aria-label={`Available ${label}, ${dayTitle(day)}; request owner approval`}
+                const recommended = recommendedStarts?.includes(start) ?? false;
+                return <button key={start} type="button" className={recommended ? "cal-available recommended" : "cal-available"}
+                  data-popover-anchor="" data-available-start={start} aria-haspopup="dialog" aria-pressed={selectedStart === start}
+                  aria-label={`${recommended ? "Recommended, available" : "Available"} ${label}, ${dayTitle(day)}; request owner approval`}
                   style={{ top: `${(minute / MINUTES_PER_DAY) * 100}%`,
                     left: `calc(${lane / lanes * 100}% + .15rem)`, width: `calc(${100 / lanes}% - .3rem)`, right: "auto" }}
                   onClick={(click) => onAvailableSelect?.(start, click.currentTarget)}>
                   {count > 1 ? label.replace(" AM", "a").replace(" PM", "p") : label}
+                  {recommended && (count > 1 ? " ★" : " · Recommended")}
                 </button>;
               })}
               {layoutDay(events, day, zone).map((placed) => (

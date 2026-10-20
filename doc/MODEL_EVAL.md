@@ -86,6 +86,10 @@ Since #241 the model, not keyword rules, decides whether a client text is a cale
 - "What times are open Friday?" and "Can I get a cleaning Friday instead?" must stay availability requests.
 - "Booking for Friday?" must clarify.
 
+### Owner scheduling preferences (#380)
+
+`backend/evals/scheduling_preferences.py` holds ten synthetic cases for the interpreter behind Review changes: two supported inputs (vague "mornings" must become a bounded range, an explicit afternoon range), vague text, a contradiction, avoidance, unsupported route grouping, client-specific guidance (unsupported in this slice), and two attempts to override booking constraints (hours/buffers, owner approval). `python -m evals.scheduling_preferences` lists them and makes no call; `--live` with `OPENAI_API_KEY` runs them through the production interpreter and deterministic validator and is billable, so it needs separate authorization. The pytest suite uses a scripted model and proves permissions, persistence and effects only, not interpretation quality. No live run has been made for #380.
+
 ## Evaluation evidence
 
 Dated results and removed-path evaluations are in [MODEL_EVAL_RESULTS.md](MODEL_EVAL_RESULTS.md). Record a new run's commit, model, prompt/tool version, date, cases and boundary; do not replace current behavior documentation with a score or infer deployed proof from a synthetic run.

@@ -72,6 +72,8 @@ The saved policy controls working hours, exceptions, holidays, horizon, start in
 
 The approved baseline is `America/Los_Angeles`, weekdays 08:00–17:00, observed US federal holidays closed, a 14-day client booking horizon, 15-minute starts, a 24-hour pending hold, a 3-hour maximum visit, and a configurable 30-minute buffer between visits. There is no buffer at the opening/closing boundary or around blocks. Settings can change the policy subject to validation against existing reservations.
 
+Owner scheduling preferences (#380) are a separate versioned business record holding the owner's text and the reviewed interpretation (weekday sets and start-time windows in business-local time). They never create or remove availability: `recommendations.recommended_starts` marks, among starts the availability rules already allow, those matching an active rule, and the client portal returns them as `recommended_starts_at` beside the unchanged `starts_at`.
+
 Availability excludes confirmed visits, unexpired holds, and authoritative unavailable blocks. Every calendar write revalidates against current state and conditionally advances the business calendar revision in its atomic transaction. UTC storage and business-local rendering keep daylight-saving handling explicit.
 
 ## 7. Key workflows
@@ -86,7 +88,7 @@ Availability excludes confirmed visits, unexpired holds, and authoritative unava
 
 Models receive typed, scoped tool interfaces and bounded conversation context. They cannot choose identity, notification destinations, arbitrary database writes, or override scheduling rules. Client writes require stored offers or confirmation state; owner writes require current request/version checks. Duplicate receipts replay stored results.
 
-The backend validates explicit dates, times, references, and message size where applicable. It does not prove every prose claim or status association; model wording and option presentation retain an accepted risk. Deterministic fallback text remains available. [CONVERSATION.md](CONVERSATION.md) owns the precise model/fallback boundaries.
+The backend validates explicit dates, times, references, and message size where applicable. It does not prove every prose claim or status association; model wording and option presentation retain an accepted risk. Owner scheduling-preference text is interpreted by the model only when the owner presses Review changes; deterministic code validates the output, a failure or problem blocks activation, and nothing the model returns creates availability or a calendar write. Deterministic fallback text remains available. [CONVERSATION.md](CONVERSATION.md) owns the precise model/fallback boundaries.
 
 ## 9. Privacy and reliability
 

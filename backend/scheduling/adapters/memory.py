@@ -37,6 +37,10 @@ from scheduling.domain.owner_calendar import (
     UnavailableBlock,
 )
 from scheduling.domain.owner_policy import PolicyCommand, PolicyCommit, PolicyRecord, PolicyReplay
+from scheduling.domain.scheduling_preferences import (
+    SchedulingPreferences,
+    SchedulingPreferencesRecord,
+)
 from scheduling.domain.service_duration import ServiceDurationChanged
 
 
@@ -50,6 +54,9 @@ class InMemoryCalendarRepository:
         self._policy_replays: dict[tuple[str, str, str, str], PolicyReplay] = {}
         self._profiles: dict[str, BusinessProfileRecord] = {}
         self._profile_replays: dict[tuple[str, str, str], tuple[BusinessProfile, int, BusinessProfileRecord]] = {}
+        self._preferences: dict[str, SchedulingPreferencesRecord] = {}
+        self._preference_replays: dict[tuple[str, str, str], tuple[
+            SchedulingPreferences | None, int, SchedulingPreferencesRecord]] = {}
         self._outreach: dict[str, OutreachRecord] = {}
         self._outreach_replays: dict[tuple[str, str, str], tuple[OutreachSettings, int, OutreachRecord]] = {}
         self._invitation_intents: dict[str, InvitationIntent] = {}
@@ -101,6 +108,30 @@ class InMemoryCalendarRepository:
             self._profiles[business_id] = result
             self._profile_replays[identity] = (profile, expected_version, result)
             self._audit[f"business_profile#{business_id}#{actor_id}#{key}"] = result
+            return result
+
+    def read_scheduling_preferences(self, business_id: str) -> SchedulingPreferencesRecord:
+        with self._lock:
+            return self._preferences.get(business_id, SchedulingPreferencesRecord(None, 0))
+
+    def save_scheduling_preferences(self, business_id: str, actor_id: str, key: str,
+                                    expected_version: int,
+                                    preferences: SchedulingPreferences | None,
+                                    ) -> SchedulingPreferencesRecord:
+        with self._lock:
+            identity = (business_id, actor_id, key)
+            previous = self._preference_replays.get(identity)
+            if previous is not None:
+                old, old_version, result = previous
+                if old != preferences or old_version != expected_version:
+                    raise IdempotencyKeyReused("Key already used for another preferences edit")
+                return result
+            if self.read_scheduling_preferences(business_id).version != expected_version:
+                raise RevisionConflict("Scheduling preferences version changed")
+            result = SchedulingPreferencesRecord(preferences, expected_version + 1)
+            self._preferences[business_id] = result
+            self._preference_replays[identity] = (preferences, expected_version, result)
+            self._audit[f"scheduling_preferences#{business_id}#{actor_id}#{key}"] = result
             return result
 
     def read_outreach(self, business_id: str) -> OutreachRecord:

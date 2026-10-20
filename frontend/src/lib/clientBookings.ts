@@ -58,13 +58,19 @@ export function parseBookings(data: unknown): ClientBooking[] {
     && !Number.isNaN(Date.parse((item as ClientBooking).end_at)));
 }
 
-export interface ClientAvailability { starts: string[]; durationMinutes: number | null }
+export interface ClientAvailability { starts: string[]; recommended: string[]; durationMinutes: number | null }
 
 export function parseAvailability(data: unknown): ClientAvailability {
-  const body = data as { starts_at?: unknown; duration_minutes?: unknown } | null;
+  const body = data as { starts_at?: unknown; recommended_starts_at?: unknown; duration_minutes?: unknown } | null;
   if (!Array.isArray(body?.starts_at)) throw new Error("Unexpected availability response");
+  const valid = (list: unknown[]) => list.filter((item): item is string =>
+    typeof item === "string" && !Number.isNaN(Date.parse(item)));
+  const starts = valid(body.starts_at);
   return {
-    starts: body.starts_at.filter((item): item is string => typeof item === "string" && !Number.isNaN(Date.parse(item))),
+    starts,
+    // A recommendation only labels a start that is also offered; it never adds one.
+    recommended: Array.isArray(body.recommended_starts_at)
+      ? valid(body.recommended_starts_at).filter((item) => starts.includes(item)) : [],
     durationMinutes: typeof body.duration_minutes === "number" ? body.duration_minutes : null,
   };
 }

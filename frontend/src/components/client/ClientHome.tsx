@@ -145,7 +145,7 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
   const [sending, setSending] = useState(false);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const [refresh, setRefresh] = useState(0);
-  const [availability, setAvailability] = useState<{ key: string; starts: string[] | null;
+  const [availability, setAvailability] = useState<{ key: string; starts: string[] | null; recommended: string[];
     minutes: number | null; error: string | null } | null>(null);
   const availabilityKey = `${availabilityDaysKey}|${refresh}`;
 
@@ -203,10 +203,11 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
         if (!current) return;
         const parsed = data.map(parseAvailability);
         setAvailability({ key, starts: parsed.flatMap((result) => result.starts),
+          recommended: parsed.flatMap((result) => result.recommended),
           minutes: parsed[0]?.durationMinutes ?? null, error: null });
       })
       .catch((error: unknown) => { if (current) fail(error, (message) =>
-        setAvailability({ key, starts: null, minutes: null, error: message })); });
+        setAvailability({ key, starts: null, recommended: [], minutes: null, error: message })); });
     return () => { current = false; };
   }, [config, token, availabilityDaysKey, availabilityKey, fail]);
 
@@ -317,7 +318,8 @@ function ClientCalendar({ config, token, zone, onSessionEnded, calendar, horizon
           A request is not an appointment until the owner approves it.</p>
         <ClientCalendarViews items={items} bookings={bookings ?? []} calendar={calendar} zone={zone} nowMs={nowMs}
           loading={bookings === null && !bookingsError} error={bookingsError}
-          maxDate={maxDate} availableStarts={moveLoading ? [] : shown} selectedStart={chosen}
+          maxDate={maxDate} availableStarts={moveLoading ? [] : shown}
+          recommendedStarts={settled?.recommended ?? []} selectedStart={chosen}
           onAvailableSelect={selectStart} onEventSelect={() => choose(null)}
           confirming={confirming} changing={changing}
           changeError={changeOutcome?.kind === "error" ? changeOutcome.message : null}
