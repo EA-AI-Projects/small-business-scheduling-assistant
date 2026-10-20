@@ -41,14 +41,30 @@ def preferred_reader(repository: object, business_id: str, timezone: str) -> Pre
     return preferred
 
 
+def _fill(starts: tuple[datetime, ...], zone: ZoneInfo, room: int) -> set[datetime]:
+    """Up to ``room`` starts spread as usual, topped up from the rest when a day underfills."""
+    chosen: set[datetime] = set()
+    left = starts
+    while len(chosen) < room and left:
+        more = spread(left, zone, room - len(chosen))
+        if not more:
+            break
+        chosen |= set(more)
+        left = tuple(start for start in left if start not in chosen)
+    return chosen
+
+
 def pick_offer(starts: tuple[datetime, ...], zone: ZoneInfo, preferred: Preferred,
                limit: int = MAX_OPTIONS) -> tuple[datetime, ...]:
-    """Up to ``limit`` starts: preferred first, the rest fill remaining slots, in time order."""
+    """Up to ``limit`` starts: preferred first, the rest fill remaining slots, in time order.
+
+    Preferred starts fill the offer until it is full or they run out, even when a day has
+    fewer than its share; only then do other valid starts fill the remaining slots.
+    """
     flagged = preferred(starts)
     if not flagged or len(starts) <= limit:
         return spread(starts, zone, limit)
-    first = spread(tuple(start for start in starts if start in flagged), zone, limit)
+    first = _fill(tuple(start for start in starts if start in flagged), zone, limit)
     rest = tuple(start for start in starts if start not in flagged)
-    room = limit - len(first)
-    fill = spread(rest, zone, room) if room > 0 and rest else ()
-    return tuple(sorted(set(first) | set(fill)))
+    fill = _fill(rest, zone, limit - len(first)) if len(first) < limit else set()
+    return tuple(sorted(first | fill))
