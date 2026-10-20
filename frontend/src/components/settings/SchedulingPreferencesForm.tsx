@@ -181,7 +181,7 @@ export function SchedulingPreferencesForm({ state, loadError = false, onRetry, o
           onChange={(event) => edit(event.target.value)} />
         <p id="scheduling-preferences-hint" className="hint">For example: Prefer mornings generally, and Thursday
           afternoons, and Thursday mornings for Client A. A client&apos;s preference replaces the general one on the
-          weekdays it names (default, pending the owner&apos;s confirmation). Times are in {timezone}.</p>
+          weekdays it names. Times are in {timezone}.</p>
         {fieldError && <p id="scheduling-preferences-error" className="field-error">{fieldError}</p>}
       </div>
       <div><BusyButton onClick={review}>Review changes</BusyButton></div>
