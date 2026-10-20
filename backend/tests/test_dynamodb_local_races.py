@@ -1464,6 +1464,37 @@ def test_preference_review_is_business_scoped_and_expires(race_env: RaceEnv) -> 
     assert repo.read_preference_review(env.business, "0" * 64, now) is None
 
 
+def _mixed_preferences(text: str, client_id: str) -> SchedulingPreferences:
+    window = (PreferenceWindow(time(9), time(12)),)
+    rules = (PreferenceRule((0, 1, 2, 3, 4), window),
+             PreferenceRule((3,), (PreferenceWindow(time(13), time(16)),), client_id))
+    return SchedulingPreferences(text, rules, _PREFERENCE_ZONE,
+                                 review_token(text, rules, _PREFERENCE_ZONE))
+
+
+def test_client_scoped_preferences_keep_the_profile_id_and_replay_per_selection(
+        race_env: RaceEnv) -> None:
+    env = race_env
+    repo = DynamoDBCalendarRepository(env.client, env.table)
+    now = datetime(2026, 9, 28, 15, tzinfo=UTC)
+    first = _mixed_preferences("mixed", "client-1")
+    saved = repo.save_scheduling_preferences(env.business, "owner-1", "m", 0, first)
+    read = repo.read_scheduling_preferences(env.business)
+    assert read == saved and read.preferences is not None
+    assert [rule.client_id for rule in read.preferences.rules] == [None, "client-1"]
+    assert repo.save_scheduling_preferences(env.business, "owner-1", "m", 0, first) == saved
+    # Same text, different selected profile: another review, so the same key is a different edit.
+    with pytest.raises(IdempotencyKeyReused):
+        repo.save_scheduling_preferences(env.business, "owner-1", "m", 0,
+                                         _mixed_preferences("mixed", "client-2"))
+    with pytest.raises(RevisionConflict):
+        repo.save_scheduling_preferences(env.business, "owner-1", "stale", 0,
+                                         _mixed_preferences("mixed", "client-2"))
+    review = StoredReview(first.text, first.rules, first.timezone, first.review_token)
+    repo.save_preference_review(env.business, review, now + timedelta(hours=1))
+    assert repo.read_preference_review(env.business, review.token, now) == review
+
+
 def test_hold_commit_requires_the_saved_default_to_be_unchanged(race_env: RaceEnv) -> None:
     env = race_env
     now = datetime(2026, 9, 28, 15, tzinfo=UTC)

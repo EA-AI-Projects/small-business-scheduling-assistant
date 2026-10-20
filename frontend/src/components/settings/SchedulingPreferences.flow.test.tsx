@@ -12,11 +12,13 @@ const POLICY = { timezone: "America/Los_Angeles", booking_horizon_days: 14,
   date_exceptions: {}, holiday_calendar: "US_FEDERAL", slot_increment_minutes: 15,
   maximum_visit_minutes: 180, maximum_buffer_minutes: 30, minimum_visit_gap_minutes: 30,
   opening_buffer_minutes: 0, closing_buffer_minutes: 0, hold_minutes: 1440 };
-const MORNINGS = [{ weekdays: [1, 3], windows: [{ start: "08:00", end: "12:00" }] }];
+type Rule = { weekdays: number[]; windows: { start: string; end: string }[]; client_id?: string };
+const MORNINGS: Rule[] = [{ weekdays: [1, 3], windows: [{ start: "08:00", end: "12:00" }] }];
+const ALDER = { weekdays: [3], windows: [{ start: "13:00", end: "16:00" }], client_id: "client-1" };
 const READY = { ready: true, timezone: "America/Los_Angeles", rules: MORNINGS,
-  review_token: "a".repeat(64), problems: [] };
-let preferences: { version: number; active: null | { text: string; rules: typeof MORNINGS; timezone: string;
-  review_token: string } };
+  clients: [], ambiguities: [], review_token: "a".repeat(64), problems: [] };
+let preferences: { version: number; active: null | { text: string; rules: Rule[]; timezone: string;
+  clients?: { client_id: string; name: string | null }[]; review_token: string } };
 const get = vi.fn(async (path: string) => {
   if (path === "/scheduling-preferences") return preferences;
   if (path === "/policy") return { record: { policy: POLICY, version: 1 }, calendar_revision: 1 };
@@ -88,11 +90,62 @@ describe("owner Scheduling preferences", () => {
     expect(button("Activate preferences")).toBeUndefined();
   });
 
+  it("reviews client guidance by current profile name and shows it in the active summary", async () => {
+    await act(async () => opener().click());
+    await act(async () => setText(text(), "Mornings, and Client Alder on Thursday afternoons"));
+    request.mockResolvedValueOnce({ ...READY, rules: [...MORNINGS, ALDER],
+      clients: [{ client_id: "client-1", name: "Client Alder" }] });
+    await press("Review changes");
+    const result = document.querySelector<HTMLElement>(".preference-review")!;
+    expect(result.textContent).toContain("Applies to: Client Alder");
+    expect(result.textContent).toContain("Client Alder — Thursday: visits start 1:00 PM–4:00 PM");
+    expect(result.textContent).toContain("Tuesday, Thursday: visits start 8:00 AM–12:00 PM");
+    request.mockResolvedValueOnce({ version: 1, active: { text: "x", rules: [...MORNINGS, ALDER],
+      clients: [{ client_id: "client-1", name: "Client Alder" }], timezone: "America/Los_Angeles",
+      review_token: READY.review_token } });
+    await press("Activate preferences");
+    expect(opener().textContent).toContain("Client Alder — Thursday: visits start 1:00 PM–4:00 PM");
+  });
+
+  it("asks which profile an ambiguous name means and needs a new review after the choice", async () => {
+    await act(async () => opener().click());
+    await act(async () => setText(text(), "Cedar Household prefers Fridays"));
+    request.mockResolvedValueOnce({ ready: false, timezone: "America/Los_Angeles", rules: [], clients: [],
+      review_token: null, problems: [{ kind: "ambiguous_client", message: "\"Cedar Household\" matches more than one client." }],
+      ambiguities: [{ name: "Cedar Household", candidates: [
+        { client_id: "c1", name: "Cedar Household", phone_last4: "0003", service_address: "1 Test Street" },
+        { client_id: "c2", name: "Cedar Household", phone_last4: "0004", service_address: "2 Test Street" }] }] });
+    await press("Review changes");
+    expect(button("Activate preferences")).toBeUndefined();
+    const second = document.querySelector<HTMLInputElement>('input[type="radio"][value="c2"]')!;
+    expect(document.querySelector("fieldset legend")!.textContent).toContain("Cedar Household");
+    expect(document.querySelector(`label[for="${second.id}"]`)!.textContent).toContain("phone ending 0004");
+    await act(async () => second.click());
+    request.mockResolvedValueOnce({ ...READY, rules: [{ weekdays: [4], windows: [], client_id: "c2" }],
+      clients: [{ client_id: "c2", name: "Cedar Household" }] });
+    await press("Review changes");
+    expect(request).toHaveBeenLastCalledWith("/scheduling-preferences/review", { method: "POST",
+      body: { text: "Cedar Household prefers Fridays", client_selections: [{ name: "Cedar Household", client_id: "c2" }] } });
+    expect(button("Activate preferences")).toBeDefined();
+  });
+
+  it("explains an unknown client and keeps Activate hidden", async () => {
+    await act(async () => opener().click());
+    await act(async () => setText(text(), "Client Zed prefers Mondays"));
+    request.mockResolvedValueOnce({ ready: false, timezone: "America/Los_Angeles", rules: [], clients: [],
+      ambiguities: [], review_token: null,
+      problems: [{ kind: "unknown_client", message: "No client named \"Client Zed\" was found." }] });
+    await press("Review changes");
+    const alert = document.querySelector<HTMLElement>('.preference-review [role="alert"]')!;
+    expect(alert.textContent).toContain("Client not found");
+    expect(button("Activate preferences")).toBeUndefined();
+  });
+
   it("blocks activation and explains what to correct", async () => {
     await act(async () => opener().click());
     await act(async () => setText(text(), "Group nearby clients"));
     request.mockResolvedValueOnce({ ready: false, timezone: "America/Los_Angeles", rules: [],
-      review_token: null, problems: [{ kind: "unsupported", message: "Route grouping is not supported." }] });
+      clients: [], ambiguities: [], review_token: null, problems: [{ kind: "unsupported", message: "Route grouping is not supported." }] });
     await press("Review changes");
     const alert = document.querySelector<HTMLElement>('.preference-review [role="alert"]')!;
     expect(alert.textContent).toContain("Not supported");

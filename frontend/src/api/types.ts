@@ -35,6 +35,20 @@ export interface BusinessProfileState {
 export interface PreferenceRule {
   weekdays: number[];
   windows: { start: string; end: string }[];
+  /** Stable profile id for a client-specific rule; absent for business-wide rules. */
+  client_id?: string;
+}
+
+/** An affected profile by its current display name (null when the profile no longer exists). */
+export interface PreferenceClient {
+  client_id: string;
+  name: string | null;
+}
+
+/** A written name that matches several profiles; the owner picks one and reviews again. */
+export interface PreferenceAmbiguity {
+  name: string;
+  candidates: { client_id: string; name: string; phone_last4: string; service_address: string }[];
 }
 export type PreferenceActivateBody = Schemas["PreferenceActivateBody"];
 
@@ -42,6 +56,7 @@ export type PreferenceActivateBody = Schemas["PreferenceActivateBody"];
 export interface ActivePreferences {
   text: string;
   rules: PreferenceRule[];
+  clients: PreferenceClient[];
   /** Business timezone the times were reviewed in. */
   timezone: string;
   review_token: string;
@@ -54,7 +69,8 @@ export interface PreferencesState {
 }
 
 export interface PreferenceProblem {
-  kind: "unclear" | "contradictory" | "unsupported" | "client_specific" | "constraint_override";
+  kind: "unclear" | "contradictory" | "unsupported" | "constraint_override"
+    | "ambiguous_client" | "unknown_client";
   message: string;
 }
 
@@ -63,6 +79,8 @@ export interface PreferenceReview {
   ready: boolean;
   timezone: string;
   rules: PreferenceRule[];
+  clients: PreferenceClient[];
+  ambiguities: PreferenceAmbiguity[];
   review_token: string | null;
   problems: PreferenceProblem[];
 }

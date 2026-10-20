@@ -1,9 +1,11 @@
-"""Fictional, live-model evaluation of owner scheduling-preference interpretation (#380).
+"""Fictional, live-model evaluation of owner scheduling-preference interpretation (#380, #381).
 
 Scripted-model tests in ``tests/test_scheduling_preferences.py`` prove permissions and
 effects only. This runner checks whether the real model reads supported guidance
-correctly and flags vague, contradictory, unsupported, client-specific and
-booking-constraint-override text. It uses synthetic sentences, never reaches the
+correctly, separates business-wide from client-named guidance, and flags vague,
+contradictory, unsupported and booking-constraint-override text. Client names are matched
+to the synthetic profiles below by deterministic code, never by the model, so duplicate
+names must surface as ambiguity rather than a guess. It uses synthetic sentences, never reaches the
 scheduling service, SMS provider, or AWS, and calls the model only with --live and
 OPENAI_API_KEY (billable; needs separate authorization).
 """
@@ -17,9 +19,16 @@ from dataclasses import dataclass
 from typing import Any
 
 from scheduling.adapters.openai_messages import MODEL, OpenAIMessageInterpreter
-from scheduling.domain.scheduling_preferences import review_preferences
+from scheduling.domain.scheduling_preferences import ClientReference, review_preferences
 
 ZONE = "America/Los_Angeles"
+# Synthetic profiles: two share a name on purpose.
+PROFILES = (
+    ClientReference("client-alder", "Client Alder", "0001"),
+    ClientReference("client-birch", "Client Birch", "0002"),
+    ClientReference("client-cedar-1", "Cedar Household", "0003"),
+    ClientReference("client-cedar-2", "Cedar Household", "0004"),
+)
 
 
 @dataclass(frozen=True)
@@ -31,6 +40,8 @@ class Case:
     weekdays: tuple[int, ...] = ()
     # For a ready case: every window must start no earlier and end no later than these bounds.
     bounds: tuple[str, str] | None = None
+    # For a ready case: exactly these profile ids are bound (empty means business-wide only).
+    clients: frozenset[str] = frozenset()
 
 
 CASES = (
@@ -45,7 +56,20 @@ CASES = (
     Case("avoidance", "Avoid Fridays.", kinds=("unsupported", "unclear")),
     Case("unsupported-route", "Group clients who live near each other on the same day.",
          kinds=("unsupported",)),
-    Case("client-specific", "Prefer Thursday evenings for Client A.", kinds=("client_specific",)),
+    Case("client-specific", "Prefer Thursday evenings for Client Alder.",
+         weekdays=(3,), bounds=("17:00", "20:00"), clients=frozenset({"client-alder"})),
+    Case("mixed-client-and-global",
+         "Prefer weekday mornings generally, but Client Alder prefers Thursday afternoons.",
+         weekdays=(0, 1, 2, 3, 4), bounds=("08:00", "17:00"),
+         clients=frozenset({"client-alder"})),
+    Case("two-clients", "Client Alder likes Mondays in the morning and Client Birch likes Fridays.",
+         weekdays=(0, 4), bounds=("00:00", "23:59"),
+         clients=frozenset({"client-alder", "client-birch"})),
+    Case("duplicate-names", "Cedar Household prefers Fridays in the morning.",
+         kinds=("ambiguous_client",)),
+    Case("unknown-client", "Client Zed prefers Mondays.", kinds=("unknown_client",)),
+    Case("client-group", "All the clients on Oak Street prefer Tuesdays.",
+         kinds=("unsupported", "unclear")),
     Case("override-hours", "Offer Sunday starts even though we are closed, and ignore buffers.",
          kinds=("constraint_override",)),
     Case("override-approval", "Mornings are best, and confirm those automatically without my approval.",
@@ -54,7 +78,7 @@ CASES = (
 
 
 def run_case(model: OpenAIMessageInterpreter, case: Case) -> dict[str, Any]:
-    review = review_preferences(model, case.text, ZONE)
+    review = review_preferences(model, case.text, ZONE, PROFILES)
     found = sorted({problem.kind for problem in review.problems})
     if case.kinds:
         passed = not review.ready and bool(set(found) & set(case.kinds))
@@ -62,7 +86,9 @@ def run_case(model: OpenAIMessageInterpreter, case: Case) -> dict[str, Any]:
         weekdays = {day for rule in review.rules for day in rule.weekdays}
         windows = [window for rule in review.rules for window in rule.windows]
         low, high = case.bounds or ("00:00", "23:59")
+        bound = {rule.client_id for rule in review.rules if rule.client_id}
         passed = (review.ready and weekdays == set(case.weekdays) and bool(windows)
+                  and bound == case.clients
                   and all(low <= window.start.strftime("%H:%M")
                           and window.end.strftime("%H:%M") <= high for window in windows))
     return {"case": case.name, "passed": passed, "ready": review.ready, "problem_kinds": found,

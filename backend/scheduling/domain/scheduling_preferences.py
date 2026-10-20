@@ -1,4 +1,4 @@
-"""Owner scheduling preferences: reviewed, validated, business-wide start guidance (#379, #380).
+"""Owner scheduling preferences: reviewed, validated start guidance (#379, #380, #381).
 
 The owner writes natural language; a model proposes an interpretation; this module
 validates it deterministically. The only supported vocabulary is preferred weekdays and
@@ -8,11 +8,24 @@ that decide which starts exist (see ``recommendations``).
 
 A review is bound to the exact text, interpretation and timezone through a token, so
 activation can store only what the owner saw. Anything unsupported, unclear,
-contradictory, client-specific (this slice is business-wide only) or aimed at booking
-constraints blocks activation; a subset is never activated silently.
+contradictory or aimed at booking constraints blocks activation; a subset is never
+activated silently.
+
+A rule is business-wide or bound to one client profile by its stable ``client_id``. The
+model only reports the name the owner wrote; ``resolve_client_names`` matches it to the
+business's own active profiles in code. An ambiguous name needs the owner's explicit
+selection, an unknown name blocks, and the stored rule keeps the profile id so a rename
+cannot redirect it.
+
+Precedence (``applicable_rules``): a client's rules are their own client rules plus the
+business-wide rules for every weekday their client rules do not name. All preferences are
+positive, so rules at one scope simply add up; a same-scope contradiction is whatever the
+interpreter reports as ``contradictory``, and it blocks activation.
 """
 
 import json
+import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from hashlib import sha256
@@ -23,8 +36,9 @@ MAX_TEXT_CHARACTERS = 1000
 MAX_RULES = 8
 MAX_WINDOWS_PER_RULE = 4
 REVIEW_TTL = timedelta(hours=1)
-PROBLEM_KINDS = ("unclear", "contradictory", "unsupported", "client_specific",
-                 "constraint_override")
+MAX_CLIENT_NAME_CHARACTERS = 100
+# Kinds the model may report. ``ambiguous_client`` and ``unknown_client`` come from code.
+PROBLEM_KINDS = ("unclear", "contradictory", "unsupported", "constraint_override")
 
 
 class PreferenceInterpretationFailed(RuntimeError):
@@ -52,11 +66,13 @@ class PreferenceWindow:
 class PreferenceRule:
     """Preferred weekdays (0 Monday to 6 Sunday), optionally limited to start windows.
 
-    No windows means any start time on those weekdays.
+    No windows means any start time on those weekdays. ``client_id`` None means the whole
+    business; otherwise the rule applies only to that client profile.
     """
 
     weekdays: tuple[int, ...]
     windows: tuple[PreferenceWindow, ...] = ()
+    client_id: str | None = None
 
     def __post_init__(self) -> None:
         if (not self.weekdays or any(day not in range(7) for day in self.weekdays)
@@ -70,10 +86,31 @@ class PreferenceRule:
             raise ValueError("Time windows must be sorted and must not overlap")
         if len(self.weekdays) == 7 and not self.windows:
             raise ValueError("Every day and any time is not a preference")
+        if self.client_id is not None and not self.client_id:
+            raise ValueError("A client rule needs a client id")
 
     def matches(self, weekday: int, wall: time) -> bool:
         return weekday in self.weekdays and (
             not self.windows or any(window.contains(wall) for window in self.windows))
+
+
+@dataclass(frozen=True)
+class ClientReference:
+    """A client profile as the owner sees it: stable id, current display name, and enough
+    owner-only detail to tell duplicate names apart."""
+
+    client_id: str
+    name: str
+    phone_last4: str = ""
+    service_address: str = ""
+
+
+@dataclass(frozen=True)
+class AmbiguousClient:
+    """A name that fits several profiles; the owner picks one and reviews again."""
+
+    name: str
+    candidates: tuple[ClientReference, ...]
 
 
 @dataclass(frozen=True)
@@ -124,6 +161,8 @@ class PreferenceReview:
     problems: tuple[PreferenceProblem, ...]
     timezone: str
     token: str | None
+    clients: tuple[ClientReference, ...] = ()
+    ambiguities: tuple[AmbiguousClient, ...] = ()
 
     @property
     def ready(self) -> bool:
@@ -132,6 +171,10 @@ class PreferenceReview:
 
 class ReviewMismatch(ValueError):
     """The submitted text or interpretation is not the one the review covered."""
+
+
+class InvalidClientSelection(ValueError):
+    """A selected profile is unknown, inactive, or not a candidate for that name."""
 
 
 class PreferenceInterpreter(Protocol):
@@ -171,22 +214,33 @@ def clean_text(text: str) -> str:
 
 
 def rules_payload(rules: tuple[PreferenceRule, ...]) -> list[dict[str, object]]:
+    # ``client_id`` appears only on client rules, so business-wide tokens stay as #380 made them.
     return [{"weekdays": list(rule.weekdays),
              "windows": [{"start": window.start.strftime("%H:%M"),
-                          "end": window.end.strftime("%H:%M")} for window in rule.windows]}
+                          "end": window.end.strftime("%H:%M")} for window in rule.windows],
+             **({} if rule.client_id is None else {"client_id": rule.client_id})}
             for rule in rules]
 
 
-def rules_from_payload(payload: object) -> tuple[PreferenceRule, ...]:
-    """Strictly parse and validate rules; ValueError for anything off-schema."""
+def rules_from_payload(payload: object, extra: frozenset[str] = frozenset({"client_id"}),
+                       ) -> tuple[PreferenceRule, ...]:
+    """Strictly parse and validate rules; ValueError for anything off-schema.
+
+    ``extra`` names the optional keys beyond weekdays and windows: stored rules may carry a
+    ``client_id``; the model's raw rules may carry a ``client_name`` instead.
+    """
     if not isinstance(payload, list) or len(payload) > MAX_RULES:
         raise ValueError(f"Use at most {MAX_RULES} preference rules")
     rules = []
     for item in payload:
-        if (not isinstance(item, dict) or set(item) != {"weekdays", "windows"}
+        if (not isinstance(item, dict) or not {"weekdays", "windows"} <= set(item)
+                or set(item) - {"weekdays", "windows"} - extra
                 or not isinstance(item["weekdays"], list)
                 or not isinstance(item["windows"], list)):
             raise ValueError("A preference rule needs weekdays and windows")
+        client_id = item.get("client_id")
+        if client_id is not None and not isinstance(client_id, str):
+            raise ValueError("A client id must be text")
         windows = []
         for window in item["windows"]:
             if not isinstance(window, dict) or set(window) != {"start", "end"}:
@@ -195,7 +249,7 @@ def rules_from_payload(payload: object) -> tuple[PreferenceRule, ...]:
         days = item["weekdays"]
         if any(type(day) is not int for day in days):
             raise ValueError("Weekdays must be whole numbers")
-        rules.append(PreferenceRule(tuple(days), tuple(windows)))
+        rules.append(PreferenceRule(tuple(days), tuple(windows), client_id))
     return tuple(rules)
 
 
@@ -213,9 +267,100 @@ def review_token(text: str, rules: tuple[PreferenceRule, ...], timezone: str) ->
     return sha256(canonical.encode()).hexdigest()
 
 
-def review_preferences(interpreter: PreferenceInterpreter, text: str,
-                       timezone: str) -> PreferenceReview:
-    """Interpret and validate. Writes nothing; activation is a separate, explicit step."""
+def normalize_name(name: str) -> str:
+    """Case, spacing and punctuation insensitive form used only to match names to profiles."""
+    return " ".join(re.findall(r"\w+", name.casefold()))
+
+
+def candidate_profiles(name: str, profiles: Sequence[ClientReference]) -> tuple[ClientReference, ...]:
+    """Active profiles the written name can mean: exact full-name matches, else every profile
+    whose name contains all the written words (so a first name finds its profile)."""
+    wanted = normalize_name(name)
+    if not wanted:
+        return ()
+    exact = tuple(profile for profile in profiles if normalize_name(profile.name) == wanted)
+    if exact:
+        return exact
+    words = set(wanted.split())
+    return tuple(profile for profile in profiles if words <= set(normalize_name(profile.name).split()))
+
+
+def resolve_client_names(rules: tuple[PreferenceRule, ...], names: Sequence[str],
+                         profiles: Sequence[ClientReference], selections: Mapping[str, str],
+                         ) -> tuple[tuple[PreferenceRule, ...], tuple[PreferenceProblem, ...],
+                                    tuple[AmbiguousClient, ...]]:
+    """Bind each named rule to a profile id, or explain why that cannot happen yet.
+
+    ``profiles`` must be the business's own active profiles, so another business's client can
+    never be a candidate. A selection must name one of those profiles and must be a candidate
+    for the name it answers, otherwise ``InvalidClientSelection``: it is refused, not ignored
+    and not turned into general guidance.
+    """
+    by_id = {profile.client_id: profile for profile in profiles}
+    chosen = {normalize_name(name): client_id for name, client_id in selections.items()}
+    if any(client_id not in by_id for client_id in chosen.values()):
+        raise InvalidClientSelection("Choose a client from this business")
+    resolved: list[PreferenceRule] = []
+    problems: list[PreferenceProblem] = []
+    ambiguities: dict[str, AmbiguousClient] = {}
+    unknown: set[str] = set()
+    for rule, name in zip(rules, names, strict=True):
+        key = normalize_name(name)
+        if not key:
+            resolved.append(rule)
+            continue
+        candidates = candidate_profiles(name, profiles)
+        pick = chosen.get(key)
+        if pick is not None and pick not in {item.client_id for item in candidates}:
+            raise InvalidClientSelection(f"That client does not match the name {name!r}")
+        if not candidates:
+            if key not in unknown:
+                unknown.add(key)
+                problems.append(PreferenceProblem(
+                    "unknown_client", f"No client named \"{name}\" was found. Correct the name "
+                                      "or add the client first, then review again."))
+            continue
+        if len(candidates) > 1 and pick is None:
+            if key not in ambiguities:
+                ambiguities[key] = AmbiguousClient(name, candidates)
+                problems.append(PreferenceProblem(
+                    "ambiguous_client", f"\"{name}\" matches more than one client. Choose the "
+                                        "one you mean, then review again."))
+            continue
+        resolved.append(PreferenceRule(rule.weekdays, rule.windows,
+                                       pick if pick is not None else candidates[0].client_id))
+    return tuple(resolved), tuple(problems), tuple(ambiguities.values())
+
+
+def applicable_rules(preferences: SchedulingPreferences | None, timezone: str,
+                     client_id: str | None) -> tuple[PreferenceRule, ...]:
+    """The rules that guide one client: their own, plus business-wide ones on other weekdays.
+
+    Client guidance overrides business-wide guidance on the weekdays it names (a rule
+    naming Thursday replaces the general Thursday preference for that client, whatever its
+    hours). Business-wide guidance on every other weekday stays. Other clients' rules never
+    appear. No client (``None``) gets business-wide rules only. Preferences reviewed for
+    another timezone apply to no one.
+    """
+    if preferences is None or preferences.timezone != timezone:
+        return ()
+    own = tuple(rule for rule in preferences.rules
+                if client_id is not None and rule.client_id == client_id)
+    named = {day for rule in own for day in rule.weekdays}
+    general: list[PreferenceRule] = []
+    for rule in preferences.rules:
+        if rule.client_id is not None:
+            continue
+        days = tuple(day for day in rule.weekdays if day not in named)
+        if days:
+            general.append(PreferenceRule(days, rule.windows))
+    return own + tuple(general)
+
+
+def review_preferences(interpreter: PreferenceInterpreter, text: str, timezone: str,
+                       profiles: Sequence[ClientReference] = (),
+                       selections: Mapping[str, str] | None = None) -> PreferenceReview:
+    """Interpret, resolve client names and validate. Writes nothing; activation is separate."""
     owner_text = clean_text(text)
     raw = interpreter.interpret_scheduling_preferences(owner_text, timezone)
     if (not isinstance(raw, dict) or set(raw) != {"rules", "problems"}
@@ -229,33 +374,61 @@ def review_preferences(interpreter: PreferenceInterpreter, text: str,
         problems.append(PreferenceProblem(item["kind"], item["message"].strip()[:300]
                                           or "This instruction needs correction."))
     rules: tuple[PreferenceRule, ...] = ()
+    ambiguities: tuple[AmbiguousClient, ...] = ()
     try:
-        rules = rules_from_payload(raw["rules"])
+        names = _client_names(raw["rules"])
+        rules = rules_from_payload(raw["rules"], frozenset({"client_name"}))
+        rules, name_problems, ambiguities = resolve_client_names(
+            rules, names, profiles, selections or {})
+        problems.extend(name_problems)
+    except InvalidClientSelection:
+        raise
     except ValueError as exc:
+        rules = ()
         problems.append(PreferenceProblem("unclear", f"The interpretation was not usable: {exc}."))
     if not problems and not rules:
         problems.append(PreferenceProblem(
             "unclear", "No weekday or start-time preference was found. Name the days or times "
                        "you prefer."))
     if problems:
-        return PreferenceReview((), tuple(problems), timezone, None)
-    return PreferenceReview(rules, (), timezone, review_token(owner_text, rules, timezone))
+        return PreferenceReview((), tuple(problems), timezone, None, (), ambiguities)
+    by_id = {profile.client_id: profile for profile in profiles}
+    clients = tuple(dict.fromkeys(by_id[rule.client_id] for rule in rules if rule.client_id))
+    return PreferenceReview(rules, (), timezone, review_token(owner_text, rules, timezone), clients)
+
+
+def _client_names(payload: object) -> list[str]:
+    """The client name each raw rule mentions ('' for business-wide); strict about shape."""
+    names = []
+    for item in payload if isinstance(payload, list) else []:  # the rule parser rejects non-lists
+        name = item.get("client_name", "") if isinstance(item, dict) else ""
+        if not isinstance(name, str) or len(name.strip()) > MAX_CLIENT_NAME_CHARACTERS:
+            raise ValueError("A client name must be short text")
+        names.append(name.strip())
+    return names
 
 
 def reviewed_preferences(repository: SchedulingPreferencesRepository, business_id: str,
-                         token: str, timezone: str, now: datetime) -> SchedulingPreferences:
+                         token: str, timezone: str, now: datetime,
+                         active_client_ids: frozenset[str] = frozenset()) -> SchedulingPreferences:
     """The configuration an activation may store: exactly a review this server produced.
 
-    The text and rules come from the stored review, never from the caller. A retry after the
-    review expired is accepted only when that same review is already the active one, so a
-    replayed activation stays idempotent without admitting an unreviewed configuration.
+    The text and rules come from the stored review, never from the caller. Every client the
+    review binds must still be an active profile of this business (``active_client_ids``),
+    otherwise the review is refused and must be redone. A retry after the review expired, or
+    after a client was later removed, is accepted only when that same review is already the
+    active one, so a replayed activation stays idempotent without admitting an unreviewed
+    configuration.
     """
-    stored = repository.read_preference_review(business_id, token, now)
-    if stored is not None and stored.timezone == timezone:
-        return SchedulingPreferences(stored.text, stored.rules, stored.timezone, stored.token)
     active = repository.read_scheduling_preferences(business_id).preferences
     if active is not None and active.review_token == token and active.timezone == timezone:
         return active
+    stored = repository.read_preference_review(business_id, token, now)
+    if stored is not None and stored.timezone == timezone:
+        if any(rule.client_id not in active_client_ids
+               for rule in stored.rules if rule.client_id is not None):
+            raise ReviewMismatch("A client in this review is no longer available")
+        return SchedulingPreferences(stored.text, stored.rules, stored.timezone, stored.token)
     raise ReviewMismatch("No current review matches; the review may have expired")
 
 

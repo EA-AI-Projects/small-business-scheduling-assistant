@@ -9,7 +9,7 @@ import { describeRule } from "./preferencesText";
 
 const MAX_CHARACTERS = 1000;
 const KIND_LABELS: Record<string, string> = { unclear: "Unclear", contradictory: "Contradictory",
-  unsupported: "Not supported", client_specific: "Client-specific (not supported yet)",
+  unsupported: "Not supported", ambiguous_client: "Choose a client", unknown_client: "Client not found",
   constraint_override: "Booking rule (cannot be changed here)" };
 
 function length(value: string): number {
@@ -28,7 +28,9 @@ export function SchedulingPreferencesForm({ state, loadError = false, onRetry, o
 }) {
   const { api, data, notify } = useOwner();
   const [draft, setDraft] = useState(state?.active?.text ?? "");
-  const [reviewed, setReviewed] = useState<{ text: string; review: PreferenceReview } | null>(null);
+  const [reviewed, setReviewed] = useState<{ text: string; picks: string; review: PreferenceReview } | null>(null);
+  // The owner's profile choice for each ambiguous written name; a change needs a new review.
+  const [selections, setSelections] = useState<Record<string, string>>({});
   const [serverError, setServerError] = useState<string | null>(null);
   const [stale, setStale] = useState(false);
   const [fieldError, setFieldError] = useState<string | null>(null);
@@ -47,7 +49,8 @@ export function SchedulingPreferencesForm({ state, loadError = false, onRetry, o
 
   const timezone = data.policy?.record.policy.timezone ?? null;
   const active = state?.active ?? null;
-  const current = reviewed !== null && reviewed.text === text ? reviewed.review : null;
+  const picks = JSON.stringify(Object.entries(selections).sort());
+  const current = reviewed !== null && reviewed.text === text && reviewed.picks === picks ? reviewed.review : null;
 
   function edit(value: string) {
     setDraft(value);
@@ -69,13 +72,15 @@ export function SchedulingPreferencesForm({ state, loadError = false, onRetry, o
     }
     setFieldError(null);
     try {
+      const chosen = Object.entries(selections).map(([name, client_id]) => ({ name, client_id }));
       const body = await api.request<PreferenceReview>("/scheduling-preferences/review",
-        { method: "POST", body: { text } });
+        { method: "POST", body: chosen.length ? { text, client_selections: chosen } : { text } });
       focusResult.current = true;
-      setReviewed({ text, review: body });
+      setReviewed({ text, picks, review: body });
     } catch (error) {
       focusResult.current = true;
       setReviewed(null);
+      if (error instanceof ApiError && error.code === "INVALID_CLIENT_SELECTION") setSelections({});
       setServerError(`Nothing was reviewed or changed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
@@ -93,6 +98,7 @@ export function SchedulingPreferencesForm({ state, loadError = false, onRetry, o
       attempt.current = null;
       onState(updated);
       setReviewed(null);
+      setSelections({});
       setStale(false);
       notify("Scheduling preferences activated");
     } catch (error) {
@@ -124,6 +130,7 @@ export function SchedulingPreferencesForm({ state, loadError = false, onRetry, o
       attempt.current = null;
       onState(updated);
       setDraft("");
+      setSelections({});
       setReviewed(null);
       setStale(false);
       notify("Scheduling preferences cleared");
@@ -143,7 +150,7 @@ export function SchedulingPreferencesForm({ state, loadError = false, onRetry, o
   return <section className="card scheduling-preferences-card">
     <h3>Scheduling preferences</h3>
     <p className="hint">Tell the assistant which weekdays and visit start times you prefer for the whole
-      business. Clients still see every open time; preferred starts are marked Recommended. Hours,
+      business or for a particular client. Clients still see every open time; preferred starts are marked Recommended. Hours,
       holidays, buffers, and your approval are never changed by preferences.</p>
     {state === null && loadError && <div className="field-error" role="alert">
       <p>Scheduling preferences could not load. Nothing was changed.</p>
@@ -155,7 +162,7 @@ export function SchedulingPreferencesForm({ state, loadError = false, onRetry, o
         <h4>Active preferences</h4>
         {active ? <>
           <p>{active.text}</p>
-          <ul>{active.rules.map((rule) => <li key={JSON.stringify(rule)}>{describeRule(rule)}</li>)}</ul>
+          <ul>{active.rules.map((rule) => <li key={JSON.stringify(rule)}>{describeRule(rule, active.clients)}</li>)}</ul>
           <p className="meta">Times are in {active.timezone}.</p>
           {active.timezone !== timezone && <p className="field-error" role="alert">The business timezone is
             now {timezone}, so these preferences are paused. Review and activate them again.</p>}
@@ -169,7 +176,8 @@ export function SchedulingPreferencesForm({ state, loadError = false, onRetry, o
             "scheduling-preferences-hint"].filter(Boolean).join(" ")}
           onChange={(event) => edit(event.target.value)} />
         <p id="scheduling-preferences-hint" className="hint">For example: Prefer mornings generally, and Thursday
-          afternoons. Times are in {timezone}. Preferences for a particular client are not supported yet.</p>
+          afternoons, and Thursday mornings for Client A. A client&apos;s preference replaces the general one on the
+          weekdays it names. Times are in {timezone}.</p>
         {fieldError && <p id="scheduling-preferences-error" className="field-error">{fieldError}</p>}
       </div>
       <div><BusyButton onClick={review}>Review changes</BusyButton></div>
@@ -180,10 +188,25 @@ export function SchedulingPreferencesForm({ state, loadError = false, onRetry, o
           <p>This cannot be activated yet. Correct the text and review again; nothing was changed.</p>
           <ul>{current.problems.map((problem, index) => <li key={index}>
             <strong>{KIND_LABELS[problem.kind] ?? "Needs correction"}:</strong> {problem.message}</li>)}</ul>
+          {current.ambiguities.map((ambiguity) => <fieldset key={ambiguity.name} className="client-picker">
+            <legend>Which client is “{ambiguity.name}”?</legend>
+            {ambiguity.candidates.map((candidate) => {
+              const id = `pick-${ambiguity.name}-${candidate.client_id}`;
+              return <div key={candidate.client_id} className="radio-row">
+                <input type="radio" id={id} name={`pick-${ambiguity.name}`} value={candidate.client_id}
+                  checked={selections[ambiguity.name] === candidate.client_id}
+                  onChange={() => setSelections((existing) => ({ ...existing, [ambiguity.name]: candidate.client_id }))} />
+                <label htmlFor={id}>{candidate.name}, phone ending {candidate.phone_last4}, {candidate.service_address}</label>
+              </div>;
+            })}
+          </fieldset>)}
+          {current.ambiguities.length > 0 && <p className="meta">After choosing, press Review changes again.</p>}
         </div>}
         {current?.ready && <div role="status">
           <h4>What the assistant understood</h4>
-          <ul>{current.rules.map((rule) => <li key={JSON.stringify(rule)}>{describeRule(rule)}</li>)}</ul>
+          {current.clients.length > 0 && <p>Applies to: {current.clients.map((client) => client.name ?? "Removed client").join(", ")}.
+            Each preference stays with that profile if the client is renamed.</p>}
+          <ul>{current.rules.map((rule) => <li key={JSON.stringify(rule)}>{describeRule(rule, current.clients)}</li>)}</ul>
           <p className="meta">Times are in {current.timezone}. Nothing is active until you activate it.</p>
           <BusyButton className="primary" onClick={activate}>Activate preferences</BusyButton>
         </div>}

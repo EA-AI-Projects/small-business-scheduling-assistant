@@ -102,6 +102,24 @@ describe("client calendar and bookings", () => {
     expect(document.body.textContent).toContain("Send request for owner approval");
   });
 
+  it("highlights different starts for two clients over the same open calendar", async () => {
+    const other = "2026-10-09T22:00:00Z";
+    let recommended = [START]; // the signed-in client's own applicable guidance, chosen by the server
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => url.includes("availability")
+      ? json({ day: TODAY, duration_minutes: 90, starts_at: [START, other], recommended_starts_at: recommended })
+      : json({ bookings: [] })));
+    const labelled = () => Array.from(host.querySelectorAll<HTMLButtonElement>("[data-available-start]"))
+      .map((button) => button.textContent!.includes("Recommended"));
+    await render("calendar");
+    expect(labelled()).toEqual([true, false]);
+    await act(async () => root.unmount());
+    root = createRoot(host);
+    recommended = [other];
+    await render("calendar");
+    expect(labelled()).toEqual([false, true]);
+    expect(host.querySelectorAll("[data-available-start]")).toHaveLength(2); // nothing removed
+  });
+
   it("shows ordinary starts without labels when none is recommended", async () => {
     vi.stubGlobal("fetch", vi.fn(async (url: string) => url.includes("availability")
       ? json({ day: TODAY, duration_minutes: 90, starts_at: [START], recommended_starts_at: [] })

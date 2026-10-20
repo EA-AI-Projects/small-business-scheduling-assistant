@@ -80,7 +80,7 @@ Conversation tools derive identity from the verified receipt, validate strict ar
 | Completed visit lookup | `VISITS#<business_id>#<sha256(client_id)> / END#<UTC-end>#<id>`; strongly consistent reverse query for retention. |
 | Identity | Hashed subject link, business target pointer and administrative events. |
 | Conversation/history | Receipt and accepted-send records, actor-scoped `SMS_HISTORY#` pointers and short-lived conversation state. |
-| Scheduling preferences | `PREFERENCES#SCHEDULING` under the business: versioned `payload` (owner text, validated rules, reviewed timezone, review token), idempotency item and audit written in one transaction like the business profile; `PREFERENCES#REVIEW#<token>` holds a server-produced ready review for one hour (`expires_at_epoch`, checked on read) so activation applies only a stored review. |
+| Scheduling preferences | `PREFERENCES#SCHEDULING` under the business: versioned `payload` (owner text, validated rules each optionally bound to a stable `client_id`, reviewed timezone, review token), idempotency item and audit written in one transaction like the business profile; `PREFERENCES#REVIEW#<token>` holds a server-produced ready review for one hour (`expires_at_epoch`, checked on read) so activation applies only a stored review, including its resolved profile selections, which are revalidated against the business's active profiles at activation. |
 | Invitations | `SETTINGS#BOOKING_OUTREACH`, deterministic invitation intents, scheduled per-client guard. |
 | Due work | Sparse `HoldDueIndex` and `OutboxDueIndex`; wake-up indexes only, followed by authoritative rereads. |
 

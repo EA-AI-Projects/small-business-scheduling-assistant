@@ -193,6 +193,30 @@
         "title": "ClientProfileBody",
         "type": "object"
       },
+      "ClientSelectionBody": {
+        "additionalProperties": false,
+        "description": "The owner's answer for an ambiguous name: the name as the review showed it, and a profile.",
+        "properties": {
+          "client_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Client Id",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "client_id"
+        ],
+        "title": "ClientSelectionBody",
+        "type": "object"
+      },
       "ClientSession": {
         "properties": {
           "booking_horizon_days": {
@@ -780,6 +804,14 @@
       "PreferenceTextBody": {
         "additionalProperties": false,
         "properties": {
+          "client_selections": {
+            "items": {
+              "$ref": "#/components/schemas/ClientSelectionBody"
+            },
+            "maxItems": 8,
+            "title": "Client Selections",
+            "type": "array"
+          },
           "text": {
             "maxLength": 1000,
             "minLength": 1,
