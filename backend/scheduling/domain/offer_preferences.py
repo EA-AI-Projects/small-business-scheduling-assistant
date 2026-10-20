@@ -1,4 +1,4 @@
-"""Business-wide scheduling preferences applied to SMS offer selection (#382).
+"""Business-wide and client-specific scheduling preferences applied to SMS offer selection (#382, #383).
 
 The SMS paths hand this module the valid starts inside the window the client asked for.
 It only chooses which of them to offer first: preferred starts take the slots, other valid
@@ -25,15 +25,19 @@ def no_preferences(starts: tuple[datetime, ...]) -> frozenset[datetime]:
     return frozenset()
 
 
-def preferred_reader(repository: object, business_id: str, timezone: str) -> Preferred:
+def preferred_reader(repository: object, business_id: str, timezone: str,
+                     client_id: str | None = None) -> Preferred:
     """Read the active preferences on first use; any failure means ordinary offers.
 
-    Logs the failure type only, never owner text or client data.
+    ``client_id`` must be the verified sender's client id from the receipt/profile context,
+    never text or tool input; it selects that client's rules through the portal's shared
+    ``recommended_starts``. Logs the failure type only, never owner text or client data.
     """
     def preferred(starts: tuple[datetime, ...]) -> frozenset[datetime]:
         try:
             reader = repository.read_scheduling_preferences  # type: ignore[attr-defined]
-            return recommended_starts(reader(business_id).preferences, timezone, starts)
+            return recommended_starts(reader(business_id).preferences, timezone, starts,
+                                       client_id)
         except Exception as exc:  # noqa: BLE001 - guidance must never break SMS
             LOGGER.warning("Scheduling preferences unavailable for SMS offer (%s)",
                            type(exc).__name__)

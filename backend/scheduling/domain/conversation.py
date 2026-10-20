@@ -1442,7 +1442,8 @@ class ConversationService:
                 prompt is not None and prompt.kind == PromptKind.RESCHEDULE_DAY
                 and not prompt.expired(now) and prompt.client_id == receipt.client_id)
             else None,
-            preferred_reader(self._repository, receipt.business_id, policy.timezone))
+            preferred_reader(self._repository, receipt.business_id, policy.timezone,
+                             receipt.client_id))
 
         def check(text: str) -> str | None:
             return check_reply(text, tools.results)
@@ -1904,7 +1905,8 @@ class ConversationService:
                                            for day in dates),
                                      reason="no_openings", detail=span)
         note = ""
-        preferred = preferred_reader(self._repository, receipt.business_id, policy.timezone)
+        preferred = preferred_reader(self._repository, receipt.business_id, policy.timezone,
+                             receipt.client_id)
         chosen: tuple[datetime, ...]
         if earliest is not None and latest is not None:
             wall = {start: start.astimezone(zone).time() for start in starts}
