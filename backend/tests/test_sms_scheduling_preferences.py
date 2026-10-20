@@ -7,8 +7,9 @@ in a stored offer and that acceptance, revalidation, expiry and replay are uncha
 how the real model words an offer. No live model, SMS, or AWS is used.
 
 The scenarios mirror the business-wide portal flags (#380): the same rules, applied by the
-same ``recommended_starts``, mark the same valid starts. They are defined here so they merge
-easily with a shared scenario module.
+same ``recommended_starts``, mark the same valid starts. The rule sets come from the shared
+``preference_scenarios`` module; client-specific SMS behavior is in
+``test_sms_client_preferences.py`` (#383).
 """
 
 import json
@@ -33,6 +34,11 @@ from scheduling.domain.scheduling_preferences import (
 )
 from scheduling.domain.sms_ingress import InboundReceipt, Keyword, SenderRole
 from scheduling.domain.sms_processing import ReceiptProcessor
+from tests.preference_scenarios import (
+    SATURDAY_ONLY_RULES,
+    THURSDAY_AFTERNOON_RULES,
+    THURSDAY_LATE_RULES,
+)
 
 SENDER = "+14155550101"
 WED, THU, FRI = "2026-09-30", "2026-10-01", "2026-10-02"
@@ -44,12 +50,9 @@ def window(start: str, end: str) -> PreferenceWindow:
     return PreferenceWindow(time.fromisoformat(start), time.fromisoformat(end))
 
 
-# SMS-local scenarios (#382); #383 will consolidate onto the shared preference_scenarios
-# module. Thursday afternoon (13:00-15:00 has eight valid starts), Thursday late (three), and a
-# weekday no day in the requested range has.
-SMS_THURSDAY_AFTERNOON: Scenario = (PreferenceRule((3,), (window("13:00", "15:00"),)),)
-SMS_THURSDAY_LATE: Scenario = (PreferenceRule((3,), (window("14:30", "15:30"),)),)
-SMS_SATURDAY_ONLY: Scenario = (PreferenceRule((5,)),)
+SMS_THURSDAY_AFTERNOON: Scenario = THURSDAY_AFTERNOON_RULES
+SMS_THURSDAY_LATE: Scenario = THURSDAY_LATE_RULES
+SMS_SATURDAY_ONLY: Scenario = SATURDAY_ONLY_RULES
 
 
 def activate(chat: Harness, rules: Scenario | None, text: str = OWNER_TEXT) -> None:
