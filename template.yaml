@@ -192,7 +192,7 @@ Resources:
           Projection: {ProjectionType: KEYS_ONLY}
       PointInTimeRecoverySpecification: {PointInTimeRecoveryEnabled: true}
       SSESpecification: {SSEEnabled: true}
-      # Only 30-minute SMS offer/confirmation memory sets this attribute.
+      # Set by 30-minute SMS offer/confirmation memory and one-hour scheduling-preference reviews.
       TimeToLiveSpecification: {AttributeName: expires_at_epoch, Enabled: true}
 
   OutboxDeadLetterQueue:

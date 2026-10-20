@@ -14,7 +14,7 @@ constraints blocks activation; a subset is never activated silently.
 
 import json
 from dataclasses import dataclass
-from datetime import time
+from datetime import datetime, time, timedelta
 from hashlib import sha256
 from itertools import pairwise
 from typing import Protocol
@@ -22,6 +22,7 @@ from typing import Protocol
 MAX_TEXT_CHARACTERS = 1000
 MAX_RULES = 8
 MAX_WINDOWS_PER_RULE = 4
+REVIEW_TTL = timedelta(hours=1)
 PROBLEM_KINDS = ("unclear", "contradictory", "unsupported", "client_specific",
                  "constraint_override")
 
@@ -96,6 +97,20 @@ class SchedulingPreferences:
 
 
 @dataclass(frozen=True)
+class StoredReview:
+    """A server-produced, ready review, kept briefly so activation can apply exactly it."""
+
+    text: str
+    rules: tuple[PreferenceRule, ...]
+    timezone: str
+    token: str
+
+    def __post_init__(self) -> None:
+        if self.token != review_token(self.text, self.rules, self.timezone):
+            raise ValueError("Stored review does not match its token")
+
+
+@dataclass(frozen=True)
 class SchedulingPreferencesRecord:
     preferences: SchedulingPreferences | None
     version: int
@@ -128,6 +143,16 @@ class PreferenceInterpreter(Protocol):
 class SchedulingPreferencesRepository(Protocol):
     def read_scheduling_preferences(self, business_id: str) -> SchedulingPreferencesRecord:
         """Return the empty version-zero record for a business that never saved one."""
+        ...
+
+    def save_preference_review(self, business_id: str, review: StoredReview,
+                               expires_at: datetime) -> None:
+        """Store a ready review under its token, scoped to the business, until it expires."""
+        ...
+
+    def read_preference_review(self, business_id: str, token: str,
+                               now: datetime) -> StoredReview | None:
+        """The unexpired review this business produced for the token, else None."""
         ...
 
     def save_scheduling_preferences(self, business_id: str, actor_id: str, key: str,
@@ -217,14 +242,21 @@ def review_preferences(interpreter: PreferenceInterpreter, text: str,
     return PreferenceReview(rules, (), timezone, review_token(owner_text, rules, timezone))
 
 
-def reviewed_preferences(text: str, rules_json: object, timezone: str,
-                         token: str) -> SchedulingPreferences:
-    """The configuration an activation may store, only if it is exactly what was reviewed."""
-    owner_text = clean_text(text)
-    rules = rules_from_payload(rules_json)
-    if not rules or token != review_token(owner_text, rules, timezone):
-        raise ReviewMismatch("The text or interpretation changed since it was reviewed")
-    return SchedulingPreferences(owner_text, rules, timezone, token)
+def reviewed_preferences(repository: SchedulingPreferencesRepository, business_id: str,
+                         token: str, timezone: str, now: datetime) -> SchedulingPreferences:
+    """The configuration an activation may store: exactly a review this server produced.
+
+    The text and rules come from the stored review, never from the caller. A retry after the
+    review expired is accepted only when that same review is already the active one, so a
+    replayed activation stays idempotent without admitting an unreviewed configuration.
+    """
+    stored = repository.read_preference_review(business_id, token, now)
+    if stored is not None and stored.timezone == timezone:
+        return SchedulingPreferences(stored.text, stored.rules, stored.timezone, stored.token)
+    active = repository.read_scheduling_preferences(business_id).preferences
+    if active is not None and active.review_token == token and active.timezone == timezone:
+        return active
+    raise ReviewMismatch("No current review matches; the review may have expired")
 
 
 def save_preferences(repository: SchedulingPreferencesRepository, business_id: str,

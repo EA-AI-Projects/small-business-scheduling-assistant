@@ -91,10 +91,12 @@ from scheduling.domain.owner_policy import (
     PolicyRepository,
 )
 from scheduling.domain.scheduling_preferences import (
-        PreferenceInterpreter,
+    REVIEW_TTL,
+    PreferenceInterpreter,
     ReviewMismatch,
     SchedulingPreferencesRecord,
     SchedulingPreferencesRepository,
+    StoredReview,
     clean_text,
     review_preferences,
     reviewed_preferences,
@@ -241,22 +243,11 @@ class PreferenceTextBody(StrictModel):
         return clean_text(value)
 
 
-class PreferenceWindowBody(StrictModel):
-    start: str
-    end: str
-
-
-class PreferenceRuleBody(StrictModel):
-    weekdays: list[int]
-    windows: list[PreferenceWindowBody]
-
-
-class PreferenceActivateBody(PreferenceTextBody):
-    """The reviewed text and interpretation, bound together by the review token."""
+class PreferenceActivateBody(StrictModel):
+    """Only the token of a review this server produced; text and rules come from that review."""
 
     expected_version: int = Field(ge=0)
-    rules: list[PreferenceRuleBody]
-    review_token: str = Field(min_length=64, max_length=64)
+    review_token: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class PreferenceClearBody(StrictModel):
@@ -766,6 +757,11 @@ def create_owner_app(
             raise _error("INTERPRETER_UNAVAILABLE",
                          "The assistant could not review these preferences. Try again.",
                          503) from exc
+        if review.token is not None:
+            # Activation applies this stored review, never rules the caller sends back.
+            cast(SchedulingPreferencesRepository, repository).save_preference_review(
+                business_id, StoredReview(body.text, review.rules, review.timezone, review.token),
+                now() + REVIEW_TTL)
         return {"ready": review.ready, "timezone": review.timezone,
                 "rules": rules_payload(review.rules), "review_token": review.token,
                 "problems": [{"kind": item.kind, "message": item.message}
@@ -778,11 +774,12 @@ def create_owner_app(
         repo = cast(SchedulingPreferencesRepository, repository)
         zone = business_timezone(business_id)
         try:
-            reviewed = reviewed_preferences(
-                body.text, [item.model_dump() for item in body.rules], zone, body.review_token)
+            reviewed = reviewed_preferences(repo, business_id, body.review_token, zone, now())
         except ReviewMismatch as exc:
             raise _error("REVIEW_MISMATCH", str(exc) + ". Review the preferences again.",
                          409) from exc
+        except ValueError as exc:
+            raise _error("INVALID_REQUEST", str(exc), 422) from exc
         record = run(lambda: save_preferences(repo, business_id, owner.actor_id, request_key,
                                               body.expected_version, reviewed),
                      lambda: preferences_view(repo.read_scheduling_preferences(business_id)))

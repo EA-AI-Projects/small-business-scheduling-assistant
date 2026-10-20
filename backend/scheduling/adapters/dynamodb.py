@@ -64,6 +64,7 @@ from scheduling.domain.owner_policy import (
 from scheduling.domain.scheduling_preferences import (
     SchedulingPreferences,
     SchedulingPreferencesRecord,
+    StoredReview,
     rules_from_payload,
     rules_payload,
 )
@@ -305,6 +306,28 @@ class DynamoDBCalendarRepository:
                 return existing
             raise RevisionConflict("Business profile version changed") from exc
         return BusinessProfileRecord(profile, next_version)
+
+    def save_preference_review(self, business_id: str, review: StoredReview,
+                               expires_at: datetime) -> None:
+        # Same token means same content, so an overwrite only extends the expiry.
+        self._client.transact_write_items(TransactItems=[{"Put": {
+            "TableName": self._table,
+            "Item": {
+                **self._business_key(business_id, f"PREFERENCES#REVIEW#{review.token}"),
+                "payload": {"S": json.dumps({
+                    "text": review.text, "rules": rules_payload(review.rules),
+                    "timezone": review.timezone}, sort_keys=True)},
+                "expires_at_epoch": {"N": str(int(expires_at.timestamp()))}}}}])
+
+    def read_preference_review(self, business_id: str, token: str,
+                               now: datetime) -> StoredReview | None:
+        item = self._get(self._business_key(business_id, f"PREFERENCES#REVIEW#{token}"))
+        # TTL deletion is lazy, so expiry is checked here as well.
+        if item is None or int(item["expires_at_epoch"]["N"]) <= int(now.timestamp()):
+            return None
+        stored = json.loads(item["payload"]["S"])
+        return StoredReview(stored["text"], rules_from_payload(stored["rules"]),
+                            stored["timezone"], token)
 
     def read_scheduling_preferences(self, business_id: str) -> SchedulingPreferencesRecord:
         item = self._get(self._business_key(business_id, "PREFERENCES#SCHEDULING"))

@@ -4,6 +4,7 @@ No route accepts a client or business identifier from the caller; both come from
 the active link of the verified token subject.
 """
 
+import logging
 from collections.abc import Callable
 from datetime import UTC, date, datetime
 from typing import Annotated, Protocol, cast
@@ -272,8 +273,10 @@ def add_client_session_route(
             preferences = store.read_scheduling_preferences(session.business_id).preferences
             flagged = recommended_starts(
                 preferences, store.read_policy(session.business_id).timezone, starts)
-        except (OSError, ValueError, KeyError, RuntimeError):
-            # Recommendations are optional guidance; ordinary availability must still show.
+        except Exception:  # noqa: BLE001 - optional guidance must not hide availability
+            # Log the failure type only: never owner text or client data.
+            logging.getLogger(__name__).warning(
+                "Scheduling preferences unavailable; no recommendations", exc_info=False)
             flagged = frozenset()
         return ClientAvailability(
             day=query.day, duration_minutes=duration, starts_at=list(starts),

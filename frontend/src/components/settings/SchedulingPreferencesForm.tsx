@@ -21,8 +21,9 @@ function length(value: string): number {
  * separately and changes only when Activate or Clear succeeds; a review binds to the exact text it
  * interpreted, so editing the text hides Activate until it is reviewed again.
  */
-export function SchedulingPreferencesForm({ state, onState, onDirtyChange }: {
+export function SchedulingPreferencesForm({ state, loadError = false, onRetry, onState, onDirtyChange }: {
   state: PreferencesState | null; onState: (state: PreferencesState) => void;
+  loadError?: boolean; onRetry?: () => void;
   onDirtyChange?: (dirty: boolean) => void;
 }) {
   const { api, data, notify } = useOwner();
@@ -82,8 +83,8 @@ export function SchedulingPreferencesForm({ state, onState, onDirtyChange }: {
   async function activate() {
     if (!state || !current?.ready || !current.review_token) return;
     setServerError(null);
-    const body: PreferenceActivateBody = { text, rules: current.rules,
-      review_token: current.review_token, expected_version: state.version };
+    // Only the token of the server's stored review: the server applies that review, not rules sent here.
+    const body: PreferenceActivateBody = { review_token: current.review_token, expected_version: state.version };
     const signature = JSON.stringify(body);
     if (attempt.current?.signature !== signature) attempt.current = { signature, key: crypto.randomUUID() };
     try {
@@ -144,7 +145,11 @@ export function SchedulingPreferencesForm({ state, onState, onDirtyChange }: {
     <p className="hint">Tell the assistant which weekdays and visit start times you prefer for the whole
       business. Clients still see every open time; preferred starts are marked Recommended. Hours,
       holidays, buffers, and your approval are never changed by preferences.</p>
-    {state === null && <p className="empty">Loading scheduling preferences…</p>}
+    {state === null && loadError && <div className="field-error" role="alert">
+      <p>Scheduling preferences could not load. Nothing was changed.</p>
+      <BusyButton onClick={async () => { onRetry?.(); }}>Retry</BusyButton>
+    </div>}
+    {state === null && !loadError && <p className="empty" role="status">Loading scheduling preferences…</p>}
     {state && <div className="form-stack">
       <div className="active-preferences" role="group" aria-label="Active preferences">
         <h4>Active preferences</h4>

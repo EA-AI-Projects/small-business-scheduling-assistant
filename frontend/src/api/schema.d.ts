@@ -739,41 +739,23 @@ export interface components {
         };
         /**
          * PreferenceActivateBody
-         * @description The reviewed text and interpretation, bound together by the review token.
+         * @description Only the token of a review this server produced; text and rules come from that review.
          */
         PreferenceActivateBody: {
             /** Expected Version */
             expected_version: number;
             /** Review Token */
             review_token: string;
-            /** Rules */
-            rules: components["schemas"]["PreferenceRuleBody"][];
-            /** Text */
-            text: string;
         };
         /** PreferenceClearBody */
         PreferenceClearBody: {
             /** Expected Version */
             expected_version: number;
         };
-        /** PreferenceRuleBody */
-        PreferenceRuleBody: {
-            /** Weekdays */
-            weekdays: number[];
-            /** Windows */
-            windows: components["schemas"]["PreferenceWindowBody"][];
-        };
         /** PreferenceTextBody */
         PreferenceTextBody: {
             /** Text */
             text: string;
-        };
-        /** PreferenceWindowBody */
-        PreferenceWindowBody: {
-            /** End */
-            end: string;
-            /** Start */
-            start: string;
         };
         /** RemoveBlockBody */
         RemoveBlockBody: {

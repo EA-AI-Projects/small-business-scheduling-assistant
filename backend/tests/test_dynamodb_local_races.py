@@ -4,7 +4,7 @@ import os
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from hashlib import sha256
 from threading import Barrier
 from time import monotonic, sleep
@@ -31,7 +31,13 @@ from scheduling.domain.client_records import (
     RecordConflict,
 )
 from scheduling.domain.conversation_state import ConversationState, PromptKind
-from scheduling.domain.holds import CreateHold, HoldService, OutboxIntent, RevisionConflict
+from scheduling.domain.holds import (
+    CreateHold,
+    HoldService,
+    IdempotencyKeyReused,
+    OutboxIntent,
+    RevisionConflict,
+)
 from scheduling.domain.lifecycle import (
     Action,
     ActorRole,
@@ -48,6 +54,13 @@ from scheduling.domain.outbox import (
     OutboxRecord,
 )
 from scheduling.domain.owner_policy import OwnerPolicyService, PolicyCommand
+from scheduling.domain.scheduling_preferences import (
+    PreferenceRule,
+    PreferenceWindow,
+    SchedulingPreferences,
+    StoredReview,
+    review_token,
+)
 from scheduling.domain.service_duration import ServiceDurationChanged
 from scheduling.domain.sms_ingress import ConsentEvidence, record_in_person_consent
 from scheduling.domain.sms_status import SmsDeliveryStatus
@@ -1378,6 +1391,77 @@ def test_same_key_business_profile_retry_returns_the_stored_result(race_env: Rac
     assert repo.read_business_profile(env.business) == first
     assert len([item for item in _business_items(env)
                 if item["SK"]["S"].startswith("AUDIT#profile#")]) == 1
+
+
+_PREFERENCE_ZONE = "America/Los_Angeles"
+
+
+def _preferences(text: str, weekday: int = 1) -> SchedulingPreferences:
+    rules = (PreferenceRule((weekday,), (PreferenceWindow(time(9), time(12)),)),)
+    return SchedulingPreferences(text, rules, _PREFERENCE_ZONE,
+                                 review_token(text, rules, _PREFERENCE_ZONE))
+
+
+def test_concurrent_stale_preference_saves_commit_at_most_one(race_env: RaceEnv) -> None:
+    env = race_env
+    repo = DynamoDBCalendarRepository(env.client, env.table)
+    barrier = Barrier(2)
+
+    def attempt(key: str) -> bool:
+        barrier.wait(timeout=5)
+        try:
+            repo.save_scheduling_preferences(env.business, "owner-1", key, 0, _preferences(key))
+        except RevisionConflict:
+            return False
+        return True
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [future.result() for future in [pool.submit(attempt, "key-a"),
+                                                  pool.submit(attempt, "key-b")]]
+    assert results.count(True) <= 1
+    record = repo.read_scheduling_preferences(env.business)
+    audits = [item for item in _business_items(env)
+              if item["SK"]["S"].startswith("AUDIT#preferences#")]
+    assert len(audits) == results.count(True) and record.version == results.count(True)
+
+
+def test_preference_retry_replays_and_activate_clear_activate_reads_back(
+        race_env: RaceEnv) -> None:
+    env = race_env
+    repo = DynamoDBCalendarRepository(env.client, env.table)
+    first = repo.save_scheduling_preferences(env.business, "owner-1", "one", 0, _preferences("one"))
+    assert first.version == 1 and first.preferences == _preferences("one")
+    assert repo.save_scheduling_preferences(
+        env.business, "owner-1", "one", 0, _preferences("one")) == first  # safe retry
+    with pytest.raises(IdempotencyKeyReused):
+        repo.save_scheduling_preferences(env.business, "owner-1", "one", 0, _preferences("two"))
+    with pytest.raises(RevisionConflict):
+        repo.save_scheduling_preferences(env.business, "owner-1", "stale", 0, _preferences("two"))
+
+    cleared = repo.save_scheduling_preferences(env.business, "owner-1", "clear", 1, None)
+    assert cleared.version == 2 and cleared.preferences is None
+    assert repo.save_scheduling_preferences(env.business, "owner-1", "clear", 1, None) == cleared
+    again = repo.save_scheduling_preferences(
+        env.business, "owner-1", "three", 2, _preferences("three", 3))
+    assert again.version == 3
+    assert repo.read_scheduling_preferences(env.business) == again
+    assert len([item for item in _business_items(env)
+                if item["SK"]["S"].startswith("AUDIT#preferences#")]) == 3
+
+
+def test_preference_review_is_business_scoped_and_expires(race_env: RaceEnv) -> None:
+    env = race_env
+    env.extra_businesses.append(f"{env.business}-other")
+    repo = DynamoDBCalendarRepository(env.client, env.table)
+    now = datetime(2026, 9, 28, 15, tzinfo=UTC)
+    prefs = _preferences("one")
+    review = StoredReview(prefs.text, prefs.rules, prefs.timezone, prefs.review_token)
+    repo.save_preference_review(env.business, review, now + timedelta(hours=1))
+    assert repo.read_preference_review(env.business, review.token, now) == review
+    assert repo.read_preference_review(f"{env.business}-other", review.token, now) is None
+    assert repo.read_preference_review(
+        env.business, review.token, now + timedelta(hours=1)) is None  # expired, TTL is lazy
+    assert repo.read_preference_review(env.business, "0" * 64, now) is None
 
 
 def test_hold_commit_requires_the_saved_default_to_be_unchanged(race_env: RaceEnv) -> None:

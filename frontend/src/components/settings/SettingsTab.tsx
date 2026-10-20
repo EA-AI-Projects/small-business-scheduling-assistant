@@ -20,12 +20,14 @@ export function SettingsTab() {
   const { api, data } = useOwner();
   const [preferences, setPreferences] = useState<PreferencesState | null>(null);
   const [preferencesError, setPreferencesError] = useState(false);
+  const [preferencesAttempt, setPreferencesAttempt] = useState(0);
   useEffect(() => {
     let live = true;
-    api.get<PreferencesState>("/scheduling-preferences").then((state) => { if (live) setPreferences(state); },
-      () => { if (live) setPreferencesError(true); });
+    api.get<PreferencesState>("/scheduling-preferences").then((state) => {
+      if (live) { setPreferences(state); setPreferencesError(false); }
+    }, () => { if (live) setPreferencesError(true); });
     return () => { live = false; };
-  }, [api]);
+  }, [api, preferencesAttempt]);
   const [open, setOpen] = useState<Editor | null>(null);
   const [dirty, setDirty] = useState({ business: false, regular: false, exception: false,
     advanced: false, invitations: false, preferences: false });
@@ -139,7 +141,8 @@ export function SettingsTab() {
           : <p className="empty">Load the pilot policy under Availability first.</p>)}
         {open === "invitations" && <OutreachForm onDirtyChange={(value) => setDirty((current) =>
           current.invitations === value ? current : { ...current, invitations: value })} />}
-        {open === "preferences" && <SchedulingPreferencesForm key={preferences ? "loaded" : "loading"} state={preferences} onState={setPreferences}
+        {open === "preferences" && <SchedulingPreferencesForm key={preferences ? "loaded" : "loading"} state={preferences}
+          loadError={preferencesError} onRetry={() => { setPreferencesError(false); setPreferencesAttempt((count) => count + 1); }} onState={setPreferences}
           onDirtyChange={(value) => setDirty((current) =>
             current.preferences === value ? current : { ...current, preferences: value })} />}
         </div>

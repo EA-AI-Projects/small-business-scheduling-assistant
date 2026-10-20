@@ -7,13 +7,12 @@ from mangum import Mangum
 
 from scheduling.adapters.openai_messages import OpenAIMessageInterpreter
 from scheduling.linked_auth import create_cognito_linked_app
+from scheduling.preference_model import LazyPreferenceInterpreter
 
 
-def _preference_interpreter() -> OpenAIMessageInterpreter | None:
-    """Preference review is a model call; without the key parameter the route reports it off."""
-    name = os.environ.get("OPENAI_API_KEY_PARAM")
-    if not name:
-        return None
+def _build_interpreter() -> OpenAIMessageInterpreter:
+    """Read the model key on the first preference review; any failure surfaces as 503 there."""
+    name = os.environ["OPENAI_API_KEY_PARAM"]
     if not name.startswith("/scheduling/"):
         raise ValueError("OpenAI key parameter must be under /scheduling/")
     parameter = boto3.client("ssm").get_parameter(Name=name, WithDecryption=True).get("Parameter", {})
@@ -29,6 +28,6 @@ app = create_cognito_linked_app(
     os.environ["COGNITO_CLIENT_ID"],
     cors_origins=(os.environ["OWNER_APP_ORIGIN"],),
     cognito_client=boto3.client("cognito-idp"),
-    preference_interpreter=_preference_interpreter(),
+    preference_interpreter=LazyPreferenceInterpreter(_build_interpreter),
 )
 handler = Mangum(app, lifespan="off")

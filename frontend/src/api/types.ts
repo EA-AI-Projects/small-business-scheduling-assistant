@@ -31,7 +31,11 @@ export interface BusinessProfileState {
   version: number;
 }
 
-export type PreferenceRule = Schemas["PreferenceRuleBody"];
+/** Weekdays 0 (Monday) to 6 (Sunday) with HH:MM start windows; no windows means any start time. */
+export interface PreferenceRule {
+  weekdays: number[];
+  windows: { start: string; end: string }[];
+}
 export type PreferenceActivateBody = Schemas["PreferenceActivateBody"];
 
 /** The reviewed, validated configuration stored with the owner's text. */

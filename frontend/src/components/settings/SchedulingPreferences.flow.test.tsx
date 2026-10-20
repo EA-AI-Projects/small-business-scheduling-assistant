@@ -81,8 +81,7 @@ describe("owner Scheduling preferences", () => {
       rules: MORNINGS, timezone: "America/Los_Angeles", review_token: READY.review_token } });
     await press("Activate preferences");
     expect(request).toHaveBeenLastCalledWith("/scheduling-preferences", expect.objectContaining({
-      method: "PUT", body: { text: "Tuesday and Thursday mornings", rules: MORNINGS,
-        review_token: READY.review_token, expected_version: 0 } }));
+      method: "PUT", body: { review_token: READY.review_token, expected_version: 0 } }));
     expect(opener().textContent).toContain("Active · Tuesday, Thursday");
     expect(document.querySelector('[aria-label="Active preferences"]')!.textContent)
       .toContain("Tuesday and Thursday mornings");
@@ -181,5 +180,28 @@ describe("owner Scheduling preferences", () => {
     await press("Discard changes");
     expect(document.querySelector('[role="dialog"]')).toBeNull();
     expect(opener().textContent).not.toContain("Unsaved changes");
+  });
+
+  it("shows an accessible error with Retry when the preferences cannot load", async () => {
+    let failing = true;
+    get.mockImplementation(async (path: string) => {
+      if (path === "/scheduling-preferences" && failing) throw new Error("offline");
+      if (path === "/scheduling-preferences") return preferences;
+      if (path === "/policy") return { record: { policy: POLICY, version: 1 }, calendar_revision: 1 };
+      if (path === "/profile") return { profile: null, version: 0 };
+      if (path === "/booking-outreach") return { version: 1, settings: { enabled: false } };
+      if (path === "/calendar") return { revision: 1, events: [] };
+      return [];
+    });
+    await act(async () => root.render(<OwnerProvider api={api} notify={() => undefined} key="fail"><SettingsTab /></OwnerProvider>));
+    expect(opener().textContent).toContain("could not load");
+    await act(async () => opener().click());
+    const alert = document.querySelector('[role="dialog"] [role="alert"]')!;
+    expect(alert.textContent).toContain("could not load");
+    expect(document.body.textContent).not.toContain("Loading scheduling preferences");
+    failing = false;
+    await press("Retry");
+    expect(text()).not.toBeNull();
+    expect(document.querySelector('[role="dialog"] [role="alert"]')).toBeNull();
   });
 });

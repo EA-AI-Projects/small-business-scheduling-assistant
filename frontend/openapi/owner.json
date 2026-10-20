@@ -742,7 +742,7 @@
       },
       "PreferenceActivateBody": {
         "additionalProperties": false,
-        "description": "The reviewed text and interpretation, bound together by the review token.",
+        "description": "Only the token of a review this server produced; text and rules come from that review.",
         "properties": {
           "expected_version": {
             "minimum": 0.0,
@@ -750,29 +750,13 @@
             "type": "integer"
           },
           "review_token": {
-            "maxLength": 64,
-            "minLength": 64,
+            "pattern": "^[0-9a-f]{64}$",
             "title": "Review Token",
-            "type": "string"
-          },
-          "rules": {
-            "items": {
-              "$ref": "#/components/schemas/PreferenceRuleBody"
-            },
-            "title": "Rules",
-            "type": "array"
-          },
-          "text": {
-            "maxLength": 1000,
-            "minLength": 1,
-            "title": "Text",
             "type": "string"
           }
         },
         "required": [
-          "text",
           "expected_version",
-          "rules",
           "review_token"
         ],
         "title": "PreferenceActivateBody",
@@ -793,31 +777,6 @@
         "title": "PreferenceClearBody",
         "type": "object"
       },
-      "PreferenceRuleBody": {
-        "additionalProperties": false,
-        "properties": {
-          "weekdays": {
-            "items": {
-              "type": "integer"
-            },
-            "title": "Weekdays",
-            "type": "array"
-          },
-          "windows": {
-            "items": {
-              "$ref": "#/components/schemas/PreferenceWindowBody"
-            },
-            "title": "Windows",
-            "type": "array"
-          }
-        },
-        "required": [
-          "weekdays",
-          "windows"
-        ],
-        "title": "PreferenceRuleBody",
-        "type": "object"
-      },
       "PreferenceTextBody": {
         "additionalProperties": false,
         "properties": {
@@ -832,25 +791,6 @@
           "text"
         ],
         "title": "PreferenceTextBody",
-        "type": "object"
-      },
-      "PreferenceWindowBody": {
-        "additionalProperties": false,
-        "properties": {
-          "end": {
-            "title": "End",
-            "type": "string"
-          },
-          "start": {
-            "title": "Start",
-            "type": "string"
-          }
-        },
-        "required": [
-          "start",
-          "end"
-        ],
-        "title": "PreferenceWindowBody",
         "type": "object"
       },
       "RemoveBlockBody": {

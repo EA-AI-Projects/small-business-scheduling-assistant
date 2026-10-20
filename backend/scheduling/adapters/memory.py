@@ -40,6 +40,7 @@ from scheduling.domain.owner_policy import PolicyCommand, PolicyCommit, PolicyRe
 from scheduling.domain.scheduling_preferences import (
     SchedulingPreferences,
     SchedulingPreferencesRecord,
+    StoredReview,
 )
 from scheduling.domain.service_duration import ServiceDurationChanged
 
@@ -57,6 +58,7 @@ class InMemoryCalendarRepository:
         self._preferences: dict[str, SchedulingPreferencesRecord] = {}
         self._preference_replays: dict[tuple[str, str, str], tuple[
             SchedulingPreferences | None, int, SchedulingPreferencesRecord]] = {}
+        self._preference_reviews: dict[tuple[str, str], tuple[StoredReview, datetime]] = {}
         self._outreach: dict[str, OutreachRecord] = {}
         self._outreach_replays: dict[tuple[str, str, str], tuple[OutreachSettings, int, OutreachRecord]] = {}
         self._invitation_intents: dict[str, InvitationIntent] = {}
@@ -109,6 +111,17 @@ class InMemoryCalendarRepository:
             self._profile_replays[identity] = (profile, expected_version, result)
             self._audit[f"business_profile#{business_id}#{actor_id}#{key}"] = result
             return result
+
+    def save_preference_review(self, business_id: str, review: StoredReview,
+                               expires_at: datetime) -> None:
+        with self._lock:
+            self._preference_reviews[business_id, review.token] = (review, expires_at)
+
+    def read_preference_review(self, business_id: str, token: str,
+                               now: datetime) -> StoredReview | None:
+        with self._lock:
+            found = self._preference_reviews.get((business_id, token))
+            return found[0] if found is not None and found[1] > now else None
 
     def read_scheduling_preferences(self, business_id: str) -> SchedulingPreferencesRecord:
         with self._lock:
