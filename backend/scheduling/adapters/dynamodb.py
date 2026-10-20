@@ -67,6 +67,7 @@ from scheduling.domain.scheduling_preferences import (
     StoredReview,
     rules_from_payload,
     rules_payload,
+    without_client,
 )
 from scheduling.domain.service_duration import ServiceDurationChanged
 from scheduling.domain.sms_ingress import SmsCommandInterrupted
@@ -339,16 +340,69 @@ class DynamoDBCalendarRepository:
             stored["review_token"])
         return SchedulingPreferencesRecord(preferences, int(item["version"]["N"]))
 
+    @staticmethod
+    def _preferences_payload(preferences: SchedulingPreferences | None) -> str:
+        return json.dumps(None if preferences is None else {
+            "text": preferences.text, "rules": rules_payload(preferences.rules),
+            "timezone": preferences.timezone, "review_token": preferences.review_token},
+            sort_keys=True)
+
+    def scrub_client_preferences(self, business_id: str, client_id: str) -> None:
+        """Erasure step: remove the client's rules and any text naming them, then their reviews.
+
+        Runs after the erasure fence exists, so a save binding this client can no longer commit.
+        Idempotent: once no rule binds the client nothing is written.
+        """
+        for _ in range(5):
+            record = self.read_scheduling_preferences(business_id)
+            current = record.preferences
+            if current is None or not any(rule.client_id == client_id for rule in current.rules):
+                break
+            next_version = record.version + 1
+            audit_key = sha256(json.dumps([business_id, "client-erasure", next_version]).encode()
+                               ).hexdigest()
+            try:
+                self._client.transact_write_items(TransactItems=[
+                    {"Put": {"TableName": self._table, "Item": {
+                        **self._business_key(business_id, "PREFERENCES#SCHEDULING"),
+                        "payload": {"S": self._preferences_payload(
+                            without_client(current, client_id))},
+                        "version": {"N": str(next_version)}},
+                        "ConditionExpression": "#version = :old",
+                        "ExpressionAttributeNames": {"#version": "version"},
+                        "ExpressionAttributeValues": {":old": {"N": str(record.version)}}}},
+                    {"Put": {"TableName": self._table, "Item": {
+                        **self._business_key(business_id, f"AUDIT#preferences#{audit_key}"),
+                        "action": {"S": "scrub_scheduling_preferences_on_client_erasure"},
+                        "actor_id": {"S": "system"}, "source": {"S": "client_erasure"},
+                        "created_at": {"S": _instant(datetime.now(UTC))},
+                        "version": {"N": str(next_version)}},
+                        "ConditionExpression": "attribute_not_exists(PK)"}},
+                ])
+                break
+            except Exception as exc:
+                if not _record_transaction_conflict(exc):
+                    raise
+        else:
+            raise RecordConflict("Scheduling preferences changed during client deletion")
+        reviews = [item for item in self._scan_items()
+                   if item.get("PK", {}).get("S") == f"BUSINESS#{business_id}"
+                   and item.get("SK", {}).get("S", "").startswith("PREFERENCES#REVIEW#")
+                   and any(rule.get("client_id") == client_id for rule in
+                           json.loads(item["payload"]["S"]).get("rules", []))]
+        for offset in range(0, len(reviews), 24):
+            self._client.transact_write_items(TransactItems=[
+                {"Delete": {"TableName": self._table,
+                            "Key": {"PK": item["PK"], "SK": item["SK"]}}}
+                for item in reviews[offset:offset + 24]])
+
     def save_scheduling_preferences(self, business_id: str, actor_id: str, key: str,
                                     expected_version: int,
                                     preferences: SchedulingPreferences | None,
                                     ) -> SchedulingPreferencesRecord:
         identity = self._business_key(business_id,
             _command_sort_key(actor_id, "edit_scheduling_preferences", key))
-        payload = json.dumps(None if preferences is None else {
-            "text": preferences.text, "rules": rules_payload(preferences.rules),
-            "timezone": preferences.timezone, "review_token": preferences.review_token},
-            sort_keys=True)
+        payload = self._preferences_payload(preferences)
         request_hash = sha256(json.dumps([expected_version, payload]).encode()).hexdigest()
 
         def replay() -> SchedulingPreferencesRecord | None:
@@ -372,9 +426,13 @@ class DynamoDBCalendarRepository:
             put["ExpressionAttributeNames"] = {"#version": "version"}
             put["ExpressionAttributeValues"] = {":old": {"N": str(expected_version)}}
         audit_key = sha256(json.dumps([business_id, actor_id, key]).encode()).hexdigest()
+        # A client being or already erased can never be (re)bound by a concurrent activation.
+        fences = [self._erasure_check(business_id, bound) for bound in dict.fromkeys(
+            rule.client_id for rule in (preferences.rules if preferences else ())
+            if rule.client_id)]
         try:
             self._client.transact_write_items(TransactItems=[
-                {"Put": put},
+                {"Put": put}, *fences,
                 {"Put": {"TableName": self._table,
                     "Item": {**identity, "request_hash": {"S": request_hash},
                              "version": {"N": str(next_version)}},
@@ -1138,6 +1196,7 @@ class DynamoDBCalendarRepository:
                     *receipt_markers,
                     *(guarded_delete(item) for item in batch),
                 ])
+        self.scrub_client_preferences(business_id, client_id)
         self._client.transact_write_items(TransactItems=[
             {"Update": {
                 "TableName": self._table, "Key": fence_key,

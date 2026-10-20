@@ -11,22 +11,27 @@ from collections.abc import Iterable
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from scheduling.domain.scheduling_preferences import SchedulingPreferences
+from scheduling.domain.scheduling_preferences import SchedulingPreferences, applicable_rules
 
 
 def recommended_starts(preferences: SchedulingPreferences | None, timezone: str,
-                       candidates: Iterable[datetime]) -> frozenset[datetime]:
-    """The candidates that match any active rule, in the business timezone.
+                       candidates: Iterable[datetime],
+                       client_id: str | None = None) -> frozenset[datetime]:
+    """The candidates that match a rule applicable to this client, in the business timezone.
+
+    Only the client's own rules and the business-wide rules they do not override count (see
+    ``applicable_rules``); other clients' rules never influence the result.
 
     No active preferences, or preferences reviewed for another timezone, recommend
     nothing, so ordinary availability is unchanged.
     """
-    if preferences is None or preferences.timezone != timezone:
+    rules = applicable_rules(preferences, timezone, client_id)
+    if not rules:
         return frozenset()
     zone = ZoneInfo(timezone)
     flagged = set()
     for start in candidates:
         local = start.astimezone(zone)
-        if any(rule.matches(local.weekday(), local.time()) for rule in preferences.rules):
+        if any(rule.matches(local.weekday(), local.time()) for rule in rules):
             flagged.add(start)
     return frozenset(flagged)

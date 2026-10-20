@@ -119,7 +119,7 @@ export function SettingsTab() {
         <strong>Scheduling preferences</strong>
         <span id="settings-preferences-summary">{preferencesError ? "Preferences could not load"
           : preferences === null ? "Loading scheduling preferences"
-          : preferences.active ? `Active · ${summarize(preferences.active.rules)}` : "None active"}</span>
+          : preferences.active ? `Active · ${summarize(preferences.active.rules, preferences.active.clients)}` : "None active"}</span>
         {open === "preferences" && dirty.preferences && <span className="settings-unsaved">Unsaved changes</span>}
       </button>
     </div>

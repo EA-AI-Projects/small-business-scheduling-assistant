@@ -92,12 +92,16 @@ from scheduling.domain.owner_policy import (
 )
 from scheduling.domain.scheduling_preferences import (
     REVIEW_TTL,
+    ClientReference,
+    InvalidClientSelection,
     PreferenceInterpreter,
+    PreferenceRule,
     ReviewMismatch,
     SchedulingPreferencesRecord,
     SchedulingPreferencesRepository,
     StoredReview,
     clean_text,
+    normalize_name,
     review_preferences,
     reviewed_preferences,
     rules_payload,
@@ -234,8 +238,16 @@ class BusinessProfileEditBody(StrictModel):
     profile: BusinessProfileBody
 
 
+class ClientSelectionBody(StrictModel):
+    """The owner's answer for an ambiguous name: the name as the review showed it, and a profile."""
+
+    name: str = Field(min_length=1, max_length=100)
+    client_id: str = Field(min_length=1, max_length=200)
+
+
 class PreferenceTextBody(StrictModel):
     text: str = Field(min_length=1, max_length=1000)
+    client_selections: list[ClientSelectionBody] = Field(default_factory=list, max_length=8)
 
     @field_validator("text")
     @classmethod
@@ -723,10 +735,34 @@ def create_owner_app(
                                                    body.profile.profile(), guard),
                    lambda: jsonable_encoder(profiles.read_business_profile(business_id)))
 
-    def preferences_view(record: SchedulingPreferencesRecord) -> dict[str, object]:
+    def active_references(business_id: str) -> tuple[ClientReference, ...]:
+        """This business's own active client profiles; nothing from any other business."""
+        return tuple(ClientReference(profile.client_id, profile.name, profile.phone_e164[-4:],
+                                     profile.service_address)
+                     for profile in cast(ClientRecordRepository, repository)
+                     .list_profiles(business_id) if profile.active)
+
+    def client_views(business_id: str, rules: tuple[PreferenceRule, ...],
+                     ) -> list[dict[str, object]]:
+        """Affected profiles by their current display name, so a rename shows immediately."""
+        wanted = list(dict.fromkeys(rule.client_id for rule in rules if rule.client_id))
+        listed = cast(ClientRecordRepository, repository).list_profiles(business_id)
+        profiles = {profile.client_id: profile for profile in listed}
+        names = [normalize_name(profile.name) for profile in listed]
+        # Erasure removes a client's rules, so every bound client still has a profile.
+        # Owner-only detail that tells apart profiles sharing a name.
+        return [{"client_id": client_id, "name": profiles[client_id].name,
+                 "phone_last4": profiles[client_id].phone_e164[-4:],
+                 "service_address": profiles[client_id].service_address,
+                 "shared_name": names.count(normalize_name(profiles[client_id].name)) > 1}
+                for client_id in wanted if client_id in profiles]
+
+    def preferences_view(record: SchedulingPreferencesRecord, business_id: str,
+                         ) -> dict[str, object]:
         active = record.preferences
         return {"version": record.version, "active": None if active is None else {
             "text": active.text, "rules": rules_payload(active.rules),
+            "clients": client_views(business_id, active.rules),
             "timezone": active.timezone, "review_token": active.review_token}}
 
     @app.get("/v1/owner/businesses/{business_id}/scheduling-preferences")
@@ -734,7 +770,7 @@ def create_owner_app(
                                    owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:
         del owner
         return preferences_view(cast(SchedulingPreferencesRepository, repository)
-                                .read_scheduling_preferences(business_id))
+                                .read_scheduling_preferences(business_id), business_id)
 
     def business_timezone(business_id: str) -> str:
         record = store.read_policy_record(business_id)
@@ -752,7 +788,11 @@ def create_owner_app(
         if preference_interpreter is None:
             raise _error("INTERPRETER_UNAVAILABLE", "Preference review is not available", 503)
         try:
-            review = review_preferences(preference_interpreter, body.text, zone)
+            review = review_preferences(
+                preference_interpreter, body.text, zone, active_references(business_id),
+                {item.name: item.client_id for item in body.client_selections})
+        except InvalidClientSelection as exc:
+            raise _error("INVALID_CLIENT_SELECTION", str(exc), 422) from exc
         except Exception as exc:  # any model failure leaves the draft untouched
             raise _error("INTERPRETER_UNAVAILABLE",
                          "The assistant could not review these preferences. Try again.",
@@ -764,6 +804,11 @@ def create_owner_app(
                 now() + REVIEW_TTL)
         return {"ready": review.ready, "timezone": review.timezone,
                 "rules": rules_payload(review.rules), "review_token": review.token,
+                "clients": client_views(business_id, review.rules),
+                "ambiguities": [{"name": item.name, "candidates": [
+                    {"client_id": c.client_id, "name": c.name, "phone_last4": c.phone_last4,
+                     "service_address": c.service_address} for c in item.candidates]}
+                    for item in review.ambiguities],
                 "problems": [{"kind": item.kind, "message": item.message}
                              for item in review.problems]}
 
@@ -774,7 +819,9 @@ def create_owner_app(
         repo = cast(SchedulingPreferencesRepository, repository)
         zone = business_timezone(business_id)
         try:
-            reviewed = reviewed_preferences(repo, business_id, body.review_token, zone, now())
+            reviewed = reviewed_preferences(
+                repo, business_id, body.review_token, zone, now(),
+                frozenset(item.client_id for item in active_references(business_id)))
         except ReviewMismatch as exc:
             raise _error("REVIEW_MISMATCH", str(exc) + ". Review the preferences again.",
                          409) from exc
@@ -782,8 +829,8 @@ def create_owner_app(
             raise _error("INVALID_REQUEST", str(exc), 422) from exc
         record = run(lambda: save_preferences(repo, business_id, owner.actor_id, request_key,
                                               body.expected_version, reviewed),
-                     lambda: preferences_view(repo.read_scheduling_preferences(business_id)))
-        return preferences_view(cast(SchedulingPreferencesRecord, record))
+                     lambda: preferences_view(repo.read_scheduling_preferences(business_id), business_id))
+        return preferences_view(cast(SchedulingPreferencesRecord, record), business_id)
 
     @app.delete("/v1/owner/businesses/{business_id}/scheduling-preferences")
     def clear_scheduling_preferences(business_id: str, body: PreferenceClearBody,
@@ -792,8 +839,8 @@ def create_owner_app(
         repo = cast(SchedulingPreferencesRepository, repository)
         record = run(lambda: save_preferences(repo, business_id, owner.actor_id, request_key,
                                               body.expected_version, None),
-                     lambda: preferences_view(repo.read_scheduling_preferences(business_id)))
-        return preferences_view(cast(SchedulingPreferencesRecord, record))
+                     lambda: preferences_view(repo.read_scheduling_preferences(business_id), business_id))
+        return preferences_view(cast(SchedulingPreferencesRecord, record), business_id)
 
     @app.get("/v1/owner/businesses/{business_id}/booking-outreach")
     def get_booking_outreach(business_id: str,

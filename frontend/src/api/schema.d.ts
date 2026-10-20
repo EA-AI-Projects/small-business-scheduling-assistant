@@ -568,6 +568,16 @@ export interface components {
             /** Service Address */
             service_address: string;
         };
+        /**
+         * ClientSelectionBody
+         * @description The owner's answer for an ambiguous name: the name as the review showed it, and a profile.
+         */
+        ClientSelectionBody: {
+            /** Client Id */
+            client_id: string;
+            /** Name */
+            name: string;
+        };
         /** ClientSession */
         ClientSession: {
             /** Booking Horizon Days */
@@ -754,6 +764,8 @@ export interface components {
         };
         /** PreferenceTextBody */
         PreferenceTextBody: {
+            /** Client Selections */
+            client_selections?: components["schemas"]["ClientSelectionBody"][];
             /** Text */
             text: string;
         };

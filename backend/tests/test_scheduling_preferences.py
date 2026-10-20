@@ -112,8 +112,8 @@ def test_review_is_explicit_and_activates_nothing() -> None:
     assert repository.read_calendar("biz-a").events == ()  # type: ignore[attr-defined]
 
 
-@pytest.mark.parametrize("kind", ["unsupported", "contradictory", "client_specific",
-                                  "constraint_override", "unclear"])
+@pytest.mark.parametrize("kind", ["unsupported", "contradictory", "constraint_override",
+                                  "unclear"])
 def test_problem_instructions_block_activation_with_an_explanation(kind: str) -> None:
     api, _, interpreter = setup()
     interpreter.answers["text"] = {"rules": TUESDAY_MORNINGS["rules"], "problems": [
@@ -162,7 +162,7 @@ def test_activation_applies_only_a_review_this_server_produced() -> None:
     done = activate(api, reviewed, 0)
     assert done.status_code == 200
     assert done.json() == {"version": 1, "active": {
-        "text": "Prefer Tuesday mornings", "rules": TUESDAY_MORNINGS["rules"],
+        "text": "Prefer Tuesday mornings", "rules": TUESDAY_MORNINGS["rules"], "clients": [],
         "timezone": "America/Los_Angeles", "review_token": reviewed["review_token"]}}
 
 

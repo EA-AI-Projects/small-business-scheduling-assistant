@@ -272,7 +272,8 @@ def add_client_session_route(
         try:
             preferences = store.read_scheduling_preferences(session.business_id).preferences
             flagged = recommended_starts(
-                preferences, store.read_policy(session.business_id).timezone, starts)
+                preferences, store.read_policy(session.business_id).timezone, starts,
+                session.client_id)
         except Exception:  # noqa: BLE001 - optional guidance must not hide availability
             # Log the failure type only: never owner text or client data.
             logging.getLogger(__name__).warning(

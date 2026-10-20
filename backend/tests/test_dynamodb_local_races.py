@@ -1,5 +1,6 @@
 """Opt-in transaction proof against DynamoDB Local or the deployed synthetic dev table."""
 
+import json
 import os
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -1462,6 +1463,83 @@ def test_preference_review_is_business_scoped_and_expires(race_env: RaceEnv) -> 
     assert repo.read_preference_review(
         env.business, review.token, now + timedelta(hours=1)) is None  # expired, TTL is lazy
     assert repo.read_preference_review(env.business, "0" * 64, now) is None
+
+
+def _mixed_preferences(text: str, client_id: str) -> SchedulingPreferences:
+    window = (PreferenceWindow(time(9), time(12)),)
+    rules = (PreferenceRule((0, 1, 2, 3, 4), window),
+             PreferenceRule((3,), (PreferenceWindow(time(13), time(16)),), client_id))
+    return SchedulingPreferences(text, rules, _PREFERENCE_ZONE,
+                                 review_token(text, rules, _PREFERENCE_ZONE))
+
+
+def test_client_scoped_preferences_keep_the_profile_id_and_replay_per_selection(
+        race_env: RaceEnv) -> None:
+    env = race_env
+    repo = DynamoDBCalendarRepository(env.client, env.table)
+    now = datetime(2026, 9, 28, 15, tzinfo=UTC)
+    first = _mixed_preferences("mixed", "client-1")
+    saved = repo.save_scheduling_preferences(env.business, "owner-1", "m", 0, first)
+    read = repo.read_scheduling_preferences(env.business)
+    assert read == saved and read.preferences is not None
+    assert [rule.client_id for rule in read.preferences.rules] == [None, "client-1"]
+    assert repo.save_scheduling_preferences(env.business, "owner-1", "m", 0, first) == saved
+    # Same text, different selected profile: another review, so the same key is a different edit.
+    with pytest.raises(IdempotencyKeyReused):
+        repo.save_scheduling_preferences(env.business, "owner-1", "m", 0,
+                                         _mixed_preferences("mixed", "client-2"))
+    with pytest.raises(RevisionConflict):
+        repo.save_scheduling_preferences(env.business, "owner-1", "stale", 0,
+                                         _mixed_preferences("mixed", "client-2"))
+    review = StoredReview(first.text, first.rules, first.timezone, first.review_token)
+    repo.save_preference_review(env.business, review, now + timedelta(hours=1))
+    assert repo.read_preference_review(env.business, review.token, now) == review
+
+
+def test_client_erasure_scrubs_preferences_and_blocks_a_concurrent_rebinding_save(
+        race_env: RaceEnv) -> None:
+    env = race_env
+    repo = DynamoDBCalendarRepository(env.client, env.table)
+    now = datetime(2026, 9, 28, 15, tzinfo=UTC)
+    ClientRecordService(repo).save_profile(
+        env.business, "synthetic-client", "Synthetic Client", "+14155550101",
+        "123 Test Street", True, 0, START)
+    bound = _mixed_preferences("Synthetic Client likes Thursday afternoons", "synthetic-client")
+    repo.save_scheduling_preferences(env.business, "owner-1", "bind", 0, bound)
+    review = StoredReview(bound.text, bound.rules, bound.timezone, bound.review_token)
+    repo.save_preference_review(env.business, review, now + timedelta(hours=1))
+    barrier = Barrier(2)
+
+    def erase() -> None:
+        barrier.wait(timeout=5)
+        repo.erase_client(env.business, "synthetic-client")
+
+    def rebind() -> bool:
+        barrier.wait(timeout=5)
+        try:
+            repo.save_scheduling_preferences(env.business, "owner-1", "rebind", 1,
+                                             _mixed_preferences("Again", "synthetic-client"))
+        except RevisionConflict:
+            return False
+        return True
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        erasing, rebinding = pool.submit(erase), pool.submit(rebind)
+        erasing.result()
+        rebinding.result()
+    record = repo.read_scheduling_preferences(env.business)
+    assert record.preferences is not None
+    assert all(rule.client_id is None for rule in record.preferences.rules)
+    assert "Synthetic" not in record.preferences.text and "synthetic-client" not in str(record)
+    assert repo.read_preference_review(env.business, review.token, now) is None
+    # Whatever the interleaving, a save after the fence cannot bind the erased client again.
+    with pytest.raises(RevisionConflict):
+        repo.save_scheduling_preferences(env.business, "owner-1", "late", record.version,
+                                         _mixed_preferences("Late", "synthetic-client"))
+    kept = json.dumps([item for item in _business_items(env)
+                       if item["SK"]["S"].startswith(("PREFERENCES#", "AUDIT#preferences#"))])
+    assert "Synthetic Client likes" not in kept and "synthetic-client" not in kept
+    repo.erase_client(env.business, "synthetic-client")  # safe replay
 
 
 def test_hold_commit_requires_the_saved_default_to_be_unchanged(race_env: RaceEnv) -> None:
