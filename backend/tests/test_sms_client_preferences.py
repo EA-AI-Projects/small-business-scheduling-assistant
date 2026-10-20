@@ -13,10 +13,11 @@ AWS is used.
 from datetime import datetime, timedelta
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 from test_client_scheduling_preferences import Scripted
 from test_client_tool_loop import Tools, chat_with
-from test_conversation_flow import NOW, THURSDAY, ZONE, ask
+from test_conversation_flow import NOW, THURSDAY, ZONE, Harness, ask
 
 from scheduling.adapters.memory import InMemoryCalendarRepository
 from scheduling.client_api import add_client_session_route
@@ -28,7 +29,7 @@ from scheduling.domain.owner_policy import OwnerPolicyService
 from scheduling.domain.sms_ingress import ConsentEvidence, InboundReceipt, Keyword, SenderRole
 from scheduling.identity_links import IdentityLink, LinkRole, LinkState
 from scheduling.owner_api import OwnerPrincipal, create_owner_app
-from tests.preference_scenarios import CLIENT_ONLY, OVERRIDE, Scenario
+from tests.preference_scenarios import CLIENT_ONLY, OVERRIDE, SCENARIOS, Scenario
 
 WED, THU, FRI = "2026-09-30", "2026-10-01", "2026-10-02"
 PHONES = {"client-1": "+14155550101", "client-2": "+14155550102", "client-3": "+14155550103"}
@@ -70,14 +71,19 @@ def profile(client: str, name: str, version: int = 1) -> ClientProfile:
 class World:
     """Three synthetic clients, one calendar, the owner API and the portal, and the SMS service."""
 
-    def __init__(self, plan: Any = None) -> None:
+    def __init__(self, plan: Any = None, deterministic: bool = False) -> None:
         self.seen: list[dict[str, Any]] = []
 
         def default(tools: Tools) -> str:
             self.seen.append(get(tools))
             return STATIC_REPLY
 
-        self.chat, self.model = chat_with(plan or default)
+        if deterministic:
+            # No tool-loop model: the backend's own deterministic offer path runs.
+            self.chat = Harness()
+            self.model: Any = self.chat.model
+        else:
+            self.chat, self.model = chat_with(plan or default)
         self.repo: InMemoryCalendarRepository = self.chat.store
         self.chat.service._consent = Consents(self.repo)  # type: ignore[attr-defined]
         self.repo.save_profile(profile("client-1", NAMES["client-1"], 2), 1, PHONES["client-1"])
@@ -201,17 +207,46 @@ def test_renaming_the_profile_keeps_its_preference_behavior() -> None:
     assert world.offer("client-1") == before
 
 
-def test_an_explicit_window_is_honored_for_a_client_without_matching_guidance() -> None:
-    world = World(lambda tools: (get(tools, time_from="08:00", time_to="10:00"), STATIC_REPLY)[1])
+def window_world(first: str, last: str, **window: str) -> World:
+    return World(lambda tools: (get(tools, first, last, **window), STATIC_REPLY)[1])
+
+
+def test_an_explicit_window_is_honored_and_a_client_rule_replaces_not_adds() -> None:
+    # Alder's Thursday-afternoon rule replaces Thursday mornings, so a Thursday-only morning
+    # window holds nothing preferred: the window is still honored and the offer is ordinary.
+    ordinary = window_world(THU, THU, time_from="08:00", time_to="10:00").offer("client-2")
+    world = window_world(THU, THU, time_from="08:00", time_to="10:00")
     world.adopt(OVERRIDE)
-    options = world.offer("client-1")  # Alder prefers Thursday afternoons only on Thursday
+    options = world.offer("client-1")
     assert options and all(8 <= s.astimezone(ZONE).hour <= 10 for s in options)
+    assert options == window_world(THU, THU, time_from="08:00", time_to="10:00").offer("client-1")
+    assert ordinary  # Birch, with business-wide morning guidance, is offered the same window
+    # A window holding both: only the replacing afternoon rule is preferred for Alder.
+    both = window_world(THU, THU, time_from="08:00", time_to="15:00")
+    both.adopt(OVERRIDE)
+    mixed = both.offer("client-1")
+    assert len(mixed) == 5 and hour_set(mixed, THU) <= {13, 14, 15}
+    assert hour_set(both.offer("client-2"), THU) <= {8, 9, 10, 11}
 
 
 def request(tools: Tools, pick: datetime) -> dict[str, Any]:
     local = pick.astimezone(ZONE)
     return tools("request_booking", {"date": local.date().isoformat(),
                                      "time": local.strftime("%H:%M")})
+
+
+def book(world: World, client: str, start: datetime) -> None:
+    """Request exactly this start through an exact-time offer and an acceptance."""
+    local = start.astimezone(ZONE)
+    day, clock = local.date().isoformat(), local.strftime("%H:%M")
+    world.model.plan = lambda tools: (
+        get(tools, day, day, time_from=clock, time_to=clock), STATIC_REPLY)[1]
+    world.sms(client, "that time?")
+    results: list[dict[str, Any]] = []
+    world.model.plan = lambda tools: (results.append(request(tools, start)), (
+        f"Requested (ref {results[0].get('ref')}). It is pending owner approval, "
+        "not confirmed yet."))[1]
+    assert world.sms(client, "yes").committed
 
 
 def test_activating_or_clearing_affects_next_offer_while_a_prior_offer_still_accepts() -> None:
@@ -244,13 +279,20 @@ def test_activating_or_clearing_affects_next_offer_while_a_prior_offer_still_acc
     after_clear = world.offer("client-1")  # read afresh: nothing is configured any more
     assert after_clear and world.portal("client-1", WED, THU, FRI) == set()
     assert len(world.chat.calendar()) == 2
-    assert all(status == CalendarStatus.PENDING_APPROVAL.value for _, status, _ in world.chat.calendar())
+    assert all(status == CalendarStatus.PENDING_APPROVAL.value
+               for _, status, _ in world.chat.calendar())
+    # The same two pending requests in a world that never had preferences: the same offer.
+    reference = World()
+    for start in (ordinary[0], preferred[0]):
+        book(reference, "client-1", start)
+    reference.model.plan = lambda tools: (get(tools), STATIC_REPLY)[1]
+    assert reference.offer("client-1") == after_clear
 
 
 def test_the_deterministic_offer_path_uses_the_senders_client_rules() -> None:
-    world = World()
+    world = World(deterministic=True)  # no tool loop: ConversationService._offer runs
     world.adopt(OVERRIDE)
-    world.chat.model.replies["anything this week?"] = ask("availability", WED, FRI)
+    world.model.replies["anything this week?"] = ask("availability", WED, FRI)
     alder = world.sms("client-1", "anything this week?")
     alder_options = world.stored("client-1")
     birch = world.sms("client-2", "anything this week?")
@@ -258,8 +300,23 @@ def test_the_deterministic_offer_path_uses_the_senders_client_rules() -> None:
     assert alder_options != birch_options and not alder.committed and not birch.committed
     assert set(alder_options) <= world.portal("client-1", WED, THU, FRI)
     assert set(birch_options) <= world.portal("client-2", WED, THU, FRI)
+    assert hour_set(alder_options, THU) <= {13, 14, 15}
+    assert hour_set(birch_options, THU) <= {8, 9, 10, 11}
     assert "Alder" not in birch.text and "afternoon" not in alder.text.lower()
     assert world.chat.calendar() == ()  # an offer books nothing
+
+
+def test_the_deterministic_reschedule_offer_uses_the_senders_client_rules() -> None:
+    world = World(deterministic=True)
+    world.adopt(OVERRIDE)
+    visit = world.chat.hold(THURSDAY, "visit", confirm=True)
+    world.model.replies["move my visit"] = ask("reschedule", THU, THU, target_date=THU)
+    world.sms("client-1", "move my visit")
+    options = world.stored("client-1")
+    assert options and set(options) <= world.portal("client-1", THU)
+    assert hour_set(options, THU) <= {13, 14, 15}  # Alder's own Thursday rule
+    assert world.chat.status(visit) == CalendarStatus.CONFIRMED
+    assert [status for _, status, _ in world.chat.calendar()] == [CalendarStatus.CONFIRMED.value]
 
 
 def move_plan(seen: list[dict[str, Any]]) -> Any:
@@ -440,3 +497,24 @@ def test_owner_review_with_an_ambiguous_name_through_activation_sms_offer_and_ac
     assert [status for _, status, _ in world.chat.calendar()] == [CalendarStatus.PENDING_APPROVAL.value]
     assert world.sms("client-2", "hello").committed is False
     assert len(world.chat.calendar()) == 1  # no one else's request, no automatic confirmation
+
+
+@pytest.mark.parametrize("scenario", SCENARIOS, ids=lambda item: item.name)
+def test_shared_scenarios_give_the_same_expectations_through_sms_offers(
+        scenario: Scenario) -> None:
+    world, ordinary = World(), World()
+    world.adopt(scenario)
+    for client, day, hours in scenario.expectations:
+        for current, label in ((world, "configured"), (ordinary, "ordinary")):
+            current.model.plan = lambda tools, day=day: (get(tools, day, day), STATIC_REPLY)[1]
+            current.offer(client)  # ensure the tool path ran for this sender and day
+        offer, plain = world.stored(client), ordinary.stored(client)
+        recommended = world.portal(client, day)
+        # The portal agrees with the shared expectation (a shorter day only has fewer starts).
+        assert {s.astimezone(ZONE).hour for s in recommended} <= set(hours), (client, day)
+        if not hours:
+            assert not recommended and offer == plain, (client, day)  # fallback
+        elif len(recommended) >= 5:
+            assert set(offer) <= recommended and len(offer) == 5, (client, day)
+        else:
+            assert recommended <= set(offer), (client, day)
