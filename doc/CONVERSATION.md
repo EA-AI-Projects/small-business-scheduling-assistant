@@ -19,7 +19,7 @@ Client history requires the same business, verified phone and client ID; owner h
 | Move | Offer times for one confirmed visit/version, then create a pending replacement; the original stays booked until owner approval. |
 | Ask about visits | Read only the client's own current visits or the owner's business calendar; no booking action follows merely from an answer. |
 
-Offers and confirmation questions last 30 minutes. A later expired/stale/replaced/unmatched reply writes nothing. A changed default duration invalidates an offer quoted at the previous length. A new request replaces the previous prompt. Exact commands retain their deterministic path; a bare answer to a read-only calendar list cannot select or cancel a visit.
+Offers and confirmation questions last 30 minutes. A later expired/stale/replaced/unmatched reply writes nothing. A changed default duration invalidates an offer quoted at the previous length. A new request replaces the previous prompt. Offered starts (the tool and the deterministic offer alike) put business-wide preferred valid starts inside the requested window first and fill the rest with other valid starts, without telling the client why (#382); an explicit window is honored without a preferred start, a preference read failure gives the ordinary offer, and a preference change never invalidates a sent offer. Exact commands retain their deterministic path; a bare answer to a read-only calendar list cannot select or cancel a visit.
 
 ## Client calendar questions
 

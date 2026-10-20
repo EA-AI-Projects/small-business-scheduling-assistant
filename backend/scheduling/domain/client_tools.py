@@ -51,10 +51,10 @@ from scheduling.domain.conversation_state import (
     MIN_OPTIONS,
     PROMPT_LIFETIME,
     clock_text,
-    spread,
     when_text,
 )
 from scheduling.domain.holidays import observed_us_federal_holidays
+from scheduling.domain.offer_preferences import Preferred, no_preferences, pick_offer
 from scheduling.domain.service_duration import ServiceNotConfigured, service_duration
 
 TOOL_NAMES = ("get_business_info", "get_availability", "get_my_bookings", "request_booking",
@@ -139,7 +139,8 @@ class ClientReadTools:
                  cancellation: CancellationHooks | None = None,
                  reschedule: Callable[[str, date, time], dict[str, Any]] | None = None,
                  counteroffer: CounterofferHooks | None = None,
-                 moving: str | None = None) -> None:
+                 moving: str | None = None,
+                 preferred: Preferred = no_preferences) -> None:
         self._repository = repository
         self._business_id = business_id
         self._now = now
@@ -151,6 +152,7 @@ class ClientReadTools:
         self._cancellation = cancellation
         self._reschedule = reschedule
         self._counteroffer = counteroffer
+        self._preferred = preferred
         self._moving = moving  # The visit of this client's open "which day" move question.
         self.requested: dict[str, Any] | None = None
         self.prepared: dict[str, Any] | None = None  # A cancellation question asked now.
@@ -327,18 +329,19 @@ class ClientReadTools:
         if not starts:
             return (), True
         if earliest is None or latest is None:
-            return spread(starts, zone, MAX_OFFER_OPTIONS), True
+            return pick_offer(starts, zone, self._preferred, MAX_OFFER_OPTIONS), True
         wall = {start: start.astimezone(zone).time() for start in starts}
         if earliest == latest:
             exact = tuple(start for start in starts if wall[start] == earliest)
             if exact:
-                return spread(exact, zone, MAX_OFFER_OPTIONS), True
+                return pick_offer(exact, zone, self._preferred, MAX_OFFER_OPTIONS), True
             target = earliest.hour * 60 + earliest.minute
             nearest = sorted(starts, key=lambda start: (
                 abs(wall[start].hour * 60 + wall[start].minute - target), start))
             return tuple(sorted(nearest[:MIN_OPTIONS])), False
         window = tuple(start for start in starts if earliest <= wall[start] <= latest)
-        return spread(window or starts, zone, MAX_OFFER_OPTIONS), bool(window)
+        return (pick_offer(window or starts, zone, self._preferred, MAX_OFFER_OPTIONS),
+                bool(window))
 
     def _reason(self, day: date, today: date, horizon: date, minutes: int) -> str:
         """The truthful reason a day has no bookable start.
