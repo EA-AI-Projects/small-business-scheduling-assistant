@@ -62,7 +62,6 @@ from scheduling.domain.conversation_state import (
     is_affirmative,
     is_negative,
     match_selection,
-    spread,
     when_text,
 )
 from scheduling.domain.holds import (
@@ -83,6 +82,7 @@ from scheduling.domain.lifecycle import (
     LifecycleService,
     StaleVersion,
 )
+from scheduling.domain.offer_preferences import pick_offer, preferred_reader
 from scheduling.domain.owner_calendar_tool import STATUSES as OWNER_CALENDAR_STATUSES
 from scheduling.domain.owner_calendar_tool import calendar_page
 from scheduling.domain.service_duration import (
@@ -1441,7 +1441,8 @@ class ConversationService:
             prompt.appointment_id if (
                 prompt is not None and prompt.kind == PromptKind.RESCHEDULE_DAY
                 and not prompt.expired(now) and prompt.client_id == receipt.client_id)
-            else None)
+            else None,
+            preferred_reader(self._repository, receipt.business_id, policy.timezone))
 
         def check(text: str) -> str | None:
             return check_reply(text, tools.results)
@@ -1903,6 +1904,7 @@ class ConversationService:
                                            for day in dates),
                                      reason="no_openings", detail=span)
         note = ""
+        preferred = preferred_reader(self._repository, receipt.business_id, policy.timezone)
         chosen: tuple[datetime, ...]
         if earliest is not None and latest is not None:
             wall = {start: start.astimezone(zone).time() for start in starts}
@@ -1911,17 +1913,17 @@ class ConversationService:
                 target = earliest.hour * 60 + earliest.minute
                 nearest = sorted(starts, key=lambda start: (
                     abs(wall[start].hour * 60 + wall[start].minute - target), start))
-                chosen = (spread(exact, zone) if exact
+                chosen = (pick_offer(exact, zone, preferred) if exact
                           else tuple(sorted(nearest[:MIN_OPTIONS])))
                 if not exact:
                     note = "That exact time isn't open. "
             else:
                 window = tuple(start for start in starts if earliest <= wall[start] <= latest)
-                chosen = spread(window or tuple(starts), zone)
+                chosen = pick_offer(window or tuple(starts), zone, preferred)
                 if not window:
                     note = "Nothing is open in that part of the day. "
         else:
-            chosen = spread(tuple(starts), zone)
+            chosen = pick_offer(tuple(starts), zone, preferred)
         # A replacement offer remembers the visit it would replace.
         self._remember(receipt, PromptKind.OFFER, now, options=chosen, appointment=original,
                        duration_minutes=minutes)
