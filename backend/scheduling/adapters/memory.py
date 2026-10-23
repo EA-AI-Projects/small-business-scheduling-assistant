@@ -89,6 +89,7 @@ class InMemoryCalendarRepository:
         self._outbox: dict[str, object] = {}
         self._audit: dict[str, object] = {}
         self._clients: dict[tuple[str, str], ClientProfile] = {}
+        self._reminder_receipts: dict[tuple[str, str, str], bool] = {}
         self._client_phones: dict[tuple[str, str], str] = {}
         self._client_notes: dict[tuple[str, str, str], ClientNote] = {}
 
@@ -182,6 +183,9 @@ class InMemoryCalendarRepository:
         with self._lock:
             if self._clients.pop((business_id, client_id), None) is None:
                 raise RecordNotFound("Client was not found")
+            self._reminder_receipts = {
+                key: value for key, value in self._reminder_receipts.items()
+                if key[:2] != (business_id, client_id)}
         self.scrub_client_preferences(business_id, client_id)
 
     def read_outreach(self, business_id: str) -> OutreachRecord:
@@ -383,6 +387,20 @@ class InMemoryCalendarRepository:
                 del self._client_phones[(profile.business_id, previous_phone)]
             self._clients[key] = profile
             self._client_phones[phone_key] = profile.client_id
+
+    def read_reminder_preference_receipt(self, business_id: str, client_id: str,
+                                         receipt_id: str) -> bool | None:
+        with self._lock:
+            return self._reminder_receipts.get((business_id, client_id, receipt_id))
+
+    def commit_reminder_preference_receipt(self, before: ClientProfile, after: ClientProfile,
+                                           receipt_id: str) -> None:
+        with self._lock:
+            key = (before.business_id, before.client_id, receipt_id)
+            if key in self._reminder_receipts:
+                raise RecordConflict("Receipt already committed")
+            self.save_profile(after, before.version, before.phone_e164)
+            self._reminder_receipts[key] = after.reminders_enabled
 
     def read_note(self, business_id: str, client_id: str,
                   note_id: str) -> ClientNote | None:

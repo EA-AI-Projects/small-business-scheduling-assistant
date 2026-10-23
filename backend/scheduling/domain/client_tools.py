@@ -59,7 +59,8 @@ from scheduling.domain.service_duration import ServiceNotConfigured, service_dur
 
 TOOL_NAMES = ("get_business_info", "get_availability", "get_my_bookings", "request_booking",
               "prepare_cancellation", "confirm_cancellation", "dismiss_cancellation",
-              "request_reschedule", "get_my_counteroffer", "respond_to_counteroffer")
+              "request_reschedule", "get_my_counteroffer", "respond_to_counteroffer",
+              "set_reminder_preference")
 MAX_TOOL_CALLS = 3
 MAX_RANGE_DAYS = 14
 MAX_REPLY_SEPTETS = 480
@@ -140,7 +141,8 @@ class ClientReadTools:
                  reschedule: Callable[[str, date, time], dict[str, Any]] | None = None,
                  counteroffer: CounterofferHooks | None = None,
                  moving: str | None = None,
-                 preferred: Preferred = no_preferences) -> None:
+                 preferred: Preferred = no_preferences,
+                 reminder_preference: Callable[[bool], dict[str, Any]] | None = None) -> None:
         self._repository = repository
         self._business_id = business_id
         self._now = now
@@ -153,6 +155,8 @@ class ClientReadTools:
         self._reschedule = reschedule
         self._counteroffer = counteroffer
         self._preferred = preferred
+        self._reminder_preference = reminder_preference
+        self.reminder_attempted = False
         self._moving = moving  # The visit of this client's open "which day" move question.
         self.requested: dict[str, Any] | None = None
         self.prepared: dict[str, Any] | None = None  # A cancellation question asked now.
@@ -168,12 +172,27 @@ class ClientReadTools:
         self.calls += 1
         if self.calls > MAX_TOOL_CALLS:
             return {"ok": False, "error": "tool_limit"}
+        if self.reminder_attempted and name not in (
+                "get_business_info", "get_my_bookings", "get_my_counteroffer"):
+            return {"ok": False, "error": "action_already_attempted"}
         try:
             result = getattr(self, name)(args)
         except READ_ERRORS:
             result = dict(UNAVAILABLE)
         self.results.append(result)
         return result
+
+    def set_reminder_preference(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Change only the verified sender's shared preference; no target arguments."""
+        if set(args) != {"enabled"} or type(args["enabled"]) is not bool:
+            return dict(INVALID)
+        if self._reminder_preference is None:
+            return dict(UNAVAILABLE)
+        if (self.requested is not None or self.prepared is not None or self.answered
+                or self.responded or self.offer):
+            return {"ok": False, "error": "action_already_attempted"}
+        self.reminder_attempted = True
+        return self._reminder_preference(args["enabled"])
 
     # -- get_business_info -------------------------------------------------
 

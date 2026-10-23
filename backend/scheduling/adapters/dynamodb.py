@@ -1351,6 +1351,45 @@ class DynamoDBCalendarRepository:
                 raise
             raise RecordConflict("Profile version or phone mapping changed") from exc
 
+    def read_reminder_preference_receipt(self, business_id: str, client_id: str,
+                                         receipt_id: str) -> bool | None:
+        item = self._get(self._business_key(
+            business_id, _command_sort_key(client_id, "set_reminder_preference", receipt_id)))
+        return bool(item["enabled"]["BOOL"]) if item is not None else None
+
+    def commit_reminder_preference_receipt(self, before: ClientProfile, after: ClientProfile,
+                                           receipt_id: str) -> None:
+        values: dict[str, Any] = {
+            ":old": {"N": str(before.version)},
+            ":version": {"N": str(after.version)},
+            ":enabled": {"BOOL": after.reminders_enabled},
+            ":updated": {"S": _instant(after.updated_at)},
+        }
+        expression = "SET reminders_enabled = :enabled, version = :version, updated_at = :updated"
+        if after.reminders_updated_at is not None:
+            expression += ", reminders_updated_at = :reminder_updated"
+            values[":reminder_updated"] = {"S": _instant(after.reminders_updated_at)}
+        writes = [{"Update": {
+            "TableName": self._table,
+            "Key": self._business_key(before.business_id, f"CLIENT#{before.client_id}"),
+            "UpdateExpression": expression,
+            "ConditionExpression": "version = :old",
+            "ExpressionAttributeValues": values,
+        }}, {"Put": {
+            "TableName": self._table,
+            "Item": {**self._business_key(before.business_id, _command_sort_key(
+                before.client_id, "set_reminder_preference", receipt_id)),
+                "client_id": {"S": before.client_id},
+                "enabled": {"BOOL": after.reminders_enabled}},
+            "ConditionExpression": "attribute_not_exists(PK)",
+        }}, self._erasure_check(before.business_id, before.client_id)]
+        try:
+            self._client.transact_write_items(TransactItems=writes)
+        except Exception as exc:
+            if not _record_transaction_conflict(exc):
+                raise
+            raise RecordConflict("Profile changed or receipt already committed") from exc
+
     @staticmethod
     def _note_from_item(item: dict[str, Any]) -> ClientNote:
         return ClientNote(
