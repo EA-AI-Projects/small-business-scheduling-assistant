@@ -27,7 +27,8 @@ def owner_schema() -> dict[str, object]:
         del token
         raise ValueError("Schema export never authenticates")
 
-    add_client_session_route(app, reject_client)
+    add_client_session_route(app, reject_client, InMemoryCalendarRepository(),
+                             sms_store=sms_store)
     return app.openapi()
 
 

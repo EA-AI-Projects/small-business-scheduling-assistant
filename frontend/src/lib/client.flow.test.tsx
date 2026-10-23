@@ -54,7 +54,7 @@ describe("client account entry", () => {
     expect(fetcher.mock.calls[2]?.[1]?.headers).toEqual({ Authorization: "Bearer access" });
   });
 
-  it("lists Calendar and Appointments in the menu and signs out from the account menu", async () => {
+  it("lists Calendar, Appointments and Reminders in the menu and signs out from the account menu", async () => {
     auth.completeSignIn.mockResolvedValue({ accessToken: "access", idToken: "id", email: "client@example.test" });
     auth.logoutUrl.mockReturnValue(null);
     vi.stubGlobal("fetch", vi.fn().mockImplementation(async (url: string) => new Response(
@@ -63,10 +63,12 @@ describe("client account entry", () => {
     nav.push.mockReset();
     await act(async () => root.render(<ClientAccess config={config}>{page}</ClientAccess>));
     const items = Array.from(host.querySelectorAll(".menu-item"));
-    expect(items.map((item) => item.textContent)).toEqual(["Calendar", "Appointments"]);
+    expect(items.map((item) => item.textContent)).toEqual(["Calendar", "Appointments", "Reminders"]);
     expect(items[0]?.getAttribute("aria-current")).toBe("page");
     await act(async () => (items[1] as HTMLButtonElement).click());
     expect(nav.push).toHaveBeenCalledWith("/client/appointments/");
+    await act(async () => (items[2] as HTMLButtonElement).click());
+    expect(nav.push).toHaveBeenCalledWith("/client/reminders/");
     expect(host.textContent).not.toContain("Welcome");
     expect(Array.from(host.querySelectorAll("button")).some((button) => button.textContent === "Sign out")).toBe(false);
     await act(async () => host.querySelector<HTMLButtonElement>(".avatar-button")!.click());

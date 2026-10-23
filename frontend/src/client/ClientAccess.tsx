@@ -16,6 +16,7 @@ import { rangeAnnouncement, rangeTitle, rangeTitleShort, todayKey, addDays } fro
 export const CLIENT_SECTIONS = [
   { id: "calendar", label: "Calendar", href: "/client/", pathname: "/client" },
   { id: "appointments", label: "Appointments", href: "/client/appointments/", pathname: "/client/appointments" },
+  { id: "reminders", label: "Reminders", href: "/client/reminders/", pathname: "/client/reminders" },
 ] as const;
 
 /** What a signed-in client page needs: the access token, the business zone and the end-of-session hook. */
