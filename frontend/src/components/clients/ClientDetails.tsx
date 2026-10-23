@@ -4,6 +4,7 @@ import type { ClientProfile } from "@/api/types";
 import { normalizePhone } from "@/lib/phone";
 import { useOwner } from "@/owner/OwnerContext";
 
+import { ReminderPreferenceForm } from "./ReminderPreferenceForm";
 import { ConsentForm } from "./ConsentForm";
 import { AccountInvitationForm } from "./AccountInvitationForm";
 import { deleteClientFlow } from "./deleteClientFlow";
@@ -106,6 +107,10 @@ export function ClientDetails({ client, blankKey, initialSection, onCreated, onD
           onEmailDraft={(email) => setEmailDraft({ clientId, email })}
           onSaved={() => setEmailDraft(null)} />
       </Accordion>
+      {client && <section className="stack" aria-label="Visit reminders">
+        <h4>Visit reminders</h4>
+        <ReminderPreferenceForm key={client.client_id} clientId={client.client_id} version={client.version} />
+      </section>}
       {client && <section className="stack" aria-label="Delete client">
         {!confirmDelete ? (
           <button type="button" className="danger" onClick={() => setConfirmDelete(true)}>

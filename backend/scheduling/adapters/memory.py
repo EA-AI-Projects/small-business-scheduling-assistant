@@ -42,6 +42,7 @@ from scheduling.domain.owner_calendar import (
     UnavailableBlock,
 )
 from scheduling.domain.owner_policy import PolicyCommand, PolicyCommit, PolicyRecord, PolicyReplay
+from scheduling.domain.reminders import ReminderRecord, ReminderSettings
 from scheduling.domain.scheduling_preferences import (
     SchedulingPreferences,
     SchedulingPreferencesRecord,
@@ -65,6 +66,8 @@ class InMemoryCalendarRepository:
         self._preference_replays: dict[tuple[str, str, str], tuple[
             SchedulingPreferences | None, int, SchedulingPreferencesRecord]] = {}
         self._preference_reviews: dict[tuple[str, str], tuple[StoredReview, datetime]] = {}
+        self._reminders: dict[str, ReminderRecord] = {}
+        self._reminders_replays: dict[tuple[str, str, str], tuple[ReminderSettings, int, ReminderRecord]] = {}
         self._outreach: dict[str, OutreachRecord] = {}
         self._outreach_replays: dict[tuple[str, str, str], tuple[OutreachSettings, int, OutreachRecord]] = {}
         self._invitation_intents: dict[str, InvitationIntent] = {}
@@ -202,6 +205,29 @@ class InMemoryCalendarRepository:
             self._outreach[business_id] = result
             self._outreach_replays[identity] = (settings, expected_version, result)
             self._audit[f"outreach#{business_id}#{actor_id}#{key}"] = result
+            return result
+
+    def read_reminders(self, business_id: str) -> ReminderRecord:
+        with self._lock:
+            return self._reminders.get(business_id, ReminderRecord(ReminderSettings(), 0))
+
+    def save_reminders(self, business_id: str, actor_id: str, key: str,
+                      expected_version: int, settings: ReminderSettings) -> ReminderRecord:
+        with self._lock:
+            identity = (business_id, actor_id, key)
+            previous = self._reminders_replays.get(identity)
+            if previous is not None:
+                old_settings, old_version, result = previous
+                if old_settings != settings or old_version != expected_version:
+                    raise IdempotencyKeyReused("Key already used for another reminders edit")
+                return result
+            current = self.read_reminders(business_id)
+            if current.version != expected_version:
+                raise RevisionConflict("Reminder settings version changed")
+            result = ReminderRecord(settings, expected_version + 1)
+            self._reminders[business_id] = result
+            self._reminders_replays[identity] = (settings, expected_version, result)
+            self._audit[f"reminders#{business_id}#{actor_id}#{key}"] = result
             return result
 
     def read_confirmed_for_client(self, business_id: str, client_id: str,

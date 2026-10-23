@@ -56,8 +56,8 @@ describe("owner Scheduling preferences", () => {
   });
   afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
 
-  it("adds a fifth card that summarizes active preferences", async () => {
-    expect(host.querySelectorAll('button[aria-haspopup="dialog"]')).toHaveLength(5);
+  it("summarizes active preferences alongside other Settings cards", async () => {
+    expect(host.querySelectorAll('button[aria-haspopup="dialog"]')).toHaveLength(6);
     expect(opener().textContent).toContain("None active");
     preferences = { version: 2, active: { text: "Tuesday and Thursday mornings", rules: MORNINGS,
       timezone: "America/Los_Angeles", review_token: "a".repeat(64) } };

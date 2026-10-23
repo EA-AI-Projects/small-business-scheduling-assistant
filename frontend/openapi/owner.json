@@ -825,6 +825,67 @@
         "title": "PreferenceTextBody",
         "type": "object"
       },
+      "ReminderEditBody": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_version": {
+            "minimum": 0.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/ReminderSettingsBody"
+          }
+        },
+        "required": [
+          "expected_version",
+          "settings"
+        ],
+        "title": "ReminderEditBody",
+        "type": "object"
+      },
+      "ReminderPreferenceBody": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "expected_version": {
+            "exclusiveMinimum": 0.0,
+            "title": "Expected Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "expected_version",
+          "enabled"
+        ],
+        "title": "ReminderPreferenceBody",
+        "type": "object"
+      },
+      "ReminderSettingsBody": {
+        "additionalProperties": false,
+        "properties": {
+          "days_before": {
+            "maximum": 7.0,
+            "minimum": 1.0,
+            "title": "Days Before",
+            "type": "integer"
+          },
+          "local_time": {
+            "format": "time",
+            "title": "Local Time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "days_before",
+          "local_time"
+        ],
+        "title": "ReminderSettingsBody",
+        "type": "object"
+      },
       "RemoveBlockBody": {
         "additionalProperties": false,
         "properties": {
@@ -2414,6 +2475,120 @@
         "summary": "Change Client Note Hold"
       }
     },
+    "/v1/owner/businesses/{business_id}/clients/{client_id}/reminder-preference": {
+      "get": {
+        "operationId": "get_reminder_preference_v1_owner_businesses__business_id__clients__client_id__reminder_preference_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "business_id",
+            "required": true,
+            "schema": {
+              "title": "Business Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Get Reminder Preference V1 Owner Businesses  Business Id  Clients  Client Id  Reminder Preference Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Reminder Preference"
+      },
+      "put": {
+        "operationId": "set_reminder_preference_v1_owner_businesses__business_id__clients__client_id__reminder_preference_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "business_id",
+            "required": true,
+            "schema": {
+              "title": "Business Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReminderPreferenceBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Set Reminder Preference V1 Owner Businesses  Business Id  Clients  Client Id  Reminder Preference Put"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Set Reminder Preference"
+      }
+    },
     "/v1/owner/businesses/{business_id}/clients/{client_id}/sms-consent": {
       "post": {
         "operationId": "capture_sms_consent_v1_owner_businesses__business_id__clients__client_id__sms_consent_post",
@@ -2794,6 +2969,112 @@
           }
         ],
         "summary": "Edit Business Profile"
+      }
+    },
+    "/v1/owner/businesses/{business_id}/reminders": {
+      "get": {
+        "operationId": "get_reminders_v1_owner_businesses__business_id__reminders_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "business_id",
+            "required": true,
+            "schema": {
+              "title": "Business Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Get Reminders V1 Owner Businesses  Business Id  Reminders Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Reminders"
+      },
+      "put": {
+        "operationId": "edit_reminders_v1_owner_businesses__business_id__reminders_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "business_id",
+            "required": true,
+            "schema": {
+              "title": "Business Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReminderEditBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Edit Reminders V1 Owner Businesses  Business Id  Reminders Put"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Edit Reminders"
       }
     },
     "/v1/owner/businesses/{business_id}/requests": {
