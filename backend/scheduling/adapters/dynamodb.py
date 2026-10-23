@@ -61,6 +61,7 @@ from scheduling.domain.owner_policy import (
     PolicyReplay,
     PolicyResult,
 )
+from scheduling.domain.reminders import ReminderRecord, ReminderSettings
 from scheduling.domain.scheduling_preferences import (
     SchedulingPreferences,
     SchedulingPreferencesRecord,
@@ -522,6 +523,69 @@ class DynamoDBCalendarRepository:
             raise RevisionConflict("Outreach settings version changed") from exc
         return OutreachRecord(settings, next_version)
 
+    def read_reminders(self, business_id: str) -> ReminderRecord:
+        item = self._get(self._business_key(business_id, "SETTINGS#VISIT_REMINDERS"))
+        if item is None:
+            return ReminderRecord(ReminderSettings(), 0)
+        payload = json.loads(item["payload"]["S"])
+        return ReminderRecord(ReminderSettings(
+            days_before=payload["days_before"], local_time=time.fromisoformat(payload["local_time"])),
+            int(item["version"]["N"]))
+
+    def save_reminders(self, business_id: str, actor_id: str, key: str,
+                      expected_version: int, settings: ReminderSettings) -> ReminderRecord:
+        identity = self._business_key(business_id,
+            _command_sort_key(actor_id, "edit_visit_reminders", key))
+        payload = json.dumps({"days_before": settings.days_before,
+            "local_time": settings.local_time.isoformat(timespec="minutes")}, sort_keys=True)
+        request_hash = sha256(json.dumps([expected_version, payload]).encode()).hexdigest()
+
+        def replay() -> ReminderRecord | None:
+            old = self._get(identity)
+            if old is None:
+                return None
+            if old["request_hash"]["S"] != request_hash:
+                raise IdempotencyKeyReused("Key already used for another reminders edit")
+            return ReminderRecord(settings, int(old["version"]["N"]))
+
+        existing = replay()
+        if existing is not None:
+            return existing
+        next_version = expected_version + 1
+        record_key = self._business_key(business_id, "SETTINGS#VISIT_REMINDERS")
+        condition = "attribute_not_exists(PK)" if expected_version == 0 else "#version = :old"
+        put: dict[str, Any] = {"TableName": self._table,
+            "Item": {**record_key, "payload": {"S": payload}, "version": {"N": str(next_version)}},
+            "ConditionExpression": condition}
+        if expected_version:
+            put["ExpressionAttributeNames"] = {"#version": "version"}
+            put["ExpressionAttributeValues"] = {":old": {"N": str(expected_version)}}
+        audit_key = sha256(json.dumps([business_id, actor_id, key]).encode()).hexdigest()
+        try:
+            self._client.transact_write_items(TransactItems=[
+                {"Put": put},
+                {"Put": {"TableName": self._table,
+                    "Item": {**identity, "request_hash": {"S": request_hash},
+                             "version": {"N": str(next_version)}},
+                    "ConditionExpression": "attribute_not_exists(PK)"}},
+                {"Put": {"TableName": self._table,
+                    "Item": {**self._business_key(business_id, f"AUDIT#reminders#{audit_key}"),
+                             "action": {"S": "edit_visit_reminders"},
+                             "actor_id": {"S": actor_id},
+                             "source": {"S": "owner_api"},
+                             "created_at": {"S": _instant(datetime.now(UTC))},
+                             "version": {"N": str(next_version)}},
+                    "ConditionExpression": "attribute_not_exists(PK)"}},
+            ])
+        except Exception as exc:
+            if not _record_transaction_conflict(exc):
+                raise
+            existing = replay()
+            if existing is not None:
+                return existing
+            raise RevisionConflict("Reminder settings version changed") from exc
+        return ReminderRecord(settings, next_version)
+
     def read_confirmed_for_client(self, business_id: str, client_id: str,
                                   run_at: datetime, end_at: datetime) -> tuple[int, tuple[Appointment, ...]]:
         snapshot = self.read_calendar(business_id)
@@ -908,6 +972,9 @@ class DynamoDBCalendarRepository:
             phone_verified_at=(datetime.fromisoformat(item["phone_verified_at"]["S"])
                                if "phone_verified_at" in item else None),
             email=item["email"]["S"] if "email" in item else None,
+            reminders_enabled=item.get("reminders_enabled", {}).get("BOOL", False),
+            reminders_updated_at=(datetime.fromisoformat(item["reminders_updated_at"]["S"])
+                                  if "reminders_updated_at" in item else None),
         )
 
     def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None:
@@ -1237,6 +1304,9 @@ class DynamoDBCalendarRepository:
             "created_at": {"S": _instant(profile.created_at)},
             "updated_at": {"S": _instant(profile.updated_at)},
         }
+        item["reminders_enabled"] = {"BOOL": profile.reminders_enabled}
+        if profile.reminders_updated_at is not None:
+            item["reminders_updated_at"] = {"S": _instant(profile.reminders_updated_at)}
         if profile.phone_verified_at is not None:
             item["phone_verified_at"] = {"S": _instant(profile.phone_verified_at)}
         if profile.email is not None:

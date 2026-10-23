@@ -1640,3 +1640,42 @@ def test_same_key_default_hold_retry_replays_after_the_default_changes(
     lookup = CreateHold(env.business, "synthetic-owner", "portal-a", "same-key", start, 1,
                         service_duration_minutes=1)
     assert HoldService(repo).existing(lookup) == first
+
+
+def test_reminder_settings_and_profile_preference_persist_with_conflicts_and_erasure(
+    race_env: RaceEnv,
+) -> None:
+    from scheduling.domain.reminders import ReminderSettings
+
+    env = race_env
+    repo = DynamoDBCalendarRepository(env.client, env.table)
+    api = TestClient(create_owner_app(repo,
+        lambda token: OwnerPrincipal("synthetic-owner", env.business), lambda: START))
+    headers = {"Authorization": "Bearer synthetic", "Idempotency-Key": "reminder-settings"}
+    base = f"/v1/owner/businesses/{env.business}"
+    assert repo.read_reminders(env.business).settings == ReminderSettings()
+    body = {"expected_version": 0, "settings": {"days_before": 7, "local_time": "18:00"}}
+    result = api.put(base + "/reminders", json=body, headers=headers)
+    assert result.status_code == 200, result.text
+    assert api.put(base + "/reminders", json=body, headers=headers).json() == result.json()
+    assert repo.read_reminders(env.business).settings == ReminderSettings(7, time(18))
+    assert api.put(base + "/reminders", json=body, headers={
+        **headers, "Idempotency-Key": "stale"}).status_code == 409
+    service = ClientRecordService(repo)
+    profile = service.save_profile(env.business, "synthetic-client", "Synthetic Client",
+        "+14155550101", "123 Test Street", True, 0, START)
+    pref = base + "/clients/synthetic-client/reminder-preference"
+    enrolled = api.put(pref, json={"expected_version": profile.version, "enabled": True}, headers=headers)
+    assert enrolled.status_code == 200, enrolled.text
+    reloaded = api.get(base + "/clients/synthetic-client", headers=headers).json()
+    assert reloaded["reminders_enabled"] is True
+    assert reloaded["reminders_updated_at"] is not None
+    assert api.put(pref, json={"expected_version": profile.version, "enabled": False}, headers=headers).status_code == 409
+    # A second repository instance observes the same state, and general edits preserve it.
+    other = ClientRecordService(DynamoDBCalendarRepository(env.client, env.table))
+    renamed = other.save_profile(env.business, "synthetic-client", "Renamed Client",
+        "+14155550101", "123 Test Street", True, reloaded["version"], START + timedelta(hours=1))
+    assert renamed.reminders_enabled
+    assert renamed.reminders_updated_at == START
+    assert api.delete(base + "/clients/synthetic-client", headers=headers).status_code == 204
+    assert api.get(pref, headers=headers).status_code == 404

@@ -112,9 +112,11 @@ The approved invitation text is the initial value of one owner-editable message 
 
 The owner may also trigger a one-off run from the same Settings card. It saves an edited message before the run, then uses the saved one- or two-week lookahead and current eligibility checks, including consent and opt-out. Manual runs have no per-client repeat limit; each click has its own idempotency key. The owner previews the eligible count and confirms the send. The manual delivery gate is configured separately from scheduled delivery. The owner plans a separate Twilio campaign for future promotional or unrelated texts.
 
-### 6.4.2 Visit reminders (approved; not implemented)
+### 6.4.2 Visit reminders (owner configuration implemented; delivery and client enrollment pending)
 
-Accepted scope (owner decisions, 2026-10-23; not yet implemented):
+Owner configuration (#391) provides a Visit reminders Settings card for the shared schedule and a client-profile enrollment control. It saves versioned values, defaults old profiles to off, and explains current SMS restrictions without changing consent. Scheduled delivery, portal enrollment, and text enrollment remain pending (#392–#394). No live delivery is authorized.
+
+Accepted full scope (owner decisions, 2026-10-23):
 
 - Send one SMS reminder per confirmed visit to enrolled clients; pending requests and email reminders are outside this version.
 - Maintain one reminder preference per client profile, shared across the owner client-profile UI, the client portal, and the client's SMS conversation. Clients can change it themselves; the owner can record the client's expressed preference.
