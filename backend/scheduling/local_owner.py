@@ -196,7 +196,8 @@ def create_local_owner_app(token: str | None, now: datetime | None = None,
                            preference_interpreter=interpreter if isinstance(
                                interpreter, OpenAIMessageInterpreter) else None)
     # The production client routes, on the same repository and clock as the owner routes.
-    add_client_session_route(app, client_verifier, repository, clock)
+    add_client_session_route(app, client_verifier, repository, clock,
+                             sms_store=LocalConsent(repository))  # type: ignore[arg-type]
     simulator = TextSimulator(repository, interpreter or OfflineInterpreter(), BUSINESS_ID,
                               current)
     mount_text_simulator(app, simulator, verifier)

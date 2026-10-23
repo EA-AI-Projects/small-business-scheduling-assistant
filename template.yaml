@@ -372,6 +372,20 @@ Resources:
             Path: /v1/owner/{proxy+}
             Method: DELETE
             Auth: {Authorizer: OwnerJwt}
+        ClientReminderPreferenceGet:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OwnerHttpApi
+            Path: /v1/client/reminder-preference
+            Method: GET
+            Auth: {Authorizer: OwnerJwt}
+        ClientReminderPreferencePut:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OwnerHttpApi
+            Path: /v1/client/reminder-preference
+            Method: PUT
+            Auth: {Authorizer: OwnerJwt}
         ClientSessionGet:
           Type: HttpApi
           Properties:

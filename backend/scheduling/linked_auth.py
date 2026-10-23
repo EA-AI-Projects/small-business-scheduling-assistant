@@ -14,6 +14,7 @@ from scheduling.adapters.account_invitations_aws import (
     DynamoClientInvitations,
 )
 from scheduling.adapters.dynamodb import DynamoClient, DynamoDBCalendarRepository
+from scheduling.adapters.sms_dynamodb import DynamoSmsIngressStore
 from scheduling.client_api import add_client_session_route
 from scheduling.domain.scheduling_preferences import PreferenceInterpreter
 from scheduling.identity_links import DynamoIdentityLinkStore, IdentityLink, IdentityLinks, LinkRole
@@ -87,5 +88,6 @@ def create_cognito_linked_app(
         client, table_name, owner, clock, cors_origins=cors_origins,
         account_invitations=invitations, verify_account=verify_account,
         preference_interpreter=preference_interpreter)
-    add_client_session_route(app, verify, records, clock)
+    add_client_session_route(app, verify, records, clock,
+                             sms_store=DynamoSmsIngressStore(client, table_name))
     return app
