@@ -112,6 +112,27 @@ The approved invitation text is the initial value of one owner-editable message 
 
 The owner may also trigger a one-off run from the same Settings card. It saves an edited message before the run, then uses the saved one- or two-week lookahead and current eligibility checks, including consent and opt-out. Manual runs have no per-client repeat limit; each click has its own idempotency key. The owner previews the eligible count and confirms the send. The manual delivery gate is configured separately from scheduled delivery. The owner plans a separate Twilio campaign for future promotional or unrelated texts.
 
+### 6.4.2 Visit reminders (approved; not implemented)
+
+Accepted scope (owner decisions, 2026-10-23; not yet implemented):
+
+- Send one SMS reminder per confirmed visit to enrolled clients; pending requests and email reminders are outside this version.
+- Maintain one reminder preference per client profile, shared across the owner client-profile UI, the client portal, and the client's SMS conversation. Clients can change it themselves; the owner can record the client's expressed preference.
+- Reminders default to off for both existing and new clients until the client requests enrollment through text, the portal, or the owner.
+- Reminder enrollment does not grant SMS consent, verify a phone, or override STOP. Existing SMS eligibility gates continue to apply. Disabling reminders alone leaves other permitted program texts enabled; STOP retains its existing program-wide meaning.
+- The owner configures one shared reminder schedule in Settings: 1–7 calendar days before each visit at one send time from 8 a.m. through 6 p.m., inclusive, in the business timezone. Default: 1 calendar day before at 10 a.m. Client profiles control enrollment, not individual reminder schedules. Multiple reminders per visit are outside this version.
+- Replies use the existing scheduling conversation and cancellation/rescheduling flows. Reminders do not request attendance confirmation. A bare YES changes nothing unless an existing conversation question is awaiting that answer.
+- A visit confirmed, or a client enrolled, after that visit's reminder time receives no catch-up reminder. Normal booking confirmation behavior remains in place. Enrollment applies to visits whose reminder time is still ahead.
+- Cancellation suppresses unsent reminders. A pending reschedule leaves the original confirmed visit's reminder intact. An approved reschedule replaces the original reminder schedule; the replacement may receive its own reminder at its future reminder time even if the original reminder was already sent.
+- Timing-setting changes recalculate unsent reminders only. They do not repeat sent reminders or send catch-up messages when the new reminder time is already past.
+- Do not retry failed reminder deliveries in this version. The owner accepts the risk of a missed reminder in exchange for simpler delivery behavior (owner decision, 2026-10-23). Failed sends must not be selected again as new reminders.
+- Missed send windows do not trigger catch-up after downtime. An uncertain provider-acceptance outcome does not trigger a resend. The owner accepts missed reminders in preference to duplicate delivery.
+- Clients can enroll or unenroll through clear plain-language texts, such as "remind me about my visits" or "turn off reminders", with a short acknowledgment. Ambiguous requests require clarification before changing the preference. The portal and owner profile show the same preference and explain when existing SMS eligibility restrictions prevent delivery.
+- Use standard reminder wording naming the business, service, full visit date, time, and timezone. Exclude private notes and attendance-confirmation prompts. Custom reminder-message editing is outside this version.
+- Show failed reminders in the existing delivery-failure view. Do not add owner alerts or a separate reminder dashboard.
+
+The owner approved the [implementation specification](VISIT_REMINDERS_SPEC.md), verification boundaries, scheduled-minute send window, and issue breakdown on 2026-10-23. Track implementation in [parent issue #390](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/issues/390) and sub-issues #391–#394. The scheduled minute is the selection/delivery window; delayed work outside that minute expires without catch-up. Implementation has not started.
+
 ### 6.5 SMS conversation behavior
 
 - Support natural-language requests for availability, booking, cancellation, and rescheduling. The language model resolves relative dates and windows ("tomorrow", "Friday afternoon", "this week") into a candidate day range; the backend checks the booking horizon, holidays, working hours, and existing visits before offering times.

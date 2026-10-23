@@ -22,6 +22,12 @@ _Avoid_: Pending appointment
 A proposed visit awaiting the owner's approval. It is not a confirmed visit.
 _Avoid_: Confirmed appointment, booked visit
 
+**Visit reminder**:
+A text reminding an enrolled client of an upcoming confirmed visit. It does not apply to a pending request.
+
+**Reminder preference**:
+A client's choice to receive or decline visit reminders, which the client can change or the owner can record on their behalf. It is separate from permission to receive program texts.
+
 **Weekly hours**:
 The business's repeating open periods for each weekday, read in its business timezone. A weekday with no open periods is closed.
 _Avoid_: Weekly calendar
