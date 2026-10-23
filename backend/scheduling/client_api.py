@@ -22,7 +22,13 @@ from scheduling.domain.availability import (
     InvalidPolicy,
 )
 from scheduling.domain.calendar import CalendarStatus
-from scheduling.domain.client_records import ClientProfile
+from scheduling.domain.client_records import (
+    ClientProfile,
+    ClientRecordRepository,
+    ClientRecordService,
+    RecordConflict,
+    RecordNotFound,
+)
 from scheduling.domain.holds import (
     LOOKUP_MINUTES,
     CreateHold,
@@ -46,6 +52,7 @@ from scheduling.domain.lifecycle import (
 )
 from scheduling.domain.owner_policy import PolicyNotConfigured
 from scheduling.domain.recommendations import recommended_starts
+from scheduling.domain.reminders import reminder_preference_view
 from scheduling.domain.scheduling_preferences import SchedulingPreferencesRecord
 from scheduling.domain.service_duration import (
     ServiceDurationChanged,
@@ -53,6 +60,7 @@ from scheduling.domain.service_duration import (
     ServiceNotConfigured,
     service_duration,
 )
+from scheduling.domain.sms_ingress import SmsIngressStore
 from scheduling.identity_links import IdentityLink, LinkRole
 
 
@@ -67,6 +75,19 @@ class ClientSession(BaseModel):
     # The saved business and service names (#348); None until the owner saves the profile.
     business_name: str | None = None
     service_name: str | None = None
+
+
+class ClientReminderPreference(BaseModel):
+    enabled: bool
+    version: int
+    blockers: list[str]
+
+
+class ClientReminderPreferenceBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(strict=True)
+    expected_version: int = Field(gt=0, strict=True)
 
 
 class ClientAvailabilityQuery(BaseModel):
@@ -202,6 +223,7 @@ def add_client_session_route(
     app: FastAPI, verify_token: Callable[[str], IdentityLink],
     repository: object | None = None,
     clock: Callable[[], datetime] | None = None,
+    *, sms_store: SmsIngressStore | None = None,
 ) -> None:
     """Expose the caller's linked identifiers and, with a repository, own bookings."""
     security = HTTPBearer(auto_error=False)
@@ -247,6 +269,36 @@ def add_client_session_route(
 
     if store is None:
         return
+    clients = ClientRecordService(cast(ClientRecordRepository, repository))
+
+    def preference(session: ClientSession) -> ClientReminderPreference:
+        profile = store.read_profile(session.business_id, session.client_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="Client profile not found")
+        return ClientReminderPreference.model_validate(reminder_preference_view(profile, sms_store))
+
+    @app.get("/v1/client/reminder-preference", response_model=ClientReminderPreference)
+    def get_client_reminder_preference(
+        session: Annotated[ClientSession, Depends(linked_client)],
+        query: Annotated[ClientBookingsQuery, Query()],
+    ) -> ClientReminderPreference:
+        del query
+        return preference(session)
+
+    @app.put("/v1/client/reminder-preference", response_model=ClientReminderPreference)
+    def set_client_reminder_preference(
+        session: Annotated[ClientSession, Depends(linked_client)],
+        body: ClientReminderPreferenceBody,
+    ) -> ClientReminderPreference:
+        try:
+            profile = clients.set_reminder_preference(
+                session.business_id, session.client_id, body.enabled, body.expected_version, now())
+        except RecordNotFound as exc:
+            raise HTTPException(status_code=404, detail="Client profile not found") from exc
+        except RecordConflict as exc:
+            raise _refused("RECORD_CONFLICT", "Your profile changed. Reload your saved preference.") from exc
+        return ClientReminderPreference.model_validate(reminder_preference_view(profile, sms_store))
+
     availability_service = AvailabilityService(store)
 
     def current_duration(business_id: str) -> int:
