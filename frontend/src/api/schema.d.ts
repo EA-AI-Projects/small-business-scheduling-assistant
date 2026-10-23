@@ -303,6 +303,24 @@ export interface paths {
         patch: operations["change_client_note_hold_v1_owner_businesses__business_id__clients__client_id__notes__note_id__legal_hold_patch"];
         trace?: never;
     };
+    "/v1/owner/businesses/{business_id}/clients/{client_id}/reminder-preference": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Reminder Preference */
+        get: operations["get_reminder_preference_v1_owner_businesses__business_id__clients__client_id__reminder_preference_get"];
+        /** Set Reminder Preference */
+        put: operations["set_reminder_preference_v1_owner_businesses__business_id__clients__client_id__reminder_preference_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/owner/businesses/{business_id}/clients/{client_id}/sms-consent": {
         parameters: {
             query?: never;
@@ -383,6 +401,24 @@ export interface paths {
         get: operations["get_business_profile_v1_owner_businesses__business_id__profile_get"];
         /** Edit Business Profile */
         put: operations["edit_business_profile_v1_owner_businesses__business_id__profile_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/owner/businesses/{business_id}/reminders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Reminders */
+        get: operations["get_reminders_v1_owner_businesses__business_id__reminders_get"];
+        /** Edit Reminders */
+        put: operations["edit_reminders_v1_owner_businesses__business_id__reminders_put"];
         post?: never;
         delete?: never;
         options?: never;
@@ -768,6 +804,29 @@ export interface components {
             client_selections?: components["schemas"]["ClientSelectionBody"][];
             /** Text */
             text: string;
+        };
+        /** ReminderEditBody */
+        ReminderEditBody: {
+            /** Expected Version */
+            expected_version: number;
+            settings: components["schemas"]["ReminderSettingsBody"];
+        };
+        /** ReminderPreferenceBody */
+        ReminderPreferenceBody: {
+            /** Enabled */
+            enabled: boolean;
+            /** Expected Version */
+            expected_version: number;
+        };
+        /** ReminderSettingsBody */
+        ReminderSettingsBody: {
+            /** Days Before */
+            days_before: number;
+            /**
+             * Local Time
+             * Format: time
+             */
+            local_time: string;
         };
         /** RemoveBlockBody */
         RemoveBlockBody: {
@@ -1707,6 +1766,74 @@ export interface operations {
             };
         };
     };
+    get_reminder_preference_v1_owner_businesses__business_id__clients__client_id__reminder_preference_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                business_id: string;
+                client_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_reminder_preference_v1_owner_businesses__business_id__clients__client_id__reminder_preference_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                business_id: string;
+                client_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReminderPreferenceBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     capture_sms_consent_v1_owner_businesses__business_id__clients__client_id__sms_consent_post: {
         parameters: {
             query?: never;
@@ -1922,6 +2049,74 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["BusinessProfileEditBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_reminders_v1_owner_businesses__business_id__reminders_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                business_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    edit_reminders_v1_owner_businesses__business_id__reminders_put: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                business_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReminderEditBody"];
             };
         };
         responses: {

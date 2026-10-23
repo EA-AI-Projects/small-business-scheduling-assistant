@@ -21,6 +21,8 @@ export type RemoveBlockBody = Schemas["RemoveBlockBody"];
 export type ManualAppointmentBody = Schemas["ManualAppointmentBody"];
 export type PolicyEditBody = Schemas["PolicyEditBody"];
 export type PolicyBody = Schemas["PolicyBody"];
+export type ReminderEditBody = Schemas["ReminderEditBody"];
+export type ReminderPreferenceBody = Schemas["ReminderPreferenceBody"];
 export type OutreachEditBody = Schemas["OutreachEditBody"];
 export type BusinessProfileBody = Schemas["BusinessProfileBody"];
 export type BusinessProfileEditBody = Schemas["BusinessProfileEditBody"];
@@ -153,6 +155,8 @@ export interface ClientProfile {
   created_at: string;
   updated_at: string;
   phone_verified_at: string | null;
+  reminders_enabled?: boolean;
+  reminders_updated_at?: string | null;
 }
 
 export interface ClientNote {

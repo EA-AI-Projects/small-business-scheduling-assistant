@@ -51,6 +51,8 @@ class ClientProfile:
     updated_at: datetime
     phone_verified_at: datetime | None = None
     email: str | None = None
+    reminders_enabled: bool = False
+    reminders_updated_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if not self.business_id or not self.client_id or not self.name.strip():
@@ -152,10 +154,26 @@ class ClientRecordService:
             current.created_at if current else instant, instant,
             current.phone_verified_at if current and current.phone_e164 == phone_e164 else None,
             email.strip() or None if email is not None else None,
+            current.reminders_enabled if current else False,
+            current.reminders_updated_at if current else None,
         )
         self._repository.save_profile(profile, expected_version,
                                       current.phone_e164 if current else None)
         return profile
+
+    def set_reminder_preference(self, business_id: str, client_id: str, enabled: bool,
+                                expected_version: int, now: datetime) -> ClientProfile:
+        current = self._repository.read_profile(business_id, client_id)
+        if current is None:
+            raise RecordNotFound("Client was not found")
+        if current.version != expected_version:
+            raise RecordConflict("Client profile version changed")
+        if current.reminders_enabled == enabled:
+            return current
+        updated = replace(current, reminders_enabled=enabled, reminders_updated_at=_utc(now),
+                          version=current.version + 1, updated_at=_utc(now))
+        self._repository.save_profile(updated, current.version, current.phone_e164)
+        return updated
 
     def verify_phone(self, business_id: str, client_id: str, phone_e164: str,
                      now: datetime) -> ClientProfile:
