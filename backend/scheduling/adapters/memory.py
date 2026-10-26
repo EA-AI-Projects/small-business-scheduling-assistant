@@ -59,6 +59,7 @@ class InMemoryCalendarRepository:
         self._revisions: dict[str, int] = defaultdict(int)
         self._policies: dict[str, AvailabilityPolicy] = {}
         self._policy_versions: dict[str, int] = {}
+        self._policy_timezone_updated_at: dict[str, datetime | None] = {}
         self._policy_replays: dict[tuple[str, str, str, str], PolicyReplay] = {}
         self._profiles: dict[str, BusinessProfileRecord] = {}
         self._profile_replays: dict[tuple[str, str, str], tuple[BusinessProfile, int, BusinessProfileRecord]] = {}
@@ -704,7 +705,9 @@ class InMemoryCalendarRepository:
     def read_policy_record(self, business_id: str) -> PolicyRecord | None:
         with self._lock:
             policy = self._policies.get(business_id)
-            return PolicyRecord(policy, self._policy_versions[business_id]) if policy else None
+            return PolicyRecord(
+                policy, self._policy_versions[business_id],
+                self._policy_timezone_updated_at.get(business_id)) if policy else None
 
     @staticmethod
     def _policy_replay_key(command: PolicyCommand) -> tuple[str, str, str, str]:
@@ -733,6 +736,7 @@ class InMemoryCalendarRepository:
                 raise RevisionConflict("Policy idempotency key already used")
             self._policies[business_id] = commit.result.record.policy
             self._policy_versions[business_id] = commit.result.record.version
+            self._policy_timezone_updated_at[business_id] = commit.result.record.timezone_updated_at
             self._policy_replays[key] = PolicyReplay(commit.request_hash, commit.result)
             self._audit[commit.audit_id] = commit
             self._outbox[f"{commit.audit_id}#owner"] = commit
