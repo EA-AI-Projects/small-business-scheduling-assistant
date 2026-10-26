@@ -52,7 +52,7 @@ def reminder_blockers(profile: ClientProfile, consent: SmsIngressStore | None) -
         try:
             evidence = consent.read_consent(profile.business_id, profile.phone_e164)
             opted_out = consent.is_opted_out(profile.business_id, profile.phone_e164)
-        except Exception:  # Provider/store diagnostics never reach authorized UI explanations.
+        except Exception:  # noqa: BLE001 - failed consent evidence always denies eligibility
             blockers.append("consent_unavailable")
         else:
             if (evidence is None or evidence.client_id != profile.client_id

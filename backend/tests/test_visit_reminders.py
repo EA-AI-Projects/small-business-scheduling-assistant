@@ -334,3 +334,100 @@ def test_known_preprovider_failure_appears_through_existing_owner_failure_api() 
     assert response.status_code == 200, response.text
     assert response.json()[0]['error_code'] == 'FICTIONAL_NUMBER'
     assert response.json()[0]['provider_id'] is None
+
+
+def test_timezone_edit_within_new_due_minute_does_not_catch_up() -> None:
+    from scheduling.domain.owner_policy import OwnerPolicyService, PolicyCommand
+    flow = workflow()
+    # Move from Pacific 10am (17Z) to Mountain 10am (16Z), after that minute begins.
+    flow.clock[0] = datetime(2026, 10, 19, 16, 0, 15, tzinfo=UTC)
+    prior = flow.records.read_policy_record(BUSINESS)
+    policy = replace(prior.policy, timezone='America/Denver')
+    OwnerPolicyService(flow.records, lambda: flow.clock[0]).apply(PolicyCommand(
+        BUSINESS, 'owner', 'change-zone', flow.records.read_revision(BUSINESS),
+        prior.version, policy))
+    assert flow.selector.run(BUSINESS, flow.clock[0]).queued == 0
+    assert flow.messages.calls == []
+
+
+def test_confirmation_after_cutoff_and_pending_requests_never_qualify() -> None:
+    from scheduling.domain.holds import CreateHold, HoldService
+    flow = workflow()
+    target = client(flow.records, flow.consent, 502)
+    profile = flow.records.read_profile(BUSINESS, target)
+    ClientRecordService(flow.records).set_reminder_preference(BUSINESS, target, True, profile.version, RUN)
+    pending = HoldService(flow.records).create(CreateHold(
+        BUSINESS, target, target, 'late-book', datetime(2026, 10, 20, 20, tzinfo=UTC), 60), RUN)
+    # Original client is unenrolled; isolate pending vs confirmed-after-cutoff behavior.
+    original = flow.records.read_profile(BUSINESS, flow.target)
+    ClientRecordService(flow.records).set_reminder_preference(BUSINESS, flow.target, False, original.version, RUN)
+    assert flow.selector.run(BUSINESS, flow.clock[0]).queued == 0
+    LifecycleService(flow.records, lambda: flow.clock[0]).apply(AppointmentCommand(
+        BUSINESS, pending.hold_id, 'owner', ActorRole.OWNER, Action.APPROVE, 'approve-late', 1))
+    assert flow.selector.run(BUSINESS, flow.clock[0]).queued == 0
+
+
+def test_settings_noop_and_replay_preserve_original_eligibility_cutoff() -> None:
+    flow = workflow()
+    settings = ReminderSettings(1, time(11))
+    first = flow.records.save_reminders(BUSINESS, 'owner', 'first', 0, settings, RUN)
+    replay = flow.records.save_reminders(BUSINESS, 'owner', 'first', 0, settings, flow.clock[0])
+    assert replay == first and first.updated_at == RUN
+    same = flow.records.save_reminders(BUSINESS, 'owner', 'same', 1, settings, flow.clock[0])
+    assert same.updated_at == RUN
+
+
+def test_crash_after_claim_before_provider_call_never_recovers() -> None:
+    flow = workflow()
+    flow.selector.run(BUSINESS, flow.clock[0])
+    def crash(_):
+        raise RuntimeError('worker died before provider invocation')
+    flow.sender.deliver = crash
+    with pytest.raises(RuntimeError):
+        consume(flow)
+    flow.clock[0] += timedelta(minutes=3)
+    assert consume(flow) == ConsumeOutcome.SKIPPED
+    assert flow.messages.calls == []
+
+
+def test_erasure_after_selection_prevents_provider_submission() -> None:
+    flow = workflow()
+    flow.selector.run(BUSINESS, flow.clock[0])
+    flow.records.erase_client(BUSINESS, flow.target)
+    assert consume(flow) == ConsumeOutcome.SKIPPED
+    assert flow.messages.calls == []
+
+
+def test_runtime_authorization_denies_before_aws_access(monkeypatch) -> None:
+    from scheduling.workers import visit_reminders
+    def forbidden(*args):
+        raise AssertionError('unauthorized worker contacted AWS')
+    monkeypatch.setattr(visit_reminders.boto3, 'client', forbidden)
+    monkeypatch.delenv('VISIT_REMINDER_DELIVERY_ENABLED', raising=False)
+    with pytest.raises(RuntimeError, match='not authorized'):
+        visit_reminders.handler({}, None)
+
+
+def test_provider_acceptance_followed_by_evidence_failure_never_resubmits() -> None:
+    flow = workflow()
+    flow.selector.run(BUSINESS, flow.clock[0])
+    def crash(*args):
+        raise RuntimeError('outbound evidence write failed')
+    flow.consent.record_outbound = crash
+    with pytest.raises(RuntimeError, match='evidence write'):
+        consume(flow)
+    flow.clock[0] += timedelta(minutes=3)
+    assert consume(flow) == ConsumeOutcome.SKIPPED
+    assert flow.records.send_claimed
+    assert len(flow.messages.calls) == 1
+
+
+def test_missing_business_configuration_fails_once_before_provider() -> None:
+    from scheduling.domain.business_profile import BusinessProfileRecord
+    flow = workflow()
+    flow.selector.run(BUSINESS, flow.clock[0])
+    flow.records._profiles[BUSINESS] = BusinessProfileRecord(None, 2)
+    assert consume(flow) == ConsumeOutcome.FAILED
+    assert consume(flow) == ConsumeOutcome.SKIPPED
+    assert flow.selector.run(BUSINESS, flow.clock[0]).queued == 0
+    assert flow.messages.calls == []

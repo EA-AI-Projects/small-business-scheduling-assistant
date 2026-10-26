@@ -666,7 +666,6 @@ Resources:
           BUSINESS_ID: !Ref BusinessId
           SMS_SEND_ENABLED: !Ref SmsSendEnabled
           BOOKING_INVITATION_SELECTION_ENABLED: !Ref BookingInvitationDeliveryEnabled
-          VISIT_REMINDER_DELIVERY_ENABLED: !Ref VisitReminderDeliveryEnabled
           BOOKING_INVITATION_DELIVERY_ENABLED: !Ref BookingInvitationDeliveryEnabled
       Policies:
         - Statement:
