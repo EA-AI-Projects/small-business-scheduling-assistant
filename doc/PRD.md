@@ -112,9 +112,9 @@ The approved invitation text is the initial value of one owner-editable message 
 
 The owner may also trigger a one-off run from the same Settings card. It saves an edited message before the run, then uses the saved one- or two-week lookahead and current eligibility checks, including consent and opt-out. Manual runs have no per-client repeat limit; each click has its own idempotency key. The owner previews the eligible count and confirms the send. The manual delivery gate is configured separately from scheduled delivery. The owner plans a separate Twilio campaign for future promotional or unrelated texts.
 
-### 6.4.2 Visit reminders (owner configuration implemented; delivery and client enrollment pending)
+### 6.4.2 Visit reminders (#390–#394)
 
-Owner configuration (#391) provides a Visit reminders Settings card for the shared schedule and a client-profile enrollment control. It saves versioned values, defaults old profiles to off, and explains current SMS restrictions without changing consent. Scheduled delivery, portal enrollment, and text enrollment remain pending (#392–#394). No live delivery is authorized.
+Visit reminders provide owner timing and profile enrollment controls, client portal and text enrollment, and scheduled SMS delivery. The surfaces share one versioned preference, default old profiles to off, and explain current SMS restrictions without changing consent. Scheduled delivery and its gate default disabled; implementation does not authorize deployment or live messages.
 
 Accepted full scope (owner decisions, 2026-10-23):
 
@@ -133,7 +133,7 @@ Accepted full scope (owner decisions, 2026-10-23):
 - Use standard reminder wording naming the business, service, full visit date, time, and timezone. Exclude private notes and attendance-confirmation prompts. Custom reminder-message editing is outside this version.
 - Show failed reminders in the existing delivery-failure view. Do not add owner alerts or a separate reminder dashboard.
 
-The owner approved the [implementation specification](VISIT_REMINDERS_SPEC.md), verification boundaries, scheduled-minute send window, and issue breakdown on 2026-10-23. Track implementation in [parent issue #390](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/issues/390) and sub-issues #391–#394. The scheduled minute is the selection/delivery window; delayed work outside that minute expires without catch-up. Implementation has not started.
+The owner approved the [implementation specification](VISIT_REMINDERS_SPEC.md), verification boundaries, scheduled-minute send window, and issue breakdown on 2026-10-23. Track implementation in [parent issue #390](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/issues/390) and sub-issues #391–#394. The scheduled minute is the selection/delivery window; delayed work outside that minute expires without catch-up. [PR #395](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/pull/395) records implementation and verification evidence; it does not certify deployed or carrier behavior.
 
 ### 6.5 SMS conversation behavior
 

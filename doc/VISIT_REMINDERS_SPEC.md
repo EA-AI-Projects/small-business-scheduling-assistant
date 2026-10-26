@@ -1,6 +1,6 @@
 # Visit reminders
 
-Status: approved on 2026-10-23 and published as [parent issue #390](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/issues/390), with implementation slices #391–#394. The specification, verification boundaries, scheduled-minute send window, and ticket breakdown were approved together. Not implemented or authorized for live delivery.
+Status: approved on 2026-10-23 and published as [parent issue #390](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/issues/390), with implementation slices #391–#394. The specification, verification boundaries, scheduled-minute send window, and ticket breakdown were approved together. Implemented in [PR #395](https://github.com/EA-AI-Projects/small-business-scheduling-assistant/pull/395); see the PR for verification evidence. Deployment and live delivery require separate authorization.
 
 ## Problem Statement
 
