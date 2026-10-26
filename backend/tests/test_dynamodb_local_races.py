@@ -1717,3 +1717,37 @@ def test_sms_reminder_receipt_is_atomic_replays_without_overwriting_and_is_erase
     repo.erase_client(env.business, verified.client_id)
     assert repo.read_reminder_preference_receipt(env.business, verified.client_id, "sms-reminder-on") is None
     assert repo.read_reminder_preference_receipt(env.business, verified.client_id, "sms-already-off") is None
+
+
+def test_reminder_claim_has_one_winner_and_never_recovers(race_env: RaceEnv) -> None:
+    """Real conditional ownership proof; never contacts an SMS provider."""
+    from scheduling.domain.outbox import OutboxConflict
+    env = race_env
+    stamp = START.isoformat(timespec='microseconds')
+    env.client.put_item(TableName=env.table, Item={
+        'PK': {'S': f'BUSINESS#{env.business}'}, 'SK': {'S': 'OUTBOX#visit-reminder#claim-race'},
+        'outbox_id': {'S': 'visit-reminder#claim-race'}, 'entity_id': {'S': 'claim-race'},
+        'recipient': {'S': 'client'}, 'template': {'S': 'visit_reminder'},
+        'event_version': {'N': '0'}, 'delivery_state': {'S': 'PENDING'}, 'attempts': {'N': '0'},
+        'created_at': {'S': stamp}, 'next_attempt_at': {'S': stamp}, 'dispatch_after': {'S': stamp},
+        **due_keys(DeliveryState.PENDING, START, 'visit-reminder#claim-race'),
+    })
+    store = DynamoOutboxStore(env.client, env.table)
+    record = store.get(env.business, 'visit-reminder#claim-race')
+    assert record is not None
+    barrier = Barrier(2)
+    def claim() -> bool:
+        barrier.wait(timeout=10)
+        try:
+            store.claim(record, START, START + timedelta(minutes=2))
+            return True
+        except OutboxConflict:
+            return False
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        outcomes = list(workers.map(lambda _: claim(), range(2)))
+    assert sorted(outcomes) == [False, True]
+    claimed = store.get(env.business, record.outbox_id)
+    assert claimed is not None and claimed.attempts == 1
+    assert claimed.next_attempt_at is None and claimed.dispatch_after is None
+    with pytest.raises(OutboxConflict):
+        store.claim(claimed, START + timedelta(hours=1), START + timedelta(hours=2))

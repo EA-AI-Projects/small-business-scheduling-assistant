@@ -49,11 +49,18 @@ def reminder_blockers(profile: ClientProfile, consent: SmsIngressStore | None) -
     if consent is None:
         blockers.append("consent_unavailable")
     else:
-        evidence = consent.read_consent(profile.business_id, profile.phone_e164)
-        if evidence is None or evidence.client_id != profile.client_id:
-            blockers.append("consent_missing")
-        if consent.is_opted_out(profile.business_id, profile.phone_e164):
-            blockers.append("sms_opted_out")
+        try:
+            evidence = consent.read_consent(profile.business_id, profile.phone_e164)
+            opted_out = consent.is_opted_out(profile.business_id, profile.phone_e164)
+        except Exception:  # Provider/store diagnostics never reach authorized UI explanations.
+            blockers.append("consent_unavailable")
+        else:
+            if (evidence is None or evidence.client_id != profile.client_id
+                    or evidence.business_id != profile.business_id or evidence.method != "in_person"
+                    or evidence.agreed_at != profile.phone_verified_at):
+                blockers.append("consent_missing")
+            if opted_out:
+                blockers.append("sms_opted_out")
     return tuple(blockers)
 
 
@@ -103,10 +110,6 @@ def reminder_problem(appointment: Appointment, profile: ClientProfile,
     blockers = reminder_blockers(profile, consent)
     if blockers:
         return blockers[0].upper()
-    evidence = consent.read_consent(profile.business_id, profile.phone_e164)
-    if (evidence is None or evidence.business_id != profile.business_id
-            or evidence.method != "in_person" or evidence.agreed_at != profile.phone_verified_at):
-        return "CONSENT_CHANGED"
     settings = records.read_reminders(appointment.business_id)
     run_at = reminder_run_at(appointment, settings.settings,
                               records.read_policy(appointment.business_id).timezone)
