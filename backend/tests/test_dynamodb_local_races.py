@@ -1679,3 +1679,41 @@ def test_reminder_settings_and_profile_preference_persist_with_conflicts_and_era
     assert renamed.reminders_updated_at == START
     assert api.delete(base + "/clients/synthetic-client", headers=headers).status_code == 204
     assert api.get(pref, headers=headers).status_code == 404
+
+
+def test_sms_reminder_receipt_is_atomic_replays_without_overwriting_and_is_erased(
+    race_env: RaceEnv,
+) -> None:
+    env = race_env
+    repo = DynamoDBCalendarRepository(env.client, env.table)
+    clients = ClientRecordService(repo)
+    original = clients.save_profile(env.business, "synthetic-client", "Synthetic Client",
+        "+14155550101", "123 Test Street", True, 0, START)
+    verified = clients.verify_phone(env.business, original.client_id, original.phone_e164, START)
+    assert clients.set_reminder_preference_from_receipt(
+        env.business, verified.client_id, verified.phone_e164, "sms-reminder-on", True, START)
+    enabled = repo.read_profile(env.business, verified.client_id)
+    assert enabled is not None and enabled.reminders_enabled
+    changed = clients.set_reminder_preference(env.business, verified.client_id, False,
+                                             enabled.version, START + timedelta(minutes=1))
+    assert clients.set_reminder_preference_from_receipt(
+        env.business, verified.client_id, verified.phone_e164, "sms-reminder-on", True, START)
+    assert repo.read_profile(env.business, verified.client_id) == changed
+    # A stale transaction cannot leave either a receipt marker or a profile change.
+    with pytest.raises(RecordConflict):
+        repo.commit_reminder_preference_receipt(verified,
+            replace(verified, reminders_enabled=True, version=verified.version + 1), "sms-stale")
+    assert repo.read_reminder_preference_receipt(env.business, verified.client_id, "sms-stale") is None
+    assert repo.read_profile(env.business, verified.client_id) == changed
+    # Even a no-op receipt is durable, so a replay cannot undo a newer choice.
+    assert not clients.set_reminder_preference_from_receipt(
+        env.business, verified.client_id, verified.phone_e164, "sms-already-off", False, START)
+    clients.set_reminder_preference(env.business, verified.client_id, True,
+                                    changed.version, START + timedelta(minutes=2))
+    assert not clients.set_reminder_preference_from_receipt(
+        env.business, verified.client_id, verified.phone_e164, "sms-already-off", False, START)
+    current = repo.read_profile(env.business, verified.client_id)
+    assert current is not None and current.reminders_enabled
+    repo.erase_client(env.business, verified.client_id)
+    assert repo.read_reminder_preference_receipt(env.business, verified.client_id, "sms-reminder-on") is None
+    assert repo.read_reminder_preference_receipt(env.business, verified.client_id, "sms-already-off") is None

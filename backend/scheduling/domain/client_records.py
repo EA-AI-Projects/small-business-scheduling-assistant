@@ -111,6 +111,10 @@ class ClientRecordRepository(Protocol):
     def read_verified_phone(self, business_id: str, phone_e164: str) -> ClientProfile | None: ...
     def save_profile(self, profile: ClientProfile, expected_version: int,
                      previous_phone: str | None) -> None: ...
+    def read_reminder_preference_receipt(self, business_id: str, client_id: str,
+                                         receipt_id: str) -> bool | None: ...
+    def commit_reminder_preference_receipt(self, before: ClientProfile, after: ClientProfile,
+                                           receipt_id: str) -> None: ...
     def read_appointment(self, appointment_id: str) -> Appointment | None: ...
     def read_note(self, business_id: str, client_id: str, note_id: str) -> ClientNote | None: ...
     def list_notes(self, business_id: str, client_id: str) -> tuple[ClientNote, ...]: ...
@@ -174,6 +178,35 @@ class ClientRecordService:
                           version=current.version + 1, updated_at=_utc(now))
         self._repository.save_profile(updated, current.version, current.phone_e164)
         return updated
+
+    def set_reminder_preference_from_receipt(self, business_id: str, client_id: str,
+                                             phone_e164: str, receipt_id: str,
+                                             enabled: bool, now: datetime) -> bool:
+        """Atomically remember this receipt and the choice, including an unchanged choice.
+
+        A replay returns the original committed choice, without replacing a later owner or
+        portal edit. The caller still checks current SMS consent/STOP before entering here.
+        """
+        current = self._repository.read_profile(business_id, client_id)
+        if (current is None or not current.active or current.phone_verified_at is None
+                or current.phone_e164 != phone_e164):
+            raise RecordNotFound("Matching verified client was not found")
+        replay = self._repository.read_reminder_preference_receipt(
+            business_id, client_id, receipt_id)
+        if replay is not None:
+            return replay
+        updated = (replace(current, reminders_enabled=enabled, reminders_updated_at=_utc(now),
+                           version=current.version + 1, updated_at=_utc(now))
+                   if current.reminders_enabled != enabled else current)
+        try:
+            self._repository.commit_reminder_preference_receipt(current, updated, receipt_id)
+        except RecordConflict:
+            replay = self._repository.read_reminder_preference_receipt(
+                business_id, client_id, receipt_id)
+            if replay is not None:
+                return replay
+            raise
+        return enabled
 
     def verify_phone(self, business_id: str, client_id: str, phone_e164: str,
                      now: datetime) -> ClientProfile:
