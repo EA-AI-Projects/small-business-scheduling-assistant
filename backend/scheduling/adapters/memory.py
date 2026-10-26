@@ -42,7 +42,12 @@ from scheduling.domain.owner_calendar import (
     UnavailableBlock,
 )
 from scheduling.domain.owner_policy import PolicyCommand, PolicyCommit, PolicyRecord, PolicyReplay
-from scheduling.domain.reminders import ReminderRecord, ReminderSettings
+from scheduling.domain.reminders import (
+    REMINDER_TEMPLATE,
+    ReminderRecord,
+    ReminderSettings,
+    reminder_outbox_id,
+)
 from scheduling.domain.scheduling_preferences import (
     SchedulingPreferences,
     SchedulingPreferencesRecord,
@@ -54,6 +59,7 @@ from scheduling.domain.service_duration import ServiceDurationChanged
 
 class InMemoryCalendarRepository:
     def __init__(self) -> None:
+        self._reminder_outbox: dict[str, OutboxRecord] = {}
         self._lock = RLock()
         self._events: dict[str, tuple[CalendarEvent, ...]] = defaultdict(tuple)
         self._revisions: dict[str, int] = defaultdict(int)
@@ -217,7 +223,7 @@ class InMemoryCalendarRepository:
             return self._reminders.get(business_id, ReminderRecord(ReminderSettings(), 0))
 
     def save_reminders(self, business_id: str, actor_id: str, key: str,
-                      expected_version: int, settings: ReminderSettings) -> ReminderRecord:
+                      expected_version: int, settings: ReminderSettings, now: datetime) -> ReminderRecord:
         with self._lock:
             identity = (business_id, actor_id, key)
             previous = self._reminders_replays.get(identity)
@@ -229,7 +235,8 @@ class InMemoryCalendarRepository:
             current = self.read_reminders(business_id)
             if current.version != expected_version:
                 raise RevisionConflict("Reminder settings version changed")
-            result = ReminderRecord(settings, expected_version + 1)
+            result = ReminderRecord(settings, expected_version + 1,
+                current.updated_at if current.settings == settings else now)
             self._reminders[business_id] = result
             self._reminders_replays[identity] = (settings, expected_version, result)
             self._audit[f"reminders#{business_id}#{actor_id}#{key}"] = result
@@ -243,6 +250,31 @@ class InMemoryCalendarRepository:
                 and appointment.status == CalendarStatus.CONFIRMED
                 and appointment.start_at <= end_at and appointment.end_at > run_at)
             return self._revisions[business_id], matches
+
+    def reserve_reminder(self, appointment: Appointment, profile: ClientProfile,
+                         settings_version: int, calendar_revision: int,
+                         run_at: datetime, now: datetime) -> bool:
+        with self._lock:
+            outbox_id = reminder_outbox_id(appointment.appointment_id)
+            prior = self._reminder_outbox.get(outbox_id)
+            if (self._revisions[appointment.business_id] != calendar_revision
+                    or self.read_reminders(appointment.business_id).version != settings_version
+                    or self.read_profile(appointment.business_id, profile.client_id) != profile
+                    or self.read_appointment(appointment.appointment_id) != appointment):
+                return False
+            if prior is not None and (prior.state != DeliveryState.PENDING or prior.attempts != 0
+                    or (prior.block_start_at == appointment.start_at and prior.block_end_at == run_at
+                        and prior.event_version == settings_version)):
+                return False
+            self._reminder_outbox[outbox_id] = OutboxRecord(
+                appointment.business_id, outbox_id, appointment.appointment_id, "client",
+                REMINDER_TEMPLATE, settings_version, DeliveryState.PENDING, now, now, now,
+                block_start_at=appointment.start_at, block_end_at=run_at)
+            return True
+
+    def list_reminder_outbox(self) -> tuple[OutboxRecord, ...]:
+        with self._lock:
+            return tuple(self._reminder_outbox.values())
 
     def reserve_invitation(self, intent: InvitationIntent, settings_version: int,
                            calendar_revision: int, profile: ClientProfile) -> bool:

@@ -47,7 +47,10 @@ def test_owner_timezone_edits_refresh_cutoff_but_other_edits_and_replays_preserv
 def test_dynamo_policy_and_replay_roundtrip_cutoff_and_accept_legacy_records():
     from scheduling.adapters.dynamodb import DynamoDBCalendarRepository
     from scheduling.domain.owner_policy import (
-        PolicyCommand, PolicyCommit, PolicyRecord, PolicyResult,
+        PolicyCommand,
+        PolicyCommit,
+        PolicyRecord,
+        PolicyResult,
     )
 
     class SyntheticDynamo:

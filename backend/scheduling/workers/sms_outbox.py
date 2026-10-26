@@ -27,6 +27,14 @@ def require_live_sms_authorization(settings: dict[str, str]) -> None:
         raise RuntimeError("Signed SMS ingress and status URLs are not configured")
 
 
+def _live_sms_enabled() -> bool:
+    try:
+        require_live_sms_authorization(dict(os.environ))
+    except RuntimeError:
+        return False
+    return True
+
+
 def handler(event: dict[str, Any], _context: object) -> dict[str, list[dict[str, str]]]:
     """Provisioning the queue trigger and send authorization is a separate owner decision."""
     require_live_sms_authorization(dict(os.environ))
@@ -52,6 +60,9 @@ def handler(event: dict[str, Any], _context: object) -> dict[str, list[dict[str,
         os.environ["OWNER_NUMBER"], status_callback=os.environ.get("TWILIO_STATUS_URL"),
         counteroffers=DynamoCounterofferStore(dynamo, table),
         invitation_send_enabled=invitation_enabled,
+        reminder_send_enabled=lambda: (
+            os.environ.get("VISIT_REMINDER_DELIVERY_ENABLED") == "authorized"
+            and _live_sms_enabled()),
         manual_invitation_send_enabled=lambda: (
             os.environ.get("MANUAL_INVITATION_DELIVERY_ENABLED") == "authorized"
             and os.environ.get("SMS_RETENTION_SCHEDULE_STATE") == "ENABLED"),

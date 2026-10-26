@@ -17,6 +17,7 @@ Before an authorized enablement, confirm exact signed ingress/status URLs, provi
 | Inbound webhooks | `EnableSmsIngress=true`, valid exact URLs, Twilio secret and provider forwarding. |
 | Ordinary outbound | `SmsSendEnabled=authorized`, `SmsSenderMappingState=ENABLED`, outbox dispatch and eligible recipient. |
 | Model conversations | `EnableSmsConversations=authorized` plus ingress/sending authorization and OpenAI secret. |
+| Visit reminders | `VisitReminderScheduleState=ENABLED`, `VisitReminderDeliveryEnabled=authorized`, global outbound authorization, current SMS eligibility and explicit reminder enrollment. Defaults remain disabled. |
 | Scheduled outreach | Separate schedule/delivery parameters, eligible clients and saved settings. |
 | Manual outreach | `ManualInvitationDeliveryEnabled=authorized`, retention schedule, eligible clients and confirmed owner action. |
 
@@ -45,4 +46,4 @@ Its original one-time authorization does not cover later backlog retirement. Rev
 
 ## Retention and failure handling
 
-Provider acceptance is distinct from delivery. Signed terminal failures remain visible to the owner for manual follow-up and do not authorize a blind resend. Ordinary uncertain provider acceptance may duplicate a retry; invitations retain a held claim for reconciliation. SMS body/evidence retention and client erasure are defined in [ARCHITECTURE.md](ARCHITECTURE.md#7-privacy-retention-and-erasure). Keep dev while required tester evidence remains within retention; stopping SMS does not authorize teardown.
+Provider acceptance is distinct from delivery. Signed terminal failures remain visible to the owner for manual follow-up and do not authorize a blind resend. Ordinary uncertain provider acceptance may duplicate a retry; invitations retain a held claim for reconciliation. Visit reminders never retry or recover a consumed attempt, including crash/uncertain acceptance. Selection and provider handoff must both occur in the configured local minute; missed windows are accepted losses. Known reminder failures appear in the existing delivery-failure view. Synthetic checks prove workflows and conditional request shape; carrier delivery and deployed scheduling require separate authorization and evidence. SMS body/evidence retention and client erasure are defined in [ARCHITECTURE.md](ARCHITECTURE.md#7-privacy-retention-and-erasure). Keep dev while required tester evidence remains within retention; stopping SMS does not authorize teardown.

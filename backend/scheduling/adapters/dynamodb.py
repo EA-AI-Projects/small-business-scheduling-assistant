@@ -61,7 +61,12 @@ from scheduling.domain.owner_policy import (
     PolicyReplay,
     PolicyResult,
 )
-from scheduling.domain.reminders import ReminderRecord, ReminderSettings
+from scheduling.domain.reminders import (
+    REMINDER_TEMPLATE,
+    ReminderRecord,
+    ReminderSettings,
+    reminder_outbox_id,
+)
 from scheduling.domain.scheduling_preferences import (
     SchedulingPreferences,
     SchedulingPreferencesRecord,
@@ -153,6 +158,7 @@ def _appointment_payload(appointment: Appointment) -> dict[str, Any]:
         "version": appointment.version,
         "replaces_appointment_id": appointment.replaces_appointment_id,
         "created_at": _instant(appointment.created_at) if appointment.created_at else None,
+        "confirmed_at": _instant(appointment.confirmed_at) if appointment.confirmed_at else None,
     }
 
 
@@ -172,6 +178,7 @@ def _appointment_from_payload(raw: dict[str, Any]) -> Appointment:
         buffer_minutes=raw["buffer_minutes"],
         version=raw["version"],
         replaces_appointment_id=raw["replaces_appointment_id"],
+        confirmed_at=(datetime.fromisoformat(raw["confirmed_at"]) if raw.get("confirmed_at") else None),
         created_at=(datetime.fromisoformat(raw["created_at"])
                     if raw.get("created_at") else None),
     )
@@ -530,10 +537,11 @@ class DynamoDBCalendarRepository:
         payload = json.loads(item["payload"]["S"])
         return ReminderRecord(ReminderSettings(
             days_before=payload["days_before"], local_time=time.fromisoformat(payload["local_time"])),
-            int(item["version"]["N"]))
+            int(item["version"]["N"]),
+            datetime.fromisoformat(item["updated_at"]["S"]) if "updated_at" in item else None)
 
     def save_reminders(self, business_id: str, actor_id: str, key: str,
-                      expected_version: int, settings: ReminderSettings) -> ReminderRecord:
+                      expected_version: int, settings: ReminderSettings, now: datetime) -> ReminderRecord:
         identity = self._business_key(business_id,
             _command_sort_key(actor_id, "edit_visit_reminders", key))
         payload = json.dumps({"days_before": settings.days_before,
@@ -546,16 +554,20 @@ class DynamoDBCalendarRepository:
                 return None
             if old["request_hash"]["S"] != request_hash:
                 raise IdempotencyKeyReused("Key already used for another reminders edit")
-            return ReminderRecord(settings, int(old["version"]["N"]))
+            return ReminderRecord(settings, int(old["version"]["N"]),
+                datetime.fromisoformat(old["updated_at"]["S"]) if "updated_at" in old else None)
 
         existing = replay()
         if existing is not None:
             return existing
+        current = self.read_reminders(business_id)
+        changed_at = current.updated_at if current.settings == settings else now
+        timestamp = {"updated_at": {"S": _instant(changed_at)}} if changed_at else {}
         next_version = expected_version + 1
         record_key = self._business_key(business_id, "SETTINGS#VISIT_REMINDERS")
         condition = "attribute_not_exists(PK)" if expected_version == 0 else "#version = :old"
         put: dict[str, Any] = {"TableName": self._table,
-            "Item": {**record_key, "payload": {"S": payload}, "version": {"N": str(next_version)}},
+            "Item": {**record_key, **timestamp, "payload": {"S": payload}, "version": {"N": str(next_version)}},
             "ConditionExpression": condition}
         if expected_version:
             put["ExpressionAttributeNames"] = {"#version": "version"}
@@ -565,7 +577,7 @@ class DynamoDBCalendarRepository:
             self._client.transact_write_items(TransactItems=[
                 {"Put": put},
                 {"Put": {"TableName": self._table,
-                    "Item": {**identity, "request_hash": {"S": request_hash},
+                    "Item": {**identity, **timestamp, "request_hash": {"S": request_hash},
                              "version": {"N": str(next_version)}},
                     "ConditionExpression": "attribute_not_exists(PK)"}},
                 {"Put": {"TableName": self._table,
@@ -584,7 +596,7 @@ class DynamoDBCalendarRepository:
             if existing is not None:
                 return existing
             raise RevisionConflict("Reminder settings version changed") from exc
-        return ReminderRecord(settings, next_version)
+        return ReminderRecord(settings, next_version, changed_at)
 
     def read_confirmed_for_client(self, business_id: str, client_id: str,
                                   run_at: datetime, end_at: datetime) -> tuple[int, tuple[Appointment, ...]]:
@@ -600,6 +612,82 @@ class DynamoDBCalendarRepository:
                     and appointment.status == CalendarStatus.CONFIRMED):
                 matches.append(appointment)
         return snapshot.revision, tuple(matches)
+
+    def reserve_reminder(self, appointment: Appointment, profile: ClientProfile,
+                         settings_version: int, calendar_revision: int,
+                         run_at: datetime, now: datetime) -> bool:
+        """Reserve once; only never-attempted pending work can be recalculated."""
+        business_id = appointment.business_id
+        outbox_id = reminder_outbox_id(appointment.appointment_id)
+        settings_check: dict[str, Any] = {
+            "TableName": self._table,
+            "Key": self._business_key(business_id, "SETTINGS#VISIT_REMINDERS"),
+            "ConditionExpression": "attribute_not_exists(PK)",
+        }
+        if settings_version:
+            settings_check.update({
+                "ConditionExpression": "#version = :version",
+                "ExpressionAttributeNames": {"#version": "version"},
+                "ExpressionAttributeValues": {":version": {"N": str(settings_version)}},
+            })
+        try:
+            self._client.transact_write_items(TransactItems=[
+                {"ConditionCheck": settings_check},
+                {"ConditionCheck": {"TableName": self._table,
+                    "Key": self._business_key(business_id, "CALENDAR#REVISION"),
+                    "ConditionExpression": "revision = :revision",
+                    "ExpressionAttributeValues": {":revision": {"N": str(calendar_revision)}}}},
+                {"ConditionCheck": {"TableName": self._table,
+                    "Key": self._business_key(business_id, f"CLIENT#{profile.client_id}"),
+                    "ConditionExpression": ("#version = :version AND active = :active "
+                        "AND reminders_enabled = :active AND phone_e164 = :phone "
+                        "AND phone_verified_at = :verified"),
+                    "ExpressionAttributeNames": {"#version": "version"},
+                    "ExpressionAttributeValues": {
+                        ":version": {"N": str(profile.version)}, ":active": {"BOOL": True},
+                        ":phone": {"S": profile.phone_e164},
+                        ":verified": {"S": _instant(profile.phone_verified_at)}
+                            if profile.phone_verified_at else {"NULL": True}}}},
+                {"ConditionCheck": {"TableName": self._table,
+                    "Key": self._business_key(business_id, f"SMS_CONSENT_CURRENT#{profile.phone_e164}"),
+                    "ConditionExpression": "client_id = :client AND #method = :method AND agreed_at = :at",
+                    "ExpressionAttributeNames": {"#method": "method"},
+                    "ExpressionAttributeValues": {":client": {"S": profile.client_id},
+                        ":method": {"S": "in_person"},
+                        ":at": {"S": _instant(profile.phone_verified_at)}
+                            if profile.phone_verified_at else {"NULL": True}}}},
+                {"ConditionCheck": {"TableName": self._table,
+                    "Key": self._business_key(business_id, f"SMS_SUPPRESS#{profile.phone_e164}"),
+                    "ConditionExpression": "attribute_not_exists(PK)"}},
+                {"ConditionCheck": {"TableName": self._table,
+                    "Key": self._business_key(business_id, f"SMS_OPTOUT#{profile.phone_e164}"),
+                    "ConditionExpression": "attribute_not_exists(PK) OR attribute_exists(cleared_at)"}},
+                self._erasure_check(business_id, profile.client_id),
+                {"Put": {"TableName": self._table,
+                    "Item": {**self._business_key(business_id, f"OUTBOX#{outbox_id}"),
+                        **due_keys(DeliveryState.PENDING, now, outbox_id),
+                        "outbox_id": {"S": outbox_id}, "entity_id": {"S": appointment.appointment_id},
+                        "client_id": {"S": profile.client_id}, "recipient": {"S": "client"},
+                        "template": {"S": REMINDER_TEMPLATE}, "event_version": {"N": str(settings_version)},
+                        "delivery_state": {"S": "PENDING"}, "attempts": {"N": "0"},
+                        "created_at": {"S": _instant(now)}, "next_attempt_at": {"S": _instant(now)},
+                        "dispatch_after": {"S": _instant(now)},
+                        "block_start_at": {"S": _instant(appointment.start_at)},
+                        "block_end_at": {"S": _instant(run_at)}},
+                    "ConditionExpression": ("attribute_not_exists(PK) OR (delivery_state = :pending "
+                        "AND attempts = :zero AND (block_start_at <> :start "
+                        "OR block_end_at <> :run OR event_version <> :version))"),
+                    "ExpressionAttributeValues": {":pending": {"S": "PENDING"}, ":zero": {"N": "0"},
+                        ":start": {"S": _instant(appointment.start_at)}, ":run": {"S": _instant(run_at)},
+                        ":version": {"N": str(settings_version)}}}},
+            ])
+        except Exception as exc:
+            if not _record_transaction_conflict(exc):
+                raise
+            return False
+        if self._outbox_created is not None:
+            self._outbox_created(business_id, outbox_id)
+        return True
 
     def reserve_invitation(self, intent: InvitationIntent, settings_version: int,
                            calendar_revision: int, profile: ClientProfile) -> bool:
@@ -1918,6 +2006,8 @@ class DynamoDBCalendarRepository:
                 item["replaces_appointment_id"]["S"]
                 if "replaces_appointment_id" in item else None
             ),
+            confirmed_at=(datetime.fromisoformat(item["confirmed_at"]["S"])
+                          if "confirmed_at" in item else None),
             created_at=(datetime.fromisoformat(item["created_at"]["S"])
                         if "created_at" in item else None),
         )
@@ -2263,6 +2353,8 @@ class DynamoDBCalendarRepository:
         }
         if appointment.hold_expires_at is not None:
             item["hold_expires_at"] = {"S": _instant(appointment.hold_expires_at)}
+        if appointment.confirmed_at is not None:
+            item["confirmed_at"] = {"S": _instant(appointment.confirmed_at)}
         if appointment.created_at is not None:
             item["created_at"] = {"S": _instant(appointment.created_at)}
         if appointment.replaces_appointment_id is not None:
