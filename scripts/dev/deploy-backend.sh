@@ -210,6 +210,7 @@ schedule_parameter() {
     NoteRetentionFunctionDaily) printf 'NoteRetentionScheduleState' ;;
     SmsRetentionFunctionDaily) printf 'SmsRetentionScheduleState' ;;
     OutboxDispatchFunctionSweep) printf 'OutboxDispatchScheduleState' ;;
+    VisitReminderFunctionSweep) printf 'VisitReminderScheduleState' ;;
     BookingInvitationFunctionSweep) printf 'BookingInvitationScheduleState' ;;
     *) printf '' ;;
   esac
@@ -358,6 +359,11 @@ CHANGED_PARAMS="$(jq -r --argjson live "${LIVE_PARAMS}" --argjson allowed "${ALL
 if [[ -n "${CHANGED_PARAMS}" ]]; then
   die "refusing: parameters would change that were not given with --param (names only): ${CHANGED_PARAMS}"
 fi
+REMINDER_TARGET="$(jq -r '[.Parameters[] | select(.ParameterKey == "VisitReminderDeliveryEnabled") | .ParameterValue] | first // "disabled"' <<<"${DESCRIPTION}")"
+if [[ "$(param_value VisitReminderDeliveryEnabled)" == "authorized" || "${REMINDER_TARGET}" == "authorized" ]]; then
+  [[ "${LIVE_SMS_AUTH}" -eq 1 ]] || die "refusing: VisitReminderDeliveryEnabled=authorized needs separate live-SMS authorization"
+  [[ "$(param_value VisitReminderDeliveryEnabled)" == "authorized" ]] || die "refusing: pass --param VisitReminderDeliveryEnabled=authorized explicitly"
+fi
 INVITATION_TARGET="$(jq -r '[.Parameters[] | select(.ParameterKey == "BookingInvitationDeliveryEnabled") | .ParameterValue] | first // "disabled"' <<<"${DESCRIPTION}")"
 if [[ "${INVITATION_TARGET}" == "authorized" ]]; then
   [[ "${LIVE_SMS_AUTH}" -eq 1 ]] || die "refusing: BookingInvitationDeliveryEnabled=authorized needs separate live-SMS authorization"
@@ -430,7 +436,7 @@ if [[ -n "${RULE_ROWS}" ]]; then
       fi
     fi
     info "  ${logical} [${action}]: ${live_state} -> ${target_state}${note}"
-    if [[ -n "${param}" && ( "${param}" == "OutboxDispatchScheduleState" || "${param}" == "BookingInvitationScheduleState" ) && "${target_state}" == "ENABLED" && "${LIVE_SMS_AUTH}" -ne 1 ]]; then
+    if [[ -n "${param}" && ( "${param}" == "OutboxDispatchScheduleState" || "${param}" == "BookingInvitationScheduleState" || "${param}" == "VisitReminderScheduleState" ) && "${target_state}" == "ENABLED" && "${LIVE_SMS_AUTH}" -ne 1 ]]; then
       SMS_AUTH_MISSING="${SMS_AUTH_MISSING:+${SMS_AUTH_MISSING}, }${param}"
     fi
   done <<<"${RULE_ROWS}"

@@ -15,7 +15,7 @@ def test_owner_saves_reminder_schedule_and_versioned_profile_preference() -> Non
     api = TestClient(create_owner_app(repository, lambda token: OwnerPrincipal('owner', 'pilot'), lambda: NOW))
     headers = {'Authorization': 'Bearer valid', 'Idempotency-Key': 'schedule'}
     assert api.get(BASE + '/reminders', headers=headers).json() == {
-        'settings': {'days_before': 1, 'local_time': '10:00:00'}, 'version': 0}
+        'settings': {'days_before': 1, 'local_time': '10:00:00'}, 'version': 0, 'updated_at': None}
     assert api.get(BASE + '/reminders').status_code == 401
     assert api.get(BASE.replace('pilot', 'other') + '/reminders', headers=headers).status_code == 403
     for days, local_time in [(1, '08:00'), (7, '18:00')]:

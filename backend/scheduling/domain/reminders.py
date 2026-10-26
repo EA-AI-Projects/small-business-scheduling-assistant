@@ -142,6 +142,8 @@ class ReminderSelector:
         zone = ZoneInfo(policy.timezone)
         settings = self._records.read_reminders(business_id)
         local = now.astimezone(zone)
+        if (local.hour, local.minute) != (settings.settings.local_time.hour, settings.settings.local_time.minute):
+            return ReminderSelectionReport(0, 0)
         day = local.date() + timedelta(days=settings.settings.days_before)
         start = datetime.combine(day, time(), zone).astimezone(UTC)
         end = datetime.combine(day + timedelta(days=1), time(), zone).astimezone(UTC)
