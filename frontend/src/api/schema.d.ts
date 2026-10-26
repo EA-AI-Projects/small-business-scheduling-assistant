@@ -38,6 +38,124 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/client/availability": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Client Availability */
+        get: operations["client_availability_v1_client_availability_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/client/bookings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Client Bookings */
+        get: operations["client_bookings_v1_client_bookings_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/client/bookings/{appointment_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Client Cancel
+         * @description Cancel one of the caller's own live bookings: the SMS path's CANCEL transition.
+         *
+         *     The client's confirmation step names the version it was shown; the lifecycle
+         *     refuses a changed booking, and its notices go to the owner and the client.
+         */
+        post: operations["client_cancel_v1_client_bookings__appointment_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/client/bookings/{appointment_id}/reschedule": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Client Reschedule
+         * @description Request a replacement time; the confirmed original stays until the owner approves.
+         *
+         *     This is the text path's reschedule: a pending hold that names the original, so the
+         *     owner's approval swaps the two atomically and a decline or expiry keeps the original.
+         */
+        post: operations["client_reschedule_v1_client_bookings__appointment_id__reschedule_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/client/reminder-preference": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Client Reminder Preference */
+        get: operations["get_client_reminder_preference_v1_client_reminder_preference_get"];
+        /** Set Client Reminder Preference */
+        put: operations["set_client_reminder_preference_v1_client_reminder_preference_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/client/requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Client Request
+         * @description Ask the owner for a visit: the SMS path's atomic hold, so it stays pending.
+         */
+        post: operations["client_request_v1_client_requests_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/client/session": {
         parameters: {
             query?: never;
@@ -303,6 +421,24 @@ export interface paths {
         patch: operations["change_client_note_hold_v1_owner_businesses__business_id__clients__client_id__notes__note_id__legal_hold_patch"];
         trace?: never;
     };
+    "/v1/owner/businesses/{business_id}/clients/{client_id}/reminder-preference": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Reminder Preference */
+        get: operations["get_reminder_preference_v1_owner_businesses__business_id__clients__client_id__reminder_preference_get"];
+        /** Set Reminder Preference */
+        put: operations["set_reminder_preference_v1_owner_businesses__business_id__clients__client_id__reminder_preference_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/owner/businesses/{business_id}/clients/{client_id}/sms-consent": {
         parameters: {
             query?: never;
@@ -383,6 +519,24 @@ export interface paths {
         get: operations["get_business_profile_v1_owner_businesses__business_id__profile_get"];
         /** Edit Business Profile */
         put: operations["edit_business_profile_v1_owner_businesses__business_id__profile_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/owner/businesses/{business_id}/reminders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Reminders */
+        get: operations["get_reminders_v1_owner_businesses__business_id__reminders_get"];
+        /** Edit Reminders */
+        put: operations["edit_reminders_v1_owner_businesses__business_id__reminders_put"];
         post?: never;
         delete?: never;
         options?: never;
@@ -543,6 +697,67 @@ export interface components {
             expected_version: number;
             profile: components["schemas"]["BusinessProfileBody"];
         };
+        /**
+         * CalendarStatus
+         * @enum {string}
+         */
+        CalendarStatus: "PENDING_APPROVAL" | "CONFIRMED" | "DECLINED" | "CANCELLED" | "EXPIRED" | "UNAVAILABLE";
+        /** ClientAvailability */
+        ClientAvailability: {
+            /**
+             * Day
+             * Format: date
+             */
+            day: string;
+            /** Duration Minutes */
+            duration_minutes: number;
+            /** Recommended Starts At */
+            recommended_starts_at?: string[];
+            /** Starts At */
+            starts_at: string[];
+        };
+        /**
+         * ClientBooking
+         * @description Portal-safe view: no client, note, version, or owner-only fields.
+         */
+        ClientBooking: {
+            /** Appointment Id */
+            appointment_id: string;
+            /** Duration Minutes */
+            duration_minutes: number;
+            /**
+             * End At
+             * Format: date-time
+             */
+            end_at: string;
+            /** Hold Expires At */
+            hold_expires_at: string | null;
+            /** Replaces Appointment Id */
+            replaces_appointment_id?: string | null;
+            /** Requested At */
+            requested_at: string | null;
+            /**
+             * Start At
+             * Format: date-time
+             */
+            start_at: string;
+            status: components["schemas"]["CalendarStatus"];
+            /** Version */
+            version: number;
+        };
+        /** ClientBookings */
+        ClientBookings: {
+            /** Bookings */
+            bookings: components["schemas"]["ClientBooking"][];
+        };
+        /**
+         * ClientCancel
+         * @description Only the version of the booking the client confirmed cancelling.
+         */
+        ClientCancel: {
+            /** Expected Version */
+            expected_version: number;
+        };
         /** ClientNoteBody */
         ClientNoteBody: {
             /** Appointment Id */
@@ -567,6 +782,54 @@ export interface components {
             phone_e164: string;
             /** Service Address */
             service_address: string;
+        };
+        /** ClientReminderPreference */
+        ClientReminderPreference: {
+            /** Blockers */
+            blockers: string[];
+            /** Enabled */
+            enabled: boolean;
+            /** Version */
+            version: number;
+        };
+        /** ClientReminderPreferenceBody */
+        ClientReminderPreferenceBody: {
+            /** Enabled */
+            enabled: boolean;
+            /** Expected Version */
+            expected_version: number;
+        };
+        /**
+         * ClientRequest
+         * @description The only caller input: a start the client chose from the offered times.
+         *
+         *     Client, business, and actor are never accepted; they come from the link. The visit
+         *     length is the business's saved default. A client may echo the length the offered
+         *     times were quoted at, and a request is refused when the owner has changed it since.
+         */
+        ClientRequest: {
+            /** Quoted Duration Minutes */
+            quoted_duration_minutes?: number | null;
+            /**
+             * Start At
+             * Format: date-time
+             */
+            start_at: string;
+        };
+        /**
+         * ClientReschedule
+         * @description The new start the client chose and the version of the confirmed visit it moves.
+         */
+        ClientReschedule: {
+            /** Expected Version */
+            expected_version: number;
+            /** Quoted Duration Minutes */
+            quoted_duration_minutes?: number | null;
+            /**
+             * Start At
+             * Format: date-time
+             */
+            start_at: string;
         };
         /**
          * ClientSelectionBody
@@ -769,6 +1032,29 @@ export interface components {
             /** Text */
             text: string;
         };
+        /** ReminderEditBody */
+        ReminderEditBody: {
+            /** Expected Version */
+            expected_version: number;
+            settings: components["schemas"]["ReminderSettingsBody"];
+        };
+        /** ReminderPreferenceBody */
+        ReminderPreferenceBody: {
+            /** Enabled */
+            enabled: boolean;
+            /** Expected Version */
+            expected_version: number;
+        };
+        /** ReminderSettingsBody */
+        ReminderSettingsBody: {
+            /** Days Before */
+            days_before: number;
+            /**
+             * Local Time
+             * Format: time
+             */
+            local_time: string;
+        };
         /** RemoveBlockBody */
         RemoveBlockBody: {
             /** Expected Revision */
@@ -850,6 +1136,219 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    client_availability_v1_client_availability_get: {
+        parameters: {
+            query: {
+                day: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClientAvailability"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    client_bookings_v1_client_bookings_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClientBookings"];
+                };
+            };
+        };
+    };
+    client_cancel_v1_client_bookings__appointment_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                appointment_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClientCancel"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClientBooking"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    client_reschedule_v1_client_bookings__appointment_id__reschedule_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                appointment_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClientReschedule"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClientBooking"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_client_reminder_preference_v1_client_reminder_preference_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClientReminderPreference"];
+                };
+            };
+        };
+    };
+    set_client_reminder_preference_v1_client_reminder_preference_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClientReminderPreferenceBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClientReminderPreference"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    client_request_v1_client_requests_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClientRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClientBooking"];
                 };
             };
             /** @description Validation Error */
@@ -1707,6 +2206,74 @@ export interface operations {
             };
         };
     };
+    get_reminder_preference_v1_owner_businesses__business_id__clients__client_id__reminder_preference_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                business_id: string;
+                client_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_reminder_preference_v1_owner_businesses__business_id__clients__client_id__reminder_preference_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                business_id: string;
+                client_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReminderPreferenceBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     capture_sms_consent_v1_owner_businesses__business_id__clients__client_id__sms_consent_post: {
         parameters: {
             query?: never;
@@ -1922,6 +2489,74 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["BusinessProfileEditBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_reminders_v1_owner_businesses__business_id__reminders_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                business_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    edit_reminders_v1_owner_businesses__business_id__reminders_put: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                business_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReminderEditBody"];
             };
         };
         responses: {

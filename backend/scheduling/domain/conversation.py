@@ -34,7 +34,13 @@ from scheduling.domain.client_calendar_questions import (
 )
 from scheduling.domain.client_calendar_questions import answer as answer_client_question
 from scheduling.domain.client_calendar_questions import compact_list as compact_client_list
-from scheduling.domain.client_records import ClientProfile
+from scheduling.domain.client_records import (
+    ClientProfile,
+    ClientRecordRepository,
+    ClientRecordService,
+    RecordConflict,
+    RecordNotFound,
+)
 from scheduling.domain.client_replies import (
     ClientReplyFact,
     ClientReplyResult,
@@ -210,7 +216,8 @@ OWNER_FAILURE_TEXT = "Something went wrong. Please try again."
 # own open owner counteroffer. The exact RESCHEDULE command keeps its deterministic path.
 CLIENT_LOOP_INTENTS = frozenset({"availability", "request_booking", "calendar_question",
                                  "clarify_booking", "clarify", "unsupported", "cancel",
-                                 "confirm_cancel", "keep_visit", "reschedule"})
+                                 "confirm_cancel", "keep_visit", "reschedule",
+                                 "reminder_preference"})
 CLOSED_NOTE = "\nI closed my earlier question, so nothing was booked or cancelled."
 
 
@@ -228,7 +235,7 @@ class ClientReplyDrafter(Protocol):
                            result: ClientReplyResult) -> str: ...
 
 
-class ConversationRepository(Protocol):
+class ConversationRepository(ClientRecordRepository, Protocol):
     def read_policy(self, business_id: str) -> AvailabilityPolicy: ...
     def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None: ...
     def read_business_profile(self, business_id: str) -> BusinessProfileRecord: ...
@@ -349,6 +356,14 @@ class ConversationService:
                     or profile.phone_e164 != receipt.sender or consent is None
                     or consent.client_id != profile.client_id):
                 return ConversationOutcome("This sender needs a verified client profile and consent.")
+            try:
+                reminder_replay = self._repository.read_reminder_preference_receipt(
+                    receipt.business_id, profile.client_id, receipt.provider_id)
+            except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+                return ConversationOutcome(
+                    "I can't check your saved message result right now. Please try again later.")
+            if reminder_replay is not None:
+                return self._reminder_acknowledgment(reminder_replay)
         try:
             policy = self._repository.read_policy(receipt.business_id)
             targets = self._targets(receipt, now)
@@ -1363,7 +1378,39 @@ class ConversationService:
         booked: ConversationOutcome | None = None
         cancelled: ConversationOutcome | None = None
         attempt: ConversationOutcome | None = None
+        reminder_reply: ConversationOutcome | None = None
         prompt_state = "absent"
+
+        def reminder(enabled: bool) -> dict[str, Any]:
+            nonlocal reminder_reply
+            if is_affirmative(receipt.body or "") or is_negative(receipt.body or ""):
+                reminder_reply = ConversationOutcome(
+                    "Would you like visit reminders turned on or off? Please say which.")
+                return {"ok": False, "error": "explicit_reminder_choice_required"}
+            try:
+                if (receipt.client_id is None
+                        or self._consent.is_opted_out(receipt.business_id, receipt.sender)):
+                    raise RecordNotFound("Sender is unavailable")
+                consent = self._consent.read_consent(receipt.business_id, receipt.sender)
+                if consent is None or consent.client_id != receipt.client_id:
+                    raise RecordNotFound("Consent is unavailable")
+                saved = ClientRecordService(self._repository).set_reminder_preference_from_receipt(
+                    receipt.business_id, receipt.client_id, receipt.sender, receipt.provider_id,
+                    enabled, self._clock())
+                reminder_reply = self._reminder_acknowledgment(saved)
+                return {"ok": True, "reminder_preference_saved": True, "enabled": saved}
+            except (RecordConflict, RecordNotFound):
+                reminder_reply = ConversationOutcome(
+                    "I couldn't save your reminder preference because your profile changed "
+                    "or is unavailable. Please try again.")
+                return {"ok": False, "error": "profile_changed_or_unavailable"}
+            except Exception:  # noqa: BLE001 - unknown commit outcomes need a safe receipt reply
+                # A storage timeout may follow a committed write. A retry uses the receipt
+                # marker; never let an unchecked model claim success or try another action.
+                reminder_reply = ConversationOutcome(
+                    "I couldn't verify that your reminder preference was saved. "
+                    "Please check your profile or ask again.")
+                return {"ok": False, "error": "unavailable"}
 
         def store_offer(options: tuple[datetime, ...], minutes: int,
                         original: Appointment | None) -> None:
@@ -1443,7 +1490,7 @@ class ConversationService:
                 and not prompt.expired(now) and prompt.client_id == receipt.client_id)
             else None,
             preferred_reader(self._repository, receipt.business_id, policy.timezone,
-                             receipt.client_id))
+                             receipt.client_id), reminder)
 
         def check(text: str) -> str | None:
             return check_reply(text, tools.results)
@@ -1454,6 +1501,10 @@ class ConversationService:
             text = interpreter.run_client_loop(
                 receipt.body or "", now.astimezone(zone), policy.timezone, history,
                 tools, check)
+            if reminder_reply is not None:
+                # Preference writes use ordinary receipt replies, not lifecycle outbox
+                # notifications. The atomic receipt marker makes a crash/replay safe.
+                return reminder_reply
             reason = check(text)
             if reason is not None:
                 raise ValueError(reason)
@@ -1497,6 +1548,8 @@ class ConversationService:
         except Exception:
             LOGGER.warning("Client tool loop failed; using the deterministic answer",
                            exc_info=True)
+            if reminder_reply is not None:
+                return reminder_reply
             if booked is not None:
                 return booked  # The request was written; its own notification still goes out.
             if cancelled is not None:
@@ -1507,6 +1560,12 @@ class ConversationService:
             # A refused booking or cancellation already closed the question; its own answer
             # says nothing changed, and it is never tried again.
             return attempt
+
+    @staticmethod
+    def _reminder_acknowledgment(enabled: bool) -> ConversationOutcome:
+        return ConversationOutcome(
+            f"Visit reminders are now {'on' if enabled else 'off'}. "
+            "Other permitted scheduling texts stay enabled.")
 
     def _prepared_cancellation(self, receipt: InboundReceipt, targets: tuple[Appointment, ...],
                                zone: ZoneInfo, now: datetime, ref: str,

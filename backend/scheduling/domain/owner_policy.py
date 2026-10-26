@@ -35,6 +35,7 @@ class PolicyNotConfigured(Exception):
 class PolicyRecord:
     policy: AvailabilityPolicy
     version: int
+    timezone_updated_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -183,7 +184,12 @@ class OwnerPolicyService:
             raise DefaultDurationConflict(
                 "The saved default booking duration is longer than this maximum visit; "
                 "lower the default duration in the business profile first")
-        result = PolicyResult(PolicyRecord(command.policy, version), revision + 1)
+        timezone_updated_at = (
+            now if previous is None or previous.policy.timezone != command.policy.timezone
+            else previous.timezone_updated_at
+        )
+        result = PolicyResult(
+            PolicyRecord(command.policy, version, timezone_updated_at), revision + 1)
         identity = json.dumps(
             [command.business_id, command.actor_id, command.operation, command.idempotency_key],
             separators=(",", ":"),

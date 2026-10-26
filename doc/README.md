@@ -13,6 +13,7 @@ Reference docs describe the current repository; they do not certify live AWS/pro
 | [Conversation](CONVERSATION.md) | Current SMS routing, tools, context, fallbacks and outreach behavior. |
 | [Accounts](ACCOUNTS.md) | Operator provisioning, client invitation and recovery process. |
 | [Settings UI spec](OWNER_SETTINGS_UI_SPEC.md) | Implemented Settings interaction requirements; retained as a focused UI specification. |
+| [Visit reminders spec](VISIT_REMINDERS_SPEC.md) | Reminder implementation and verification scope; tracked in #390–#394 and PR #395. |
 | [Team agreement](TEAM_AGREEMENT.md), [agent guides](agents/domain.md), [glossary](../GLOSSARY.md) | Work coordination and shared terminology. |
 
 ## Operations and evidence

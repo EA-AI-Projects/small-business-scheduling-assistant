@@ -197,7 +197,7 @@ class LifecycleService:
                     self._require_free(before, revision, now, original)
                 except RevisionConflict:
                     continue
-                after = replace(before, status=CalendarStatus.CONFIRMED, version=before.version + 1)
+                after = replace(before, status=CalendarStatus.CONFIRMED, version=before.version + 1, confirmed_at=now)
             elif command.operation == Action.DECLINE:
                 self._require_pending(before, now)
                 after = replace(before, status=CalendarStatus.DECLINED, version=before.version + 1)
@@ -230,6 +230,7 @@ class LifecycleService:
                 after = replace(
                     before,
                     start_at=start,
+                    confirmed_at=now if start != before.start_at else before.confirmed_at,
                     end_at=start + timedelta(minutes=duration),
                     duration_minutes=duration,
                     version=before.version + 1,

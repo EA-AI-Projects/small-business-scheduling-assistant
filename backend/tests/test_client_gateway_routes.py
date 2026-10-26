@@ -79,6 +79,8 @@ def test_mounted_non_owner_routes_are_the_expected_set() -> None:
         ("POST", "/v1/account/invitations/{business_id}/{client_id}/activate"),
         ("POST", "/v1/account/invitations/activate"),
         ("GET", "/v1/client/session"),
+        ("GET", "/v1/client/reminder-preference"),
+        ("PUT", "/v1/client/reminder-preference"),
         ("GET", "/v1/client/availability"),
         ("GET", "/v1/client/bookings"),
         ("POST", "/v1/client/requests"),

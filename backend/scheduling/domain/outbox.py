@@ -35,6 +35,10 @@ class PermanentDeliveryFailure(DeliveryFailure):
     """A policy or data gate that another provider attempt cannot repair."""
 
 
+class DeliverySuppressed(PermanentDeliveryFailure):
+    """Stale reminder work rejected strictly before provider submission."""
+
+
 @dataclass(frozen=True)
 class OutboxRecord:
     business_id: str
@@ -65,6 +69,8 @@ class OutboxStore(Protocol):
     ) -> None: ...
 
     def claim(self, record: OutboxRecord, now: datetime, lease_until: datetime) -> OutboxRecord: ...
+
+    def mark_suppressed(self, record: OutboxRecord, now: datetime) -> None: ...
 
     def mark_sent(self, record: OutboxRecord, provider_id: str, now: datetime) -> None: ...
 
@@ -189,6 +195,11 @@ class ConsumeService:
                 raise ValueError("Sender must return a provider message ID")
             self._store.mark_sent(claimed, provider_id, _utc(self._clock()))
             return ConsumeOutcome.SENT
+        except DeliverySuppressed:
+            if claimed.template != "visit_reminder":
+                raise
+            self._store.mark_suppressed(claimed, _utc(self._clock()))
+            return ConsumeOutcome.SKIPPED
         except PermanentDeliveryFailure as exc:
             self._store.mark_failure(
                 claimed, DeliveryState.FAILED, None, exc.code, _utc(self._clock())
@@ -196,7 +207,7 @@ class ConsumeService:
             return ConsumeOutcome.FAILED
         except DeliveryFailure as exc:
             failed_at = _utc(self._clock())
-            if claimed.attempts >= self._max_attempts:
+            if claimed.template == "visit_reminder" or claimed.attempts >= self._max_attempts:
                 self._store.mark_failure(
                     claimed, DeliveryState.FAILED, None, exc.code, failed_at
                 )
@@ -250,6 +261,10 @@ def _utc(value: datetime) -> datetime:
 
 
 def _is_claimable(record: OutboxRecord, now: datetime) -> bool:
+    if record.template == "visit_reminder" and (
+        record.state != DeliveryState.PENDING or record.attempts != 0
+    ):
+        return False
     return (
         record.state in (DeliveryState.PENDING, DeliveryState.RETRYABLE, DeliveryState.SENDING)
         and record.next_attempt_at is not None and record.next_attempt_at <= now

@@ -42,6 +42,12 @@ from scheduling.domain.owner_calendar import (
     UnavailableBlock,
 )
 from scheduling.domain.owner_policy import PolicyCommand, PolicyCommit, PolicyRecord, PolicyReplay
+from scheduling.domain.reminders import (
+    REMINDER_TEMPLATE,
+    ReminderRecord,
+    ReminderSettings,
+    reminder_outbox_id,
+)
 from scheduling.domain.scheduling_preferences import (
     SchedulingPreferences,
     SchedulingPreferencesRecord,
@@ -53,11 +59,13 @@ from scheduling.domain.service_duration import ServiceDurationChanged
 
 class InMemoryCalendarRepository:
     def __init__(self) -> None:
+        self._reminder_outbox: dict[str, OutboxRecord] = {}
         self._lock = RLock()
         self._events: dict[str, tuple[CalendarEvent, ...]] = defaultdict(tuple)
         self._revisions: dict[str, int] = defaultdict(int)
         self._policies: dict[str, AvailabilityPolicy] = {}
         self._policy_versions: dict[str, int] = {}
+        self._policy_timezone_updated_at: dict[str, datetime | None] = {}
         self._policy_replays: dict[tuple[str, str, str, str], PolicyReplay] = {}
         self._profiles: dict[str, BusinessProfileRecord] = {}
         self._profile_replays: dict[tuple[str, str, str], tuple[BusinessProfile, int, BusinessProfileRecord]] = {}
@@ -65,6 +73,8 @@ class InMemoryCalendarRepository:
         self._preference_replays: dict[tuple[str, str, str], tuple[
             SchedulingPreferences | None, int, SchedulingPreferencesRecord]] = {}
         self._preference_reviews: dict[tuple[str, str], tuple[StoredReview, datetime]] = {}
+        self._reminders: dict[str, ReminderRecord] = {}
+        self._reminders_replays: dict[tuple[str, str, str], tuple[ReminderSettings, int, ReminderRecord]] = {}
         self._outreach: dict[str, OutreachRecord] = {}
         self._outreach_replays: dict[tuple[str, str, str], tuple[OutreachSettings, int, OutreachRecord]] = {}
         self._invitation_intents: dict[str, InvitationIntent] = {}
@@ -86,6 +96,7 @@ class InMemoryCalendarRepository:
         self._outbox: dict[str, object] = {}
         self._audit: dict[str, object] = {}
         self._clients: dict[tuple[str, str], ClientProfile] = {}
+        self._reminder_receipts: dict[tuple[str, str, str], bool] = {}
         self._client_phones: dict[tuple[str, str], str] = {}
         self._client_notes: dict[tuple[str, str, str], ClientNote] = {}
 
@@ -179,6 +190,9 @@ class InMemoryCalendarRepository:
         with self._lock:
             if self._clients.pop((business_id, client_id), None) is None:
                 raise RecordNotFound("Client was not found")
+            self._reminder_receipts = {
+                key: value for key, value in self._reminder_receipts.items()
+                if key[:2] != (business_id, client_id)}
         self.scrub_client_preferences(business_id, client_id)
 
     def read_outreach(self, business_id: str) -> OutreachRecord:
@@ -204,6 +218,30 @@ class InMemoryCalendarRepository:
             self._audit[f"outreach#{business_id}#{actor_id}#{key}"] = result
             return result
 
+    def read_reminders(self, business_id: str) -> ReminderRecord:
+        with self._lock:
+            return self._reminders.get(business_id, ReminderRecord(ReminderSettings(), 0))
+
+    def save_reminders(self, business_id: str, actor_id: str, key: str,
+                      expected_version: int, settings: ReminderSettings, now: datetime) -> ReminderRecord:
+        with self._lock:
+            identity = (business_id, actor_id, key)
+            previous = self._reminders_replays.get(identity)
+            if previous is not None:
+                old_settings, old_version, result = previous
+                if old_settings != settings or old_version != expected_version:
+                    raise IdempotencyKeyReused("Key already used for another reminders edit")
+                return result
+            current = self.read_reminders(business_id)
+            if current.version != expected_version:
+                raise RevisionConflict("Reminder settings version changed")
+            result = ReminderRecord(settings, expected_version + 1,
+                current.updated_at if current.settings == settings else now)
+            self._reminders[business_id] = result
+            self._reminders_replays[identity] = (settings, expected_version, result)
+            self._audit[f"reminders#{business_id}#{actor_id}#{key}"] = result
+            return result
+
     def read_confirmed_for_client(self, business_id: str, client_id: str,
                                   run_at: datetime, end_at: datetime) -> tuple[int, tuple[Appointment, ...]]:
         with self._lock:
@@ -212,6 +250,31 @@ class InMemoryCalendarRepository:
                 and appointment.status == CalendarStatus.CONFIRMED
                 and appointment.start_at <= end_at and appointment.end_at > run_at)
             return self._revisions[business_id], matches
+
+    def reserve_reminder(self, appointment: Appointment, profile: ClientProfile,
+                         settings_version: int, calendar_revision: int,
+                         run_at: datetime, now: datetime) -> bool:
+        with self._lock:
+            outbox_id = reminder_outbox_id(appointment.appointment_id)
+            prior = self._reminder_outbox.get(outbox_id)
+            if (self._revisions[appointment.business_id] != calendar_revision
+                    or self.read_reminders(appointment.business_id).version != settings_version
+                    or self.read_profile(appointment.business_id, profile.client_id) != profile
+                    or self.read_appointment(appointment.appointment_id) != appointment):
+                return False
+            if prior is not None and (prior.state != DeliveryState.PENDING or prior.attempts != 0
+                    or (prior.block_start_at == appointment.start_at and prior.block_end_at == run_at
+                        and prior.event_version == settings_version)):
+                return False
+            self._reminder_outbox[outbox_id] = OutboxRecord(
+                appointment.business_id, outbox_id, appointment.appointment_id, "client",
+                REMINDER_TEMPLATE, settings_version, DeliveryState.PENDING, now, now, now,
+                block_start_at=appointment.start_at, block_end_at=run_at)
+            return True
+
+    def list_reminder_outbox(self) -> tuple[OutboxRecord, ...]:
+        with self._lock:
+            return tuple(self._reminder_outbox.values())
 
     def reserve_invitation(self, intent: InvitationIntent, settings_version: int,
                            calendar_revision: int, profile: ClientProfile) -> bool:
@@ -357,6 +420,20 @@ class InMemoryCalendarRepository:
                 del self._client_phones[(profile.business_id, previous_phone)]
             self._clients[key] = profile
             self._client_phones[phone_key] = profile.client_id
+
+    def read_reminder_preference_receipt(self, business_id: str, client_id: str,
+                                         receipt_id: str) -> bool | None:
+        with self._lock:
+            return self._reminder_receipts.get((business_id, client_id, receipt_id))
+
+    def commit_reminder_preference_receipt(self, before: ClientProfile, after: ClientProfile,
+                                           receipt_id: str) -> None:
+        with self._lock:
+            key = (before.business_id, before.client_id, receipt_id)
+            if key in self._reminder_receipts:
+                raise RecordConflict("Receipt already committed")
+            self.save_profile(after, before.version, before.phone_e164)
+            self._reminder_receipts[key] = after.reminders_enabled
 
     def read_note(self, business_id: str, client_id: str,
                   note_id: str) -> ClientNote | None:
@@ -660,7 +737,9 @@ class InMemoryCalendarRepository:
     def read_policy_record(self, business_id: str) -> PolicyRecord | None:
         with self._lock:
             policy = self._policies.get(business_id)
-            return PolicyRecord(policy, self._policy_versions[business_id]) if policy else None
+            return PolicyRecord(
+                policy, self._policy_versions[business_id],
+                self._policy_timezone_updated_at.get(business_id)) if policy else None
 
     @staticmethod
     def _policy_replay_key(command: PolicyCommand) -> tuple[str, str, str, str]:
@@ -689,6 +768,7 @@ class InMemoryCalendarRepository:
                 raise RevisionConflict("Policy idempotency key already used")
             self._policies[business_id] = commit.result.record.policy
             self._policy_versions[business_id] = commit.result.record.version
+            self._policy_timezone_updated_at[business_id] = commit.result.record.timezone_updated_at
             self._policy_replays[key] = PolicyReplay(commit.request_hash, commit.result)
             self._audit[commit.audit_id] = commit
             self._outbox[f"{commit.audit_id}#owner"] = commit

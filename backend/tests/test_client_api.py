@@ -269,3 +269,59 @@ def test_missing_policy_returns_503_without_detail() -> None:
         f"/v1/client/availability?day={DAY}", headers=auth("a"))
     assert response.status_code == 503
     assert response.json() == {"detail": "Booking is unavailable"}
+
+
+def test_portal_reminder_preference_is_shared_versioned_and_identity_scoped() -> None:
+    api, _ = setup()
+    path = "/v1/client/reminder-preference"
+    owner_path = "/v1/owner/businesses/business-1/clients/client-a/reminder-preference"
+    state = api.get(path, headers=auth("a"))
+    assert state.status_code == 200
+    assert state.json()["enabled"] is False
+    assert api.get(path).status_code == 401
+    assert api.get(path, headers=auth("owner")).status_code == 403
+    assert api.get(path + "?client_id=client-b", headers=auth("a")).status_code == 422
+    for extra in ({"client_id": "client-b"}, {"business_id": "other"}):
+        assert api.put(path, json={"enabled": True, "expected_version": 1, **extra},
+                       headers=auth("a")).status_code == 422
+    saved = api.put(path, json={"enabled": True, "expected_version": 1}, headers=auth("a"))
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["enabled"] is True
+    assert "consent_unavailable" in saved.json()["blockers"]
+    assert api.get(owner_path, headers=auth("owner")).json() == saved.json()
+    assert api.get(path, headers=auth("b")).json()["enabled"] is False
+    assert api.put(path, json={"enabled": False, "expected_version": 1},
+                   headers=auth("a")).status_code == 409
+    off = api.put(owner_path, json={"enabled": False, "expected_version": 2},
+                  headers=auth("owner"))
+    assert off.status_code == 200
+    assert api.get(path, headers=auth("a")).json() == off.json()
+
+
+def test_portal_enrollment_preserves_phone_consent_and_stop_restrictions() -> None:
+    from scheduling.local_texts import LocalConsent
+
+    api, repository = setup()
+    app = create_owner_app(repository, lambda _t: OwnerPrincipal("o", "business-1"), lambda: NOW)
+
+    class OptedOutConsent(LocalConsent):
+        def is_opted_out(self, business_id: str, phone_e164: str) -> bool:
+            return True
+
+    add_client_session_route(app, verify, repository, lambda: NOW,
+                             sms_store=OptedOutConsent(repository))  # type: ignore[arg-type]
+    api = TestClient(app)
+    path = "/v1/client/reminder-preference"
+    enrolled = api.put(path, json={"enabled": True, "expected_version": 1}, headers=auth("a"))
+    assert enrolled.status_code == 200
+    assert enrolled.json()["blockers"] == ["phone_unverified", "consent_missing", "sms_opted_out"]
+    profile = api.get("/v1/owner/businesses/business-1/clients/client-a", headers=auth("owner")).json()
+    assert profile["phone_verified_at"] is None
+    off = api.put(path, json={"enabled": False, "expected_version": 2}, headers=auth("a"))
+    assert off.status_code == 200
+    assert off.json()["enabled"] is False
+    assert off.json()["blockers"] == enrolled.json()["blockers"]
+    assert api.put(path, json={"enabled": "true", "expected_version": 3}, headers=auth("a")).status_code == 422
+    assert api.delete("/v1/owner/businesses/business-1/clients/client-a", headers=auth("owner")).status_code == 204
+    assert api.get(path, headers=auth("a")).status_code == 404
+    assert api.put(path, json={"enabled": True, "expected_version": 3}, headers=auth("a")).status_code == 404

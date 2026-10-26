@@ -381,3 +381,16 @@ def test_first_deploy_with_new_parameters_missing_live_proceeds(tmp_path: Path) 
     assert result.returncode == 0, result.stdout
     assert "WARNING" not in result.stdout
     assert f"{OUTBOX} [Modify]: DISABLED -> DISABLED" in result.stdout
+
+
+def test_visit_reminder_schedule_needs_explicit_state_and_live_sms_authorization(tmp_path: Path) -> None:
+    resource = 'VisitReminderFunctionSweep'
+    parameter = 'VisitReminderScheduleState'
+    template = {resource: {'State': {'Ref': parameter}}}
+    no_auth = run_guard([modify(resource)], template, {parameter: 'ENABLED'},
+        {resource: 'DISABLED'}, [f'{parameter}=ENABLED'], tmp_path)
+    assert no_auth.returncode == 1
+    assert '--i-have-live-sms-authorization' in no_auth.stdout
+    allowed = run_guard([modify(resource)], template, {parameter: 'ENABLED'},
+        {resource: 'DISABLED'}, [f'{parameter}=ENABLED'], tmp_path, auth=True)
+    assert allowed.returncode == 0, allowed.stdout

@@ -18,6 +18,7 @@ Client history requires the same business, verified phone and client ID; owner h
 | Cancel | Resolve one own visit/request and store a version-bound confirmation question. A later confirmation cancels it; declining keeps it. |
 | Move | Offer times for one confirmed visit/version, then create a pending replacement; the original stays booked until owner approval. |
 | Ask about visits | Read only the client's own current visits or the owner's business calendar; no booking action follows merely from an answer. |
+| Manage visit reminders | Interpret a clear request to turn future visit reminders on/off; save the verified sender's shared preference and acknowledge the committed choice. Ask about ambiguous intent without writing. |
 
 Offers and confirmation questions last 30 minutes. A later expired/stale/replaced/unmatched reply writes nothing. A changed default duration invalidates an offer quoted at the previous length. A new request replaces the previous prompt. Offered starts (the tool and the deterministic offer alike) put the preferred valid starts for the verified sender (their own client-specific preferences, which replace business-wide guidance on the weekdays they name, plus the business-wide guidance on other weekdays; #383) inside the requested window first and fill the rest with other valid starts, without telling the client why (#382); an explicit window is honored without a preferred start, a preference read failure gives the ordinary offer, and a preference change never invalidates a sent offer. The sender is identified by the verified receipt, never by a name in the message or a tool argument. Exact commands retain their deterministic path; a bare answer to a read-only calendar list cannot select or cancel a visit.
 
@@ -48,6 +49,7 @@ The client loop has five model calls, three tool calls and a 30-second budget, w
 | `dismiss_cancellation` | Closes that confirmation, cancels nothing. |
 | `request_reschedule` | Visit reference and offered local date/time must match the stored move offer and current original version; creates a pending replacement. |
 | `get_my_counteroffer` | Only this client's current unexpired owner offer and source request. |
+| `set_reminder_preference` | Boolean `enabled` only; changes the verified sender's own shared reminder preference. No client/business target, consent change, phone verification, STOP override, or scheduling action. |
 | `respond_to_counteroffer` | Accept/decline only, bound to the client's current offer; acceptance creates one pending linked request, decline books nothing. |
 
 A first booking message offers times and cannot book in that same message. New-booking and move offers cannot substitute for each other. Holds recheck profile, consent, opt-out, quoted service duration, policy, calendar and receipt-keyed idempotency. Cancellation needs a second message, and a confirmed original with an active replacement is refused until the replacement is withdrawn. A stale original never permits a move.
@@ -129,3 +131,26 @@ The subshell removes the key from the parent shell even if the command is interr
 4. Type `/quit` to exit. The calendar and conversation memory reset on restart.
 
 Without `OPENAI_API_KEY`, the simulator answers plain language with a question and a note; exact commands and replies to an existing offer still work.
+
+## Visit reminder enrollment by text (#394)
+
+The model interprets clear plain-language enrollment and unenrollment through the existing
+client loop. Reminder preference intent is distinct from listing visits ("remind me when my
+visit is"), booking, cancellation, and attendance confirmation. Ambiguous requests ask whether
+to turn reminders on or off. A bare YES retains its existing stored-question behavior and does
+not enroll the client in reminders. No new keyword command is required.
+
+The tool accepts only `enabled`; business/client/phone/receipt identity comes from the verified
+receipt. Existing consent, active-profile, phone verification and STOP checks apply before model
+interpretation and are checked again at the write boundary. Turning reminders off leaves other
+permitted scheduling texts enabled. Program-wide STOP/START retain their existing precedence.
+
+Profile version checks and an atomic receipt marker prevent a concurrent profile edit from
+being overwritten. Even an already-selected preference records the receipt. Reprocessing a
+committed receipt returns its original acknowledgment before invoking the model, without
+changing a newer owner or portal choice. Erasure removes these markers with the client data.
+The trusted acknowledgment reflects the committed result even if the model subsequently fails
+or drafts contradictory text; an unsuccessful or uncertain update cannot claim success.
+Acknowledgments use ordinary conversation-reply delivery, separately from scheduled reminders'
+no-retry delivery policy. Scripted-model workflow checks cover these backend boundaries; they
+do not establish live-model interpretation or carrier delivery.

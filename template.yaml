@@ -109,6 +109,16 @@ Parameters:
     AllowedValues: [disabled, authorized]
     Default: disabled
     Description: Additional invitation send gate; requires separate live-SMS authorization.
+  VisitReminderScheduleState:
+    Type: String
+    AllowedValues: [ENABLED, DISABLED]
+    Default: DISABLED
+    Description: Keep scheduled visit reminders off until separately authorized.
+  VisitReminderDeliveryEnabled:
+    Type: String
+    AllowedValues: [disabled, authorized]
+    Default: disabled
+    Description: Separate visit reminder delivery authorization; requires global SMS authorization.
   ManualInvitationDeliveryEnabled:
     Type: String
     AllowedValues: [disabled, authorized]
@@ -372,6 +382,20 @@ Resources:
             Path: /v1/owner/{proxy+}
             Method: DELETE
             Auth: {Authorizer: OwnerJwt}
+        ClientReminderPreferenceGet:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OwnerHttpApi
+            Path: /v1/client/reminder-preference
+            Method: GET
+            Auth: {Authorizer: OwnerJwt}
+        ClientReminderPreferencePut:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OwnerHttpApi
+            Path: /v1/client/reminder-preference
+            Method: PUT
+            Auth: {Authorizer: OwnerJwt}
         ClientSessionGet:
           Type: HttpApi
           Properties:
@@ -535,6 +559,7 @@ Resources:
           SCHEDULING_TABLE_NAME: !Ref SchedulingTable
           BUSINESS_ID: !Ref BusinessId
           SMS_SEND_ENABLED: !Ref SmsSendEnabled
+          VISIT_REMINDER_DELIVERY_ENABLED: !Ref VisitReminderDeliveryEnabled
           BOOKING_INVITATION_DELIVERY_ENABLED: !Ref BookingInvitationDeliveryEnabled
           MANUAL_INVITATION_DELIVERY_ENABLED: !Ref ManualInvitationDeliveryEnabled
           SMS_RETENTION_SCHEDULE_STATE: !Ref SmsRetentionScheduleState
@@ -660,6 +685,40 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub '/aws/lambda/${BookingInvitationFunction}'
+      RetentionInDays: 30
+  VisitReminderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: scheduling.workers.visit_reminders.handler
+      Timeout: 60
+      Environment:
+        Variables:
+          SCHEDULING_TABLE_NAME: !Ref SchedulingTable
+          BUSINESS_ID: !Ref BusinessId
+          SMS_SEND_ENABLED: !Ref SmsSendEnabled
+          VISIT_REMINDER_DELIVERY_ENABLED: !Ref VisitReminderDeliveryEnabled
+          OUTBOX_QUEUE_URL: !Ref OutboxQueue
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:ConditionCheckItem]
+              Resource: !GetAtt SchedulingTable.Arn
+            - Effect: Allow
+              Action: [dynamodb:Query]
+              Resource: !GetAtt SchedulingTable.Arn
+            - Effect: Allow
+              Action: [sqs:SendMessage]
+              Resource: !GetAtt OutboxQueue.Arn
+      Events:
+        Sweep:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 minute)
+            State: !Ref VisitReminderScheduleState
+  VisitReminderLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${VisitReminderFunction}'
       RetentionInDays: 30
   NoteRetentionFunction:
     Type: AWS::Serverless::Function

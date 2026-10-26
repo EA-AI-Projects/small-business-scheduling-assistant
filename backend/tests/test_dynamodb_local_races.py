@@ -1640,3 +1640,114 @@ def test_same_key_default_hold_retry_replays_after_the_default_changes(
     lookup = CreateHold(env.business, "synthetic-owner", "portal-a", "same-key", start, 1,
                         service_duration_minutes=1)
     assert HoldService(repo).existing(lookup) == first
+
+
+def test_reminder_settings_and_profile_preference_persist_with_conflicts_and_erasure(
+    race_env: RaceEnv,
+) -> None:
+    from scheduling.domain.reminders import ReminderSettings
+
+    env = race_env
+    repo = DynamoDBCalendarRepository(env.client, env.table)
+    api = TestClient(create_owner_app(repo,
+        lambda token: OwnerPrincipal("synthetic-owner", env.business), lambda: START))
+    headers = {"Authorization": "Bearer synthetic", "Idempotency-Key": "reminder-settings"}
+    base = f"/v1/owner/businesses/{env.business}"
+    assert repo.read_reminders(env.business).settings == ReminderSettings()
+    body = {"expected_version": 0, "settings": {"days_before": 7, "local_time": "18:00"}}
+    result = api.put(base + "/reminders", json=body, headers=headers)
+    assert result.status_code == 200, result.text
+    assert api.put(base + "/reminders", json=body, headers=headers).json() == result.json()
+    assert repo.read_reminders(env.business).settings == ReminderSettings(7, time(18))
+    assert api.put(base + "/reminders", json=body, headers={
+        **headers, "Idempotency-Key": "stale"}).status_code == 409
+    service = ClientRecordService(repo)
+    profile = service.save_profile(env.business, "synthetic-client", "Synthetic Client",
+        "+14155550101", "123 Test Street", True, 0, START)
+    pref = base + "/clients/synthetic-client/reminder-preference"
+    enrolled = api.put(pref, json={"expected_version": profile.version, "enabled": True}, headers=headers)
+    assert enrolled.status_code == 200, enrolled.text
+    reloaded = api.get(base + "/clients/synthetic-client", headers=headers).json()
+    assert reloaded["reminders_enabled"] is True
+    assert reloaded["reminders_updated_at"] is not None
+    assert api.put(pref, json={"expected_version": profile.version, "enabled": False}, headers=headers).status_code == 409
+    # A second repository instance observes the same state, and general edits preserve it.
+    other = ClientRecordService(DynamoDBCalendarRepository(env.client, env.table))
+    renamed = other.save_profile(env.business, "synthetic-client", "Renamed Client",
+        "+14155550101", "123 Test Street", True, reloaded["version"], START + timedelta(hours=1))
+    assert renamed.reminders_enabled
+    assert renamed.reminders_updated_at == START
+    assert api.delete(base + "/clients/synthetic-client", headers=headers).status_code == 204
+    assert api.get(pref, headers=headers).status_code == 404
+
+
+def test_sms_reminder_receipt_is_atomic_replays_without_overwriting_and_is_erased(
+    race_env: RaceEnv,
+) -> None:
+    env = race_env
+    repo = DynamoDBCalendarRepository(env.client, env.table)
+    clients = ClientRecordService(repo)
+    original = clients.save_profile(env.business, "synthetic-client", "Synthetic Client",
+        "+14155550101", "123 Test Street", True, 0, START)
+    verified = clients.verify_phone(env.business, original.client_id, original.phone_e164, START)
+    assert clients.set_reminder_preference_from_receipt(
+        env.business, verified.client_id, verified.phone_e164, "sms-reminder-on", True, START)
+    enabled = repo.read_profile(env.business, verified.client_id)
+    assert enabled is not None and enabled.reminders_enabled
+    changed = clients.set_reminder_preference(env.business, verified.client_id, False,
+                                             enabled.version, START + timedelta(minutes=1))
+    assert clients.set_reminder_preference_from_receipt(
+        env.business, verified.client_id, verified.phone_e164, "sms-reminder-on", True, START)
+    assert repo.read_profile(env.business, verified.client_id) == changed
+    # A stale transaction cannot leave either a receipt marker or a profile change.
+    with pytest.raises(RecordConflict):
+        repo.commit_reminder_preference_receipt(verified,
+            replace(verified, reminders_enabled=True, version=verified.version + 1), "sms-stale")
+    assert repo.read_reminder_preference_receipt(env.business, verified.client_id, "sms-stale") is None
+    assert repo.read_profile(env.business, verified.client_id) == changed
+    # Even a no-op receipt is durable, so a replay cannot undo a newer choice.
+    assert not clients.set_reminder_preference_from_receipt(
+        env.business, verified.client_id, verified.phone_e164, "sms-already-off", False, START)
+    clients.set_reminder_preference(env.business, verified.client_id, True,
+                                    changed.version, START + timedelta(minutes=2))
+    assert not clients.set_reminder_preference_from_receipt(
+        env.business, verified.client_id, verified.phone_e164, "sms-already-off", False, START)
+    current = repo.read_profile(env.business, verified.client_id)
+    assert current is not None and current.reminders_enabled
+    repo.erase_client(env.business, verified.client_id)
+    assert repo.read_reminder_preference_receipt(env.business, verified.client_id, "sms-reminder-on") is None
+    assert repo.read_reminder_preference_receipt(env.business, verified.client_id, "sms-already-off") is None
+
+
+def test_reminder_claim_has_one_winner_and_never_recovers(race_env: RaceEnv) -> None:
+    """Real conditional ownership proof; never contacts an SMS provider."""
+    from scheduling.domain.outbox import OutboxConflict
+    env = race_env
+    stamp = START.isoformat(timespec='microseconds')
+    env.client.put_item(TableName=env.table, Item={
+        'PK': {'S': f'BUSINESS#{env.business}'}, 'SK': {'S': 'OUTBOX#visit-reminder#claim-race'},
+        'outbox_id': {'S': 'visit-reminder#claim-race'}, 'entity_id': {'S': 'claim-race'},
+        'recipient': {'S': 'client'}, 'template': {'S': 'visit_reminder'},
+        'event_version': {'N': '0'}, 'delivery_state': {'S': 'PENDING'}, 'attempts': {'N': '0'},
+        'created_at': {'S': stamp}, 'next_attempt_at': {'S': stamp}, 'dispatch_after': {'S': stamp},
+        **due_keys(DeliveryState.PENDING, START, 'visit-reminder#claim-race'),
+    })
+    store = DynamoOutboxStore(env.client, env.table)
+    record = store.get(env.business, 'visit-reminder#claim-race')
+    assert record is not None
+    barrier = Barrier(2)
+    def claim() -> bool:
+        barrier.wait(timeout=10)
+        try:
+            store.claim(record, START, START + timedelta(minutes=2))
+            return True
+        except OutboxConflict:
+            return False
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        outcomes = list(workers.map(lambda _: claim(), range(2)))
+    assert sorted(outcomes) == [False, True]
+    claimed = store.get(env.business, record.outbox_id)
+    assert claimed is not None and claimed.attempts == 1
+    assert claimed.next_attempt_at is None and claimed.dispatch_after is None
+    with pytest.raises(OutboxConflict):
+        store.claim(claimed, START + timedelta(hours=1), START + timedelta(hours=2))
