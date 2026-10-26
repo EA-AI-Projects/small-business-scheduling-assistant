@@ -1631,6 +1631,8 @@ class DynamoDBCalendarRepository:
         return PolicyRecord(
             self._decode_policy(item["payload"]["S"]),
             int(item.get("version", {"N": "1"})["N"]),
+            datetime.fromisoformat(item["timezone_updated_at"]["S"])
+            if "timezone_updated_at" in item else None,
         )
 
     @staticmethod
@@ -1673,7 +1675,9 @@ class DynamoDBCalendarRepository:
             item["request_hash"]["S"],
             PolicyResult(
                 PolicyRecord(
-                    self._decode_policy(response["policy"]), response["policy_version"]
+                    self._decode_policy(response["policy"]), response["policy_version"],
+                    datetime.fromisoformat(response["timezone_updated_at"])
+                    if response.get("timezone_updated_at") else None,
                 ),
                 response["calendar_revision"],
             ),
@@ -1869,6 +1873,9 @@ class DynamoDBCalendarRepository:
             "payload": {"S": encode_policy(commit.result.record.policy)},
             "version": {"N": str(commit.result.record.version)},
         }
+        if commit.result.record.timezone_updated_at is not None:
+            policy_item["timezone_updated_at"] = {
+                "S": _instant(commit.result.record.timezone_updated_at)}
         policy_put: dict[str, Any] = {
             "TableName": self._table,
             "Item": policy_item,
@@ -1882,6 +1889,9 @@ class DynamoDBCalendarRepository:
         replay_payload = {
             "policy": encode_policy(commit.result.record.policy),
             "policy_version": commit.result.record.version,
+            "timezone_updated_at": (
+                _instant(commit.result.record.timezone_updated_at)
+                if commit.result.record.timezone_updated_at is not None else None),
             "calendar_revision": commit.result.calendar_revision,
         }
         outbox_id = f"{commit.audit_id}#owner"
