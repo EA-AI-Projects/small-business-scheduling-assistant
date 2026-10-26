@@ -874,7 +874,7 @@ def create_owner_app(
                        request_key: Annotated[str, Depends(key)]) -> object:
         reminders = cast(ReminderRepository, repository)
         return run(lambda: reminders.save_reminders(business_id, owner.actor_id, request_key,
-            body.expected_version, ReminderSettings(body.settings.days_before, body.settings.local_time)),
+            body.expected_version, ReminderSettings(body.settings.days_before, body.settings.local_time), now()),
             lambda: jsonable_encoder(reminders.read_reminders(business_id)))
 
     @app.get("/v1/owner/businesses/{business_id}/clients/{client_id}/reminder-preference")

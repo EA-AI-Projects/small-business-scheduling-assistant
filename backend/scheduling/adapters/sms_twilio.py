@@ -36,7 +36,12 @@ from scheduling.domain.lifecycle import (
     COUNTEROFFER_DECLINED_TEMPLATE,
     EXPIRED_REPLACEMENT_WAITING_TEMPLATE,
 )
-from scheduling.domain.outbox import DeliveryFailure, OutboxRecord, PermanentDeliveryFailure
+from scheduling.domain.outbox import (
+    DeliveryFailure,
+    DeliverySuppressed,
+    OutboxRecord,
+    PermanentDeliveryFailure,
+)
 from scheduling.domain.owner_calendar import UnavailableBlock
 from scheduling.domain.owner_counteroffer import (
     COUNTEROFFER_FAILED_TEMPLATE,
@@ -49,6 +54,14 @@ from scheduling.domain.owner_counteroffer import (
     counteroffer_failure_outbox,
     failure_outbox_id_for,
     outbox_id_for,
+)
+from scheduling.domain.owner_policy import PolicyRecord
+from scheduling.domain.reminders import (
+    REMINDER_TEMPLATE,
+    ReminderRecord,
+    reminder_outbox_id,
+    reminder_problem,
+    reminder_run_at,
 )
 from scheduling.domain.sms_ingress import (
     WELCOME_TEMPLATE,
@@ -69,6 +82,8 @@ class SchedulingRecords(Protocol):
     def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None: ...
     def read_policy(self, business_id: str) -> AvailabilityPolicy: ...
     def read_outreach(self, business_id: str) -> OutreachRecord: ...
+    def read_reminders(self, business_id: str) -> ReminderRecord: ...
+    def read_policy_record(self, business_id: str) -> PolicyRecord | None: ...
     def read_business_profile(self, business_id: str) -> BusinessProfileRecord: ...
     def read_confirmed_for_client(self, business_id: str, client_id: str,
                                   run_at: datetime, end_at: datetime) -> tuple[int, tuple[Appointment, ...]]: ...
@@ -99,6 +114,7 @@ class TwilioSmsSender:
                  status_callback: str | None = None,
                  clock: Callable[[], datetime] | None = None,
                  counteroffers: CounterofferStore | None = None,
+                 reminder_send_enabled: Callable[[], bool] | None = None,
                  invitation_send_enabled: Callable[[], bool] | None = None,
                  manual_invitation_send_enabled: Callable[[], bool] | None = None) -> None:
         if not business_id:
@@ -118,6 +134,7 @@ class TwilioSmsSender:
         self._status_callback = status_callback
         self._clock = clock or (lambda: datetime.now(UTC))
         self._counteroffers = counteroffers
+        self._reminder_send_enabled = reminder_send_enabled or (lambda: False)
         self._invitation_send_enabled = invitation_send_enabled or (lambda: False)
         self._manual_invitation_send_enabled = manual_invitation_send_enabled or (lambda: False)
 
@@ -130,6 +147,8 @@ class TwilioSmsSender:
             return self._deliver_reply(record)
         if record.template == WELCOME_TEMPLATE:
             return self._deliver_welcome(record)
+        if record.template == REMINDER_TEMPLATE:
+            return self._deliver_reminder(record)
         if record.template == INVITATION_TEMPLATE:
             return self._deliver_invitation(record)
         if record.template == COUNTEROFFER_TEMPLATE:
@@ -157,6 +176,52 @@ class TwilioSmsSender:
         return self._send(record, to, body,
                           appointment.client_id if record.recipient == "client"
                           and appointment is not None else None)
+
+    def _deliver_reminder(self, record: OutboxRecord) -> str:
+        def current() -> tuple[Appointment, ClientProfile, str]:
+            if not self._reminder_send_enabled():
+                raise DeliverySuppressed("REMINDER_SEND_DISABLED")
+            visit = self._records.read_appointment(record.entity_id)
+            if (visit is None or visit.business_id != record.business_id
+                    or record.recipient != "client"
+                    or record.outbox_id != reminder_outbox_id(record.entity_id)):
+                raise DeliverySuppressed("REMINDER_VISIT_UNAVAILABLE")
+            profile = self._records.read_profile(record.business_id, visit.client_id)
+            if profile is None:
+                raise DeliverySuppressed("REMINDER_CLIENT_UNAVAILABLE")
+            reason = reminder_problem(visit, profile, self._records, self._consent, self._clock())
+            if reason is not None:
+                raise DeliverySuppressed(f"REMINDER_{reason}")
+            settings = self._records.read_reminders(record.business_id)
+            zone = self._records.read_policy(record.business_id).timezone
+            if (record.block_start_at != visit.start_at
+                    or record.block_end_at != reminder_run_at(visit, settings.settings, zone)
+                    or record.event_version != settings.version):
+                raise DeliverySuppressed("REMINDER_SCHEDULE_CHANGED")
+            saved = self._records.read_business_profile(record.business_id).profile
+            if saved is None:
+                raise PermanentDeliveryFailure("REMINDER_BUSINESS_UNAVAILABLE")
+            local = visit.start_at.astimezone(ZoneInfo(zone))
+            body = (f"{saved.display_name}: Reminder for your {visit_phrase(saved)} on "
+                    f"{local.strftime('%A, %B')} {local.day}, {local.year} at "
+                    f"{local.strftime('%I:%M %p').lstrip('0')} {local.tzname()} ({zone}). "
+                    "Reply if you need to cancel or reschedule. Reply STOP to stop texts.")
+            return visit, profile, body
+
+        visit, profile, body = current()
+        def check() -> None:
+            latest_visit, latest_profile, latest_body = current()
+            if latest_visit != visit or latest_profile != profile or latest_body != body:
+                raise DeliverySuppressed("REMINDER_RECORD_CHANGED")
+        try:
+            return self._send(record, normalize_phone(profile.phone_e164), body,
+                              visit.client_id, pre_send=check)
+        except DeliveryFailure as exc:
+            if isinstance(exc, PermanentDeliveryFailure):
+                raise
+            code = ("REMINDER_CLIENT_SEND_BUSY" if exc.code == "CLIENT_SEND_BUSY"
+                    else "REMINDER_HANDOFF_UNCERTAIN")
+            raise PermanentDeliveryFailure(code) from exc
 
     def _deliver_invitation(self, record: OutboxRecord) -> str:
         stored = self._records.read_invitation(record.business_id, record.entity_id)

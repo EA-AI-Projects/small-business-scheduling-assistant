@@ -200,6 +200,30 @@ class DynamoOutboxStore:
     def claim(self, record: OutboxRecord, now: datetime, lease_until: datetime) -> OutboxRecord:
         if record.next_attempt_at is None:
             raise OutboxConflict("Outbox record is not claimable")
+        if record.template == "visit_reminder":
+            if record.state != DeliveryState.PENDING or record.attempts != 0:
+                raise OutboxConflict("Reminder was already attempted")
+            response = _conditional_call(
+                self._client, TableName=self._table,
+                Key=self._key(record.business_id, record.outbox_id),
+                UpdateExpression=(
+                    "SET delivery_state = :sending, lease_token = :token, attempts = :one "
+                    "REMOVE next_attempt_at, dispatch_after, outbox_due_pk, outbox_due_sk"
+                ),
+                ConditionExpression=(
+                    "delivery_state = :pending AND template = :template "
+                    "AND (attribute_not_exists(attempts) OR attempts = :zero) "
+                    "AND next_attempt_at = :old_attempt AND next_attempt_at <= :now"
+                ),
+                ExpressionAttributeValues={
+                    ":sending": {"S": "SENDING"}, ":pending": {"S": "PENDING"},
+                    ":template": {"S": "visit_reminder"}, ":token": {"S": new_lease_token()},
+                    ":one": {"N": "1"}, ":zero": {"N": "0"},
+                    ":old_attempt": {"S": _instant(record.next_attempt_at)},
+                    ":now": {"S": _instant(now)},
+                }, ReturnValues="ALL_NEW",
+            )
+            return self._record(response["Attributes"])
         token = new_lease_token()
         response = _conditional_call(
             self._client,
@@ -229,6 +253,14 @@ class DynamoOutboxStore:
             ReturnValues="ALL_NEW",
         )
         return self._record(response["Attributes"])
+
+    def mark_suppressed(self, record: OutboxRecord, now: datetime) -> None:
+        if record.template != "visit_reminder":
+            raise ValueError("Only never-submitted reminders may be parked")
+        self._finish(record,
+            "SET delivery_state = :state, attempts = :zero, suppressed_at = :now "
+            "REMOVE outbox_due_pk, outbox_due_sk, dispatch_after, next_attempt_at, lease_token",
+            {":state": {"S": "PENDING"}, ":zero": {"N": "0"}, ":now": {"S": _instant(now)}})
 
     def mark_sent(self, record: OutboxRecord, provider_id: str, now: datetime) -> None:
         self._finish(

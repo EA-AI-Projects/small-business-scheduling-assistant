@@ -216,7 +216,7 @@ class OwnerCalendarService:
             appointment = Appointment(
                 str(uuid4()), command.business_id, command.client_id, start, end,
                 CalendarStatus.CONFIRMED, None, command.duration_minutes,
-                policy.minimum_visit_gap_minutes, 1,
+                policy.minimum_visit_gap_minutes, 1, confirmed_at=now,
             )
         else:
             if command.operation != OwnerAction.CREATE_BLOCK:
