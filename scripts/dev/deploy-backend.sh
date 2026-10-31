@@ -37,9 +37,9 @@
 #   --param      Supply a parameter that the live stack does not have yet, or deliberately
 #                change one (for example HoldExpiryScheduleState=ENABLED). Not allowed for the three
 #                private keys above.
-#   --i-have-live-sms-authorization   Required whenever OutboxDispatchScheduleState or
-#                SmsSenderMappingState targets ENABLED. Pass it only with Enrique's separate
-#                live-SMS authorization (#91).
+#   --live-sms   Acknowledge live-SMS authorization for this deployment, including already
+#                authorized delivery gates and enabled SMS schedules/sender mapping. Existing
+#                parameter values are preserved; new or changed settings still need --param.
 #   --prompt-param Key   Read the value of OwnerNumber, TwilioAccountSid
 #                or TwilioBusinessNumber from a hidden prompt. No other key is accepted. Needs a
 #                terminal. --dry-run does not prompt and shows ****.
@@ -75,7 +75,7 @@ while [[ $# -gt 0 ]]; do
       EXTRA_PARAMS+=("$2")
       shift
       ;;
-    --i-have-live-sms-authorization) LIVE_SMS_AUTH=1 ;;
+    --live-sms) LIVE_SMS_AUTH=1 ;;
     --prompt-param)
       [[ $# -ge 2 ]] || die "--prompt-param needs a key"
       is_private_param "$2" || die "--prompt-param accepts only: ${PRIVATE_PARAMS[*]}"
@@ -361,18 +361,15 @@ if [[ -n "${CHANGED_PARAMS}" ]]; then
 fi
 REMINDER_TARGET="$(jq -r '[.Parameters[] | select(.ParameterKey == "VisitReminderDeliveryEnabled") | .ParameterValue] | first // "disabled"' <<<"${DESCRIPTION}")"
 if [[ "$(param_value VisitReminderDeliveryEnabled)" == "authorized" || "${REMINDER_TARGET}" == "authorized" ]]; then
-  [[ "${LIVE_SMS_AUTH}" -eq 1 ]] || die "refusing: VisitReminderDeliveryEnabled=authorized needs separate live-SMS authorization"
-  [[ "$(param_value VisitReminderDeliveryEnabled)" == "authorized" ]] || die "refusing: pass --param VisitReminderDeliveryEnabled=authorized explicitly"
+  [[ "${LIVE_SMS_AUTH}" -eq 1 ]] || die "refusing: VisitReminderDeliveryEnabled=authorized needs --live-sms with separate live-SMS authorization"
 fi
 INVITATION_TARGET="$(jq -r '[.Parameters[] | select(.ParameterKey == "BookingInvitationDeliveryEnabled") | .ParameterValue] | first // "disabled"' <<<"${DESCRIPTION}")"
 if [[ "${INVITATION_TARGET}" == "authorized" ]]; then
-  [[ "${LIVE_SMS_AUTH}" -eq 1 ]] || die "refusing: BookingInvitationDeliveryEnabled=authorized needs separate live-SMS authorization"
-  [[ "$(param_value BookingInvitationDeliveryEnabled)" == "authorized" ]] || die "refusing: pass --param BookingInvitationDeliveryEnabled=authorized explicitly"
+  [[ "${LIVE_SMS_AUTH}" -eq 1 ]] || die "refusing: BookingInvitationDeliveryEnabled=authorized needs --live-sms with separate live-SMS authorization"
 fi
 MANUAL_INVITATION_TARGET="$(jq -r '[.Parameters[] | select(.ParameterKey == "ManualInvitationDeliveryEnabled") | .ParameterValue] | first // "disabled"' <<<"${DESCRIPTION}")"
 if [[ "${MANUAL_INVITATION_TARGET}" == "authorized" ]]; then
-  [[ "${LIVE_SMS_AUTH}" -eq 1 ]] || die "refusing: ManualInvitationDeliveryEnabled=authorized needs separate live-SMS authorization"
-  [[ "$(param_value ManualInvitationDeliveryEnabled)" == "authorized" ]] || die "refusing: pass --param ManualInvitationDeliveryEnabled=authorized explicitly"
+  [[ "${LIVE_SMS_AUTH}" -eq 1 ]] || die "refusing: ManualInvitationDeliveryEnabled=authorized needs --live-sms with separate live-SMS authorization"
   RETENTION_TARGET="$(jq -r '[.Parameters[] | select(.ParameterKey == "SmsRetentionScheduleState") | .ParameterValue] | first // "DISABLED"' <<<"${DESCRIPTION}")"
   [[ "${RETENTION_TARGET}" == "ENABLED" ]] || die "refusing: manual invitation delivery requires the SMS retention schedule enabled"
 fi
@@ -447,7 +444,7 @@ fi
 
 SMS_AUTH_MISSING="${SMS_AUTH_MISSING:-}"
 if [[ -n "${RULE_ROWS}" && -n "${SMS_AUTH_MISSING}" ]]; then
-  die "refusing: ${SMS_AUTH_MISSING} targets ENABLED, which is a live-SMS action: pass --i-have-live-sms-authorization only with Enrique's separate authorization (#91)."
+  die "refusing: ${SMS_AUTH_MISSING} targets ENABLED, which is a live-SMS action: pass --live-sms only with Enrique's separate authorization (#91)."
 fi
 
 # Sender mapping guard: the SmsSender outbox mapping's State must not change silently either.
@@ -505,7 +502,7 @@ if [[ -n "${MAPPING_ROWS}" ]]; then
       [[ "${map_target}" == "DISABLED" ]] || map_note="  (REFUSED: other mappings must stay DISABLED)"
     else
       if [[ "${map_target}" == "ENABLED" && "${LIVE_SMS_AUTH}" -ne 1 ]]; then
-        map_note="  (REFUSED: targeting ENABLED needs --i-have-live-sms-authorization, #91)"
+        map_note="  (REFUSED: targeting ENABLED needs --live-sms, #91)"
       elif [[ "${map_live}" != "${map_target}" ]]; then
         # A change counts as requested only when the --param value equals the resolved target.
         if [[ "$(param_value "${SENDER_PARAM}")" == "${map_target}" ]]; then

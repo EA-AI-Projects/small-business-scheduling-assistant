@@ -23,7 +23,7 @@
 #   --allow-dirty  Deploy a dirty working tree (uncommitted changes ship too).
 #   Logical IDs: HoldExpiryFunctionSweep, NoteRetentionFunctionDaily,
 #                SmsRetentionFunctionDaily, OutboxDispatchFunctionSweep
-#   --i-have-live-sms-authorization  Required to ENABLE OutboxDispatchFunctionSweep.
+#   --live-sms  Required to ENABLE OutboxDispatchFunctionSweep.
 set -euo pipefail
 
 # shellcheck source=lib.sh
@@ -40,7 +40,7 @@ ARGS=()
 for arg in "${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}"; do
   case "${arg}" in
     --allow-dirty) ALLOW_DIRTY=1 ;;
-    --i-have-live-sms-authorization) LIVE_SMS_AUTH=1 ;;
+    --live-sms) LIVE_SMS_AUTH=1 ;;
     *) ARGS+=("${arg}") ;;
   esac
 done
@@ -69,7 +69,7 @@ case "${NAME}" in
     ;;
 esac
 if [[ "${NAME}" == OutboxDispatchFunctionSweep && "${ACTION}" == "enable" && "${LIVE_SMS_AUTH}" -ne 1 ]]; then
-  die "enabling outbox dispatch is a live-SMS action that needs Enrique's separate authorization (#91); pass --i-have-live-sms-authorization only with it. Refusing."
+  die "enabling outbox dispatch is a live-SMS action that needs Enrique's separate authorization (#91); pass --live-sms only with it. Refusing."
 fi
 
 case "${NAME}" in
@@ -91,7 +91,7 @@ info "Full deploy of the current checkout; deploy-backend.sh below prints the co
 DEPLOY=("$(dirname "${BASH_SOURCE[0]}")/deploy-backend.sh" --param "${PARAM}=${WANT}")
 [[ "${DRY_RUN}" -ne 1 ]] || DEPLOY+=(--dry-run)
 [[ "${ALLOW_DIRTY}" -ne 1 ]] || DEPLOY+=(--allow-dirty)
-[[ "${LIVE_SMS_AUTH}" -ne 1 ]] || DEPLOY+=(--i-have-live-sms-authorization)
+[[ "${LIVE_SMS_AUTH}" -ne 1 ]] || DEPLOY+=(--live-sms)
 if [[ -z "${PROFILE}" ]]; then DEPLOY+=(--no-profile); else DEPLOY+=(--profile "${PROFILE}"); fi
 
 if [[ "${DRY_RUN}" -eq 1 ]]; then

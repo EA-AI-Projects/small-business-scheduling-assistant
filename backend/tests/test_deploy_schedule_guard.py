@@ -193,7 +193,7 @@ def test_outbox_dispatch_is_parameterized(tmp_path: Path) -> None:
         ["OutboxDispatchScheduleState=ENABLED"], tmp_path,
     )
     assert no_auth.returncode == 1
-    assert "--i-have-live-sms-authorization" in no_auth.stdout
+    assert "--live-sms" in no_auth.stdout
 
 
 def test_wrong_param_value_is_not_authorization(tmp_path: Path) -> None:
@@ -270,7 +270,7 @@ def test_sender_mapping_enabled_needs_authorization_flag(tmp_path: Path) -> None
         ["SmsSenderMappingState=ENABLED"], tmp_path, mappings={SENDER: "Disabled"},
     )
     assert result.returncode == 1
-    assert "--i-have-live-sms-authorization" in result.stdout
+    assert "--live-sms" in result.stdout
 
 
 def test_sender_mapping_wrong_param_value_is_not_authorization(tmp_path: Path) -> None:
@@ -390,7 +390,7 @@ def test_visit_reminder_schedule_needs_explicit_state_and_live_sms_authorization
     no_auth = run_guard([modify(resource)], template, {parameter: 'ENABLED'},
         {resource: 'DISABLED'}, [f'{parameter}=ENABLED'], tmp_path)
     assert no_auth.returncode == 1
-    assert '--i-have-live-sms-authorization' in no_auth.stdout
+    assert '--live-sms' in no_auth.stdout
     allowed = run_guard([modify(resource)], template, {parameter: 'ENABLED'},
         {resource: 'DISABLED'}, [f'{parameter}=ENABLED'], tmp_path, auth=True)
     assert allowed.returncode == 0, allowed.stdout
