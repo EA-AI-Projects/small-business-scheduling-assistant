@@ -60,6 +60,18 @@ Scripts deploy the **local checkout** and report its commit. Dirty writes requir
 
 Defaults describe a new stack, not the live environment. Preserve current trigger state deliberately across deployments, including emergency-disabled rules. Never infer live-SMS authorization from a template setting, old checkpoint or campaign approval. Current messaging procedures are in [DEV_SMS_PLAN.md](DEV_SMS_PLAN.md).
 
+### Routine deployments with live SMS
+
+After live-SMS authorization, deploy while preserving existing stack settings with:
+
+```sh
+scripts/dev/deploy-backend.sh --live-sms
+```
+
+`--live-sms` acknowledges authorization for this deployment. Existing authorized invitation and reminder delivery gates do not need repeated `--param` values. The flag preserves disabled gates as well; it does not enable them. New template parameters still need explicit values on their first deployment, and deliberate parameter, schedule, or sender-mapping state changes still require the relevant `--param Key=Value`. Live/parameter drift guards, private-value handling, retention checks, change-set review, and deployment confirmation remain in place.
+
+`scripts/dev/schedules.sh` accepts and forwards `--live-sms` when changing a schedule through deployment. The former long authorization flag has been replaced.
+
 ## Validation and monitoring
 
 [AWS_VALIDATION.md](AWS_VALIDATION.md) separates local race checks from opt-in deployed DynamoDB, Lambda, SQS/DLQ and retention proof. Review each test's side effects first. Record which commit and configuration passed; local tests do not prove IAM, deployed triggers or provider delivery.

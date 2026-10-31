@@ -219,3 +219,23 @@ def test_frontend_dry_run_is_not_blocked_by_dirty_tree(scripted: tuple[Path, dic
     result = run_script(repo, env, "deploy-frontend.sh", "--dry-run")
     assert result.returncode == 0, result.stderr
     assert "uncommitted changes will ship" in result.stdout
+
+
+@needs_tools
+def test_live_sms_flag_is_accepted_and_forwarded(scripted: tuple[Path, dict[str, str]]) -> None:
+    repo, env = scripted
+    deploy = run_script(repo, env, "deploy-backend.sh", "--dry-run", "--live-sms")
+    assert deploy.returncode == 0, deploy.stderr
+    schedules = run_script(repo, env, "schedules.sh", "enable", "OutboxDispatchFunctionSweep",
+                           "--dry-run", "--live-sms")
+    assert schedules.returncode == 0, schedules.stderr
+    assert "--live-sms" in schedules.stdout
+    assert "OutboxDispatchScheduleState=ENABLED" in schedules.stdout
+
+
+@needs_tools
+def test_old_live_sms_flag_is_no_longer_accepted(scripted: tuple[Path, dict[str, str]]) -> None:
+    repo, env = scripted
+    result = run_script(repo, env, "deploy-backend.sh", "--dry-run", "--i-have-live-sms-authorization")
+    assert result.returncode == 1
+    assert "unknown argument" in result.stderr

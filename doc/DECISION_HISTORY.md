@@ -51,3 +51,8 @@ This is a selected record of material changes, not a second specification. Curre
 ## Documentation consolidation (2026-10-14)
 
 Architecture/current design no longer embeds issue chronology, account IDs, completed authorization packets, dated prices or UI implementation diaries. Useful operational details have focused homes; detailed historical text remains in Git history. See the [documentation index](README.md) for each document's scope and disposition.
+
+## Deployment authorization flag (#396; 2026-10-31)
+
+- **Earlier behavior:** every deployment retaining authorized invitation/reminder gates required both the long live-SMS acknowledgment flag and repeated explicit gate parameters.
+- **Replacement:** `--live-sms` acknowledges live-SMS authorization for the deployment and permits preserving existing authorized delivery gates. New settings and deliberate parameter/trigger changes still require explicit values. The shorter flag is shared by backend deployment and schedule commands. The owner approved the change to remove repetitive arguments; it does not authorize this code change to deploy or send messages.
