@@ -29,6 +29,15 @@ Reference docs describe the current repository; they do not certify live AWS/pro
 | [A2P registration](A2P_REGISTRATION.md), [policy site](../docs/README.md) | Registration guidance and public disclosures; verify provider state before submission. |
 | [Decision history](DECISION_HISTORY.md) | Selected superseded choices and completed checkpoints, with issue provenance. |
 
+## Proposed design research
+
+These documents describe options for future consideration, not accepted architecture or authorized implementation.
+
+| Document | Owns |
+| --- | --- |
+| [Agent framework research](AGENT_FRAMEWORK_RESEARCH.md) | Comparison of framework options against the existing SMS harness. |
+| [OpenAI Agents SDK assessment and plan](OPENAI_AGENTS_SDK_PLAN.md) | Proposed integration boundary, refactoring scope, phased validation and rollback. |
+
 ## Maintenance rules
 
 - Edit the owning reference section to state the final accepted behavior. Remove the superseded wording; do not append another correction to it.
