@@ -215,6 +215,12 @@ class ClientReadTools:
         (null) fields keep their saved values. Malformed values write nothing and leave the
         model free to ask the client what they meant.
         """
+        # Another action this message keeps its own reply: a reminder call after it is
+        # refused first, whatever its shape, and never replaces that reply.
+        if (self._reminder_preference is not None and (
+                self.requested is not None or self.prepared is not None or self.answered
+                or self.responded or self.offer)):
+            return {"ok": False, "error": "action_already_attempted"}
         if not set(args) <= {"enabled", "days_before", "local_time"} or not args:
             return self._refuse_reminder()
         enabled = args.get("enabled")
@@ -227,9 +233,6 @@ class ClientReadTools:
             return self._refuse_reminder()
         if self._reminder_preference is None:
             return dict(UNAVAILABLE)
-        if (self.requested is not None or self.prepared is not None or self.answered
-                or self.responded or self.offer):
-            return {"ok": False, "error": "action_already_attempted"}
         self.reminder_attempted = True
         return self._reminder_preference.write(
             enabled, days, _clock_arg(clock) if clock is not None else None)

@@ -94,7 +94,7 @@ from scheduling.domain.lifecycle import (
 from scheduling.domain.offer_preferences import pick_offer, preferred_reader
 from scheduling.domain.owner_calendar_tool import STATUSES as OWNER_CALENDAR_STATUSES
 from scheduling.domain.owner_calendar_tool import calendar_page
-from scheduling.domain.reminder_text import ambiguous_hour, has_reminder_content
+from scheduling.domain.reminder_text import acknowledgment_only, unclear_time
 from scheduling.domain.reminders import reminder_preference_view
 from scheduling.domain.service_duration import (
     ServiceDurationChanged,
@@ -1414,13 +1414,13 @@ class ConversationService:
             body = receipt.body or ""
             timing = days_before is not None or local_time is not None
             if (is_affirmative(body) or is_negative(body)
-                    or not has_reminder_content(body)):
+                    or acknowledgment_only(body)):
                 reminder_reply = ConversationOutcome(
                     "Which reminder days before (1 to 7) and time, with AM or PM, would you "
                     "like? Your saved reminder settings did not change." if timing else
                     "Would you like visit reminders turned on or off? Please say which.")
                 return {"ok": False, "error": "explicit_reminder_choice_required"}
-            if local_time is not None and ambiguous_hour(body):
+            if local_time is not None and unclear_time(body, local_time):
                 reminder_reply = ConversationOutcome(
                     "What reminder time would you like? Please include AM or PM, for example "
                     "9 AM or 2 PM. Your saved reminder settings did not change.")

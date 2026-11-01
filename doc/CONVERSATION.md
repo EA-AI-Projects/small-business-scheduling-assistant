@@ -137,8 +137,8 @@ Without `OPENAI_API_KEY`, the simulator answers plain language with a question a
 
 The model interprets clear plain-language enrollment and unenrollment through the existing
 client loop. Reminder preference intent is distinct from listing visits ("remind me when my
-visit is"), booking, cancellation, and attendance confirmation. Ambiguous requests ask whether
-for the missing value. A bare YES retains its existing stored-question behavior and never
+visit is"), booking, cancellation, and attendance confirmation. Ambiguous requests ask for
+the missing value. A bare YES retains its existing stored-question behavior and never
 enrolls the client in reminders or changes timing. No new keyword command is required.
 
 The write tool accepts only `enabled`, `days_before` and `local_time` (#402, below); business/client/phone/receipt identity comes from the verified
@@ -172,17 +172,23 @@ off retains timing, and a timing edit never re-enrolls an unenrolled client. Cle
 save immediately and the committed acknowledgment states enrollment, days before, local time
 and the business timezone. A time without AM/PM (such as a bare "9") is not a valid time
 argument. Deterministic backend guards on the inbound text, applied before any commit, back
-the prompt: a write needs reminder content in the message (a digit, number word, day part,
-on/off or reminder word), so "go ahead", "k" or a thumbs-up cannot write; and when the call
-supplies a time, a message that names an hour without AM/PM, a day part, noon or an
-unambiguous 24-hour form ("9", "at 9", "9 o'clock", "nine", "9:30") gets a fixed question
-asking for AM or PM, writes nothing, and ends the reminder action for that message so a
-same-message retry with 09:00 cannot save. Day quantities ("two days") are not hours;
-"9 AM", "noon", "14:00", "09:30" and "9 in the morning" pass, as does a message with no hour
-at all (such as "morning" answering the question). The guard reads only the inbound text: it
-does not understand other languages or spelled-out times beyond one to twelve, and a time
-the model reads from the transcript rather than the current message must be restated.
-A malformed tool call also gets a fixed "nothing changed" reply rather than model text.
+the prompt, and are applied before any commit. A message that is only an acknowledgment
+(an emoji, "go ahead", "do it", "k", "si", bare yes/no) cannot write; longer messages are left
+to the model, so "go ahead on that" can reach a write (accepted limit). When the call supplies
+a time, the current message must back it: an hour without AM/PM, noon, a 24-hour form or an
+adjacent day part ("9", "at 9", "9ish", "900", "nine", "9:30", "I work in the morning,
+remind me at 9") gets a fixed question asking for AM or PM; a clear time or day part that
+differs from the supplied value ("9 PM" with 09:00, "evening" with 09:00) is refused the same
+way. Nothing is written and the reminder action ends for that message, so a same-message retry
+cannot save. Day quantities ("two days") are not hours; "9 AM", "nine AM", "9 a.m.", "9.30
+am", "noon", "14:00", "09:30" and "9 in the morning" pass, as does a message with no hour at
+all ("morning", "a.m.") answering the question. The guard uses English time words only;
+other-language ambiguous hours such as "a las 9" are left to the model. It also cannot catch
+a model-supplied time when the current message names no time at all ("Make it earlier",
+"Turn reminders on"); the acknowledgment states the saved time so the client can correct it.
+A reminder call after another action in the same message (booking, cancellation, offer) is
+refused first and never replaces that action's reply.
+A malformed reminder call (with no other action) gets a fixed "nothing changed" reply rather than model text.
 Well-formed values outside the ranges write
 nothing and get a fixed explanation that saved settings did not change.
 

@@ -471,14 +471,22 @@ def test_a_model_that_normalizes_a_bare_hour_cannot_save_it() -> None:
         assert world.owner_view() == before, body
     assert commits == []
 
-    # A same-message retry with a normalized time cannot save after a malformed attempt.
-    def retry(tools: Tools) -> str:
-        tools("set_reminder_preference", set_args(clock="9"))
-        assert tools("set_reminder_preference", set_args(clock="09:00")) == {
-            "ok": False, "error": "action_already_attempted"}
+
+
+def test_malformed_call_ends_the_action_so_a_valid_retry_in_the_same_message_cannot_save() -> None:
+    world = World()
+    before = world.owner_view()
+    commits = commit_counter(world)
+    results: list[dict[str, Any]] = []
+
+    def plan(tools: Tools) -> str:
+        results.append(tools("set_reminder_preference", set_args(clock="9")))  # Malformed.
+        # The text clearly says 9 AM, so the ambiguity guard alone would allow this retry.
+        results.append(tools("set_reminder_preference", set_args(True, clock="09:00")))
         return "Saved!"
 
-    reply = world.text("Make my reminder 9", retry)
+    reply = world.text("Remind me at 9 AM", plan)
+    assert [item["error"] for item in results] == ["invalid_arguments", "action_already_attempted"]
     assert "Saved!" not in reply.text and world.owner_view() == before and commits == []
 
 
@@ -564,3 +572,112 @@ def test_replay_of_a_marker_without_timing_acknowledges_enrollment_only() -> Non
     reply = world.text("Remind me", forbidden, receipt_id="SM-legacy")
     assert "now on" in reply.text and "days before" not in reply.text
     assert world.owner_view() == before
+
+
+def test_a_clear_time_the_model_contradicts_or_a_distant_day_part_cannot_save() -> None:
+    world = World()
+    world.owner_edit(enabled=True, days_before=3, local_time="11:00")
+    before = world.owner_view()
+    for body, clock in (("Remind me at 9 PM", "09:00"), ("Remind me in the evening", "09:00"),
+                        ("Remind me at 9ish", "09:00"), ("Remind me at 900", "09:00"),
+                        ("Remind me at 830", "08:30"), ("Remind me at 9 AM", "10:00"),
+                        ("I work in the morning, remind me at 9", "09:00"),
+                        ("Remind me the night before at 8", "08:00"),
+                        ("Remind me tomorrow morning", "13:00")):
+        reply = world.text(body, lambda tools, clock=clock: (
+            tools("set_reminder_preference", set_args(True, clock=clock)), "Saved!")[1])
+        assert "AM or PM" in reply.text and "Saved!" not in reply.text, body
+        assert world.owner_view() == before, body
+
+
+def test_common_spellings_of_a_clear_time_save() -> None:
+    world = World()
+    for body, clock in (("Remind me at nine AM", "09:00"), ("Remind me at two pm", "14:00"),
+                        ("Remind me at 9 a.m.", "09:00"), ("Remind me at 9.30 am", "09:30"),
+                        ("Remind me at 12 noon", "12:00"), ("Remind me at 8 at night", "20:00"),
+                        ("Remind me morning at 9", "09:00"),
+                        ("I want one at 9 AM", "09:00")):
+        if clock == "20:00":
+            continue  # Outside 08:00-18:00; covered by the range reply.
+        world.text(body, lambda tools, clock=clock: (
+            tools("set_reminder_preference", set_args(True, clock=clock)), "x")[1])
+        assert world.saved()[2] == f"{clock}:00", body
+    fresh = World()
+    fresh.text("a.m.", lambda tools: (
+        tools("set_reminder_preference", set_args(True, clock="09:00")), "x")[1])
+    assert fresh.saved() == (True, 1, "09:00:00")
+
+
+def test_plain_language_requests_in_any_wording_reach_the_model_choice() -> None:
+    world = World()
+    for body, args, expected in (
+            ("Activa mis recordatorios", set_args(True), (True, 1, "10:00:00")),
+            ("Apaga los recordatorios", set_args(False), (False, 1, "10:00:00")),
+            ("No quiero recordatorios", set_args(False), (False, 1, "10:00:00")),
+            ("Alert me about my visits", set_args(True), (True, 1, "10:00:00")),
+            ("Give me a heads up about my visits", set_args(True), (True, 1, "10:00:00")),
+            ("Don't bug me about visits anymore", set_args(False), (False, 1, "10:00:00")),
+            ("dos", set_args(days=2), (False, 2, "10:00:00"))):
+        world.text(body, lambda tools, args=args: (
+            tools("set_reminder_preference", args), "x")[1])
+        assert world.saved() == expected, body
+
+
+def test_a_malformed_reminder_call_never_replaces_another_actions_reply() -> None:
+    from test_client_booking_tool import OFFER_TEXT, accept, offer_plan
+    from test_client_cancellation_tool import ASK_TEXT, prepare
+    from test_client_tool_loop import chat_with
+    from test_conversation_flow import THURSDAY, ask
+
+    from scheduling.domain.calendar import CalendarStatus
+    from scheduling.domain.conversation_state import PromptKind
+
+    sender = "+14155550101"
+    bad = lambda tools: tools("set_reminder_preference", set_args(clock="9"))
+
+    # request_booking commits; the later malformed reminder call is refused without a trace.
+    chat, model = chat_with(offer_plan)
+    chat.text("Anything tomorrow?")
+    results: list[dict[str, Any]] = []
+    model.plan = lambda tools: (accept(tools), results.append(bad(tools)),
+                                "Requested Wed Sep 30 at 10:00 AM. It is pending owner approval.")[2]
+    reply = chat.text("the 10 o'clock one please")
+    assert reply.committed and reply.client_outbox_id and reply.appointment_id
+    assert reply.text.startswith("Requested Wed Sep 30 at 10:00 AM")
+    assert chat.status(reply.appointment_id) == CalendarStatus.PENDING_APPROVAL
+    assert results == [{"ok": False, "error": "action_already_attempted"}]
+
+    # confirm_cancellation commits.
+    chat, model = chat_with(lambda tools: (prepare(tools), ASK_TEXT)[1])
+    visit = chat.hold(THURSDAY, "visit", confirm=True)
+    chat.model.replies["I can't make Thursday"] = ask(
+        "cancel", target_date="2026-10-01")
+    chat.text("I can't make Thursday")
+    model.plan = lambda tools: (tools("confirm_cancellation", {}), bad(tools),
+                                "Cancelled your Thu Oct 1 at 9:00 AM visit.")[2]
+    done = chat.text("yes please")
+    assert done.committed and done.client_outbox_id
+    assert done.text == "Cancelled your Thu Oct 1 at 9:00 AM visit."
+    assert chat.status(visit) == CalendarStatus.CANCELLED
+
+    # prepare_cancellation stores its question; get_availability stores its offer.
+    chat, model = chat_with(lambda tools: (prepare(tools), bad(tools), ASK_TEXT)[2])
+    visit = chat.hold(THURSDAY, "visit", confirm=True)
+    chat.model.replies["I can't make Thursday"] = ask(
+        "cancel", target_date="2026-10-01")
+    asked = chat.text("I can't make Thursday")
+    assert asked.text == ASK_TEXT and not asked.committed
+    stored = chat.states.read_state("pilot", sender)
+    assert stored.kind == PromptKind.CONFIRM_CANCEL and stored.appointment_id == visit
+    assert chat.status(visit) == CalendarStatus.CONFIRMED
+    chat, model = chat_with(lambda tools: (offer_plan(tools), bad(tools), OFFER_TEXT)[2])
+    offered = chat.text("Anything tomorrow?")
+    assert offered.text == OFFER_TEXT
+    assert chat.states.read_state("pilot", sender).kind == PromptKind.OFFER
+
+    # Content, bare-yes and ambiguous-hour refusals sit behind the same ordering.
+    for body in ("yes", "go ahead", "Remind me at 9"):
+        chat, model = chat_with(lambda tools: (offer_plan(tools), tools(
+            "set_reminder_preference", set_args(True, clock="09:00")), OFFER_TEXT)[2])
+        assert chat.text(body).text == OFFER_TEXT, body
+        assert chat.states.read_state("pilot", sender).kind == PromptKind.OFFER, body
