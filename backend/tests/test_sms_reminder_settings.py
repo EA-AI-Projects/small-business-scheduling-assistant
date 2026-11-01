@@ -925,3 +925,53 @@ def test_every_backend_reminder_refusal_carries_the_scope_sentence() -> None:
         *a, error=OSError("timeout"))
     assert REMINDER_SCOPE in reply_for(world, "Turn reminders on please", set_args(True))
     world.records.commit_reminder_preference_receipt = original  # type: ignore[method-assign]
+
+
+def test_a_loop_failure_after_a_refused_reminder_call_is_not_redrafted_without_the_sentence() -> None:
+    from test_client_booking_tool import accept, offer_plan
+    from test_client_cancellation_tool import ASK_TEXT, prepare
+    from test_conversation_flow import THURSDAY, ask
+
+    from scheduling.domain.calendar import CalendarStatus
+
+    reminder = lambda tools: tools("set_reminder_preference", set_args(True, clock="09:00"))
+
+    class Drafting(LoopScript):
+        """Offers a valid (fallback) redraft; the fix must never ask for it."""
+
+        def __init__(self, plan: Any = None) -> None:
+            super().__init__(plan)
+            self.draft_calls: list[str] = []
+
+        def draft_client_reply(self, body: str, context: Any, result: Any) -> str:
+            self.draft_calls.append(body)
+            return str(result.fallback)
+
+    def chat_with(plan: Any) -> tuple[Any, Drafting]:
+        from test_conversation_flow import Harness
+
+        model = Drafting(plan)
+        return Harness(model), model
+
+    def timeout(_: Tools) -> str:
+        raise TimeoutError("model timed out")
+
+    chat, model = chat_with(offer_plan)
+    chat.text("Anything tomorrow?")
+    model.plan = lambda tools: (accept(tools), reminder(tools), timeout(tools))[2]
+    reply = chat.text("the 10 o'clock one, and remind me at 9 AM")
+    assert chat.model.draft_calls == []  # A valid redraft was available but must not run.
+    assert reply.committed and reply.client_outbox_id and reply.appointment_id
+    assert reply.text.endswith(NOT_CHANGED)
+    assert chat.status(reply.appointment_id) == CalendarStatus.PENDING_APPROVAL
+
+    chat, model = chat_with(lambda tools: (prepare(tools), ASK_TEXT)[1])
+    visit = chat.hold(THURSDAY, "visit", confirm=True)
+    chat.model.replies["I can't make Thursday"] = ask("cancel", target_date="2026-10-01")
+    chat.text("I can't make Thursday")
+    model.plan = lambda tools: (tools("confirm_cancellation", {}), reminder(tools),
+                                timeout(tools))[2]
+    done = chat.text("yes, and remind me at 9 AM")
+    assert chat.model.draft_calls == []
+    assert done.committed and done.client_outbox_id and done.text.endswith(NOT_CHANGED)
+    assert chat.status(visit) == CalendarStatus.CANCELLED

@@ -189,16 +189,23 @@ a model-supplied time when the current message names no time at all ("Make it ea
 "Turn reminders on"); the acknowledgment states the saved time so the client can correct it.
 A reminder call after another action in the same message (a booking, move, cancellation or
 offer, including one that was tried and refused) is refused first and never replaces that
-action's reply or changes its committed outcome or outbox ID. So is a reminder call past the
-tool-call limit. The delivered reply gets "Reminders not changed." appended. A committed reply
-is one message of at most 160 GSM-7 characters or the adapter drops it, so the model's text
-plus the sentence is used only if it fits; otherwise the deterministic committed text plus the
+action's reply or changes its committed outcome or outbox ID. The delivered reply gets
+"Reminders not changed." appended. A reminder call past the backend's tool-call limit gets the
+same sentence, but the real OpenAI loop stops offering tools at its own limit and never makes
+that call, so only a scripted loop reaches it. A committed reply is one message of at most 160
+GSM-7 characters or the adapter drops it, so the model's text plus the sentence is used only if
+it fits; otherwise the deterministic committed text plus the sentence. If the loop then fails,
+the same composition is used and the optional redraft is skipped so it cannot replace the
 sentence. The longest ordinary committed text (a move, 136 characters) plus the sentence is
-159. Accepting a counteroffer while an earlier request is pending is 185 characters before the
-sentence (207 with it, 47 over the limit) and has no client outbox ID, so that draft is never
-attached and the existing notification is what the client receives. For uncommitted replies the
-limit is 480 characters, and if the sentence does not fit the deterministic answer is used. The
-sentence is part of the reply text, so a stored committed reply and its replay carry it.
+159. For uncommitted replies the limit is 480 characters, and if the sentence does not fit the
+deterministic answer is used. The sentence is part of the reply text, so a stored committed
+reply and its replay carry it. Known limits: a refused booking or move followed by a loop
+failure returns that refusal's own deterministic answer without the sentence. Accepting a
+counteroffer in the same text as a reminder change never delivers the sentence, whatever its
+length: that acceptance has no client outbox ID, so no committed draft is attached and the
+client receives the existing notification, which does not mention reminders (its
+deterministic text with an earlier pending request is 185 characters before the sentence,
+208 with it).
 Every backend-written reminder reply that replaces the model's text (acknowledgment and
 refusals, including a replayed acknowledgment) ends with a fixed sentence that it covers
 reminder settings only and nothing else in the message was acted on, so a mixed request such

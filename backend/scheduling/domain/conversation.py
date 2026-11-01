@@ -1640,10 +1640,13 @@ class ConversationService:
                 return reminder_reply
             if booked is not None:
                 # The request was written; its own notification still goes out.
-                return replace(booked, text=committed_text(booked, booked.text))
+                return replace(booked, text=committed_text(booked, booked.text),
+                               reply_result=None if reminder_skipped else booked.reply_result)
             if cancelled is not None:
                 # The visit was cancelled; its own notification goes out.
-                return replace(cancelled, text=committed_text(cancelled, cancelled.text))
+                return replace(cancelled, text=committed_text(cancelled, cancelled.text),
+                               reply_result=(None if reminder_skipped
+                                             else cancelled.reply_result))
             if stored:
                 self._states.clear_state(receipt.business_id, receipt.sender,
                                          receipt.provider_id)
