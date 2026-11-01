@@ -55,12 +55,13 @@ from scheduling.domain.conversation_state import (
 )
 from scheduling.domain.holidays import observed_us_federal_holidays
 from scheduling.domain.offer_preferences import Preferred, no_preferences, pick_offer
+from scheduling.domain.reminders import ReminderPreferenceView
 from scheduling.domain.service_duration import ServiceNotConfigured, service_duration
 
 TOOL_NAMES = ("get_business_info", "get_availability", "get_my_bookings", "request_booking",
               "prepare_cancellation", "confirm_cancellation", "dismiss_cancellation",
               "request_reschedule", "get_my_counteroffer", "respond_to_counteroffer",
-              "set_reminder_preference")
+              "get_reminder_preference", "set_reminder_preference")
 MAX_TOOL_CALLS = 3
 MAX_RANGE_DAYS = 14
 MAX_REPLY_SEPTETS = 480
@@ -130,6 +131,13 @@ def _clock_arg(value: object) -> time | None:
     return time.fromisoformat(value)
 
 
+@dataclass(frozen=True)
+class ReminderHooks:
+    """Reads and writes bound by the conversation service to the verified sender."""
+    read: Callable[[], dict[str, Any]]
+    write: Callable[[bool | None, int | None, time | None], dict[str, Any]]
+
+
 class ClientReadTools:
     """One message's read tools for one verified client. Not reusable across messages."""
 
@@ -142,7 +150,7 @@ class ClientReadTools:
                  counteroffer: CounterofferHooks | None = None,
                  moving: str | None = None,
                  preferred: Preferred = no_preferences,
-                 reminder_preference: Callable[[bool], dict[str, Any]] | None = None) -> None:
+                 reminder_preference: ReminderHooks | None = None) -> None:
         self._repository = repository
         self._business_id = business_id
         self._now = now
@@ -173,7 +181,8 @@ class ClientReadTools:
         if self.calls > MAX_TOOL_CALLS:
             return {"ok": False, "error": "tool_limit"}
         if self.reminder_attempted and name not in (
-                "get_business_info", "get_my_bookings", "get_my_counteroffer"):
+                "get_business_info", "get_my_bookings", "get_my_counteroffer",
+                "get_reminder_preference"):
             return {"ok": False, "error": "action_already_attempted"}
         try:
             result = getattr(self, name)(args)
@@ -182,9 +191,30 @@ class ClientReadTools:
         self.results.append(result)
         return result
 
+    def get_reminder_preference(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Read-only: this sender's saved reminder settings, blockers and expected reminders."""
+        if args:
+            return dict(INVALID)
+        if self._reminder_preference is None:
+            return dict(UNAVAILABLE)
+        return self._reminder_preference.read()
+
     def set_reminder_preference(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Change only the verified sender's shared preference; no target arguments."""
-        if set(args) != {"enabled"} or type(args["enabled"]) is not bool:
+        """Change only the verified sender's shared preference; no target arguments.
+
+        Any of enrollment, days before and a 24-hour HH:MM local time may be given; omitted
+        (null) fields keep their saved values. Malformed values write nothing and leave the
+        model free to ask the client what they meant.
+        """
+        if not set(args) <= {"enabled", "days_before", "local_time"} or not args:
+            return dict(INVALID)
+        enabled = args.get("enabled")
+        days = args.get("days_before")
+        clock = args.get("local_time")
+        if ((enabled is not None and type(enabled) is not bool)
+                or (days is not None and type(days) is not int)
+                or (clock is not None and _clock_arg(clock) is None)
+                or (enabled is None and days is None and clock is None)):
             return dict(INVALID)
         if self._reminder_preference is None:
             return dict(UNAVAILABLE)
@@ -192,7 +222,8 @@ class ClientReadTools:
                 or self.responded or self.offer):
             return {"ok": False, "error": "action_already_attempted"}
         self.reminder_attempted = True
-        return self._reminder_preference(args["enabled"])
+        return self._reminder_preference.write(
+            enabled, days, _clock_arg(clock) if clock is not None else None)
 
     # -- get_business_info -------------------------------------------------
 
@@ -565,6 +596,40 @@ class ClientReadTools:
             "pending_count": sum(item["confirmed"] is False for item in shown),
             "bookings": shown,
         }
+
+
+# -- reminder facts ---------------------------------------------------------
+
+MAX_REMINDER_ROWS = 5
+REMINDER_GUIDANCE = (
+    "scheduled means the reminder time is still ahead and no current restriction applies; "
+    "it is not a delivery guarantee. disabled means reminders are off. blocked means a "
+    "current restriction (see blockers) stops sending. past_time means the reminder time "
+    "has passed or was set after it, so no catch-up is sent. attempted means a send was "
+    "already tried and is never repeated; its delivery outcome is not known here.")
+
+
+def reminder_facts(view: ReminderPreferenceView) -> dict[str, Any]:
+    """Structured read of one client's own reminder settings for the model (read-only)."""
+    zone = ZoneInfo(view.timezone) if view.timezone else None
+    rows = []
+    for item in view.upcoming_reminders[:MAX_REMINDER_ROWS]:
+        row: dict[str, Any] = {"status": item.status, "ref": item.appointment_id[:8]}
+        if zone is not None:
+            row.update({"visit": when_text(item.start_at, zone),
+                        "visit_date": item.start_at.astimezone(zone).date().isoformat(),
+                        "reminder_at": when_text(item.run_at, zone),
+                        "reminder_date": item.run_at.astimezone(zone).date().isoformat()})
+        rows.append(row)
+    return {
+        "ok": True, "enabled": view.enabled, "days_before": view.days_before,
+        "time": view.local_time.strftime("%H:%M"),
+        "time_text": clock_text(datetime.combine(date(2000, 1, 1), view.local_time, zone),
+                                zone) if zone else view.local_time.strftime("%H:%M"),
+        "timezone": view.timezone, "blockers": list(view.blockers),
+        "upcoming_visit_count": len(view.upcoming_reminders),
+        "reminders": rows, "status_meaning": REMINDER_GUIDANCE,
+    }
 
 
 # -- final reply check -----------------------------------------------------

@@ -140,7 +140,7 @@ visit is"), booking, cancellation, and attendance confirmation. Ambiguous reques
 to turn reminders on or off. A bare YES retains its existing stored-question behavior and does
 not enroll the client in reminders. No new keyword command is required.
 
-The tool accepts only `enabled`; business/client/phone/receipt identity comes from the verified
+The write tool accepts only `enabled`, `days_before` and `local_time` (#402, below); business/client/phone/receipt identity comes from the verified
 receipt. Existing consent, active-profile, phone verification and STOP checks apply before model
 interpretation and are checked again at the write boundary. Turning reminders off leaves other
 permitted scheduling texts enabled. Program-wide STOP/START retain their existing precedence.
@@ -154,3 +154,34 @@ or drafts contradictory text; an unsuccessful or uncertain update cannot claim s
 Acknowledgments use ordinary conversation-reply delivery, separately from scheduled reminders'
 no-retry delivery policy. Scripted-model workflow checks cover these backend boundaries; they
 do not establish live-model interpretation or carrier delivery.
+
+### Reading and changing reminder timing by text (#402)
+
+`get_reminder_preference` (no arguments) reads the verified sender's own saved enrollment,
+days before, local time, business timezone, current blockers and each upcoming confirmed
+visit's expected reminder time with its status (`disabled`, `blocked`, `past_time`,
+`scheduled`, `attempted`), through the same service the owner and portal reads use. The
+model explains these without promising delivery or claiming an outcome; an `attempted`
+reminder's delivery result is not known to the Agent. No argument can name another client.
+
+`set_reminder_preference` takes `enabled`, `days_before` (1-7) and `local_time` (24-hour
+`HH:MM`, 08:00-18:00); null keeps the saved value. "Remind me two days before at 9 AM" sends
+all three. "Change my reminder time to 9 AM" sends only the time and preserves enrollment;
+off retains timing, and a timing edit never re-enrolls an unenrolled client. Clear requests
+save immediately and the committed acknowledgment states enrollment, days before, local time
+and the business timezone. A time without AM/PM (such as a bare "9") is not a valid time
+argument: the model asks and writes nothing. Well-formed values outside the ranges write
+nothing and get a fixed explanation that saved settings did not change.
+
+The receipt marker now remembers the committed enrollment, days and time, so a replayed
+receipt returns its original acknowledgment (without the past-time note) and never overwrites
+a newer edit. A profile version conflict (for example an owner edit between the read and the
+commit) saves nothing and asks the client to try again.
+
+When the saved edit leaves an enrolled client's upcoming visit with a reminder time that has
+already passed, the acknowledgment says no reminder will be sent for that visit; there is no
+catch-up and an `attempted` reminder is never reset or repeated. If a current restriction
+blocks sending, the acknowledgment says reminders cannot be sent right now.
+
+A bare YES or NO never enrolls or changes timing. Reminder questions do not persist a
+pending-clarification state; a clarification is answered with explicit text such as "9 AM".
