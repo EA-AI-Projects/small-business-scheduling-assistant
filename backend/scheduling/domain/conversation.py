@@ -225,7 +225,10 @@ CLIENT_LOOP_INTENTS = frozenset({"availability", "request_booking", "calendar_qu
                                  "reminder_preference"})
 REMINDER_SCOPE = ("This covers reminder settings only; nothing else in your message was "
                   "acted on, so text me again about anything else.")
-REMINDER_NOT_CHANGED = "Your reminder settings were not changed."
+# Short enough that the longest committed text (a move, 136 septets) plus this fits the
+# 160-septet committed-reply limit.
+REMINDER_NOT_CHANGED = "Reminders not changed."
+COMMITTED_REPLY_SEPTETS = 160
 CLOSED_NOTE = "\nI closed my earlier question, so nothing was booked or cancelled."
 
 
@@ -1407,6 +1410,17 @@ class ConversationService:
 
         reminder_skipped = False
 
+        def committed_text(outcome: ConversationOutcome, model_text: str) -> str:
+            # A committed draft is one 160-septet message or the adapter drops it, so the
+            # sentence must fit there: the model text if it fits, else the deterministic text.
+            if not reminder_skipped:
+                return model_text
+            for candidate in (model_text, outcome.text):
+                full = f"{candidate} {REMINDER_NOT_CHANGED}"
+                if (size := gsm_septets(full)) is not None and size <= COMMITTED_REPLY_SEPTETS:
+                    return full
+            return f"{outcome.text} {REMINDER_NOT_CHANGED}"  # Over by design; reported.
+
         def scoped(text: str) -> ConversationOutcome:
             # A backend-written reminder reply replaces the model's text, so it must not let
             # the client think the rest of the message was handled.
@@ -1575,7 +1589,7 @@ class ConversationService:
             reason = check(text)
             if reason is not None:
                 raise ValueError(reason)
-            if reminder_skipped:
+            if reminder_skipped and booked is None and cancelled is None:
                 # A reminder call refused because another action ran first changed nothing;
                 # say so, or fall back to the deterministic answer if there is no room.
                 text = f"{text} {REMINDER_NOT_CHANGED}"
@@ -1584,11 +1598,12 @@ class ConversationService:
             if booked is not None:
                 # The reply was checked against the tool result: pending, with its reference.
                 # No other reply draft replaces it; the committed text is what is delivered.
-                return replace(booked, text=text, reply_result=None)
+                return replace(booked, text=committed_text(booked, text), reply_result=None)
             if cancelled is not None:
                 # Checked against the tool result: cancelled, with its reference. The committed
                 # visit change and its notification stand; only the text is the model's.
-                return replace(cancelled, text=text, reply_result=None)
+                return replace(cancelled, text=committed_text(cancelled, text),
+                               reply_result=None)
             if tools.offer or tools.prepared is not None:
                 if self._acceptance is not None:
                     self._acceptance.supersede_for_new_request(receipt)
@@ -1624,9 +1639,11 @@ class ConversationService:
             if reminder_reply is not None:
                 return reminder_reply
             if booked is not None:
-                return booked  # The request was written; its own notification still goes out.
+                # The request was written; its own notification still goes out.
+                return replace(booked, text=committed_text(booked, booked.text))
             if cancelled is not None:
-                return cancelled  # The visit was cancelled; its own notification goes out.
+                # The visit was cancelled; its own notification goes out.
+                return replace(cancelled, text=committed_text(cancelled, cancelled.text))
             if stored:
                 self._states.clear_state(receipt.business_id, receipt.sender,
                                          receipt.provider_id)

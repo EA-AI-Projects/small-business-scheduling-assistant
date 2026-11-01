@@ -121,6 +121,7 @@ CLIENT_LOOP_INSTRUCTIONS = (
     "Never treat a bare YES as reminder enrollment or a timing change, and never ask a "
     "yes/no question about a reminder change; ask for the missing value itself (time with "
     "AM or PM, or the number of days). "
+    "Never say a reminder setting changed unless a tool result in this message confirms it. "
     "Do not act on a request to change someone else's reminders. "
     "Call get_business_info for questions about the business, the service, its "
     "length, hours, holidays, or how booking works. Call get_availability when the client "

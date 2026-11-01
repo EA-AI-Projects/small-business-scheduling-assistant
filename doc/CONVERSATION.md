@@ -187,10 +187,17 @@ any digit in the text counts as an hour, so "a las 9" is refused for AM/PM; spel
 non-English hours such as "a las nueve" pass to the model. It also cannot catch
 a model-supplied time when the current message names no time at all ("Make it earlier",
 "Turn reminders on"); the acknowledgment states the saved time so the client can correct it.
-A reminder call after another action in the same message (booking, cancellation, offer) is
-refused first and never replaces that action's reply or changes its committed outcome or
-outbox ID; the delivered reply gets "Your reminder settings were not changed." appended
-(or, if that leaves no room in 480 GSM-7 characters, the deterministic answer is used). The
+A reminder call after another action in the same message (a booking, move, cancellation or
+offer, including one that was tried and refused) is refused first and never replaces that
+action's reply or changes its committed outcome or outbox ID. So is a reminder call past the
+tool-call limit. The delivered reply gets "Reminders not changed." appended. A committed reply
+is one message of at most 160 GSM-7 characters or the adapter drops it, so the model's text
+plus the sentence is used only if it fits; otherwise the deterministic committed text plus the
+sentence. The longest ordinary committed text (a move, 136 characters) plus the sentence is
+159. Accepting a counteroffer while an earlier request is pending is 185 characters before the
+sentence (207 with it, 47 over the limit) and has no client outbox ID, so that draft is never
+attached and the existing notification is what the client receives. For uncommitted replies the
+limit is 480 characters, and if the sentence does not fit the deterministic answer is used. The
 sentence is part of the reply text, so a stored committed reply and its replay carry it.
 Every backend-written reminder reply that replaces the model's text (acknowledgment and
 refusals, including a replayed acknowledgment) ends with a fixed sentence that it covers

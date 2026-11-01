@@ -169,6 +169,7 @@ class ClientReadTools:
         self.reminder_attempted = False
         self._moving = moving  # The visit of this client's open "which day" move question.
         self.requested: dict[str, Any] | None = None
+        self.write_attempted = False  # A booking or move was tried, even if refused.
         self.prepared: dict[str, Any] | None = None  # A cancellation question asked now.
         self.answered = False  # confirm_cancellation or dismiss_cancellation ran.
         self.responded = False  # respond_to_counteroffer ran.
@@ -181,6 +182,8 @@ class ClientReadTools:
             return {"ok": False, "error": "unknown_tool"}
         self.calls += 1
         if self.calls > MAX_TOOL_CALLS:
+            if name == "set_reminder_preference" and self._reminder_preference is not None:
+                self._reminder_preference.not_applied()
             return {"ok": False, "error": "tool_limit"}
         if self.reminder_attempted and name not in (
                 "get_business_info", "get_my_bookings", "get_my_counteroffer",
@@ -219,7 +222,8 @@ class ClientReadTools:
         # Another action this message keeps its own reply: a reminder call after it is
         # refused first, whatever its shape, and never replaces that reply.
         if (self._reminder_preference is not None and (
-                self.requested is not None or self.prepared is not None or self.answered
+                self.requested is not None or self.write_attempted
+                or self.prepared is not None or self.answered
                 or self.responded or self.offer)):
             self._reminder_preference.not_applied()
             return {"ok": False, "error": "action_already_attempted"}
@@ -454,6 +458,7 @@ class ClientReadTools:
             return {"ok": False, "error": "cancellation_in_progress"}
         if self.responded:
             return {"ok": False, "error": "counteroffer_answered"}
+        self.write_attempted = True
         result = self._request(day, clock)
         if result.get("requested") is True:
             self.requested = result
@@ -480,6 +485,7 @@ class ClientReadTools:
             return dict(UNAVAILABLE)
         if (why := self._write_blocked()) is not None:
             return {"ok": False, "error": why}
+        self.write_attempted = True
         result = self._reschedule(ref, day, clock)
         if result.get("requested") is True:
             self.requested = result

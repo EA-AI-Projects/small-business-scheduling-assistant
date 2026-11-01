@@ -8,7 +8,7 @@ real model chooses tools or phrases answers. No live model, SMS, or AWS is used.
 """
 
 from dataclasses import replace
-from datetime import UTC, datetime, time
+from datetime import UTC, date, datetime, time
 from types import SimpleNamespace
 from typing import Any
 
@@ -27,11 +27,12 @@ from scheduling.domain.outbox import ConsumeOutcome, ConsumeService
 from scheduling.domain.owner_calendar import OwnerAction, OwnerCalendarCommand, OwnerCalendarService
 from scheduling.domain.reminders import ReminderSelector
 from scheduling.domain.sms_ingress import InboundReceipt, Keyword, SenderRole
+from scheduling.domain.sms_processing import ReceiptProcessor
 from scheduling.identity_links import IdentityLink, LinkRole, LinkState
 from scheduling.owner_api import OwnerPrincipal, create_owner_app
 
 ZONE = "America/Los_Angeles"
-NOT_CHANGED = "Your reminder settings were not changed."
+NOT_CHANGED = "Reminders not changed."
 OWNER = {"Authorization": "Bearer owner", "Idempotency-Key": "settings"}
 
 
@@ -747,3 +748,180 @@ def test_reminder_request_after_a_booking_is_reported_unchanged_and_the_booking_
     assert [text for *_, text in store.committed_drafts] == [first.text]
     assert processor.process("pilot", inbound.provider_id) is None
     assert len(chat.calendar()) == 1
+
+
+# -- committed-reply size, refused attempts, tool limit, refusal scope (final round) ------------
+
+FILLER = (" Thanks so much for your patience, I really appreciate it and I hope everything "
+          "goes smoothly for you and your family this week and next week too.")
+
+
+def limited_reader(inbound: InboundReceipt) -> Any:
+    from test_sms_processing import Reader
+
+    from scheduling.domain.client_replies import gsm_septets
+
+    class LimitedReader(Reader):
+        """The real adapter drops a committed draft over 160 septets (put_committed_reply)."""
+        dropped: list[str]
+
+        def put_committed_reply(self, receipt: Any, outbox_id: str, text: str,
+                                token: str) -> bool:
+            size = gsm_septets(text)
+            if size is None or size > 160:
+                self.dropped.append(text)
+                return False
+            return super().put_committed_reply(receipt, outbox_id, text, token)
+
+    reader = LimitedReader({(BUSINESS, inbound.provider_id): inbound})
+    reader.dropped = []
+    return reader
+
+
+def committed_inbound(body: str, provider_id: str) -> InboundReceipt:
+    from test_conversation_flow import NOW
+
+    return InboundReceipt("pilot", provider_id, "+14155550101", "+14155550000", body, NOW,
+                          SenderRole.CLIENT, "client-1", Keyword.OTHER, True)
+
+
+def assert_delivered_with_sentence(chat: Any, reader: Any, first: Any, inbound: Any) -> None:
+    from scheduling.domain.client_replies import gsm_septets
+
+    assert isinstance(first, ConversationOutcome) and first.committed
+    assert first.client_outbox_id and first.appointment_id
+    assert reader.dropped == []  # The adapter would have kept it, not fallen back to the notice.
+    [(_, outbox_id, draft)] = reader.committed_drafts
+    assert outbox_id == first.client_outbox_id and draft == first.text
+    assert draft.endswith(NOT_CHANGED) and (gsm_septets(draft) or 999) <= 160
+    assert FILLER.strip() not in draft  # Too long for one message: deterministic text used.
+    reader.replies.clear()
+    assert chat.service is not None
+    before = len(reader.committed_drafts)
+    assert ReceiptProcessor(reader, chat.service, "pilot", lambda: first_clock()).process(
+        "pilot", inbound.provider_id) is None
+    assert len(reader.committed_drafts) == before  # Nothing sent twice.
+
+
+def first_clock() -> datetime:
+    from test_conversation_flow import NOW
+
+    return NOW
+
+
+def test_long_committed_replies_keep_the_not_changed_sentence_within_160_septets() -> None:
+    from test_client_booking_tool import accept, offer_plan
+    from test_client_cancellation_tool import ASK_TEXT, prepare
+    from test_client_reschedule_tool import FRIDAY, move_offered, requested_text
+    from test_client_tool_loop import chat_with
+    from test_conversation_flow import THURSDAY, ask
+
+    from scheduling.domain.calendar import CalendarStatus
+
+    def run(chat: Any, body: str, provider_id: str) -> tuple[Any, Any, Any]:
+        inbound = committed_inbound(body, provider_id)
+        reader = limited_reader(inbound)
+        processor = ReceiptProcessor(reader, chat.service, "pilot", first_clock)
+        return reader, inbound, processor.process("pilot", inbound.provider_id)
+
+    reminder = lambda tools: tools("set_reminder_preference", set_args(True, clock="09:00"))
+
+    chat, model = chat_with(offer_plan)
+    chat.text("Anything tomorrow?")
+    model.plan = lambda tools: (accept(tools), reminder(tools),
+                                "Requested Wed Sep 30 at 10:00 AM. It is pending owner "
+                                "approval, not confirmed yet." + FILLER)[2]
+    reader, inbound, first = run(chat, "the 10 o'clock one, and remind me at 9 AM", "SM-b1")
+    assert_delivered_with_sentence(chat, reader, first, inbound)
+    assert chat.status(first.appointment_id) == CalendarStatus.PENDING_APPROVAL
+
+    chat, model, visit, _ = move_offered()
+    results: list[dict[str, Any]] = []
+    model.plan = lambda tools: (results.append(tools("request_reschedule", {
+        "ref": visit[:8], "date": FRIDAY, "time": "10:00"})), reminder(tools),
+        requested_text(results[0]["ref"]) + FILLER)[2]
+    reader, inbound, first = run(chat, "2, and remind me at 9 AM", "SM-b2")
+    assert_delivered_with_sentence(chat, reader, first, inbound)
+    assert first.text.startswith("Requested a move to")
+    assert chat.status(visit) == CalendarStatus.CONFIRMED
+
+    chat, model = chat_with(lambda tools: (prepare(tools), ASK_TEXT)[1])
+    visit = chat.hold(THURSDAY, "visit", confirm=True)
+    chat.model.replies["I can't make Thursday"] = ask("cancel", target_date="2026-10-01")
+    chat.text("I can't make Thursday")
+    model.plan = lambda tools: (tools("confirm_cancellation", {}), reminder(tools),
+                                "Cancelled your Thu Oct 1 at 9:00 AM visit." + FILLER)[2]
+    reader, inbound, first = run(chat, "yes, and remind me at 9 AM", "SM-b3")
+    assert_delivered_with_sentence(chat, reader, first, inbound)
+    assert chat.status(visit) == CalendarStatus.CANCELLED
+    assert chat.store.read_profile("pilot", "client-1").reminders_enabled is False
+
+
+def test_a_refused_booking_then_a_reminder_write_keeps_the_refusal_and_saves_nothing() -> None:
+    from test_client_booking_tool import accept, offer_plan
+    from test_client_tool_loop import chat_with
+
+    from scheduling.domain.availability import pilot_policy
+
+    chat, model = chat_with(offer_plan)
+    chat.text("Anything tomorrow?")
+    chat.store.set_policy_for_test("pilot", pilot_policy({date(2026, 9, 30): ()}))  # The offered day closed: the booking is refused.
+    before = chat.store.read_profile("pilot", "client-1")
+    results: list[dict[str, Any]] = []
+    model.plan = lambda tools: (results.append(accept(tools)), results.append(tools(
+        "set_reminder_preference", set_args(True, clock="09:00"))),
+        "That time is no longer open, so nothing was booked.")[2]
+    reply = chat.text("the second one please, and remind me at 9 AM")
+    assert results[0]["reason"] == "outside_current_hours"
+    assert results[1] == {"ok": False, "error": "action_already_attempted"}
+    assert reply.text == f"That time is no longer open, so nothing was booked. {NOT_CHANGED}"
+    assert not reply.committed and chat.calendar() == ()
+    assert chat.states.read_state("pilot", "+14155550101") is None  # As a refused booking does.
+    assert chat.store.read_profile("pilot", "client-1") == before
+
+
+def test_a_reminder_call_past_the_tool_limit_still_says_reminders_were_not_changed() -> None:
+    from test_client_tool_loop import chat_with
+
+    chat, model = chat_with(lambda tools: "x")
+    before = chat.store.read_profile("pilot", "client-1")
+    results: list[dict[str, Any]] = []
+
+    def plan(tools: Tools) -> str:
+        for _ in range(3):
+            tools("get_business_info", {})
+        results.append(tools("set_reminder_preference", set_args(True, clock="09:00")))
+        return "We are open on weekdays."
+
+    model.plan = plan
+    reply = chat.text("What are your hours? Also remind me at 9 AM")
+    assert results == [{"ok": False, "error": "tool_limit"}]
+    assert reply.text.endswith(NOT_CHANGED)
+    assert chat.store.read_profile("pilot", "client-1") == before
+
+
+def test_every_backend_reminder_refusal_carries_the_scope_sentence() -> None:
+    from scheduling.domain.conversation import REMINDER_SCOPE
+
+    def reply_for(world: World, body: str, args: dict[str, Any]) -> str:
+        return world.text(body, lambda tools: (
+            tools("set_reminder_preference", args), "model text")[1]).text
+
+    world = World()
+    assert REMINDER_SCOPE in reply_for(world, "k", set_args(True))  # Bare acknowledgment.
+    assert REMINDER_SCOPE in reply_for(world, "Remind me at 9", set_args(True, clock="09:00"))
+    assert REMINDER_SCOPE in reply_for(world, "Remind me 9 days before", set_args(days=9))
+    assert REMINDER_SCOPE in reply_for(world, "Change it", {"enabled": "yes"})  # Malformed.
+    original = world.records.commit_reminder_preference_receipt
+
+    def fail(*_: Any, error: Exception) -> None:
+        raise error
+
+    from scheduling.domain.client_records import RecordConflict
+    world.records.commit_reminder_preference_receipt = lambda *a: fail(  # type: ignore[method-assign]
+        *a, error=RecordConflict("changed"))
+    assert REMINDER_SCOPE in reply_for(world, "Turn reminders on", set_args(True))  # Conflict.
+    world.records.commit_reminder_preference_receipt = lambda *a: fail(  # type: ignore[method-assign]
+        *a, error=OSError("timeout"))
+    assert REMINDER_SCOPE in reply_for(world, "Turn reminders on please", set_args(True))
+    world.records.commit_reminder_preference_receipt = original  # type: ignore[method-assign]
