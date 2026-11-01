@@ -55,14 +55,16 @@ describe("owner Settings", () => {
   });
   afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
 
-  it("shows six saved-value cards and opens Business details with collapsible sections", async () => {
+  it("shows five saved-value cards and opens Business details with collapsible sections", async () => {
     const cards = [...host.querySelectorAll<HTMLButtonElement>('button[aria-haspopup="dialog"]')];
-    expect(cards).toHaveLength(6);
+    expect(cards).toHaveLength(5);
     expect(cards.map((card) => card.textContent)).toEqual([
       expect.stringContaining("Business details"), expect.stringContaining("Availability"),
       expect.stringContaining("Advanced scheduling"), expect.stringContaining("Booking invitations"),
-      expect.stringContaining("Scheduling preferences"), expect.stringContaining("Visit reminders"),
+      expect.stringContaining("Scheduling preferences"),
     ]);
+    expect(host.querySelector('[aria-label="Edit Visit reminders"]')).toBeNull();
+    expect(get).not.toHaveBeenCalledWith("/reminders");
     expect(cards[0]!.textContent).toContain("Example Cleaning");
     expect(cards[1]!.textContent).toContain("1 open day");
     expect(cards[1]!.textContent).toContain("Federal holidays closed");

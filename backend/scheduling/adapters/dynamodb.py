@@ -2,7 +2,7 @@
 
 import json
 from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, date, datetime, time, timedelta
 from hashlib import sha256
 from typing import Any, Protocol
@@ -613,26 +613,19 @@ class DynamoDBCalendarRepository:
                 matches.append(appointment)
         return snapshot.revision, tuple(matches)
 
+    def reminder_attempted(self, business_id: str, appointment_id: str) -> bool:
+        item = self._get(self._business_key(business_id,
+            f"OUTBOX#{reminder_outbox_id(appointment_id)}"))
+        return item is not None and int(item.get("attempts", {}).get("N", "0")) > 0
+
     def reserve_reminder(self, appointment: Appointment, profile: ClientProfile,
                          settings_version: int, calendar_revision: int,
                          run_at: datetime, now: datetime) -> bool:
         """Reserve once; only never-attempted pending work can be recalculated."""
         business_id = appointment.business_id
         outbox_id = reminder_outbox_id(appointment.appointment_id)
-        settings_check: dict[str, Any] = {
-            "TableName": self._table,
-            "Key": self._business_key(business_id, "SETTINGS#VISIT_REMINDERS"),
-            "ConditionExpression": "attribute_not_exists(PK)",
-        }
-        if settings_version:
-            settings_check.update({
-                "ConditionExpression": "#version = :version",
-                "ExpressionAttributeNames": {"#version": "version"},
-                "ExpressionAttributeValues": {":version": {"N": str(settings_version)}},
-            })
         try:
             self._client.transact_write_items(TransactItems=[
-                {"ConditionCheck": settings_check},
                 {"ConditionCheck": {"TableName": self._table,
                     "Key": self._business_key(business_id, "CALENDAR#REVISION"),
                     "ConditionExpression": "revision = :revision",
@@ -1063,6 +1056,10 @@ class DynamoDBCalendarRepository:
             reminders_enabled=item.get("reminders_enabled", {}).get("BOOL", False),
             reminders_updated_at=(datetime.fromisoformat(item["reminders_updated_at"]["S"])
                                   if "reminders_updated_at" in item else None),
+            reminder_days_before=(int(item["reminder_days_before"]["N"])
+                                  if "reminder_days_before" in item else None),
+            reminder_local_time=(time.fromisoformat(item["reminder_local_time"]["S"])
+                                 if "reminder_local_time" in item else None),
         )
 
     def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None:
@@ -1070,7 +1067,24 @@ class DynamoDBCalendarRepository:
                 business_id, f"ERASURE#{sha256(client_id.encode()).hexdigest()}")) is not None:
             return None
         item = self._get(self._business_key(business_id, f"CLIENT#{client_id}"))
-        return self._profile_from_item(item) if item else None
+        if item is None:
+            return None
+        profile = self._profile_from_item(item)
+        if profile.reminder_days_before is None:
+            # Conditional full-profile save also honors phone and erasure fences.
+            # A concurrent writer wins; re-read rather than overwriting its choice.
+            legacy = self.read_reminders(business_id)
+            cutoffs = [instant for instant in (profile.reminders_updated_at, legacy.updated_at)
+                       if instant is not None]
+            migrated = replace(profile, reminder_days_before=legacy.settings.days_before,
+                reminder_local_time=legacy.settings.local_time, version=profile.version + 1,
+                reminders_updated_at=max(cutoffs) if cutoffs else None)
+            try:
+                self.save_profile(migrated, profile.version, profile.phone_e164)
+            except RecordConflict:
+                return self.read_profile(business_id, client_id)
+            return migrated
+        return profile
 
     def list_profiles(self, business_id: str) -> tuple[ClientProfile, ...]:
         items = self._query(business_id, "PK = :pk AND begins_with(SK, :prefix)",
@@ -1393,6 +1407,10 @@ class DynamoDBCalendarRepository:
             "updated_at": {"S": _instant(profile.updated_at)},
         }
         item["reminders_enabled"] = {"BOOL": profile.reminders_enabled}
+        if profile.reminder_days_before is not None:
+            item["reminder_days_before"] = {"N": str(profile.reminder_days_before)}
+        if profile.reminder_local_time is not None:
+            item["reminder_local_time"] = {"S": profile.reminder_local_time.isoformat()}
         if profile.reminders_updated_at is not None:
             item["reminders_updated_at"] = {"S": _instant(profile.reminders_updated_at)}
         if profile.phone_verified_at is not None:

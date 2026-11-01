@@ -17,6 +17,7 @@ PROFILE_ITEM = {
     "name": {"S": "Synthetic Client"}, "phone_e164": {"S": "+14155550101"},
     "service_address": {"S": "123 Test Street"},
     "active": {"BOOL": True},
+    "reminder_days_before": {"N": "1"}, "reminder_local_time": {"S": "10:00:00"},
     "version": {"N": "1"}, "created_at": {"S": STAMP}, "updated_at": {"S": STAMP},
 }
 

@@ -33,16 +33,17 @@ def test_portal_enrollment_sends_once_then_text_unenrollment_suppresses_next_vis
     owner = {"Authorization": "Bearer owner", "Idempotency-Key": "reminder-settings"}
     client_headers = {"Authorization": "Bearer client"}
     owner_path = f"/v1/owner/businesses/{BUSINESS}"
-    saved = api.put(owner_path + "/reminders", headers=owner,
-                     json={"expected_version": 0,
-                           "settings": {"days_before": 1, "local_time": "10:00"}})
-    assert saved.status_code == 200, saved.text
+    profile = records.read_profile(BUSINESS, target)
+    saved = api.put(owner_path + f"/clients/{target}/reminder-preference", headers=owner,
+                    json={"expected_version": profile.version, "local_time": "10:17"})
+    assert saved.status_code == 200 and saved.json()["enabled"] is False
     state = api.get("/v1/client/reminder-preference", headers=client_headers).json()
     assert state["enabled"] is False
     enrolled = api.put("/v1/client/reminder-preference", headers=client_headers,
                         json={"expected_version": state["version"], "enabled": True})
     assert enrolled.status_code == 200, enrolled.text
     assert enrolled.json()["blockers"] == []
+    assert enrolled.json()["local_time"] == "10:17:00"
     assert api.get(owner_path + f"/clients/{target}/reminder-preference",
                     headers=owner).json()["enabled"] is True
     calendar = OwnerCalendarService(records, lambda: clock[0])
@@ -51,7 +52,7 @@ def test_portal_enrollment_sends_once_then_text_unenrollment_suppresses_next_vis
             BUSINESS, "owner", f"visit-{day}", OwnerAction.CREATE_APPOINTMENT,
             records.read_revision(BUSINESS), client_id=target,
             start_at=datetime(2026, 10, day, 17, tzinfo=UTC), duration_minutes=120))
-    clock[0] = datetime(2026, 10, 19, 17, 0, 15, tzinfo=UTC)
+    clock[0] = datetime(2026, 10, 19, 17, 17, 15, tzinfo=UTC)
     selector = ReminderSelector(records, consent)
     assert selector.run(BUSINESS, clock[0]).queued == 1
     submissions = []
@@ -84,7 +85,8 @@ def test_portal_enrollment_sends_once_then_text_unenrollment_suppresses_next_vis
         BUSINESS, "SM-cross-path-off", profile.phone_e164, "+14155550000",
         "Please turn off my reminders", clock[0], SenderRole.CLIENT, target, Keyword.OTHER, True))
     assert "off" in reply.text.lower()
-    assert api.get("/v1/client/reminder-preference", headers=client_headers).json()["enabled"] is False
+    final = api.get("/v1/client/reminder-preference", headers=client_headers).json()
+    assert final["enabled"] is False and final["local_time"] == "10:17:00"
     assert api.get(owner_path + f"/clients/{target}/reminder-preference",
                     headers=owner).json()["enabled"] is False
     clock[0] += timedelta(days=1)

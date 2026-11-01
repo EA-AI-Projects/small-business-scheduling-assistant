@@ -1,10 +1,9 @@
-export interface ReminderPreference {
-  enabled: boolean;
-  version: number;
-  blockers: string[];
-}
+import type { components } from "@/api/schema";
+
+export type ReminderPreference = components["schemas"]["ReminderPreferenceView"];
 
 export const reminderRestriction: Record<string, string> = {
+  business_unconfigured: "Configure business availability and its timezone before reminders can be sent.",
   inactive_profile: "The client profile is inactive.",
   phone_unverified: "Verify the current phone before reminders can be sent.",
   consent_unavailable: "SMS consent records are unavailable; delivery eligibility cannot be verified.",

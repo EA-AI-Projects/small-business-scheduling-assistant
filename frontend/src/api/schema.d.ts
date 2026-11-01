@@ -787,8 +787,19 @@ export interface components {
         ClientReminderPreference: {
             /** Blockers */
             blockers: string[];
+            /** Days Before */
+            days_before: number;
             /** Enabled */
             enabled: boolean;
+            /**
+             * Local Time
+             * Format: time
+             */
+            local_time: string;
+            /** Timezone */
+            timezone: string | null;
+            /** Upcoming Reminders */
+            upcoming_reminders: components["schemas"]["UpcomingReminder"][];
             /** Version */
             version: number;
         };
@@ -1040,10 +1051,34 @@ export interface components {
         };
         /** ReminderPreferenceBody */
         ReminderPreferenceBody: {
+            /** Days Before */
+            days_before?: number | null;
             /** Enabled */
-            enabled: boolean;
+            enabled?: boolean | null;
             /** Expected Version */
             expected_version: number;
+            /** Local Time */
+            local_time?: string | null;
+        };
+        /** ReminderPreferenceView */
+        ReminderPreferenceView: {
+            /** Blockers */
+            blockers: string[];
+            /** Days Before */
+            days_before: number;
+            /** Enabled */
+            enabled: boolean;
+            /**
+             * Local Time
+             * Format: time
+             */
+            local_time: string;
+            /** Timezone */
+            timezone: string | null;
+            /** Upcoming Reminders */
+            upcoming_reminders: components["schemas"]["UpcomingReminder"][];
+            /** Version */
+            version: number;
         };
         /** ReminderSettingsBody */
         ReminderSettingsBody: {
@@ -1061,6 +1096,26 @@ export interface components {
             expected_revision: number;
             /** Expected Version */
             expected_version: number;
+        };
+        /** UpcomingReminder */
+        UpcomingReminder: {
+            /** Appointment Id */
+            appointment_id: string;
+            /**
+             * Run At
+             * Format: date-time
+             */
+            run_at: string;
+            /**
+             * Start At
+             * Format: date-time
+             */
+            start_at: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "disabled" | "blocked" | "past_time" | "scheduled" | "attempted";
         };
         /** ValidationError */
         ValidationError: {
@@ -2224,7 +2279,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ReminderPreferenceView"];
                 };
             };
             /** @description Validation Error */
@@ -2260,7 +2315,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ReminderPreferenceView"];
                 };
             };
             /** @description Validation Error */

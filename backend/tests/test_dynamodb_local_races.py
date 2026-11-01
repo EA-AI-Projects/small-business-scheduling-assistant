@@ -1655,17 +1655,13 @@ def test_reminder_settings_and_profile_preference_persist_with_conflicts_and_era
     base = f"/v1/owner/businesses/{env.business}"
     assert repo.read_reminders(env.business).settings == ReminderSettings()
     body = {"expected_version": 0, "settings": {"days_before": 7, "local_time": "18:00"}}
-    result = api.put(base + "/reminders", json=body, headers=headers)
-    assert result.status_code == 200, result.text
-    assert api.put(base + "/reminders", json=body, headers=headers).json() == result.json()
-    assert repo.read_reminders(env.business).settings == ReminderSettings(7, time(18))
-    assert api.put(base + "/reminders", json=body, headers={
-        **headers, "Idempotency-Key": "stale"}).status_code == 409
+    assert api.put(base + "/reminders", json=body, headers=headers).status_code == 410
     service = ClientRecordService(repo)
     profile = service.save_profile(env.business, "synthetic-client", "Synthetic Client",
         "+14155550101", "123 Test Street", True, 0, START)
     pref = base + "/clients/synthetic-client/reminder-preference"
-    enrolled = api.put(pref, json={"expected_version": profile.version, "enabled": True}, headers=headers)
+    enrolled = api.put(pref, json={"expected_version": profile.version, "enabled": True,
+        "days_before": 7, "local_time": "18:00"}, headers=headers)
     assert enrolled.status_code == 200, enrolled.text
     reloaded = api.get(base + "/clients/synthetic-client", headers=headers).json()
     assert reloaded["reminders_enabled"] is True
@@ -1676,6 +1672,7 @@ def test_reminder_settings_and_profile_preference_persist_with_conflicts_and_era
     renamed = other.save_profile(env.business, "synthetic-client", "Renamed Client",
         "+14155550101", "123 Test Street", True, reloaded["version"], START + timedelta(hours=1))
     assert renamed.reminders_enabled
+    assert renamed.reminder_days_before == 7 and renamed.reminder_local_time == time(18)
     assert renamed.reminders_updated_at == START
     assert api.delete(base + "/clients/synthetic-client", headers=headers).status_code == 204
     assert api.get(pref, headers=headers).status_code == 404
@@ -1751,3 +1748,132 @@ def test_reminder_claim_has_one_winner_and_never_recovers(race_env: RaceEnv) -> 
     assert claimed.next_attempt_at is None and claimed.dispatch_after is None
     with pytest.raises(OutboxConflict):
         store.claim(claimed, START + timedelta(hours=1), START + timedelta(hours=2))
+
+
+def test_legacy_reminder_migration_repeats_preserves_choices_and_new_defaults(race_env: RaceEnv) -> None:
+    from scheduling.domain.reminders import ReminderSettings
+
+    env = race_env
+    repo = DynamoDBCalendarRepository(env.client, env.table)
+    service = ClientRecordService(repo)
+    repo.save_reminders(env.business, 'synthetic-owner', 'legacy', 0,
+                        ReminderSettings(3, time(9, 31)), START)
+    for index, enabled in enumerate((False, True)):
+        identity = f'legacy-{index}'
+        created = service.save_profile(env.business, identity, 'Synthetic Client',
+            f'+1415555010{index}', '123 Synthetic Street', True, 0, START)
+        env.client.update_item(TableName=env.table,
+            Key=repo._business_key(env.business, f'CLIENT#{identity}'),
+            UpdateExpression='SET reminders_enabled = :enabled REMOVE reminder_days_before, reminder_local_time',
+            ExpressionAttributeValues={':enabled': {'BOOL': enabled}})
+        def read(_: int, client_id: str = identity) -> ClientProfile:
+            return DynamoDBCalendarRepository(env.client, env.table).read_profile(env.business, client_id)
+        with ThreadPoolExecutor(max_workers=6) as workers:
+            migrated = list(workers.map(read, range(12)))
+        assert all(item.reminder_days_before == 3 and item.reminder_local_time == time(9, 31)
+                   and item.reminders_enabled == enabled for item in migrated)
+        assert {item.version for item in migrated} == {created.version + 1}
+        saved = service.set_reminder_preference(env.business, identity, None,
+            migrated[0].version, START, days_before=5, local_time=time(18))
+        reloaded = repo.read_profile(env.business, identity)
+        assert reloaded == saved and reloaded.reminders_enabled == enabled
+        assert reloaded.reminder_days_before == 5 and reloaded.reminder_local_time == time(18)
+    fresh = service.save_profile(env.business, 'new-client', 'Synthetic New Client',
+        '+14155550103', '456 Synthetic Street', True, 0, START)
+    assert not fresh.reminders_enabled
+    assert fresh.reminder_days_before == 1 and fresh.reminder_local_time == time(10)
+
+
+def test_concurrent_reminder_edits_have_one_winner_and_old_sms_replay_preserves_timing(
+    race_env: RaceEnv,
+) -> None:
+    env = race_env
+    repo = DynamoDBCalendarRepository(env.client, env.table)
+    service = ClientRecordService(repo)
+    profile = service.save_profile(env.business, 'synthetic-client', 'Synthetic Client',
+        '+14155550101', '123 Synthetic Street', True, 0, START)
+    profile = service.verify_phone(env.business, profile.client_id, profile.phone_e164, START)
+    assert service.set_reminder_preference_from_receipt(env.business, profile.client_id,
+        profile.phone_e164, 'first-enrollment', True, START)
+    profile = repo.read_profile(env.business, profile.client_id)
+    barrier = Barrier(2)
+    def change(days: int) -> bool:
+        barrier.wait(timeout=10)
+        try:
+            ClientRecordService(DynamoDBCalendarRepository(env.client, env.table)).set_reminder_preference(
+                env.business, profile.client_id, None, profile.version, START,
+                days_before=days, local_time=time(9, 31))
+            return True
+        except RecordConflict:
+            return False
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        outcomes = list(workers.map(change, (2, 4)))
+    assert sorted(outcomes) == [False, True]
+    winner = repo.read_profile(env.business, profile.client_id)
+    assert winner.reminders_enabled and winner.reminder_days_before in (2, 4)
+    assert service.set_reminder_preference_from_receipt(env.business, profile.client_id,
+        profile.phone_e164, 'first-enrollment', True, START)
+    assert repo.read_profile(env.business, profile.client_id) == winner
+    disabled = service.set_reminder_preference(env.business, profile.client_id, False,
+                                              winner.version, START)
+    assert service.set_reminder_preference_from_receipt(env.business, profile.client_id,
+        profile.phone_e164, 'first-enrollment', True, START)
+    assert repo.read_profile(env.business, profile.client_id) == disabled
+
+
+def test_durable_reminder_replans_only_never_submitted_work_and_rejects_stale_profile(
+    race_env: RaceEnv,
+) -> None:
+    """Exercise the actual reservation, claim, parking and sender boundaries with no provider calls."""
+    from scheduling.adapters.sms_twilio import TwilioSmsSender
+    from scheduling.domain.reminders import ReminderSelector, reminder_outbox_id
+
+    env = race_env
+    repo = DynamoDBCalendarRepository(env.client, env.table)
+    OwnerPolicyService(repo, lambda: START).seed(env.business, 'synthetic-owner', 'seed')
+    clients = ClientRecordService(repo)
+    profile = clients.save_profile(env.business, 'synthetic-client', 'Synthetic Client',
+        '+14155550501', '123 Synthetic Street', True, 0, START)
+    consent = DynamoSmsIngressStore(env.client, env.table)
+    record_in_person_consent(consent, repo, env.business, profile.client_id, profile.phone_e164,
+                             profile.name, 'synthetic-script', START)
+    profile = repo.read_profile(env.business, profile.client_id)
+    profile = clients.set_reminder_preference(env.business, profile.client_id, True,
+                                              profile.version, START)
+    visit = replace(_appointment(env, 'reminder', CalendarStatus.CONFIRMED),
+                    start_at=START + timedelta(days=1, hours=1),
+                    end_at=START + timedelta(days=1, hours=2), confirmed_at=START)
+    _seed(env, (visit,))
+    clock = [START + timedelta(hours=1)]  # 10 AM Pacific on the preceding calendar day.
+    selector = ReminderSelector(repo, consent)
+    assert selector.run(env.business, clock[0]).queued == 1
+    outbox = DynamoOutboxStore(env.client, env.table)
+    identity = reminder_outbox_id(visit.appointment_id)
+    original = outbox.get(env.business, identity)
+    assert original is not None
+    clients.set_reminder_preference(env.business, profile.client_id, None,
+        profile.version, clock[0], local_time=time(11))
+    assert not repo.reserve_reminder(visit, profile, profile.version, 7, clock[0], clock[0])
+
+    class Messages:
+        def create(self, **kwargs):
+            raise AssertionError('stale/expired reminder reached provider')
+
+    sender = TwilioSmsSender(Messages(), repo, consent, env.business,
+        '+14155550000', '+14155559999', clock=lambda: clock[0], reminder_send_enabled=lambda: True)
+    consumer = ConsumeService(outbox, sender, lambda: clock[0])
+    assert consumer.consume(env.business, identity) == ConsumeOutcome.SKIPPED
+    parked = outbox.get(env.business, identity)
+    assert parked.state == DeliveryState.PENDING and parked.attempts == 0
+    assert parked.next_attempt_at is None
+    clock[0] += timedelta(hours=1)
+    assert selector.run(env.business, clock[0]).queued == 1
+    assert selector.run(env.business, clock[0]).queued == 0
+    replanned = outbox.get(env.business, identity)
+    assert replanned.block_end_at == clock[0] and replanned.event_version != original.event_version
+    # A durable claim consumes the identity before submission, including a worker crash.
+    outbox.claim(replanned, clock[0], clock[0] + timedelta(minutes=2))
+    clock[0] += timedelta(minutes=3)
+    assert consumer.consume(env.business, identity) == ConsumeOutcome.SKIPPED
+    assert selector.run(env.business, clock[0]).queued == 0
+    assert repo.reminder_attempted(env.business, visit.appointment_id)

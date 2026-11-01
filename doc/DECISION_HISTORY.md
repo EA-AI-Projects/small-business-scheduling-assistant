@@ -52,6 +52,12 @@ This is a selected record of material changes, not a second specification. Curre
 
 Architecture/current design no longer embeds issue chronology, account IDs, completed authorization packets, dated prices or UI implementation diaries. Useful operational details have focused homes; detailed historical text remains in Git history. See the [documentation index](README.md) for each document's scope and disposition.
 
+## Per-client visit reminder timing (#399; 2026-11-01)
+
+- **Earlier choice (#390–#394 / PR #395):** one owner-configured business schedule in Settings, with enrollment-only client preferences.
+- **Replacement:** the owner approved one shared enrollment/timing preference per client, editable through owner/client UI and SMS, to support individual timing and authoritative reminder reads. Remove global timing; preserve existing enrollment and copy saved business timing once, including for unenrolled clients. New profiles start off at one day/10 AM.
+- **Boundary:** the [PRD](PRD.md) and [specification](VISIT_REMINDERS_SPEC.md) own current requirements. #400 implements the owner-to-delivery slice before portal and SMS extensions. No catch-up/retry, consent/STOP, or deployment/live-SMS authorization changes.
+
 ## Deployment authorization flag (#396; 2026-10-31)
 
 - **Earlier behavior:** every deployment retaining authorized invitation/reminder gates required both the long live-SMS acknowledgment flag and repeated explicit gate parameters.
