@@ -171,8 +171,8 @@ all three. "Change my reminder time to 9 AM" sends only the time and preserves e
 off retains timing, and a timing edit never re-enrolls an unenrolled client. Clear requests
 save immediately and the committed acknowledgment states enrollment, days before, local time
 and the business timezone. A time without AM/PM (such as a bare "9") is not a valid time
-argument. Deterministic backend guards on the inbound text, applied before any commit, back
-the prompt, and are applied before any commit. A message that is only an acknowledgment
+argument. Deterministic backend guards on the inbound text back the prompt and run before any
+commit. A message that is only an acknowledgment
 (an emoji, "go ahead", "do it", "k", "si", bare yes/no) cannot write; longer messages are left
 to the model, so "go ahead on that" can reach a write (accepted limit). When the call supplies
 a time, the current message must back it: an hour without AM/PM, noon, a 24-hour form or an
@@ -182,13 +182,22 @@ differs from the supplied value ("9 PM" with 09:00, "evening" with 09:00) is ref
 way. Nothing is written and the reminder action ends for that message, so a same-message retry
 cannot save. Day quantities ("two days") are not hours; "9 AM", "nine AM", "9 a.m.", "9.30
 am", "noon", "14:00", "09:30" and "9 in the morning" pass, as does a message with no hour at
-all ("morning", "a.m.") answering the question. The guard uses English time words only;
-other-language ambiguous hours such as "a las 9" are left to the model. It also cannot catch
+all ("morning", "a.m.") answering the question. The guard uses English time words only, and
+any digit in the text counts as an hour, so "a las 9" is refused for AM/PM; spelled-out
+non-English hours such as "a las nueve" pass to the model. It also cannot catch
 a model-supplied time when the current message names no time at all ("Make it earlier",
 "Turn reminders on"); the acknowledgment states the saved time so the client can correct it.
 A reminder call after another action in the same message (booking, cancellation, offer) is
-refused first and never replaces that action's reply.
-A malformed reminder call (with no other action) gets a fixed "nothing changed" reply rather than model text.
+refused first and never replaces that action's reply or changes its committed outcome or
+outbox ID; the delivered reply gets "Your reminder settings were not changed." appended
+(or, if that leaves no room in 480 GSM-7 characters, the deterministic answer is used). The
+sentence is part of the reply text, so a stored committed reply and its replay carry it.
+Every backend-written reminder reply that replaces the model's text (acknowledgment and
+refusals, including a replayed acknowledgment) ends with a fixed sentence that it covers
+reminder settings only and nothing else in the message was acted on, so a mixed request such
+as "yes cancel it and remind me at 9 AM" never implies the cancellation happened; an open
+confirmation stays open. A malformed reminder call (with no other action) gets a fixed
+"nothing changed" reply rather than model text.
 Well-formed values outside the ranges write
 nothing and get a fixed explanation that saved settings did not change.
 

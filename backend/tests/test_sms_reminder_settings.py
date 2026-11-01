@@ -31,6 +31,7 @@ from scheduling.identity_links import IdentityLink, LinkRole, LinkState
 from scheduling.owner_api import OwnerPrincipal, create_owner_app
 
 ZONE = "America/Los_Angeles"
+NOT_CHANGED = "Your reminder settings were not changed."
 OWNER = {"Authorization": "Bearer owner", "Idempotency-Key": "settings"}
 
 
@@ -644,6 +645,7 @@ def test_a_malformed_reminder_call_never_replaces_another_actions_reply() -> Non
     reply = chat.text("the 10 o'clock one please")
     assert reply.committed and reply.client_outbox_id and reply.appointment_id
     assert reply.text.startswith("Requested Wed Sep 30 at 10:00 AM")
+    assert reply.text.endswith(NOT_CHANGED)
     assert chat.status(reply.appointment_id) == CalendarStatus.PENDING_APPROVAL
     assert results == [{"ok": False, "error": "action_already_attempted"}]
 
@@ -657,7 +659,7 @@ def test_a_malformed_reminder_call_never_replaces_another_actions_reply() -> Non
                                 "Cancelled your Thu Oct 1 at 9:00 AM visit.")[2]
     done = chat.text("yes please")
     assert done.committed and done.client_outbox_id
-    assert done.text == "Cancelled your Thu Oct 1 at 9:00 AM visit."
+    assert done.text == "Cancelled your Thu Oct 1 at 9:00 AM visit. " + NOT_CHANGED
     assert chat.status(visit) == CalendarStatus.CANCELLED
 
     # prepare_cancellation stores its question; get_availability stores its offer.
@@ -666,18 +668,82 @@ def test_a_malformed_reminder_call_never_replaces_another_actions_reply() -> Non
     chat.model.replies["I can't make Thursday"] = ask(
         "cancel", target_date="2026-10-01")
     asked = chat.text("I can't make Thursday")
-    assert asked.text == ASK_TEXT and not asked.committed
+    assert asked.text == f"{ASK_TEXT} {NOT_CHANGED}" and not asked.committed
     stored = chat.states.read_state("pilot", sender)
     assert stored.kind == PromptKind.CONFIRM_CANCEL and stored.appointment_id == visit
     assert chat.status(visit) == CalendarStatus.CONFIRMED
     chat, model = chat_with(lambda tools: (offer_plan(tools), bad(tools), OFFER_TEXT)[2])
     offered = chat.text("Anything tomorrow?")
-    assert offered.text == OFFER_TEXT
+    assert offered.text == f"{OFFER_TEXT} {NOT_CHANGED}"
     assert chat.states.read_state("pilot", sender).kind == PromptKind.OFFER
 
     # Content, bare-yes and ambiguous-hour refusals sit behind the same ordering.
     for body in ("yes", "go ahead", "Remind me at 9"):
         chat, model = chat_with(lambda tools: (offer_plan(tools), tools(
             "set_reminder_preference", set_args(True, clock="09:00")), OFFER_TEXT)[2])
-        assert chat.text(body).text == OFFER_TEXT, body
+        assert chat.text(body).text == f"{OFFER_TEXT} {NOT_CHANGED}", body
         assert chat.states.read_state("pilot", sender).kind == PromptKind.OFFER, body
+
+
+def test_reminder_reply_in_a_mixed_message_says_nothing_else_was_acted_on() -> None:
+    from test_client_cancellation_tool import ASK_TEXT, prepare
+    from test_client_tool_loop import chat_with
+    from test_conversation_flow import THURSDAY, ask
+
+    from scheduling.domain.calendar import CalendarStatus
+    from scheduling.domain.conversation import REMINDER_SCOPE
+    from scheduling.domain.conversation_state import PromptKind
+
+    sender = "+14155550101"
+    chat, model = chat_with(lambda tools: (prepare(tools), ASK_TEXT)[1])
+    visit = chat.hold(THURSDAY, "visit", confirm=True)
+    chat.model.replies["I can't make Thursday"] = ask("cancel", target_date="2026-10-01")
+    chat.text("I can't make Thursday")
+    model.plan = lambda tools: (tools("set_reminder_preference", set_args(True, clock="09:00")),
+                                tools("confirm_cancellation", {}), "Cancelled and set.")[2]
+    reply = chat.text("yes cancel it and remind me at 9 AM")
+    assert REMINDER_SCOPE in reply.text and "now on" in reply.text and not reply.committed
+    assert chat.status(visit) == CalendarStatus.CONFIRMED
+    assert chat.states.read_state("pilot", sender).kind == PromptKind.CONFIRM_CANCEL
+    assert chat.store.read_profile("pilot", "client-1").reminders_enabled is True
+    # A refused reminder call carries the same sentence.
+    model.plan = lambda tools: (tools("set_reminder_preference", set_args(clock="9")), "x")[1]
+    assert REMINDER_SCOPE in chat.text("yes cancel it and remind me at 9").text
+    # A later plain yes still confirms the open question exactly as before.
+    model.plan = lambda tools: (tools("confirm_cancellation", {}),
+                                "Cancelled your Thu Oct 1 at 9:00 AM visit.")[1]
+    done = chat.text("yes")
+    assert done.committed and chat.status(visit) == CalendarStatus.CANCELLED
+
+
+def test_reminder_request_after_a_booking_is_reported_unchanged_and_the_booking_stands() -> None:
+    from test_client_booking_tool import accept, offer_plan
+    from test_client_tool_loop import chat_with
+    from test_conversation_flow import NOW
+    from test_sms_processing import Reader
+
+    from scheduling.domain.calendar import CalendarStatus
+    from scheduling.domain.sms_processing import ReceiptProcessor
+
+    chat, model = chat_with(offer_plan)
+    chat.text("Anything tomorrow?")
+    before = chat.store.read_profile("pilot", "client-1")
+    model.plan = lambda tools: (accept(tools), tools(
+        "set_reminder_preference", set_args(True, clock="09:00")),
+        "Requested Wed Sep 30 at 10:00 AM. Your reminder is set too.")[2]
+    inbound = InboundReceipt("pilot", "SM-mixed", "+14155550101", "+14155550000",
+                             "the 10 o'clock one please, and remind me at 9 AM", NOW,
+                             SenderRole.CLIENT, "client-1", Keyword.OTHER, True)
+    store = Reader({("pilot", inbound.provider_id): inbound})
+    processor = ReceiptProcessor(store, chat.service, "pilot", lambda: NOW)
+    first = processor.process("pilot", inbound.provider_id)
+    assert isinstance(first, ConversationOutcome) and first.committed
+    assert first.client_outbox_id and first.appointment_id
+    assert chat.status(first.appointment_id) == CalendarStatus.PENDING_APPROVAL
+    assert first.text.endswith(NOT_CHANGED) and "reminder is set" in first.text
+    assert chat.store.read_profile("pilot", "client-1") == before  # Nothing saved.
+    # The stored reply and committed draft carry the sentence; replay sends nothing new.
+    assert [text for _, text in store.replies] == [first.text]
+    assert [text for *_, text in store.committed_drafts] == [first.text]
+    assert processor.process("pilot", inbound.provider_id) is None
+    assert len(chat.calendar()) == 1

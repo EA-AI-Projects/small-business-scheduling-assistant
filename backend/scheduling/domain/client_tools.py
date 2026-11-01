@@ -137,6 +137,7 @@ class ReminderHooks:
     read: Callable[[], dict[str, Any]]
     write: Callable[[bool | None, int | None, time | None], dict[str, Any]]
     invalid: Callable[[], dict[str, Any]]
+    not_applied: Callable[[], None]
 
 
 class ClientReadTools:
@@ -212,14 +213,15 @@ class ClientReadTools:
         """Change only the verified sender's shared preference; no target arguments.
 
         Any of enrollment, days before and a 24-hour HH:MM local time may be given; omitted
-        (null) fields keep their saved values. Malformed values write nothing and leave the
-        model free to ask the client what they meant.
+        (null) fields keep their saved values. A malformed call writes nothing, ends the
+        reminder action for the message and gets a fixed reply from the service.
         """
         # Another action this message keeps its own reply: a reminder call after it is
         # refused first, whatever its shape, and never replaces that reply.
         if (self._reminder_preference is not None and (
                 self.requested is not None or self.prepared is not None or self.answered
                 or self.responded or self.offer)):
+            self._reminder_preference.not_applied()
             return {"ok": False, "error": "action_already_attempted"}
         if not set(args) <= {"enabled", "days_before", "local_time"} or not args:
             return self._refuse_reminder()
