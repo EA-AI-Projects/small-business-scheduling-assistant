@@ -222,8 +222,6 @@ class ClientRecordService:
         owner, portal or text edit. A newer profile version raises RecordConflict. The caller
         still checks current SMS consent/STOP before entering here.
         """
-        from scheduling.domain.reminders import ReminderSettings
-
         current = self._repository.read_profile(business_id, client_id)
         if (current is None or not current.active or current.phone_verified_at is None
                 or current.phone_e164 != phone_e164):
@@ -232,6 +230,38 @@ class ClientRecordService:
             business_id, client_id, receipt_id)
         if replay is not None:
             return replay
+        return self._commit_reminder_request(current, receipt_id, enabled, now,
+                                             days_before, local_time)
+
+    def apply_owner_reminder_request_from_receipt(
+            self, business_id: str, client_id: str, receipt_id: str,
+            expected_version: int, enabled: bool | None, now: datetime, *,
+            days_before: int | None = None, local_time: time | None = None) -> ReminderReceipt:
+        """Authorized owner choice, guarded by the version read through the owner tools.
+
+        Unlike client SMS this can save a preference on an unverified/blocked client.
+        It changes neither phone verification, consent nor STOP. The caller authenticates
+        the owner; the same atomic receipt marker as client SMS protects redelivery.
+        """
+        current = self._repository.read_profile(business_id, client_id)
+        if current is None or not current.active:
+            raise RecordNotFound("Client was not found")
+        replay = self._repository.read_reminder_preference_receipt(
+            business_id, client_id, receipt_id)
+        if replay is not None:
+            return replay
+        if current.version != expected_version:
+            raise RecordConflict("Client profile version changed")
+        return self._commit_reminder_request(current, receipt_id, enabled, now,
+                                             days_before, local_time)
+
+    def _commit_reminder_request(self, current: ClientProfile, receipt_id: str,
+                                 enabled: bool | None, now: datetime,
+                                 days_before: int | None, local_time: time | None,
+                                 ) -> ReminderReceipt:
+        from scheduling.domain.reminders import ReminderSettings
+
+        business_id, client_id = current.business_id, current.client_id
         settings = ReminderSettings(
             days_before if days_before is not None else current.reminder_days_before or 1,
             local_time if local_time is not None else current.reminder_local_time or time(10))
