@@ -18,7 +18,7 @@ Client history requires the same business, verified phone and client ID; owner h
 | Cancel | Resolve one own visit/request and store a version-bound confirmation question. A later confirmation cancels it; declining keeps it. |
 | Move | Offer times for one confirmed visit/version, then create a pending replacement; the original stays booked until owner approval. |
 | Ask about visits | Read only the client's own current visits or the owner's business calendar; no booking action follows merely from an answer. |
-| Manage visit reminders | Interpret a clear request to turn future visit reminders on/off or change days before and time (#402); save the verified sender's shared preference and acknowledge the committed choice. Ask about ambiguous intent or time without writing. |
+| Manage visit reminders | Interpret a clear request to turn future visit reminders on/off or change days before and time (#402); save the verified client sender's shared preference or an authorized owner's named-client choice (#403), and acknowledge the committed result. Ask about ambiguous intent or time without writing. |
 
 Offers and confirmation questions last 30 minutes. A later expired/stale/replaced/unmatched reply writes nothing. A changed default duration invalidates an offer quoted at the previous length. A new request replaces the previous prompt. Offered starts (the tool and the deterministic offer alike) put the preferred valid starts for the verified sender (their own client-specific preferences, which replace business-wide guidance on the weekdays they name, plus the business-wide guidance on other weekdays; #383) inside the requested window first and fill the rest with other valid starts, without telling the client why (#382); an explicit window is honored without a preferred start, a preference read failure gives the ordinary offer, and a preference change never invalidates a sent offer. The sender is identified by the verified receipt, never by a name in the message or a tool argument. Exact commands retain their deterministic path; a bare answer to a read-only calendar list cannot select or cancel a visit.
 
@@ -73,7 +73,7 @@ The legacy result-based client drafter uses a different bound: one GSM-7 segment
 
 After owner verification, opt-out and exact-command checks, free text enters one bounded model loop with the business-local date/time and sent-aware history. Limits are five model calls, three tool calls and 36 seconds. A history/model failure gets the fixed failure reply.
 
-Tools are `get_business_info`, `list_pending_requests`, `get_calendar`, `approve_request`, `decline_request`, `draft_counteroffer`, `send_counteroffer` and `cancel_counteroffer`. Identity derives from the receipt. Reads are scoped to the business; approval/decline require one current request/reference and version and use transactional lifecycle checks. There is no short-reply allowlist or deterministic owner paging/parser state. Unclear targets require clarification. The backend validates a called write; it does not validate every model interpretation or prose assertion.
+Tools are `get_business_info`, `list_pending_requests`, `get_calendar`, `approve_request`, `decline_request`, `draft_counteroffer`, `send_counteroffer`, `cancel_counteroffer`, `get_client_reminder_preference` and `set_client_reminder_preference`. Identity derives from the receipt. Reads are scoped to the business; approval/decline require one current request/reference and version and use transactional lifecycle checks. There is no short-reply allowlist or deterministic owner paging/parser state. Unclear targets require clarification. The backend validates a called write; it does not validate every model interpretation or prose assertion.
 
 An owner counteroffer draft binds one pending request/version and a valid alternative time, storing exact model-written client text for 30 minutes without sending. Send requires trusted history showing that an owner preview with that exact client text was actually sent after draft creation. It rechecks request, consent/eligibility, availability, expiry and newer-request guards before atomically confirming and queueing one client intent. The sender repeats checks at handoff and sends the stored text without a new model rewrite. Failure can queue the fixed owner delivery-failure notice. See [SCHEDULING_CONTRACTS.md](SCHEDULING_CONTRACTS.md#owner-counteroffer-confirmation-175).
 
@@ -227,3 +227,42 @@ blocks sending, the acknowledgment says reminders cannot be sent right now.
 
 A bare YES or NO never enrolls or changes timing. Reminder questions do not persist a
 pending-clarification state; a clarification is answered with explicit text such as "9 AM".
+
+
+### Owner reads and reminder changes by text (#403)
+
+The verified owner uses the same bounded tool loop for named-client reminder requests.
+`get_client_reminder_preference(client_name, client_id)` searches only active profiles in
+that business using the existing normalized name candidates. A single exact full-name match
+resolves automatically. Partial names and duplicate full names require clarification; candidates
+contain only the name, stable reference and phone ending. The model cannot choose a candidate
+itself: an explicit selection must match a reference or unique phone ending in the current
+owner text. The read returns the current profile version, saved enrollment/timing, blockers
+and upcoming expected reminder facts, including absent visits, disabled, blocked, past-time
+and attempted states. Model-written read explanations have the owner loop's existing semantic
+risk and must not promise delivery.
+
+`set_client_reminder_preference(client_id, version, enabled, days_before, local_time)` requires
+that message's resolved client and version. Null preserves a field. Enrollment records the
+client's expressed choice relayed by the owner; the prompt asks for clarification if that choice
+is unclear. Explicit timed enrollment enables; a timing-only change preserves enrollment and
+disabling retains timing. The same 1–7 days, 08:00–18:00 business-time bounds, acknowledgment-only
+and ambiguous-time guards apply before committing. A phone ending used for identity is excluded
+from the clock guard. No reminder action changes consent, phone verification or STOP, so an owner
+can record a blocked client's choice while delivery remains blocked.
+
+A successful write produces a backend receipt stating the phone ending, enrollment, days before,
+time and business timezone, with current blockers or a no-catch-up warning when applicable.
+It survives a subsequent model failure or contradictory draft. Replays return the original saved
+settings without changing a newer portal/UI/SMS edit, explicitly warning that later edits may have
+changed them. Ordinary receipt reply storage suppresses duplicate replies; the atomic profile/receipt
+transaction protects a retry after a crash before reply storage. No-op writes also remember the
+receipt without changing the effective preference timestamp. Erasure removes the markers.
+
+Only one action may be handled per owner message. A reminder write attempt prevents subsequent
+scheduling writes and its receipt/refusal says other requests were not acted on. A scheduling action
+that already ran prevents a later reminder write and the reply explicitly says reminder settings did
+not change. Version conflicts are not retried with freshly read values in that message. Timing changes
+preserve the shared selector/sender's no-catch-up, no-repeat and delivery gates. Workflow checks use
+scripted models, HTTP preference views, a controlled clock and a fake SMS provider; they do not prove
+live-model interpretation or carrier delivery. No deployment or live SMS is authorized.

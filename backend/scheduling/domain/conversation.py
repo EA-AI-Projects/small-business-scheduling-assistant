@@ -94,6 +94,8 @@ from scheduling.domain.lifecycle import (
 from scheduling.domain.offer_preferences import pick_offer, preferred_reader
 from scheduling.domain.owner_calendar_tool import STATUSES as OWNER_CALENDAR_STATUSES
 from scheduling.domain.owner_calendar_tool import calendar_page
+from scheduling.domain.owner_reminder_tools import NAMES as OWNER_REMINDER_NAMES
+from scheduling.domain.owner_reminder_tools import OwnerReminderTools
 from scheduling.domain.reminder_text import acknowledgment_only, unclear_time
 from scheduling.domain.reminders import reminder_preference_view
 from scheduling.domain.service_duration import (
@@ -1211,9 +1213,28 @@ class ConversationService:
         committed: ConversationOutcome | None = None
         offer_action: str | None = None
         drafted_offer_id: str | None = None
+        reminder_skipped = False
+        reminder_tools = OwnerReminderTools(
+            cast(Any, self._repository), cast(Any, self._consent), receipt, self._clock,
+            self._repository.read_policy(receipt.business_id).timezone)
+        try:
+            replay = reminder_tools.replay()
+        except Exception:  # noqa: BLE001 - do not write when a prior result cannot be checked
+            return ConversationOutcome("I can't check this message's saved result. Please try again later.")
+        if replay is not None:
+            return ConversationOutcome(replay)
 
         def tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
-            nonlocal committed, offer_action, drafted_offer_id
+            nonlocal committed, offer_action, drafted_offer_id, reminder_skipped
+            if name in OWNER_REMINDER_NAMES:
+                if name == "set_client_reminder_preference" and (
+                        committed is not None or offer_action is not None):
+                    reminder_skipped = True
+                    return {"ok": False, "error": "action_already_attempted"}
+                return reminder_tools(name, args)
+            if reminder_tools.attempted and name not in (
+                    "get_business_info", "get_calendar", "list_pending_requests"):
+                return {"ok": False, "error": "action_already_attempted"}
             if name not in ("get_business_info", "list_pending_requests", "approve_request", "decline_request",
                             "get_calendar", "draft_counteroffer", "send_counteroffer",
                             "cancel_counteroffer"):
@@ -1355,11 +1376,22 @@ class ConversationService:
             text = self._interpreter.run_owner_loop(
                 receipt.body or "", now.astimezone(ZoneInfo(policy.timezone)).date(),
                 policy.timezone, history, tool)
+            if reminder_tools.reply is not None:
+                return ConversationOutcome(reminder_tools.reply)
+            if reminder_skipped:
+                # A later reminder call must not borrow the earlier scheduling success.
+                # A draft still needs its exact preview; an overlong preview takes the
+                # existing failure/cleanup path instead of becoming a misleading receipt.
+                text = ("The scheduling action was saved. Reminder settings did not change. "
+                        "Send the reminder request separately." if committed is not None else
+                        f"{text} Reminder settings did not change; send that request separately.")
             size = gsm_septets(text, True)
             if not text.strip() or size is None or size > 480:
                 raise ValueError("Owner reply is not deliverable")
             return replace(committed, text=text) if committed is not None else ConversationOutcome(text)
         except Exception:  # noqa: BLE001 - model/read failures have one fixed owner reply
+            if reminder_tools.reply is not None:
+                return ConversationOutcome(reminder_tools.reply)
             if drafted_offer_id is not None and self._counteroffers is not None:
                 try:
                     discarded = self._counteroffers.cancel_counteroffer(

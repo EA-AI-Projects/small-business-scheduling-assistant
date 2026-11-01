@@ -47,6 +47,24 @@ OWNER_LOOP_INSTRUCTIONS = (
     "may read get_calendar while leaving open_offer unchanged. Treat the draft's stored "
     "client_text as authoritative: send uses that exact text. Only one scheduling write is "
     "allowed per owner message. "
+    "For a named client's reminder settings call get_client_reminder_preference with the "
+    "name the owner supplied and client_id null. If clarification is needed, ask for a full "
+    "name or unique phone ending/reference; do not choose a match yourself. A later explicit "
+    "pick may supply its client_id together with the same name. Explain enabled state, saved "
+    "timing/timezone, blockers and expected reminder times from the result; zero upcoming "
+    "visits means no next reminder. Disabled, blocked, past_time and attempted reminders "
+    "are not scheduled sends. Never promise delivery or catch-up. "
+    "A clear request changes settings immediately using set_client_reminder_preference "
+    "with that read's client_id and version. Enrollment records the client's expressed choice: "
+    "the owner must be relaying that choice; if unclear ask whether the client requested it. "
+    "'Avery asked for reminders two days before at 9 AM' sets enabled true, days_before 2 and "
+    "local_time 09:00. 'Change Avery's reminder time to 9 AM' sets only local_time; disabling "
+    "sets only enabled false and retains timing. Use null for fields not requested. "
+    "Days must be 1 to 7, local time 08:00 to 18:00 in the business timezone. Clarify a bare "
+    "hour without AM/PM; never treat bare YES as enrollment. A reminder edit does not grant "
+    "SMS consent, verify a phone, clear STOP, book, cancel or confirm attendance. "
+    "After a failed write do not re-read and retry in this message. Only reminder settings "
+    "are handled when a reminder write is attempted; ask to send other requests separately. "
     "When the owner asks for a person or needs help you cannot provide after clarification, "
     "call get_business_info and give the saved support contact. If no contact is saved, "
     "say you cannot provide one. Do not invent a contact or add help wording to routine replies. "
@@ -61,6 +79,20 @@ OWNER_LOOP_INSTRUCTIONS = (
     "Use GSM-7 characters and at most 480 characters."
 )
 OWNER_LOOP_TOOLS: list[dict[str, Any]] = [
+    {"type": "function", "name": "get_client_reminder_preference", "strict": True,
+     "description": "Resolve an owner's named client and read shared reminder settings, version, blockers and expected times.",
+     "parameters": {"type": "object", "properties": {
+         "client_name": {"type": "string"}, "client_id": {"type": ["string", "null"]}},
+         "required": ["client_name", "client_id"], "additionalProperties": False}},
+    {"type": "function", "name": "set_client_reminder_preference", "strict": True,
+     "description": "Save the client's expressed reminder choice relayed by the owner. Null preserves a field; requires a resolved client and current version.",
+     "parameters": {"type": "object", "properties": {
+         "client_id": {"type": "string"}, "version": {"type": "integer"},
+         "enabled": {"type": ["boolean", "null"]},
+         "days_before": {"type": ["integer", "null"]},
+         "local_time": {"type": ["string", "null"], "description": "HH:MM business local time"}},
+         "required": ["client_id", "version", "enabled", "days_before", "local_time"],
+         "additionalProperties": False}},
     {"type": "function", "name": "get_business_info", "strict": True,
      "description": "Read the saved business name and support contact for a human-help request.",
      "parameters": {"type": "object", "properties": {}, "required": [],
