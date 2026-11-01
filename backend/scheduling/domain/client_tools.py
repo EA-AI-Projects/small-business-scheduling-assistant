@@ -136,6 +136,7 @@ class ReminderHooks:
     """Reads and writes bound by the conversation service to the verified sender."""
     read: Callable[[], dict[str, Any]]
     write: Callable[[bool | None, int | None, time | None], dict[str, Any]]
+    invalid: Callable[[], dict[str, Any]]
 
 
 class ClientReadTools:
@@ -199,6 +200,14 @@ class ClientReadTools:
             return dict(UNAVAILABLE)
         return self._reminder_preference.read()
 
+    def _refuse_reminder(self) -> dict[str, Any]:
+        """A malformed write ends the reminder action: fixed reply, no same-message retry."""
+        if self._reminder_preference is None:
+            return dict(INVALID)
+        self.reminder_attempted = True
+        self._reminder_preference.invalid()
+        return dict(INVALID)
+
     def set_reminder_preference(self, args: dict[str, Any]) -> dict[str, Any]:
         """Change only the verified sender's shared preference; no target arguments.
 
@@ -207,7 +216,7 @@ class ClientReadTools:
         model free to ask the client what they meant.
         """
         if not set(args) <= {"enabled", "days_before", "local_time"} or not args:
-            return dict(INVALID)
+            return self._refuse_reminder()
         enabled = args.get("enabled")
         days = args.get("days_before")
         clock = args.get("local_time")
@@ -215,7 +224,7 @@ class ClientReadTools:
                 or (days is not None and type(days) is not int)
                 or (clock is not None and _clock_arg(clock) is None)
                 or (enabled is None and days is None and clock is None)):
-            return dict(INVALID)
+            return self._refuse_reminder()
         if self._reminder_preference is None:
             return dict(UNAVAILABLE)
         if (self.requested is not None or self.prepared is not None or self.answered

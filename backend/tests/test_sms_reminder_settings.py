@@ -242,7 +242,7 @@ def test_timed_enrollment_then_partial_edits_keep_unspecified_fields() -> None:
         "Stop reminders",
         lambda tools: (tools("set_reminder_preference", set_args(enabled=False)), "x")[1])
     assert world.saved() == (False, 2, "14:30:00")  # Off retains timing.
-    assert "now off" in reply.text and "2 days before" in reply.text and ZONE in reply.text
+    assert "are off" in reply.text and "other permitted" in reply.text.lower() and "2 days before" in reply.text and ZONE in reply.text
     world.text("Make it 4 days ahead",
                lambda tools: (tools("set_reminder_preference", set_args(days=4)), "x")[1])
     assert world.saved() == (False, 4, "14:30:00")  # A timing edit cannot re-enroll.
@@ -284,9 +284,9 @@ def test_ambiguous_or_invalid_timing_never_replaces_saved_settings() -> None:
         assert "did not change" in reply.text
         assert world.owner_view() == before
     # Boundaries are accepted.
-    world.text("Edge", attempt(set_args(days=7, clock="18:00")))
+    world.text("Reminders 7 days before at 18:00", attempt(set_args(days=7, clock="18:00")))
     assert world.saved() == (True, 7, "18:00:00")
-    world.text("Edge", attempt(set_args(days=1, clock="08:00")))
+    world.text("Reminders 1 day before at 08:00", attempt(set_args(days=1, clock="08:00")))
     assert world.saved() == (True, 1, "08:00:00")
 
 
@@ -296,6 +296,10 @@ def test_bare_yes_or_no_cannot_enroll_or_change_timing() -> None:
     for body in ("yes", "Yes", "YES", "no"):
         reply = world.text(body, lambda tools: (
             tools("set_reminder_preference", set_args(True, 2, "09:00")), "Reminders on")[1])
+        assert "Reminders on" not in reply.text and "AM or PM" in reply.text
+        assert world.owner_view() == before
+        reply = world.text(body, lambda tools: (
+            tools("set_reminder_preference", set_args(enabled=True)), "Reminders on")[1])
         assert "Reminders on" not in reply.text and "on or off" in reply.text
         assert world.owner_view() == before
 
@@ -317,11 +321,11 @@ def test_repeated_receipt_replays_the_first_result_and_never_overwrites_a_newer_
     assert replay.text == first.text and len(world.model.loops) == loops
     assert world.saved() == (False, 5, "16:00:00")
     # An edit that left everything unchanged is remembered too.
-    unchanged = world.text("Same again", lambda tools: (
+    unchanged = world.text("Turn reminders off again", lambda tools: (
         tools("set_reminder_preference", set_args(False, 5, "16:00")), "x")[1],
         receipt_id="SM-same")
     world.owner_edit(enabled=True)
-    again = world.text("Same again", forbidden, receipt_id="SM-same")
+    again = world.text("Turn reminders off again", forbidden, receipt_id="SM-same")
     assert again.text == unchanged.text and world.saved() == (True, 5, "16:00:00")
 
 
@@ -433,3 +437,130 @@ def test_scheduled_delivery_honors_the_sms_edit_for_only_that_client() -> None:
     # The texting client's old 10:00 minute no longer selects anything.
     assert world.run_delivery(datetime(2026, 10, 20, 17, 0, 15, tzinfo=UTC)) == 0
     assert len(world.submissions) == 2
+
+
+# -- deterministic guards on the inbound text (review round 1) ---------------------------------
+
+def commit_counter(world: World) -> list[int]:
+    calls: list[int] = []
+    original = world.records.commit_reminder_preference_receipt
+
+    def counted(before: Any, after: Any, receipt_id: str) -> None:
+        calls.append(1)
+        original(before, after, receipt_id)
+
+    world.records.commit_reminder_preference_receipt = counted  # type: ignore[method-assign]
+    return calls
+
+
+def test_a_model_that_normalizes_a_bare_hour_cannot_save_it() -> None:
+    world = World()
+    world.owner_edit(enabled=True, days_before=3, local_time="11:00")
+    before = world.owner_view()
+    commits = commit_counter(world)
+    for body, args in (("Make my reminder 9", set_args(clock="09:00")),
+                       ("Remind me at 9", set_args(True, clock="09:00")),
+                       ("Remind me 9 o'clock", set_args(True, clock="09:00")),
+                       ("Remind me at nine", set_args(True, clock="09:00")),
+                       ("Remind me at 9:30", set_args(True, clock="09:30")),
+                       ("Remind me 2 days before at 9", set_args(True, 2, "09:00")),
+                       ("Remind me two days before at 9", set_args(True, 2, "09:00"))):
+        reply = world.text(body, lambda tools, args=args: (
+            tools("set_reminder_preference", args), "Saved!")[1])
+        assert "AM or PM" in reply.text and "Saved!" not in reply.text, body
+        assert world.owner_view() == before, body
+    assert commits == []
+
+    # A same-message retry with a normalized time cannot save after a malformed attempt.
+    def retry(tools: Tools) -> str:
+        tools("set_reminder_preference", set_args(clock="9"))
+        assert tools("set_reminder_preference", set_args(clock="09:00")) == {
+            "ok": False, "error": "action_already_attempted"}
+        return "Saved!"
+
+    reply = world.text("Make my reminder 9", retry)
+    assert "Saved!" not in reply.text and world.owner_view() == before and commits == []
+
+
+def test_a_clear_hour_saves_and_the_two_step_clarification_completes() -> None:
+    world = World()
+    for body, args, expected in (
+            ("Remind me two days before at 9 AM", set_args(True, 2, "09:00"), (True, 2, "09:00:00")),
+            ("Make it 9am", set_args(clock="09:00"), (True, 2, "09:00:00")),
+            ("Make it noon", set_args(clock="12:00"), (True, 2, "12:00:00")),
+            ("Make it 14:00", set_args(clock="14:00"), (True, 2, "14:00:00")),
+            ("Make it 09:30", set_args(clock="09:30"), (True, 2, "09:30:00")),
+            ("Make it 9 in the morning", set_args(clock="09:00"), (True, 2, "09:00:00")),
+            ("Remind me 3 days before at 5 pm", set_args(days=3, clock="17:00"),
+             (True, 3, "17:00:00"))):
+        world.text(body, lambda tools, args=args: (
+            tools("set_reminder_preference", args), "x")[1])
+        assert world.saved() == expected, body
+    fresh = World()
+    before = fresh.owner_view()
+    fresh.text("Make my reminder 9", lambda tools: "Morning or evening?")
+    assert fresh.owner_view() == before
+    fresh.text("morning", lambda tools: (
+        tools("set_reminder_preference", set_args(True, clock="09:00")), "x")[1])
+    assert fresh.saved() == (True, 1, "09:00:00")
+
+
+def test_messages_without_reminder_content_cannot_write() -> None:
+    world = World()
+    before = world.owner_view()
+    commits = commit_counter(world)
+    for body in ("go ahead", "do it", "please do", "absolutely", "k", "si", "\U0001F44D"):
+        world.text(body, lambda tools: (
+            tools("set_reminder_preference", set_args(enabled=True)), "Saved!")[1])
+        assert world.owner_view() == before, body
+    assert commits == []
+
+
+def test_malformed_write_gets_a_fixed_reply_not_the_models_success_claim() -> None:
+    world = World()
+    before = world.owner_view()
+    reply = world.text("Change my reminders", lambda tools: (
+        tools("set_reminder_preference", set_args(clock="9")), "Your reminder is updated.")[1])
+    assert "updated" not in reply.text and "nothing changed" in reply.text
+    assert world.owner_view() == before
+
+
+def test_opt_out_between_model_and_write_is_rechecked() -> None:
+    world = World()
+    before = world.owner_view()
+
+    def plan(tools: Tools) -> str:
+        world.consent.stopped.add(f"{BUSINESS}:+14155550501")  # STOP lands mid-message.
+        tools("set_reminder_preference", set_args(True, 2, "09:00"))
+        return "Saved!"
+
+    reply = world.text("Remind me two days before at 9 AM", plan)
+    assert "couldn't save" in reply.text and world.owner_view()["enabled"] is False
+    assert world.owner_view()["version"] == before["version"]
+
+
+def test_blocked_sender_is_told_reminders_cannot_be_sent_right_now() -> None:
+    world = World()
+    world.visit(world.target, 22)
+    key = f"{BUSINESS}:+14155550501"
+    world.consent.evidence[key] = replace(world.consent.evidence[key], method="text")
+    reply = world.text("Remind me two days before at 9 AM", lambda tools: (
+        tools("set_reminder_preference", set_args(True, 2, "09:00")), "x")[1])
+    assert world.saved() == (True, 2, "09:00:00")
+    assert "can't be sent to you right now" in reply.text
+
+
+def test_replay_of_a_marker_without_timing_acknowledges_enrollment_only() -> None:
+    from scheduling.domain.client_records import ReminderReceipt
+
+    world = World()
+    world.records._reminder_receipts[  # type: ignore[attr-defined]
+        (BUSINESS, world.target, "SM-legacy")] = ReminderReceipt(True)
+    before = world.owner_view()
+
+    def forbidden(_: Tools) -> str:
+        raise AssertionError("A replayed receipt must not run the model")
+
+    reply = world.text("Remind me", forbidden, receipt_id="SM-legacy")
+    assert "now on" in reply.text and "days before" not in reply.text
+    assert world.owner_view() == before

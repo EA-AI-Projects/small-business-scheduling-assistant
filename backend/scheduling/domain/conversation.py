@@ -94,6 +94,7 @@ from scheduling.domain.lifecycle import (
 from scheduling.domain.offer_preferences import pick_offer, preferred_reader
 from scheduling.domain.owner_calendar_tool import STATUSES as OWNER_CALENDAR_STATUSES
 from scheduling.domain.owner_calendar_tool import calendar_page
+from scheduling.domain.reminder_text import ambiguous_hour, has_reminder_content
 from scheduling.domain.reminders import reminder_preference_view
 from scheduling.domain.service_duration import (
     ServiceDurationChanged,
@@ -1400,13 +1401,30 @@ class ConversationService:
             except Exception:  # noqa: BLE001 - a failed read is simply unavailable
                 return {"ok": False, "error": "unavailable"}
 
+        def reminder_invalid() -> dict[str, Any]:
+            nonlocal reminder_reply
+            reminder_reply = ConversationOutcome(
+                "I couldn't tell what reminder change you want, so nothing changed. Please "
+                "say how many days before (1 to 7) and a time with AM or PM.")
+            return {"ok": False, "error": "invalid_arguments"}
+
         def reminder(enabled: bool | None, days_before: int | None,
                      local_time: time | None) -> dict[str, Any]:
             nonlocal reminder_reply
-            if is_affirmative(receipt.body or "") or is_negative(receipt.body or ""):
+            body = receipt.body or ""
+            timing = days_before is not None or local_time is not None
+            if (is_affirmative(body) or is_negative(body)
+                    or not has_reminder_content(body)):
                 reminder_reply = ConversationOutcome(
+                    "Which reminder days before (1 to 7) and time, with AM or PM, would you "
+                    "like? Your saved reminder settings did not change." if timing else
                     "Would you like visit reminders turned on or off? Please say which.")
                 return {"ok": False, "error": "explicit_reminder_choice_required"}
+            if local_time is not None and ambiguous_hour(body):
+                reminder_reply = ConversationOutcome(
+                    "What reminder time would you like? Please include AM or PM, for example "
+                    "9 AM or 2 PM. Your saved reminder settings did not change.")
+                return {"ok": False, "error": "reminder_time_needs_am_pm"}
             try:
                 if (receipt.client_id is None
                         or self._consent.is_opted_out(receipt.business_id, receipt.sender)):
@@ -1522,7 +1540,7 @@ class ConversationService:
                 and not prompt.expired(now) and prompt.client_id == receipt.client_id)
             else None,
             preferred_reader(self._repository, receipt.business_id, policy.timezone,
-                             receipt.client_id), ReminderHooks(reminder_read, reminder))
+                             receipt.client_id), ReminderHooks(reminder_read, reminder, reminder_invalid))
 
         def check(text: str) -> str | None:
             return check_reply(text, tools.results)
@@ -1627,8 +1645,10 @@ class ConversationService:
         timing = (f"{receipt.days_before} day{'s' if receipt.days_before != 1 else ''} before "
                   f"your visit at {hour} {timezone or 'business time'}")
         lead = (f"Visit reminders are now on: {timing}." if receipt.enabled else
-                f"Visit reminders are now off. Your saved timing stays {timing}.")
-        text = " ".join((lead, *notes, "Reminders are not a delivery guarantee."))
+                f"Visit reminders are off. Your saved timing is {timing}.")
+        closing = ("Other permitted scheduling texts stay enabled. "
+                   "Reminders are not a delivery guarantee.")
+        text = " ".join((lead, *notes, closing))
         if (size := gsm_septets(text, True)) is None or size > 480:
             text = lead
         return ConversationOutcome(text)
