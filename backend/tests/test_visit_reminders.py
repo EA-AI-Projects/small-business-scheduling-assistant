@@ -82,7 +82,9 @@ def test_due_confirmed_visit_sends_one_standard_current_reminder() -> None:
 def test_unsent_selected_reminder_recalculates_after_future_schedule_edit() -> None:
     flow = workflow()
     assert flow.selector.run(BUSINESS, flow.clock[0]).queued == 1
-    flow.records.save_reminders(BUSINESS, 'owner', 'later', 0, ReminderSettings(1, time(11)), flow.clock[0])
+    profile = flow.records.read_profile(BUSINESS, flow.target)
+    ClientRecordService(flow.records).set_reminder_preference(
+        BUSINESS, flow.target, None, profile.version, flow.clock[0], local_time=time(11))
     assert consume(flow) == ConsumeOutcome.SKIPPED
     assert flow.messages.calls == []
     flow.clock[0] = datetime(2026, 10, 19, 18, 0, 15, tzinfo=UTC)
@@ -161,8 +163,8 @@ def test_within_minute_changes_do_not_create_catchup(late) -> None:
             BUSINESS, flow.visit.appointment_id, 'owner', ActorRole.OWNER, Action.EDIT, 'edit', flow.visit.version,
             start_at=flow.visit.start_at + timedelta(minutes=30)))
     else:
-        flow.records.save_reminders(BUSINESS, 'owner', 'before', 0, ReminderSettings(1, time(11)), RUN)
-        flow.records.save_reminders(BUSINESS, 'owner', 'late', 1, ReminderSettings(1, time(10)), cutoff + timedelta(seconds=1))
+        profile = clients.set_reminder_preference(BUSINESS, flow.target, None, profile.version, RUN, local_time=time(11))
+        clients.set_reminder_preference(BUSINESS, flow.target, None, profile.version, cutoff + timedelta(seconds=1), local_time=time(10))
     assert flow.selector.run(BUSINESS, flow.clock[0]).queued == 0
     assert flow.messages.calls == []
 
@@ -243,7 +245,7 @@ def test_reservation_conditions_bind_current_settings_calendar_profile_and_sms_g
     assert repository.reserve_reminder(flow.visit, profile, 0, 2, due, due)
     checks = [item.get('ConditionCheck', {}) for item in dynamo.transaction]
     keys = [check.get('Key', {}).get('SK', {}).get('S') for check in checks]
-    assert 'SETTINGS#VISIT_REMINDERS' in keys and 'CALENDAR#REVISION' in keys
+    assert 'SETTINGS#VISIT_REMINDERS' not in keys and 'CALENDAR#REVISION' in keys
     assert f'CLIENT#{flow.target}' in keys
     assert f'SMS_CONSENT_CURRENT#{profile.phone_e164}' in keys
     assert f'SMS_SUPPRESS#{profile.phone_e164}' in keys
@@ -430,4 +432,82 @@ def test_missing_business_configuration_fails_once_before_provider() -> None:
     assert consume(flow) == ConsumeOutcome.FAILED
     assert consume(flow) == ConsumeOutcome.SKIPPED
     assert flow.selector.run(BUSINESS, flow.clock[0]).queued == 0
+    assert flow.messages.calls == []
+
+
+def test_two_clients_use_independent_current_schedules_and_expected_states() -> None:
+    from fastapi.testclient import TestClient
+
+    from scheduling.owner_api import OwnerPrincipal, create_owner_app
+
+    flow = workflow()
+    other = client(flow.records, flow.consent, 502)
+    clients = ClientRecordService(flow.records)
+    profile = flow.records.read_profile(BUSINESS, other)
+    clients.set_reminder_preference(BUSINESS, other, True, profile.version, RUN,
+                                   days_before=2, local_time=time(9, 31))
+    visit = OwnerCalendarService(flow.records, lambda: RUN).apply(OwnerCalendarCommand(
+        BUSINESS, 'owner', 'other-book', OwnerAction.CREATE_APPOINTMENT,
+        flow.records.read_revision(BUSINESS), start_at=datetime(2026, 10, 21, 20, tzinfo=UTC),
+        duration_minutes=60, client_id=other)).appointment
+    api = TestClient(create_owner_app(flow.records, lambda _: OwnerPrincipal('owner', BUSINESS),
+        lambda: flow.clock[0], sms_store=flow.consent))
+    path = f'/v1/owner/businesses/{BUSINESS}/clients/{other}/reminder-preference'
+    headers = {'Authorization': 'Bearer synthetic'}
+    flow.clock[0] = datetime(2026, 10, 19, 16, 31, tzinfo=UTC)
+    expected = api.get(path, headers=headers).json()
+    assert expected['upcoming_reminders'] == [{'appointment_id': visit.appointment_id,
+        'start_at': '2026-10-21T20:00:00Z', 'run_at': '2026-10-19T16:31:00Z', 'status': 'scheduled'}]
+    assert flow.selector.run(BUSINESS, flow.clock[0]).queued == 1
+    record = flow.records.list_reminder_outbox()[0]
+    assert record.entity_id == visit.appointment_id
+    assert flow.consumer.consume(BUSINESS, record.outbox_id) == ConsumeOutcome.SENT
+    assert len(flow.messages.calls) == 1
+    assert api.get(path, headers=headers).json()['upcoming_reminders'][0]['status'] == 'attempted'
+    flow.clock[0] = datetime(2026, 10, 19, 17, tzinfo=UTC)
+    assert flow.selector.run(BUSINESS, flow.clock[0]).queued == 1
+    original = flow.records.list_reminder_outbox()[1]
+    assert original.entity_id == flow.visit.appointment_id
+    assert flow.sender.deliver(original) == 'SM-reminder'
+    assert len(flow.messages.calls) == 2
+
+
+def test_expected_read_reports_disabled_blocked_and_past_without_catchup() -> None:
+    from fastapi.testclient import TestClient
+
+    from scheduling.owner_api import OwnerPrincipal, create_owner_app
+
+    flow = workflow()
+    api = TestClient(create_owner_app(flow.records, lambda _: OwnerPrincipal('owner', BUSINESS),
+        lambda: flow.clock[0], sms_store=flow.consent))
+    path = f'/v1/owner/businesses/{BUSINESS}/clients/{flow.target}/reminder-preference'
+    headers = {'Authorization': 'Bearer synthetic'}
+    initial = api.get(path, headers=headers).json()
+    assert initial['upcoming_reminders'][0]['status'] == 'scheduled'
+    # Move a new reminder into the past; never catch up within the minute.
+    edited = api.put(path, headers=headers, json={'expected_version': initial['version'], 'local_time': '09:59'})
+    assert edited.json()['upcoming_reminders'][0]['status'] == 'past_time'
+    assert flow.selector.run(BUSINESS, flow.clock[0]).queued == 0
+    off = api.put(path, headers=headers, json={'expected_version': edited.json()['version'], 'enabled': False})
+    assert off.json()['upcoming_reminders'][0]['status'] == 'disabled'
+    flow.consent.stopped.add(f'{BUSINESS}:' + flow.records.read_profile(BUSINESS, flow.target).phone_e164)
+    timed = api.put(path, headers=headers, json={'expected_version': off.json()['version'], 'local_time': '11:00'})
+    assert timed.json()['enabled'] is False and 'sms_opted_out' in timed.json()['blockers']
+    on = api.put(path, headers=headers, json={'expected_version': timed.json()['version'], 'enabled': True})
+    assert on.json()['upcoming_reminders'][0]['status'] == 'blocked'
+    assert 'sms_opted_out' in on.json()['blockers']
+
+
+def test_legacy_migration_preserves_late_global_timing_cutoff_without_new_catchup() -> None:
+    flow = workflow()
+    profile = flow.records.read_profile(BUSINESS, flow.target)
+    flow.records._clients[(BUSINESS, flow.target)] = replace(profile,
+        reminder_days_before=None, reminder_local_time=None)
+    flow.records.save_reminders(BUSINESS, 'owner', 'legacy-before', 0, ReminderSettings(1, time(11)), RUN)
+    cutoff = datetime(2026, 10, 19, 17, 0, 1, tzinfo=UTC)
+    flow.records.save_reminders(BUSINESS, 'owner', 'legacy-late', 1, ReminderSettings(), cutoff)
+    assert flow.selector.run(BUSINESS, flow.clock[0]).queued == 0
+    migrated = flow.records.read_profile(BUSINESS, flow.target)
+    assert migrated.reminders_updated_at == cutoff
+    assert flow.records.read_profile(BUSINESS, flow.target) == migrated
     assert flow.messages.calls == []

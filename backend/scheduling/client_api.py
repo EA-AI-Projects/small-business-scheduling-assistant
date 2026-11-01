@@ -52,7 +52,11 @@ from scheduling.domain.lifecycle import (
 )
 from scheduling.domain.owner_policy import PolicyNotConfigured
 from scheduling.domain.recommendations import recommended_starts
-from scheduling.domain.reminders import reminder_preference_view
+from scheduling.domain.reminders import (
+    ReminderDeliveryRepository,
+    ReminderPreferenceView,
+    reminder_preference_view,
+)
 from scheduling.domain.scheduling_preferences import SchedulingPreferencesRecord
 from scheduling.domain.service_duration import (
     ServiceDurationChanged,
@@ -77,10 +81,8 @@ class ClientSession(BaseModel):
     service_name: str | None = None
 
 
-class ClientReminderPreference(BaseModel):
-    enabled: bool
-    version: int
-    blockers: list[str]
+class ClientReminderPreference(ReminderPreferenceView):
+    pass
 
 
 class ClientReminderPreferenceBody(BaseModel):
@@ -275,7 +277,8 @@ def add_client_session_route(
         profile = store.read_profile(session.business_id, session.client_id)
         if profile is None:
             raise HTTPException(status_code=404, detail="Client profile not found")
-        return ClientReminderPreference.model_validate(reminder_preference_view(profile, sms_store))
+        return ClientReminderPreference.model_validate(reminder_preference_view(
+            profile, sms_store, cast(ReminderDeliveryRepository, repository), now()), from_attributes=True)
 
     @app.get("/v1/client/reminder-preference", response_model=ClientReminderPreference)
     def get_client_reminder_preference(
@@ -297,7 +300,8 @@ def add_client_session_route(
             raise HTTPException(status_code=404, detail="Client profile not found") from exc
         except RecordConflict as exc:
             raise _refused("RECORD_CONFLICT", "Your profile changed. Reload your saved preference.") from exc
-        return ClientReminderPreference.model_validate(reminder_preference_view(profile, sms_store))
+        return ClientReminderPreference.model_validate(reminder_preference_view(
+            profile, sms_store, cast(ReminderDeliveryRepository, repository), now()), from_attributes=True)
 
     availability_service = AvailabilityService(store)
 

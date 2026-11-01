@@ -8,7 +8,7 @@ duration snapshots (#339).
 import re
 import unicodedata
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from typing import Protocol
 from uuid import uuid4
 
@@ -53,6 +53,9 @@ class ClientProfile:
     email: str | None = None
     reminders_enabled: bool = False
     reminders_updated_at: datetime | None = None
+    # None identifies a legacy profile awaiting its one-time timing copy.
+    reminder_days_before: int | None = 1
+    reminder_local_time: time | None = time(10)
 
     def __post_init__(self) -> None:
         if not self.business_id or not self.client_id or not self.name.strip():
@@ -160,21 +163,35 @@ class ClientRecordService:
             email.strip() or None if email is not None else None,
             current.reminders_enabled if current else False,
             current.reminders_updated_at if current else None,
+            current.reminder_days_before if current else 1,
+            current.reminder_local_time if current else time(10),
         )
         self._repository.save_profile(profile, expected_version,
                                       current.phone_e164 if current else None)
         return profile
 
-    def set_reminder_preference(self, business_id: str, client_id: str, enabled: bool,
-                                expected_version: int, now: datetime) -> ClientProfile:
+    def set_reminder_preference(self, business_id: str, client_id: str, enabled: bool | None,
+                                expected_version: int, now: datetime, *,
+                                days_before: int | None = None,
+                                local_time: time | None = None) -> ClientProfile:
+        from scheduling.domain.reminders import ReminderSettings
+
         current = self._repository.read_profile(business_id, client_id)
         if current is None:
             raise RecordNotFound("Client was not found")
         if current.version != expected_version:
             raise RecordConflict("Client profile version changed")
-        if current.reminders_enabled == enabled:
+        settings = ReminderSettings(
+            days_before if days_before is not None else current.reminder_days_before or 1,
+            local_time if local_time is not None else current.reminder_local_time or time(10))
+        choice = current.reminders_enabled if enabled is None else enabled
+        if (current.reminders_enabled == choice
+                and current.reminder_days_before == settings.days_before
+                and current.reminder_local_time == settings.local_time):
             return current
-        updated = replace(current, reminders_enabled=enabled, reminders_updated_at=_utc(now),
+        updated = replace(current, reminders_enabled=choice, reminders_updated_at=_utc(now),
+                          reminder_days_before=settings.days_before,
+                          reminder_local_time=settings.local_time,
                           version=current.version + 1, updated_at=_utc(now))
         self._repository.save_profile(updated, current.version, current.phone_e164)
         return updated

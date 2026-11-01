@@ -12,7 +12,7 @@ import { NoteForm } from "./NoteForm";
 import { NoteList } from "./NoteList";
 import { ProfileForm } from "./ProfileForm";
 
-type SectionName = "profile" | "consent" | "account" | "notes";
+type SectionName = "profile" | "consent" | "account" | "notes" | "reminders";
 
 function Accordion({ title, open, onToggle, disabledReason, children }: {
   title: string;
@@ -65,7 +65,7 @@ export function ClientDetails({ client, blankKey, initialSection, onCreated, onD
   const [open, setOpen] = useState<Record<SectionName, boolean>>({
     profile: initialSection === "profile", consent: initialSection === "consent",
     account: initialSection === "account",
-    notes: initialSection === "notes",
+    notes: initialSection === "notes", reminders: initialSection === "reminders",
   });
   const [phoneDraft, setPhoneDraft] = useState<{ key: string; phone: string } | null>(null);
   const [emailDraft, setEmailDraft] = useState<{ clientId: string | null; email: string } | null>(null);
@@ -107,10 +107,10 @@ export function ClientDetails({ client, blankKey, initialSection, onCreated, onD
           onEmailDraft={(email) => setEmailDraft({ clientId, email })}
           onSaved={() => setEmailDraft(null)} />
       </Accordion>
-      {client && <section className="stack" aria-label="Visit reminders">
-        <h4>Visit reminders</h4>
-        <ReminderPreferenceForm key={client.client_id} clientId={client.client_id} version={client.version} />
-      </section>}
+      <Accordion title="Visit reminders" open={open.reminders} onToggle={() => toggle("reminders")}
+        disabledReason={client ? undefined : `${waiting} Visit reminders require a saved client.`}>
+        {client && <ReminderPreferenceForm key={client.client_id} clientId={client.client_id} version={client.version} />}
+      </Accordion>
       {client && <section className="stack" aria-label="Delete client">
         {!confirmDelete ? (
           <button type="button" className="danger" onClick={() => setConfirmDelete(true)}>

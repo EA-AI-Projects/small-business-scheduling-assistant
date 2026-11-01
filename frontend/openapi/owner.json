@@ -359,9 +359,36 @@
             "title": "Blockers",
             "type": "array"
           },
+          "days_before": {
+            "title": "Days Before",
+            "type": "integer"
+          },
           "enabled": {
             "title": "Enabled",
             "type": "boolean"
+          },
+          "local_time": {
+            "format": "time",
+            "title": "Local Time",
+            "type": "string"
+          },
+          "timezone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timezone"
+          },
+          "upcoming_reminders": {
+            "items": {
+              "$ref": "#/components/schemas/UpcomingReminder"
+            },
+            "title": "Upcoming Reminders",
+            "type": "array"
           },
           "version": {
             "title": "Version",
@@ -371,7 +398,11 @@
         "required": [
           "enabled",
           "version",
-          "blockers"
+          "days_before",
+          "local_time",
+          "timezone",
+          "blockers",
+          "upcoming_reminders"
         ],
         "title": "ClientReminderPreference",
         "type": "object"
@@ -1112,21 +1143,109 @@
       "ReminderPreferenceBody": {
         "additionalProperties": false,
         "properties": {
+          "days_before": {
+            "anyOf": [
+              {
+                "maximum": 7.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Days Before"
+          },
           "enabled": {
-            "title": "Enabled",
-            "type": "boolean"
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
           },
           "expected_version": {
             "exclusiveMinimum": 0.0,
             "title": "Expected Version",
             "type": "integer"
+          },
+          "local_time": {
+            "anyOf": [
+              {
+                "format": "time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Time"
           }
         },
         "required": [
-          "expected_version",
-          "enabled"
+          "expected_version"
         ],
         "title": "ReminderPreferenceBody",
+        "type": "object"
+      },
+      "ReminderPreferenceView": {
+        "properties": {
+          "blockers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Blockers",
+            "type": "array"
+          },
+          "days_before": {
+            "title": "Days Before",
+            "type": "integer"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "local_time": {
+            "format": "time",
+            "title": "Local Time",
+            "type": "string"
+          },
+          "timezone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timezone"
+          },
+          "upcoming_reminders": {
+            "items": {
+              "$ref": "#/components/schemas/UpcomingReminder"
+            },
+            "title": "Upcoming Reminders",
+            "type": "array"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "enabled",
+          "version",
+          "days_before",
+          "local_time",
+          "timezone",
+          "blockers",
+          "upcoming_reminders"
+        ],
+        "title": "ReminderPreferenceView",
         "type": "object"
       },
       "ReminderSettingsBody": {
@@ -1170,6 +1289,43 @@
           "expected_version"
         ],
         "title": "RemoveBlockBody",
+        "type": "object"
+      },
+      "UpcomingReminder": {
+        "properties": {
+          "appointment_id": {
+            "title": "Appointment Id",
+            "type": "string"
+          },
+          "run_at": {
+            "format": "date-time",
+            "title": "Run At",
+            "type": "string"
+          },
+          "start_at": {
+            "format": "date-time",
+            "title": "Start At",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "disabled",
+              "blocked",
+              "past_time",
+              "scheduled",
+              "attempted"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "appointment_id",
+          "start_at",
+          "run_at",
+          "status"
+        ],
+        "title": "UpcomingReminder",
         "type": "object"
       },
       "ValidationError": {
@@ -3089,7 +3245,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "title": "Response Get Reminder Preference V1 Owner Businesses  Business Id  Clients  Client Id  Reminder Preference Get"
+                  "$ref": "#/components/schemas/ReminderPreferenceView"
                 }
               }
             },
@@ -3150,7 +3306,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "title": "Response Set Reminder Preference V1 Owner Businesses  Business Id  Clients  Client Id  Reminder Preference Put"
+                  "$ref": "#/components/schemas/ReminderPreferenceView"
                 }
               }
             },

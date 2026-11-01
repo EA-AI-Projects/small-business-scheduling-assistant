@@ -7,7 +7,10 @@ import type { ClientProfile } from "@/api/types";
 import { ClientDetails } from "./ClientDetails";
 
 const request = vi.fn(async () => undefined);
-const get = vi.fn(async () => ({ state: "none", expires_at: null }));
+const get = vi.fn(async (path: string) => path.endsWith("reminder-preference")
+  ? { enabled: false, version: 1, days_before: 1, local_time: "10:00:00", timezone: "America/Los_Angeles",
+    blockers: [], upcoming_reminders: [] }
+  : { state: "none", expires_at: null });
 const api = { request, get };
 const refresh = vi.fn(async () => undefined);
 const notify = vi.fn();
@@ -47,6 +50,34 @@ describe("Delete client confirmation", () => {
     expect(button).toBeDefined();
     await act(async () => button!.click());
   }
+
+  it("uses a collapsed Visit reminders accordion that keeps a timing draft", async () => {
+    const button = [...host.querySelectorAll<HTMLButtonElement>('button[aria-expanded]')]
+      .find((item) => item.textContent?.includes("Visit reminders"))!;
+    expect(button.getAttribute("aria-expanded")).toBe("false");
+    const region = host.querySelector<HTMLElement>(`#${CSS.escape(button.getAttribute("aria-controls")!)}`)!;
+    expect(region.hidden).toBe(true);
+    await act(async () => button.click());
+    expect(region.hidden).toBe(false);
+    const field = region.querySelector<HTMLInputElement>('input[name="days_before"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(field, "3");
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => button.click());
+    await act(async () => button.click());
+    expect(field.value).toBe("3");
+  });
+
+  it("requires a saved profile before opening Visit reminders", async () => {
+    await act(async () => root.render(<ClientDetails client={undefined} blankKey={2}
+      initialSection="profile" onCreated={() => undefined} onDeleted={onDeleted} />));
+    const button = [...host.querySelectorAll<HTMLButtonElement>('button[aria-expanded]')]
+      .find((item) => item.textContent?.includes("Visit reminders"))!;
+    expect(button.disabled).toBe(true);
+    expect(host.textContent).toContain("Visit reminders require a saved client");
+    expect(host.querySelector('form[aria-label="Visit reminder preference"]')).toBeNull();
+  });
 
   it("states irreversible effects and lets the owner cancel without a request", async () => {
     await click("Delete client");

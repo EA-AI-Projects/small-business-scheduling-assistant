@@ -21,6 +21,9 @@ let expiresAt: string | null = null;
 let appKey = 0;
 const get = vi.fn(async (path: string) => {
   if (path === "/clients") return [profile];
+  if (path.endsWith("/reminder-preference")) return { enabled: false, version: profile.version,
+    days_before: 1, local_time: "10:00:00", timezone: "America/Los_Angeles",
+    blockers: [], upcoming_reminders: [] };
   if (path.endsWith("/account-invitation")) return {
     state: accountState === "pending" && expiresAt && Date.parse(expiresAt) <= Date.now()
       ? "expired" : accountState,

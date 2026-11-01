@@ -1,6 +1,7 @@
 """Deterministic local calendar adapter for synthetic tests and development."""
 
 from collections import defaultdict
+from dataclasses import replace
 from datetime import datetime
 from threading import RLock
 
@@ -258,7 +259,6 @@ class InMemoryCalendarRepository:
             outbox_id = reminder_outbox_id(appointment.appointment_id)
             prior = self._reminder_outbox.get(outbox_id)
             if (self._revisions[appointment.business_id] != calendar_revision
-                    or self.read_reminders(appointment.business_id).version != settings_version
                     or self.read_profile(appointment.business_id, profile.client_id) != profile
                     or self.read_appointment(appointment.appointment_id) != appointment):
                 return False
@@ -275,6 +275,11 @@ class InMemoryCalendarRepository:
     def list_reminder_outbox(self) -> tuple[OutboxRecord, ...]:
         with self._lock:
             return tuple(self._reminder_outbox.values())
+
+    def reminder_attempted(self, business_id: str, appointment_id: str) -> bool:
+        with self._lock:
+            record = self._reminder_outbox.get(reminder_outbox_id(appointment_id))
+            return bool(record and record.business_id == business_id and record.attempts > 0)
 
     def reserve_invitation(self, intent: InvitationIntent, settings_version: int,
                            calendar_revision: int, profile: ClientProfile) -> bool:
@@ -382,12 +387,22 @@ class InMemoryCalendarRepository:
 
     def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None:
         with self._lock:
-            return self._clients.get((business_id, client_id))
+            profile = self._clients.get((business_id, client_id))
+            if profile is not None and profile.reminder_days_before is None:
+                legacy = self.read_reminders(business_id)
+                cutoffs = [instant for instant in (profile.reminders_updated_at, legacy.updated_at)
+                           if instant is not None]
+                profile = replace(profile, reminder_days_before=legacy.settings.days_before,
+                    reminder_local_time=legacy.settings.local_time, version=profile.version + 1,
+                    reminders_updated_at=max(cutoffs) if cutoffs else None)
+                self._clients[(business_id, client_id)] = profile
+            return profile
 
     def list_profiles(self, business_id: str) -> tuple[ClientProfile, ...]:
         with self._lock:
-            return tuple(sorted((profile for (owner, _), profile in self._clients.items()
-                                 if owner == business_id), key=lambda profile: profile.client_id))
+            return tuple(sorted((profile for owner, client_id in self._clients
+                if owner == business_id and (profile := self.read_profile(owner, client_id)) is not None),
+                key=lambda profile: profile.client_id))
 
     def list_profiles_after(self, business_id: str, cursor: str | None,
                             limit: int) -> tuple[tuple[ClientProfile, ...], str | None]:
@@ -399,7 +414,7 @@ class InMemoryCalendarRepository:
     def read_verified_phone(self, business_id: str, phone_e164: str) -> ClientProfile | None:
         with self._lock:
             client_id = self._client_phones.get((business_id, phone_e164))
-            profile = self._clients.get((business_id, client_id)) if client_id else None
+            profile = self.read_profile(business_id, client_id) if client_id else None
             return (profile if profile and profile.phone_e164 == phone_e164
                     and profile.phone_verified_at is not None and profile.active else None)
 

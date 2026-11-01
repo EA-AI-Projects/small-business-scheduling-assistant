@@ -1,15 +1,17 @@
 """Shared visit reminder settings and SMS eligibility, independent of delivery."""
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
-from typing import Protocol
+from typing import Literal, Protocol
 from zoneinfo import ZoneInfo
+
+from pydantic import BaseModel
 
 from scheduling.domain.appointments import Appointment
 from scheduling.domain.availability import AvailabilityPolicy
 from scheduling.domain.booking_invitations import _local_instant
 from scheduling.domain.calendar import CalendarStatus
 from scheduling.domain.client_records import ClientProfile
-from scheduling.domain.owner_policy import PolicyRecord
+from scheduling.domain.owner_policy import PolicyNotConfigured, PolicyRecord
 from scheduling.domain.sms_ingress import SmsIngressStore
 
 
@@ -19,7 +21,7 @@ class ReminderSettings:
     local_time: time = time(10)
 
     def __post_init__(self) -> None:
-        if not 1 <= self.days_before <= 7:
+        if type(self.days_before) is not int or not 1 <= self.days_before <= 7:
             raise ValueError("Reminder days before must be 1 through 7")
         if (self.local_time.tzinfo is not None or self.local_time.second
                 or self.local_time.microsecond or not time(8) <= self.local_time <= time(18)):
@@ -64,9 +66,59 @@ def reminder_blockers(profile: ClientProfile, consent: SmsIngressStore | None) -
     return tuple(blockers)
 
 
-def reminder_preference_view(profile: ClientProfile, consent: SmsIngressStore | None) -> dict[str, object]:
-    return {"enabled": profile.reminders_enabled, "version": profile.version,
-            "blockers": reminder_blockers(profile, consent)}
+class UpcomingReminder(BaseModel):
+    appointment_id: str
+    start_at: datetime
+    run_at: datetime
+    status: Literal["disabled", "blocked", "past_time", "scheduled", "attempted"]
+
+
+class ReminderPreferenceView(BaseModel):
+    enabled: bool
+    version: int
+    days_before: int
+    local_time: time
+    timezone: str | None
+    blockers: tuple[str, ...]
+    upcoming_reminders: tuple[UpcomingReminder, ...]
+
+
+def client_reminder_settings(profile: ClientProfile) -> ReminderSettings:
+    return ReminderSettings(profile.reminder_days_before or 1,
+                            profile.reminder_local_time or time(10))
+
+
+def reminder_preference_view(profile: ClientProfile, consent: SmsIngressStore | None,
+                             records: "ReminderDeliveryRepository", now: datetime) -> ReminderPreferenceView:
+    settings = client_reminder_settings(profile)
+    blockers = reminder_blockers(profile, consent)
+    policy = records.read_policy_record(profile.business_id)
+    try:
+        zone = records.read_policy(profile.business_id).timezone
+    except PolicyNotConfigured:
+        return ReminderPreferenceView(enabled=profile.reminders_enabled, version=profile.version,
+            days_before=settings.days_before, local_time=settings.local_time, timezone=None,
+            blockers=(*blockers, "business_unconfigured"), upcoming_reminders=())
+    timezone_changed = getattr(policy, "timezone_updated_at", None)
+    _, visits = records.read_confirmed_for_client(
+        profile.business_id, profile.client_id, now, now + timedelta(days=366))
+    upcoming = []
+    for visit in sorted(visits, key=lambda item: item.start_at):
+        if visit.start_at <= now:
+            continue
+        run_at = reminder_run_at(visit, settings, zone)
+        late = ((profile.reminders_updated_at is not None and profile.reminders_updated_at > run_at)
+                or (visit.confirmed_at is not None and visit.confirmed_at > run_at)
+                or (timezone_changed is not None and timezone_changed > run_at))
+        status: Literal["disabled", "blocked", "past_time", "scheduled", "attempted"]
+        status = ("attempted" if records.reminder_attempted(profile.business_id, visit.appointment_id)
+                  else "disabled" if not profile.reminders_enabled else "blocked" if blockers
+                  else "past_time" if now >= run_at + timedelta(minutes=1) or late else "scheduled")
+        upcoming.append(UpcomingReminder(appointment_id=visit.appointment_id,
+            start_at=visit.start_at, run_at=run_at, status=status))
+    return ReminderPreferenceView(enabled=profile.reminders_enabled, version=profile.version,
+        days_before=settings.days_before, local_time=settings.local_time, timezone=zone,
+        blockers=blockers, upcoming_reminders=tuple(upcoming))
 
 
 REMINDER_TEMPLATE = "visit_reminder"
@@ -90,6 +142,7 @@ class ReminderEligibilityRepository(Protocol):
 
 
 class ReminderDeliveryRepository(ReminderEligibilityRepository, Protocol):
+    def reminder_attempted(self, business_id: str, appointment_id: str) -> bool: ...
     def list_profiles(self, business_id: str) -> tuple[ClientProfile, ...]: ...
     def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None: ...
     def read_appointment(self, appointment_id: str) -> Appointment | None: ...
@@ -110,8 +163,7 @@ def reminder_problem(appointment: Appointment, profile: ClientProfile,
     blockers = reminder_blockers(profile, consent)
     if blockers:
         return blockers[0].upper()
-    settings = records.read_reminders(appointment.business_id)
-    run_at = reminder_run_at(appointment, settings.settings,
+    run_at = reminder_run_at(appointment, client_reminder_settings(profile),
                               records.read_policy(appointment.business_id).timezone)
     if not run_at <= now < run_at + timedelta(minutes=1):
         return "WINDOW_EXPIRED"
@@ -119,8 +171,6 @@ def reminder_problem(appointment: Appointment, profile: ClientProfile,
     timezone_changed = getattr(policy, "timezone_updated_at", None)
     if timezone_changed is not None and timezone_changed > run_at:
         return "LATE_TIMEZONE_CHANGE"
-    if settings.updated_at is not None and settings.updated_at > run_at:
-        return "LATE_SETTINGS_CHANGE"
     if ((profile.reminders_updated_at is not None and profile.reminders_updated_at > run_at)
             or (appointment.confirmed_at is not None and appointment.confirmed_at > run_at)):
         return "LATE_ENROLLMENT_OR_CONFIRMATION"
@@ -143,17 +193,17 @@ class ReminderSelector:
             raise ValueError("Reminder clock must be timezone-aware")
         policy = self._records.read_policy(business_id)
         zone = ZoneInfo(policy.timezone)
-        settings = self._records.read_reminders(business_id)
         local = now.astimezone(zone)
-        if (local.hour, local.minute) != (settings.settings.local_time.hour, settings.settings.local_time.minute):
-            return ReminderSelectionReport(0, 0)
-        day = local.date() + timedelta(days=settings.settings.days_before)
-        start = datetime.combine(day, time(), zone).astimezone(UTC)
-        end = datetime.combine(day + timedelta(days=1), time(), zone).astimezone(UTC)
         examined = queued = 0
         for profile in self._records.list_profiles(business_id):
             if not profile.reminders_enabled:
                 continue
+            settings = client_reminder_settings(profile)
+            if (local.hour, local.minute) != (settings.local_time.hour, settings.local_time.minute):
+                continue
+            day = local.date() + timedelta(days=settings.days_before)
+            start = datetime.combine(day, time(), zone).astimezone(UTC)
+            end = datetime.combine(day + timedelta(days=1), time(), zone).astimezone(UTC)
             revision, visits = self._records.read_confirmed_for_client(business_id, profile.client_id, start, end)
             for visit in visits:
                 examined += 1
@@ -161,7 +211,7 @@ class ReminderSelector:
                     continue
                 if reminder_problem(visit, profile, self._records, self._consent, now) is not None:
                     continue
-                run_at = reminder_run_at(visit, settings.settings, policy.timezone)
-                if self._records.reserve_reminder(visit, profile, settings.version, revision, run_at, now):
+                run_at = reminder_run_at(visit, settings, policy.timezone)
+                if self._records.reserve_reminder(visit, profile, profile.version, revision, run_at, now):
                     queued += 1
         return ReminderSelectionReport(examined, queued)

@@ -9,13 +9,12 @@ import { BusinessProfileForm } from "./BusinessProfileForm";
 import { AdvancedPolicyForm } from "./AdvancedPolicyForm";
 import { ExceptionForm } from "./ExceptionForm";
 import { PolicySummary } from "./PolicySummary";
-import { ReminderForm } from "./ReminderForm";
 import { OutreachForm } from "./OutreachForm";
 import { RegularPolicyForm } from "./RegularPolicyForm";
 import { SchedulingPreferencesForm } from "./SchedulingPreferencesForm";
 import { summarize } from "./preferencesText";
 
-type Editor = "business" | "availability" | "advanced" | "invitations" | "preferences" | "reminders";
+type Editor = "business" | "availability" | "advanced" | "invitations" | "preferences";
 
 export function SettingsTab() {
   const { api, data } = useOwner();
@@ -31,10 +30,10 @@ export function SettingsTab() {
   }, [api, preferencesAttempt]);
   const [open, setOpen] = useState<Editor | null>(null);
   const [dirty, setDirty] = useState({ business: false, regular: false, exception: false,
-    advanced: false, invitations: false, reminders: false, preferences: false });
+    advanced: false, invitations: false, preferences: false });
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const buttons = useRef<Record<Editor, HTMLButtonElement | null>>({ business: null,
-    availability: null, advanced: null, invitations: null, reminders: null, preferences: null });
+    availability: null, advanced: null, invitations: null, preferences: null });
   const keepEditingButton = useRef<HTMLButtonElement>(null);
   const resumeFocus = useRef<HTMLElement | null>(null);
   const getAnchor = useCallback(() => null, []);
@@ -56,7 +55,7 @@ export function SettingsTab() {
   }, [confirmDiscard]);
 
   function show(editor: Editor) {
-    setDirty({ business: false, regular: false, exception: false, advanced: false, invitations: false, reminders: false,
+    setDirty({ business: false, regular: false, exception: false, advanced: false, invitations: false,
       preferences: false });
     setConfirmDiscard(false);
     setOpen(editor);
@@ -77,7 +76,7 @@ export function SettingsTab() {
 
   const titles: Record<Editor, string> = { business: "Business details", availability: "Availability",
     advanced: "Advanced scheduling", invitations: "Booking invitations",
-    reminders: "Visit reminders", preferences: "Scheduling preferences" };
+    preferences: "Scheduling preferences" };
 
   return <>
     <SectionHeading eyebrow="AVAILABILITY" title="Settings" />
@@ -112,8 +111,6 @@ export function SettingsTab() {
         <strong>Booking invitations</strong>
         <span id="settings-invitations-summary">{outreach ? outreach.enabled ? `Weekly · ${outreach.lookahead_weeks ?? "?"}-week lookahead`
           : "Recurring invitations off" : "Loading invitation settings"}</span>
-        {open === "reminders" && <ReminderForm onDirtyChange={(value) => setDirty((current) =>
-          current.reminders === value ? current : { ...current, reminders: value })} />}
         {open === "invitations" && dirty.invitations && <span className="settings-unsaved">Unsaved changes</span>}
       </button>
       <button ref={(node) => { buttons.current.preferences = node; }} type="button" className="settings-card"
@@ -124,11 +121,6 @@ export function SettingsTab() {
           : preferences === null ? "Loading scheduling preferences"
           : preferences.active ? `Active · ${summarize(preferences.active.rules, preferences.active.clients)}` : "None active"}</span>
         {open === "preferences" && dirty.preferences && <span className="settings-unsaved">Unsaved changes</span>}
-      </button>
-      <button ref={(node) => { buttons.current.reminders = node; }} type="button" className="settings-card"
-        aria-haspopup="dialog" aria-label="Edit Visit reminders" onClick={() => show("reminders")}>
-        <strong>Visit reminders</strong><span>Timing for enrolled clients · {data.zone}</span>
-        {open === "reminders" && dirty.reminders && <span className="settings-unsaved">Unsaved changes</span>}
       </button>
     </div>
     {open && <PopoverCard variant="modal" title={titles[open]} getAnchor={getAnchor} onClose={close}
@@ -147,8 +139,6 @@ export function SettingsTab() {
         {open === "advanced" && (data.policy ? <AdvancedPolicyForm onDirtyChange={(value) => setDirty((current) =>
           current.advanced === value ? current : { ...current, advanced: value })} />
           : <p className="empty">Load the pilot policy under Availability first.</p>)}
-        {open === "reminders" && <ReminderForm onDirtyChange={(value) => setDirty((current) =>
-          current.reminders === value ? current : { ...current, reminders: value })} />}
         {open === "invitations" && <OutreachForm onDirtyChange={(value) => setDirty((current) =>
           current.invitations === value ? current : { ...current, invitations: value })} />}
         {open === "preferences" && <SchedulingPreferencesForm key={preferences ? "loaded" : "loading"} state={preferences}
