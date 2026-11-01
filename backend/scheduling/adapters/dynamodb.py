@@ -29,6 +29,7 @@ from scheduling.domain.client_records import (
     ClientProfile,
     RecordConflict,
     RecordNotFound,
+    ReminderReceipt,
 )
 from scheduling.domain.holds import (
     CreateHold,
@@ -1458,10 +1459,15 @@ class DynamoDBCalendarRepository:
             raise RecordConflict("Profile version or phone mapping changed") from exc
 
     def read_reminder_preference_receipt(self, business_id: str, client_id: str,
-                                         receipt_id: str) -> bool | None:
+                                         receipt_id: str) -> ReminderReceipt | None:
         item = self._get(self._business_key(
             business_id, _command_sort_key(client_id, "set_reminder_preference", receipt_id)))
-        return bool(item["enabled"]["BOOL"]) if item is not None else None
+        if item is None:
+            return None
+        return ReminderReceipt(
+            bool(item["enabled"]["BOOL"]),
+            int(item["days_before"]["N"]) if "days_before" in item else None,
+            time.fromisoformat(item["local_time"]["S"]) if "local_time" in item else None)
 
     def commit_reminder_preference_receipt(self, before: ClientProfile, after: ClientProfile,
                                            receipt_id: str) -> None:
@@ -1475,6 +1481,13 @@ class DynamoDBCalendarRepository:
         if after.reminders_updated_at is not None:
             expression += ", reminders_updated_at = :reminder_updated"
             values[":reminder_updated"] = {"S": _instant(after.reminders_updated_at)}
+        receipt_item: dict[str, Any] = {"enabled": {"BOOL": after.reminders_enabled}}
+        if after.reminder_days_before is not None and after.reminder_local_time is not None:
+            expression += ", reminder_days_before = :days, reminder_local_time = :clock"
+            values[":days"] = {"N": str(after.reminder_days_before)}
+            values[":clock"] = {"S": after.reminder_local_time.isoformat()}
+            receipt_item["days_before"] = {"N": str(after.reminder_days_before)}
+            receipt_item["local_time"] = {"S": after.reminder_local_time.isoformat()}
         writes = [{"Update": {
             "TableName": self._table,
             "Key": self._business_key(before.business_id, f"CLIENT#{before.client_id}"),
@@ -1485,8 +1498,7 @@ class DynamoDBCalendarRepository:
             "TableName": self._table,
             "Item": {**self._business_key(before.business_id, _command_sort_key(
                 before.client_id, "set_reminder_preference", receipt_id)),
-                "client_id": {"S": before.client_id},
-                "enabled": {"BOOL": after.reminders_enabled}},
+                "client_id": {"S": before.client_id}, **receipt_item},
             "ConditionExpression": "attribute_not_exists(PK)",
         }}, self._erasure_check(before.business_id, before.client_id)]
         try:

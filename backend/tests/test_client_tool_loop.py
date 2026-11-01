@@ -482,7 +482,8 @@ def test_openai_client_loop_bounds_tools_and_rewrites_once_when_the_check_fails(
         "get_business_info", "get_availability", "get_my_bookings",
         "request_booking", "prepare_cancellation", "confirm_cancellation",
         "dismiss_cancellation", "request_reschedule", "get_my_counteroffer",
-        "respond_to_counteroffer", "set_reminder_preference"}  # Backend validates every write.
+        "respond_to_counteroffer", "get_reminder_preference",
+        "set_reminder_preference"}  # Backend validates every write.
     from scheduling.domain.client_tools import TOOL_NAMES
     assert {tool["name"] for tool in CLIENT_LOOP_TOOLS} == set(TOOL_NAMES)
     assert all(payload["store"] is False for payload in payloads)

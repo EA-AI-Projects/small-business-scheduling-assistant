@@ -114,7 +114,7 @@ The owner may also trigger a one-off run from the same Settings card. It saves a
 
 ### 6.4.2 Visit reminders (#399, revising #390–#394)
 
-Visit reminders use one versioned enrollment and timing preference per stable client profile. The accepted design supports owner and client UI and SMS controls, with current SMS restrictions explained without changing consent. #400 implements owner controls and delivery; #401 adds the client portal controls (enrollment, days before and local send time in the business timezone); the remaining #399 children extend client SMS and owner SMS controls. Scheduled delivery and its gate default disabled; implementation does not authorize deployment or live messages.
+Visit reminders use one versioned enrollment and timing preference per stable client profile. The accepted design supports owner and client UI and SMS controls, with current SMS restrictions explained without changing consent. #400 implements owner controls and delivery; #401 adds the client portal controls (enrollment, days before and local send time in the business timezone); #402 adds client SMS reads and changes of the same preference; the remaining #399 child extends owner SMS controls (#403). Scheduled delivery and its gate default disabled; implementation does not authorize deployment or live messages.
 
 Accepted full scope (owner decisions, 2026-10-23; per-client revision approved 2026-11-01 in #399):
 

@@ -9,7 +9,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 from zoneinfo import ZoneInfo
 
 from scheduling.domain.appointments import Appointment
@@ -40,6 +40,7 @@ from scheduling.domain.client_records import (
     ClientRecordService,
     RecordConflict,
     RecordNotFound,
+    ReminderReceipt,
 )
 from scheduling.domain.client_replies import (
     ClientReplyFact,
@@ -51,7 +52,9 @@ from scheduling.domain.client_tools import (
     CancellationHooks,
     ClientReadTools,
     CounterofferHooks,
+    ReminderHooks,
     check_reply,
+    reminder_facts,
 )
 from scheduling.domain.conversation_history import HistoryMessage
 from scheduling.domain.conversation_state import (
@@ -91,6 +94,8 @@ from scheduling.domain.lifecycle import (
 from scheduling.domain.offer_preferences import pick_offer, preferred_reader
 from scheduling.domain.owner_calendar_tool import STATUSES as OWNER_CALENDAR_STATUSES
 from scheduling.domain.owner_calendar_tool import calendar_page
+from scheduling.domain.reminder_text import acknowledgment_only, unclear_time
+from scheduling.domain.reminders import reminder_preference_view
 from scheduling.domain.service_duration import (
     ServiceDurationChanged,
     ServiceNotConfigured,
@@ -218,6 +223,12 @@ CLIENT_LOOP_INTENTS = frozenset({"availability", "request_booking", "calendar_qu
                                  "clarify_booking", "clarify", "unsupported", "cancel",
                                  "confirm_cancel", "keep_visit", "reschedule",
                                  "reminder_preference"})
+REMINDER_SCOPE = ("This covers reminder settings only; nothing else in your message was "
+                  "acted on, so text me again about anything else.")
+# Short enough that the longest committed text (a move, 136 septets) plus this fits the
+# 160-septet committed-reply limit.
+REMINDER_NOT_CHANGED = "Reminders not changed."
+COMMITTED_REPLY_SEPTETS = 160
 CLOSED_NOTE = "\nI closed my earlier question, so nothing was booked or cancelled."
 
 
@@ -363,7 +374,8 @@ class ConversationService:
                 return ConversationOutcome(
                     "I can't check your saved message result right now. Please try again later.")
             if reminder_replay is not None:
-                return self._reminder_acknowledgment(reminder_replay)
+                return self._reminder_acknowledgment(
+                    reminder_replay, self._business_timezone(receipt), scoped=True)
         try:
             policy = self._repository.read_policy(receipt.business_id)
             targets = self._targets(receipt, now)
@@ -1381,12 +1393,67 @@ class ConversationService:
         reminder_reply: ConversationOutcome | None = None
         prompt_state = "absent"
 
-        def reminder(enabled: bool) -> dict[str, Any]:
+        def reminder_view(now_: datetime) -> Any:
+            profile = (self._repository.read_profile(receipt.business_id, receipt.client_id)
+                       if receipt.client_id is not None else None)
+            if profile is None:
+                raise RecordNotFound("Sender is unavailable")
+            return reminder_preference_view(
+                profile, cast(Any, self._consent), cast(Any, self._repository), now_)
+
+        def reminder_read() -> dict[str, Any]:
+            # Always the verified sender's own profile; opted-out senders never reach a loop.
+            try:
+                return reminder_facts(reminder_view(self._clock()))
+            except Exception:  # noqa: BLE001 - a failed read is simply unavailable
+                return {"ok": False, "error": "unavailable"}
+
+        reminder_skipped = False
+
+        def committed_text(outcome: ConversationOutcome, model_text: str) -> str:
+            # A committed draft is one 160-septet message or the adapter drops it, so the
+            # sentence must fit there: the model text if it fits, else the deterministic text.
+            if not reminder_skipped:
+                return model_text
+            for candidate in (model_text, outcome.text):
+                full = f"{candidate} {REMINDER_NOT_CHANGED}"
+                if (size := gsm_septets(full)) is not None and size <= COMMITTED_REPLY_SEPTETS:
+                    return full
+            return f"{outcome.text} {REMINDER_NOT_CHANGED}"  # Over by design; reported.
+
+        def scoped(text: str) -> ConversationOutcome:
+            # A backend-written reminder reply replaces the model's text, so it must not let
+            # the client think the rest of the message was handled.
+            return ConversationOutcome(f"{text} {REMINDER_SCOPE}")
+
+        def reminder_not_applied() -> None:
+            nonlocal reminder_skipped
+            reminder_skipped = True
+
+        def reminder_invalid() -> dict[str, Any]:
             nonlocal reminder_reply
-            if is_affirmative(receipt.body or "") or is_negative(receipt.body or ""):
-                reminder_reply = ConversationOutcome(
+            reminder_reply = scoped(
+                "I couldn't tell what reminder change you want, so nothing changed. Please "
+                "say how many days before (1 to 7) and a time with AM or PM.")
+            return {"ok": False, "error": "invalid_arguments"}
+
+        def reminder(enabled: bool | None, days_before: int | None,
+                     local_time: time | None) -> dict[str, Any]:
+            nonlocal reminder_reply
+            body = receipt.body or ""
+            timing = days_before is not None or local_time is not None
+            if (is_affirmative(body) or is_negative(body)
+                    or acknowledgment_only(body)):
+                reminder_reply = scoped(
+                    "Which reminder days before (1 to 7) and time, with AM or PM, would you "
+                    "like? Your saved reminder settings did not change." if timing else
                     "Would you like visit reminders turned on or off? Please say which.")
                 return {"ok": False, "error": "explicit_reminder_choice_required"}
+            if local_time is not None and unclear_time(body, local_time):
+                reminder_reply = scoped(
+                    "What reminder time would you like? Please include AM or PM, for example "
+                    "9 AM or 2 PM. Your saved reminder settings did not change.")
+                return {"ok": False, "error": "reminder_time_needs_am_pm"}
             try:
                 if (receipt.client_id is None
                         or self._consent.is_opted_out(receipt.business_id, receipt.sender)):
@@ -1394,20 +1461,33 @@ class ConversationService:
                 consent = self._consent.read_consent(receipt.business_id, receipt.sender)
                 if consent is None or consent.client_id != receipt.client_id:
                     raise RecordNotFound("Consent is unavailable")
-                saved = ClientRecordService(self._repository).set_reminder_preference_from_receipt(
+                saved = ClientRecordService(self._repository).apply_reminder_request_from_receipt(
                     receipt.business_id, receipt.client_id, receipt.sender, receipt.provider_id,
-                    enabled, self._clock())
-                reminder_reply = self._reminder_acknowledgment(saved)
-                return {"ok": True, "reminder_preference_saved": True, "enabled": saved}
+                    enabled, self._clock(), days_before=days_before, local_time=local_time)
+                notes: tuple[str, ...] = ()
+                try:
+                    notes = self._reminder_notes(reminder_view(self._clock()), zone, saved)
+                except Exception:
+                    LOGGER.warning("Could not explain reminder timing", exc_info=True)
+                reminder_reply = self._reminder_acknowledgment(
+                    saved, policy.timezone, notes, scoped=True)
+                return {"ok": True, "reminder_preference_saved": True, "enabled": saved.enabled,
+                        "days_before": saved.days_before,
+                        "time": saved.local_time.strftime("%H:%M") if saved.local_time else None}
+            except ValueError:
+                reminder_reply = scoped(
+                    "Reminders can be 1 to 7 days before your visit, between 8:00 AM and "
+                    "6:00 PM. Your saved reminder settings did not change.")
+                return {"ok": False, "error": "reminder_timing_out_of_range"}
             except (RecordConflict, RecordNotFound):
-                reminder_reply = ConversationOutcome(
+                reminder_reply = scoped(
                     "I couldn't save your reminder preference because your profile changed "
                     "or is unavailable. Please try again.")
                 return {"ok": False, "error": "profile_changed_or_unavailable"}
             except Exception:  # noqa: BLE001 - unknown commit outcomes need a safe receipt reply
                 # A storage timeout may follow a committed write. A retry uses the receipt
                 # marker; never let an unchecked model claim success or try another action.
-                reminder_reply = ConversationOutcome(
+                reminder_reply = scoped(
                     "I couldn't verify that your reminder preference was saved. "
                     "Please check your profile or ask again.")
                 return {"ok": False, "error": "unavailable"}
@@ -1490,7 +1570,8 @@ class ConversationService:
                 and not prompt.expired(now) and prompt.client_id == receipt.client_id)
             else None,
             preferred_reader(self._repository, receipt.business_id, policy.timezone,
-                             receipt.client_id), reminder)
+                             receipt.client_id), ReminderHooks(reminder_read, reminder, reminder_invalid,
+                          reminder_not_applied))
 
         def check(text: str) -> str | None:
             return check_reply(text, tools.results)
@@ -1508,14 +1589,21 @@ class ConversationService:
             reason = check(text)
             if reason is not None:
                 raise ValueError(reason)
+            if reminder_skipped and booked is None and cancelled is None:
+                # A reminder call refused because another action ran first changed nothing;
+                # say so, or fall back to the deterministic answer if there is no room.
+                text = f"{text} {REMINDER_NOT_CHANGED}"
+                if (size := gsm_septets(text, True)) is None or size > 480:
+                    raise ValueError("No room to say the reminder settings did not change")
             if booked is not None:
                 # The reply was checked against the tool result: pending, with its reference.
                 # No other reply draft replaces it; the committed text is what is delivered.
-                return replace(booked, text=text, reply_result=None)
+                return replace(booked, text=committed_text(booked, text), reply_result=None)
             if cancelled is not None:
                 # Checked against the tool result: cancelled, with its reference. The committed
                 # visit change and its notification stand; only the text is the model's.
-                return replace(cancelled, text=text, reply_result=None)
+                return replace(cancelled, text=committed_text(cancelled, text),
+                               reply_result=None)
             if tools.offer or tools.prepared is not None:
                 if self._acceptance is not None:
                     self._acceptance.supersede_for_new_request(receipt)
@@ -1551,9 +1639,14 @@ class ConversationService:
             if reminder_reply is not None:
                 return reminder_reply
             if booked is not None:
-                return booked  # The request was written; its own notification still goes out.
+                # The request was written; its own notification still goes out.
+                return replace(booked, text=committed_text(booked, booked.text),
+                               reply_result=None if reminder_skipped else booked.reply_result)
             if cancelled is not None:
-                return cancelled  # The visit was cancelled; its own notification goes out.
+                # The visit was cancelled; its own notification goes out.
+                return replace(cancelled, text=committed_text(cancelled, cancelled.text),
+                               reply_result=(None if reminder_skipped
+                                             else cancelled.reply_result))
             if stored:
                 self._states.clear_state(receipt.business_id, receipt.sender,
                                          receipt.provider_id)
@@ -1561,11 +1654,50 @@ class ConversationService:
             # says nothing changed, and it is never tried again.
             return attempt
 
+    def _business_timezone(self, receipt: InboundReceipt) -> str | None:
+        try:
+            return self._repository.read_policy(receipt.business_id).timezone
+        except Exception:  # noqa: BLE001 - a receipt replay still acknowledges the choice
+            return None
+
     @staticmethod
-    def _reminder_acknowledgment(enabled: bool) -> ConversationOutcome:
-        return ConversationOutcome(
-            f"Visit reminders are now {'on' if enabled else 'off'}. "
-            "Other permitted scheduling texts stay enabled.")
+    def _reminder_notes(view: Any, zone: ZoneInfo, saved: ReminderReceipt) -> tuple[str, ...]:
+        """Plain facts about the visits this save leaves without a reminder; no catch-up."""
+        if not saved.enabled:
+            return ()
+        if view.blockers:
+            return ("Reminders can't be sent to you right now, so none are scheduled.",)
+        past = [item for item in view.upcoming_reminders if item.status == "past_time"]
+        if not past:
+            return ()
+        names = " and ".join(when_text(item.start_at, zone) for item in past[:2])
+        more = f" and {len(past) - 2} more" if len(past) > 2 else ""
+        note = (f"The reminder time for your {names}{more} visit is already past, so no "
+                "reminder will be sent for it.")
+        return (note,)
+
+    @staticmethod
+    def _reminder_acknowledgment(saved: ReminderReceipt | bool, timezone: str | None = None,
+                                 notes: tuple[str, ...] = (), scoped: bool = False,
+                                 ) -> ConversationOutcome:
+        receipt = ReminderReceipt(saved) if isinstance(saved, bool) else saved
+        state = "on" if receipt.enabled else "off"
+        tail = f" {REMINDER_SCOPE}" if scoped else ""
+        if receipt.days_before is None or receipt.local_time is None:
+            return ConversationOutcome(
+                f"Visit reminders are now {state}. Other permitted scheduling texts stay "
+                f"enabled.{tail}")
+        hour = receipt.local_time.strftime("%I:%M %p").lstrip("0")
+        timing = (f"{receipt.days_before} day{'s' if receipt.days_before != 1 else ''} before "
+                  f"your visit at {hour} {timezone or 'business time'}")
+        lead = (f"Visit reminders are now on: {timing}." if receipt.enabled else
+                f"Visit reminders are off. Your saved timing is {timing}.")
+        closing = ("Other permitted scheduling texts stay enabled. "
+                   "Reminders are not a delivery guarantee.")
+        text = " ".join((lead, *notes, closing)) + tail
+        if (size := gsm_septets(text, True)) is None or size > 480:
+            text = lead + tail
+        return ConversationOutcome(text)
 
     def _prepared_cancellation(self, receipt: InboundReceipt, targets: tuple[Appointment, ...],
                                zone: ZoneInfo, now: datetime, ref: str,

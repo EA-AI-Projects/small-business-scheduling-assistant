@@ -25,6 +25,7 @@ from scheduling.domain.client_records import (
     ClientProfile,
     RecordConflict,
     RecordNotFound,
+    ReminderReceipt,
 )
 from scheduling.domain.holds import (
     CreateHold,
@@ -97,7 +98,7 @@ class InMemoryCalendarRepository:
         self._outbox: dict[str, object] = {}
         self._audit: dict[str, object] = {}
         self._clients: dict[tuple[str, str], ClientProfile] = {}
-        self._reminder_receipts: dict[tuple[str, str, str], bool] = {}
+        self._reminder_receipts: dict[tuple[str, str, str], ReminderReceipt] = {}
         self._client_phones: dict[tuple[str, str], str] = {}
         self._client_notes: dict[tuple[str, str, str], ClientNote] = {}
 
@@ -437,7 +438,7 @@ class InMemoryCalendarRepository:
             self._client_phones[phone_key] = profile.client_id
 
     def read_reminder_preference_receipt(self, business_id: str, client_id: str,
-                                         receipt_id: str) -> bool | None:
+                                         receipt_id: str) -> ReminderReceipt | None:
         with self._lock:
             return self._reminder_receipts.get((business_id, client_id, receipt_id))
 
@@ -448,7 +449,8 @@ class InMemoryCalendarRepository:
             if key in self._reminder_receipts:
                 raise RecordConflict("Receipt already committed")
             self.save_profile(after, before.version, before.phone_e164)
-            self._reminder_receipts[key] = after.reminders_enabled
+            self._reminder_receipts[key] = ReminderReceipt(
+                after.reminders_enabled, after.reminder_days_before, after.reminder_local_time)
 
     def read_note(self, business_id: str, client_id: str,
                   note_id: str) -> ClientNote | None:

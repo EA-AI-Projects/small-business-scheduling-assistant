@@ -1716,6 +1716,37 @@ def test_sms_reminder_receipt_is_atomic_replays_without_overwriting_and_is_erase
     assert repo.read_reminder_preference_receipt(env.business, verified.client_id, "sms-already-off") is None
 
 
+def test_sms_timing_receipt_persists_merged_settings_and_replays_without_overwriting(
+    race_env: RaceEnv,
+) -> None:
+    env = race_env
+    repo = DynamoDBCalendarRepository(env.client, env.table)
+    clients = ClientRecordService(repo)
+    original = clients.save_profile(env.business, "synthetic-client", "Synthetic Client",
+        "+14155550101", "123 Test Street", True, 0, START)
+    verified = clients.verify_phone(env.business, original.client_id, original.phone_e164, START)
+    outcome = clients.apply_reminder_request_from_receipt(
+        env.business, verified.client_id, verified.phone_e164, "sms-timing", True, START,
+        days_before=2, local_time=time(9))
+    assert (outcome.enabled, outcome.days_before, outcome.local_time) == (True, 2, time(9))
+    saved = repo.read_profile(env.business, verified.client_id)
+    assert saved is not None
+    assert (saved.reminders_enabled, saved.reminder_days_before, saved.reminder_local_time) == (
+        True, 2, time(9))
+    later = clients.set_reminder_preference(env.business, verified.client_id, False,
+                                            saved.version, START + timedelta(minutes=1),
+                                            days_before=5)
+    replay = clients.apply_reminder_request_from_receipt(
+        env.business, verified.client_id, verified.phone_e164, "sms-timing", False, START,
+        days_before=6, local_time=time(15))
+    assert replay == outcome and repo.read_profile(env.business, verified.client_id) == later
+    with pytest.raises(ValueError):
+        clients.apply_reminder_request_from_receipt(
+            env.business, verified.client_id, verified.phone_e164, "sms-invalid", None, START,
+            days_before=9)
+    assert repo.read_reminder_preference_receipt(env.business, verified.client_id, "sms-invalid") is None
+
+
 def test_reminder_claim_has_one_winner_and_never_recovers(race_env: RaceEnv) -> None:
     """Real conditional ownership proof; never contacts an SMS provider."""
     from scheduling.domain.outbox import OutboxConflict

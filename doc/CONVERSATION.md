@@ -18,7 +18,7 @@ Client history requires the same business, verified phone and client ID; owner h
 | Cancel | Resolve one own visit/request and store a version-bound confirmation question. A later confirmation cancels it; declining keeps it. |
 | Move | Offer times for one confirmed visit/version, then create a pending replacement; the original stays booked until owner approval. |
 | Ask about visits | Read only the client's own current visits or the owner's business calendar; no booking action follows merely from an answer. |
-| Manage visit reminders | Interpret a clear request to turn future visit reminders on/off; save the verified sender's shared preference and acknowledge the committed choice. Ask about ambiguous intent without writing. |
+| Manage visit reminders | Interpret a clear request to turn future visit reminders on/off or change days before and time (#402); save the verified sender's shared preference and acknowledge the committed choice. Ask about ambiguous intent or time without writing. |
 
 Offers and confirmation questions last 30 minutes. A later expired/stale/replaced/unmatched reply writes nothing. A changed default duration invalidates an offer quoted at the previous length. A new request replaces the previous prompt. Offered starts (the tool and the deterministic offer alike) put the preferred valid starts for the verified sender (their own client-specific preferences, which replace business-wide guidance on the weekdays they name, plus the business-wide guidance on other weekdays; #383) inside the requested window first and fill the rest with other valid starts, without telling the client why (#382); an explicit window is honored without a preferred start, a preference read failure gives the ordinary offer, and a preference change never invalidates a sent offer. The sender is identified by the verified receipt, never by a name in the message or a tool argument. Exact commands retain their deterministic path; a bare answer to a read-only calendar list cannot select or cancel a visit.
 
@@ -49,7 +49,8 @@ The client loop has five model calls, three tool calls and a 30-second budget, w
 | `dismiss_cancellation` | Closes that confirmation, cancels nothing. |
 | `request_reschedule` | Visit reference and offered local date/time must match the stored move offer and current original version; creates a pending replacement. |
 | `get_my_counteroffer` | Only this client's current unexpired owner offer and source request. |
-| `set_reminder_preference` | Boolean `enabled` only; changes the verified sender's own shared reminder preference. No client/business target, consent change, phone verification, STOP override, or scheduling action. |
+| `get_reminder_preference` | No arguments; read-only. The verified sender's own saved enrollment, days before, local time, timezone, blockers and upcoming expected reminders with status (#402). |
+| `set_reminder_preference` | `enabled`, `days_before` (1-7), `local_time` (HH:MM, 08:00-18:00), each nullable (null keeps the saved value); changes the verified sender's own shared reminder preference. No client/business target, consent change, phone verification, STOP override, or scheduling action. |
 | `respond_to_counteroffer` | Accept/decline only, bound to the client's current offer; acceptance creates one pending linked request, decline books nothing. |
 
 A first booking message offers times and cannot book in that same message. New-booking and move offers cannot substitute for each other. Holds recheck profile, consent, opt-out, quoted service duration, policy, calendar and receipt-keyed idempotency. Cancellation needs a second message, and a confirmed original with an active replacement is refused until the replacement is withdrawn. A stale original never permits a move.
@@ -136,11 +137,11 @@ Without `OPENAI_API_KEY`, the simulator answers plain language with a question a
 
 The model interprets clear plain-language enrollment and unenrollment through the existing
 client loop. Reminder preference intent is distinct from listing visits ("remind me when my
-visit is"), booking, cancellation, and attendance confirmation. Ambiguous requests ask whether
-to turn reminders on or off. A bare YES retains its existing stored-question behavior and does
-not enroll the client in reminders. No new keyword command is required.
+visit is"), booking, cancellation, and attendance confirmation. Ambiguous requests ask for
+the missing value. A bare YES retains its existing stored-question behavior and never
+enrolls the client in reminders or changes timing. No new keyword command is required.
 
-The tool accepts only `enabled`; business/client/phone/receipt identity comes from the verified
+The write tool accepts only `enabled`, `days_before` and `local_time` (#402, below); business/client/phone/receipt identity comes from the verified
 receipt. Existing consent, active-profile, phone verification and STOP checks apply before model
 interpretation and are checked again at the write boundary. Turning reminders off leaves other
 permitted scheduling texts enabled. Program-wide STOP/START retain their existing precedence.
@@ -154,3 +155,75 @@ or drafts contradictory text; an unsuccessful or uncertain update cannot claim s
 Acknowledgments use ordinary conversation-reply delivery, separately from scheduled reminders'
 no-retry delivery policy. Scripted-model workflow checks cover these backend boundaries; they
 do not establish live-model interpretation or carrier delivery.
+
+### Reading and changing reminder timing by text (#402)
+
+`get_reminder_preference` (no arguments) reads the verified sender's own saved enrollment,
+days before, local time, business timezone, current blockers and each upcoming confirmed
+visit's expected reminder time with its status (`disabled`, `blocked`, `past_time`,
+`scheduled`, `attempted`), through the same service the owner and portal reads use. The
+model explains these without promising delivery or claiming an outcome; an `attempted`
+reminder's delivery result is not known to the Agent. No argument can name another client.
+
+`set_reminder_preference` takes `enabled`, `days_before` (1-7) and `local_time` (24-hour
+`HH:MM`, 08:00-18:00); null keeps the saved value. "Remind me two days before at 9 AM" sends
+all three. "Change my reminder time to 9 AM" sends only the time and preserves enrollment;
+off retains timing, and a timing edit never re-enrolls an unenrolled client. Clear requests
+save immediately and the committed acknowledgment states enrollment, days before, local time
+and the business timezone. A time without AM/PM (such as a bare "9") is not a valid time
+argument. Deterministic backend guards on the inbound text back the prompt and run before any
+commit. A message that is only an acknowledgment
+(an emoji, "go ahead", "do it", "k", "si", bare yes/no) cannot write; longer messages are left
+to the model, so "go ahead on that" can reach a write (accepted limit). When the call supplies
+a time, the current message must back it: an hour without AM/PM, noon, a 24-hour form or an
+adjacent day part ("9", "at 9", "9ish", "900", "nine", "9:30", "I work in the morning,
+remind me at 9") gets a fixed question asking for AM or PM; a clear time or day part that
+differs from the supplied value ("9 PM" with 09:00, "evening" with 09:00) is refused the same
+way. Nothing is written and the reminder action ends for that message, so a same-message retry
+cannot save. Day quantities ("two days") are not hours; "9 AM", "nine AM", "9 a.m.", "9.30
+am", "noon", "14:00", "09:30" and "9 in the morning" pass, as does a message with no hour at
+all ("morning", "a.m.") answering the question. The guard uses English time words only, and
+any digit in the text counts as an hour, so "a las 9" is refused for AM/PM; spelled-out
+non-English hours such as "a las nueve" pass to the model. It also cannot catch
+a model-supplied time when the current message names no time at all ("Make it earlier",
+"Turn reminders on"); the acknowledgment states the saved time so the client can correct it.
+A reminder call after another action in the same message (a booking, move, cancellation or
+offer, including one that was tried and refused) is refused first and never replaces that
+action's reply or changes its committed outcome or outbox ID. The delivered reply gets
+"Reminders not changed." appended. A reminder call past the backend's tool-call limit gets the
+same sentence, but the real OpenAI loop stops offering tools at its own limit and never makes
+that call, so only a scripted loop reaches it. A committed reply is one message of at most 160
+GSM-7 characters or the adapter drops it, so the model's text plus the sentence is used only if
+it fits; otherwise the deterministic committed text plus the sentence. If the loop then fails,
+the same composition is used and the optional redraft is skipped so it cannot replace the
+sentence. The longest ordinary committed text (a move, 136 characters) plus the sentence is
+159. For uncommitted replies the limit is 480 characters, and if the sentence does not fit the
+deterministic answer is used. The sentence is part of the reply text, so a stored committed
+reply and its replay carry it. Known limits: a refused booking or move followed by a loop
+failure returns that refusal's own deterministic answer without the sentence. Accepting a
+counteroffer in the same text as a reminder change never delivers the sentence, whatever its
+length: that acceptance has no client outbox ID, so no committed draft is attached and the
+client receives the existing notification, which does not mention reminders (its
+deterministic text with an earlier pending request is 185 characters before the sentence,
+208 with it).
+Every backend-written reminder reply that replaces the model's text (acknowledgment and
+refusals, including a replayed acknowledgment) ends with a fixed sentence that it covers
+reminder settings only and nothing else in the message was acted on, so a mixed request such
+as "yes cancel it and remind me at 9 AM" never implies the cancellation happened; an open
+confirmation stays open. A malformed reminder call (with no other action) gets a fixed
+"nothing changed" reply rather than model text.
+Well-formed values outside the ranges write
+nothing and get a fixed explanation that saved settings did not change.
+
+The receipt marker now remembers the committed enrollment, days and time, so a replayed
+receipt returns its original acknowledgment (without the past-time note) and never overwrites
+a newer edit. A profile version conflict (for example an owner edit between the read and the
+commit) saves nothing and asks the client to try again.
+
+When the saved edit leaves an enrolled client's upcoming visit with a reminder time that has
+already passed, the acknowledgment says no reminder will be sent for that visit; there is no
+catch-up and an `attempted` reminder is never reset or repeated. If a current restriction
+blocks sending, the acknowledgment says reminders cannot be sent right now.
+
+A bare YES or NO never enrolls or changes timing. Reminder questions do not persist a
+pending-clarification state; a clarification is answered with explicit text such as "9 AM".
