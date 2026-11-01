@@ -129,7 +129,7 @@ it("explains on load and after a save that an edit moved a visit's reminder into
     upcoming_reminders: [{ ...visit, run_at: "2026-10-19T17:00:00Z", status: "past_time" }] }));
   await submit();
   expect(host.textContent).toContain("Reminder preference saved.");
-  expect(host.textContent).toContain("with your saved timing, this visit's reminder time has already passed, and late reminders are not sent");
+  expect(host.textContent).toContain("with your saved timing, this visit's reminder time has already passed, and late reminders are not sent. If you choose a time that is still ahead, a reminder may be planned instead.");
   fetcher.mockResolvedValueOnce(response({ ...base, enabled: true, version: 3, days_before: 3, blockers: [],
     upcoming_reminders: [{ ...visit, run_at: "2026-10-19T17:00:00Z", status: "past_time" }] }));
   await reload();
