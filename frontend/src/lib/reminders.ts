@@ -31,7 +31,7 @@ export function clientReminderStatusText(
   switch (reminder.status) {
     case "disabled": return `${visit}reminders are off.`;
     case "blocked": return `${visit}a reminder cannot currently be sent.`;
-    case "past_time": return `${visit}the reminder time has already passed, so no reminder will be sent for this visit.`;
+    case "past_time": return `${visit}with your saved timing, this visit's reminder time has already passed, and late reminders are not sent. If you choose a time that is still ahead, a reminder may be planned instead.`;
     case "attempted": return `${visit}a reminder was already attempted; none will be repeated.`;
     default: return `${visit}a reminder is planned for ${when(reminder.run_at)}, but delivery is not guaranteed.`;
   }

@@ -129,11 +129,17 @@ it("explains on load and after a save that an edit moved a visit's reminder into
     upcoming_reminders: [{ ...visit, run_at: "2026-10-19T17:00:00Z", status: "past_time" }] }));
   await submit();
   expect(host.textContent).toContain("Reminder preference saved.");
-  expect(host.textContent).toContain("the reminder time has already passed, so no reminder will be sent for this visit");
+  expect(host.textContent).toContain("with your saved timing, this visit's reminder time has already passed, and late reminders are not sent");
   fetcher.mockResolvedValueOnce(response({ ...base, enabled: true, version: 3, days_before: 3, blockers: [],
     upcoming_reminders: [{ ...visit, run_at: "2026-10-19T17:00:00Z", status: "past_time" }] }));
   await reload();
   expect(host.textContent).toContain("has already passed");
+  await type(field("days_before"), "1");
+  fetcher.mockResolvedValueOnce(response({ ...base, enabled: true, version: 4, blockers: [],
+    upcoming_reminders: [{ ...visit, status: "scheduled" }] }));
+  await submit();
+  expect(host.textContent).not.toContain("has already passed");
+  expect(host.textContent).toContain("a reminder is planned for");
 });
 
 it("uses client-facing wording for blockers", async () => {
