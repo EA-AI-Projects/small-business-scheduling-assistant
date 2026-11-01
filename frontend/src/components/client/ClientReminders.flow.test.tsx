@@ -39,7 +39,7 @@ it("loads, enrolls, reloads and unenrolls the shared preference while explaining
   const checkbox = () => host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
   expect(checkbox().checked).toBe(false);
   expect(host.textContent).toContain("STOP");
-  expect(host.textContent).toContain("Verify the current phone");
+  expect(host.textContent).toContain("has not been verified by the business");
   await act(async () => checkbox().click()); await submit();
   expect(host.textContent).toContain("Reminder preference saved");
   await reload(); expect(checkbox().checked).toBe(true);
@@ -115,4 +115,32 @@ it("keeps the client's edits and explains a server validation refusal", async ()
   expect(host.querySelector('[role="alert"]')!.textContent).toContain("1–7");
   expect(field("days_before").value).toBe("5");
   expect(host.textContent).toContain("Saved: Reminders off · 1 calendar day");
+});
+
+it("explains on load and after a save that an edit moved a visit's reminder into the past", async () => {
+  const visit = { appointment_id: "visit-1", start_at: "2026-10-22T17:00:00Z", run_at: "2026-10-21T17:00:00Z" };
+  fetcher.mockResolvedValueOnce(response({ ...base, enabled: true, version: 2, blockers: [],
+    upcoming_reminders: [{ ...visit, status: "scheduled" }] }));
+  await render();
+  expect(host.textContent).toContain("a reminder is planned for");
+  expect(host.textContent).toContain("delivery is not guaranteed");
+  await type(field("days_before"), "3");
+  fetcher.mockResolvedValueOnce(response({ ...base, enabled: true, version: 3, days_before: 3, blockers: [],
+    upcoming_reminders: [{ ...visit, run_at: "2026-10-19T17:00:00Z", status: "past_time" }] }));
+  await submit();
+  expect(host.textContent).toContain("Reminder preference saved.");
+  expect(host.textContent).toContain("the reminder time has already passed, so no reminder will be sent for this visit");
+  fetcher.mockResolvedValueOnce(response({ ...base, enabled: true, version: 3, days_before: 3, blockers: [],
+    upcoming_reminders: [{ ...visit, run_at: "2026-10-19T17:00:00Z", status: "past_time" }] }));
+  await reload();
+  expect(host.textContent).toContain("has already passed");
+});
+
+it("uses client-facing wording for blockers", async () => {
+  fetcher.mockResolvedValueOnce(response({ ...base, enabled: true, version: 2,
+    blockers: ["phone_unverified", "consent_missing", "business_unconfigured"] }));
+  await render();
+  expect(host.textContent).toContain("Contact the business to update it");
+  expect(host.textContent).not.toContain("Record SMS consent");
+  expect(host.textContent).not.toContain("Configure business availability");
 });

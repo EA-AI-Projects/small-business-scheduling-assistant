@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { components } from "@/api/schema";
 import type { OwnerConfig } from "@/lib/config";
-import { reminderRestriction, type ReminderPreference } from "@/lib/reminders";
+import { clientReminderRestriction, clientReminderStatusText, type ReminderPreference } from "@/lib/reminders";
 
 type PreferenceBody = components["schemas"]["ClientReminderPreferenceBody"];
 const TIME_PATTERN = /^(?:0[89]|1[0-7]):[0-5][0-9]$|^18:00$/;
@@ -90,8 +90,11 @@ export function ClientReminders({ config, token, onSessionEnded }: {
       </fieldset>
       {saved && <p>Saved: {saved.enabled ? "Enrolled" : "Reminders off"} · {saved.days_before} calendar {saved.days_before === 1 ? "day" : "days"} before at {hhmm(saved.local_time)} · {zone}</p>}
       {saved?.blockers.length ? <div><p>Reminders cannot currently be sent:</p><ul>
-        {saved.blockers.map((reason) => <li key={reason}>{reminderRestriction[reason] ?? "SMS delivery is restricted."}</li>)}
+        {saved.blockers.map((reason) => <li key={reason}>{clientReminderRestriction[reason] ?? "SMS delivery is restricted."}</li>)}
       </ul></div> : saved && <p>Your current profile and SMS consent allow reminders when enrolled.</p>}
+      {saved?.timezone && saved.upcoming_reminders.length ? <div><p>Your upcoming confirmed visits, using your saved preference:</p><ul>
+        {saved.upcoming_reminders.map((reminder) => <li key={reminder.appointment_id}>{clientReminderStatusText(reminder, saved.timezone!)}</li>)}
+      </ul></div> : saved && <p>{saved.timezone ? "You have no upcoming confirmed visits." : "Expected reminder times are unavailable until the business finishes setup."}</p>}
       {invalid && <p role="alert">Choose a whole number from 1–7 days and a time from 08:00 through 18:00.</p>}
       {problem && <p role="alert">{problem}</p>}
       {error && <p role="alert">{error}</p>}
@@ -107,8 +110,16 @@ function parsePreference(value: unknown): ReminderPreference {
   const state = value as Partial<ReminderPreference> | null;
   if (!state || typeof state.enabled !== "boolean" || !Number.isInteger(state.version)
     || !Number.isInteger(state.days_before) || typeof state.local_time !== "string"
+    || !Array.isArray(state.upcoming_reminders) || !state.upcoming_reminders.every(validReminder)
     || !Array.isArray(state.blockers) || !state.blockers.every((reason) => typeof reason === "string")) {
     throw new Error("Unexpected reminder preference response");
   }
   return state as ReminderPreference;
+}
+
+const REMINDER_STATUSES = ["disabled", "blocked", "past_time", "scheduled", "attempted"];
+function validReminder(value: unknown): boolean {
+  const item = value as Record<string, unknown> | null;
+  return !!item && typeof item.appointment_id === "string" && typeof item.start_at === "string"
+    && typeof item.run_at === "string" && REMINDER_STATUSES.includes(item.status as string);
 }

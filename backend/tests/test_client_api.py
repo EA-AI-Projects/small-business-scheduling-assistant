@@ -361,3 +361,18 @@ def test_portal_timing_is_separate_validated_partial_and_identity_scoped() -> No
     assert api.get(path, headers=auth("a")).json() == off.json()
     untouched = api.get(path, headers=auth("b")).json()
     assert (untouched["days_before"], untouched["local_time"]) == (1, "10:00:00")
+    # Version-only body: a no-op at the current version, a conflict at a stale one.
+    same = api.put(path, headers=auth("a"), json={"expected_version": current})
+    assert same.status_code == 200 and same.json() == off.json()
+    assert api.put(path, headers=auth("a"), json={"expected_version": version}).status_code == 409
+    # Inclusive boundaries, and a timing save leaves blockers and phone verification alone.
+    owner_profile = "/v1/owner/businesses/business-1/clients/client-a"
+    before = api.get(owner_profile, headers=auth("owner")).json()["phone_verified_at"]
+    for days, local in ((1, "08:00"), (7, "18:00")):
+        edge = api.put(path, headers=auth("a"), json={
+            "expected_version": api.get(path, headers=auth("a")).json()["version"],
+            "days_before": days, "local_time": local})
+        assert edge.status_code == 200, edge.text
+        assert (edge.json()["days_before"], edge.json()["local_time"]) == (days, f"{local}:00")
+        assert edge.json()["blockers"] == off.json()["blockers"]
+    assert api.get(owner_profile, headers=auth("owner")).json()["phone_verified_at"] == before

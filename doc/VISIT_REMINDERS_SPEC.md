@@ -61,6 +61,6 @@ Run applicable retained backend/frontend, generated-contract and infrastructure 
 
 ## Delivery slices and exclusions
 
-#400 implements the complete owner-to-delivery slice, compatibility, shared reads and verification. #401 implements the client portal controls on the same shared service. Client SMS reads/changes and owner SMS reads/changes each depend on it and include their own behavior verification. The [PRD](PRD.md) owns product rules; the [glossary](../GLOSSARY.md) owns terminology. #390–#394 / PR #395 remains historical evidence for the former global-timing design; those completed tickets are unchanged.
+#400 implements the complete owner-to-delivery slice, compatibility, shared reads and verification. #401 implements the client portal controls on the same shared service. Client SMS reads/changes and owner SMS reads/changes each depend on #400 and include their own behavior verification. The [PRD](PRD.md) owns product rules; the [glossary](../GLOSSARY.md) owns terminology. #390–#394 / PR #395 remains historical evidence for the former global-timing design; those completed tickets are unchanged.
 
 Out of scope: automatic enrollment, bulk/global edits, client-specific timezones, multiple/same-day reminders, email/push/pending-request reminders, attendance confirmation, new cancellation/rescheduling rules, custom reminder copy, retry/catch-up/manual resend, separate dashboards/owner alerts, delivery guarantees, and changes to consent/STOP or ordinary SMS retries. No deployment, live SMS or other consequential operational activation is authorized.
