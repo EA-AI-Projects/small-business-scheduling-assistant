@@ -20,7 +20,7 @@ Start with the [documentation index](doc/README.md) for each document's purpose 
 - Configurable 30-minute travel buffer between visits, with none before the first or after the last.
 - SMS-first owner and client workflows, an owner calendar/admin app, and client Calendar and Appointments pages.
 - Free client cancellations; cancelled time becomes available for future requests.
-- Optional confirmed-visit SMS reminders with business-wide timing and enrollment through owner profiles, the client portal, or text. Scheduled delivery defaults disabled.
+- Optional confirmed-visit SMS reminders with per-client timing and enrollment through owner profiles, the client portal, or text. Scheduled delivery defaults disabled.
 
 ## Status
 

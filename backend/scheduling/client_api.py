@@ -6,7 +6,7 @@ the active link of the verified token subject.
 
 import logging
 from collections.abc import Callable
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from typing import Annotated, Protocol, cast
 from zoneinfo import ZoneInfo
 
@@ -88,8 +88,11 @@ class ClientReminderPreference(ReminderPreferenceView):
 class ClientReminderPreferenceBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    enabled: bool = Field(strict=True)
+    # Omitted fields keep their saved value: enrollment and timing are separate controls.
     expected_version: int = Field(gt=0, strict=True)
+    enabled: bool | None = Field(default=None, strict=True)
+    days_before: int | None = Field(default=None, ge=1, le=7, strict=True)
+    local_time: time | None = None
 
 
 class ClientAvailabilityQuery(BaseModel):
@@ -295,7 +298,10 @@ def add_client_session_route(
     ) -> ClientReminderPreference:
         try:
             profile = clients.set_reminder_preference(
-                session.business_id, session.client_id, body.enabled, body.expected_version, now())
+                session.business_id, session.client_id, body.enabled, body.expected_version, now(),
+                days_before=body.days_before, local_time=body.local_time)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         except RecordNotFound as exc:
             raise HTTPException(status_code=404, detail="Client profile not found") from exc
         except RecordConflict as exc:

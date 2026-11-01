@@ -410,18 +410,49 @@
       "ClientReminderPreferenceBody": {
         "additionalProperties": false,
         "properties": {
+          "days_before": {
+            "anyOf": [
+              {
+                "maximum": 7.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Days Before"
+          },
           "enabled": {
-            "title": "Enabled",
-            "type": "boolean"
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
           },
           "expected_version": {
             "exclusiveMinimum": 0.0,
             "title": "Expected Version",
             "type": "integer"
+          },
+          "local_time": {
+            "anyOf": [
+              {
+                "format": "time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Time"
           }
         },
         "required": [
-          "enabled",
           "expected_version"
         ],
         "title": "ClientReminderPreferenceBody",

@@ -92,3 +92,85 @@ def test_portal_enrollment_sends_once_then_text_unenrollment_suppresses_next_vis
     clock[0] += timedelta(days=1)
     assert selector.run(BUSINESS, clock[0]).queued == 0
     assert len(submissions) == 1
+
+
+def test_portal_timing_edit_drives_only_that_clients_delivery() -> None:
+    records, consent, _ = setup()
+    first, second, third = (client(records, consent, number) for number in (511, 512, 513))
+    clock = [RUN]
+    links = {name: IdentityLink(f"sub-{name}", LinkRole.CLIENT, BUSINESS, name,
+                                LinkState.ACTIVE, 1, RUN, "owner", "synthetic")
+             for name in (first, second, third)}
+    app = create_owner_app(records, lambda _: OwnerPrincipal("owner", BUSINESS),
+                           lambda: clock[0], sms_store=consent)
+    add_client_session_route(app, lambda token: links[token], records, lambda: clock[0],
+                             sms_store=consent)
+    api = TestClient(app)
+    path = "/v1/client/reminder-preference"
+
+    def headers(name: str) -> dict[str, str]:
+        return {"Authorization": f"Bearer {name}"}
+
+    calendar = OwnerCalendarService(records, lambda: clock[0])
+    for name, day in ((first, 22), (second, 23), (third, 21)):
+        calendar.apply(OwnerCalendarCommand(
+            BUSINESS, "owner", f"visit-{name}", OwnerAction.CREATE_APPOINTMENT,
+            records.read_revision(BUSINESS), client_id=name,
+            start_at=datetime(2026, 10, day, 17, tzinfo=UTC), duration_minutes=120))
+    for name in (first, second, third):
+        version = api.get(path, headers=headers(name)).json()["version"]
+        assert api.put(path, headers=headers(name),
+                       json={"expected_version": version, "enabled": True}).status_code == 200
+    # First moves later (old minute: Oct 21 10:00 local); third moves into the past.
+    version = api.get(path, headers=headers(first)).json()["version"]
+    edited = api.put(path, headers=headers(first), json={"expected_version": version,
+                                                         "local_time": "15:00"})
+    assert edited.status_code == 200, edited.text
+    assert (edited.json()["enabled"], edited.json()["days_before"],
+            edited.json()["local_time"]) == (True, 1, "15:00:00")
+    version = api.get(path, headers=headers(third)).json()["version"]
+    past = api.put(path, headers=headers(third), json={"expected_version": version,
+                                                       "days_before": 3})
+    assert [item["status"] for item in past.json()["upcoming_reminders"]] == ["past_time"]
+    other = api.get(path, headers=headers(second)).json()
+    assert (other["days_before"], other["local_time"]) == (1, "10:00:00")
+
+    submissions = []
+
+    class Messages:
+        def create(self, **kwargs):
+            submissions.append(kwargs)
+            return SimpleNamespace(sid=f"SM-portal-{len(submissions)}")
+
+    sender = TwilioSmsSender(Messages(), records, consent, BUSINESS, "+14155550000",
+                             "+14155559999", clock=lambda: clock[0],
+                             reminder_send_enabled=lambda: True)
+    selector = ReminderSelector(records, consent)
+    delivered = []
+
+    def run_at(moment: datetime) -> int:
+        clock[0] = moment
+        queued = selector.run(BUSINESS, moment).queued
+        for record in records.list_reminder_outbox():
+            if record.outbox_id in delivered:
+                continue
+            delivered.append(record.outbox_id)
+            store = MemoryStore()
+            store.record = record
+            assert ConsumeService(store, sender, lambda: clock[0]).consume(
+                BUSINESS, record.outbox_id) == ConsumeOutcome.SENT
+        return queued
+
+    assert run_at(datetime(2026, 10, 20, 17, 0, 15, tzinfo=UTC)) == 0  # third's old minute
+    assert run_at(datetime(2026, 10, 21, 17, 0, 15, tzinfo=UTC)) == 0  # first's old minute
+    assert submissions == []
+    assert run_at(datetime(2026, 10, 21, 22, 0, 15, tzinfo=UTC)) == 1  # first's new minute
+    assert len(submissions) == 1 and "October 22" in submissions[0]["body"]
+    assert submissions[0]["to"] == records.read_profile(BUSINESS, first).phone_e164
+    assert run_at(datetime(2026, 10, 22, 17, 0, 15, tzinfo=UTC)) == 1  # second, unchanged
+    assert len(submissions) == 2 and "October 23" in submissions[1]["body"]
+    assert submissions[1]["to"] == records.read_profile(BUSINESS, second).phone_e164
+    assert run_at(datetime(2026, 10, 23, 17, 0, 15, tzinfo=UTC)) == 0
+    assert len(submissions) == 2
+    assert api.get(f"/v1/owner/businesses/{BUSINESS}/clients/{first}/reminder-preference",
+                   headers=headers("owner")).json() == api.get(path, headers=headers(first)).json()
