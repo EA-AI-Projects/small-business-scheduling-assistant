@@ -92,3 +92,55 @@ def test_portal_enrollment_sends_once_then_text_unenrollment_suppresses_next_vis
     clock[0] += timedelta(days=1)
     assert selector.run(BUSINESS, clock[0]).queued == 0
     assert len(submissions) == 1
+
+
+def test_portal_timing_edit_drives_only_that_clients_delivery() -> None:
+    records, consent, _ = setup()
+    first, second = client(records, consent, 511), client(records, consent, 512)
+    clock = [RUN]
+    links = {name: IdentityLink(f"sub-{name}", LinkRole.CLIENT, BUSINESS, name,
+                                LinkState.ACTIVE, 1, RUN, "owner", "synthetic")
+             for name in (first, second)}
+    app = create_owner_app(records, lambda _: OwnerPrincipal("owner", BUSINESS),
+                           lambda: clock[0], sms_store=consent)
+    add_client_session_route(app, lambda token: links[token], records, lambda: clock[0],
+                             sms_store=consent)
+    api = TestClient(app)
+    path = "/v1/client/reminder-preference"
+
+    def headers(name: str) -> dict[str, str]:
+        return {"Authorization": f"Bearer {name}"}
+
+    for name in (first, second):
+        version = api.get(path, headers=headers(name)).json()["version"]
+        assert api.put(path, headers=headers(name),
+                       json={"expected_version": version, "enabled": True}).status_code == 200
+    state = api.get(path, headers=headers(first)).json()
+    edited = api.put(path, headers=headers(first), json={
+        "expected_version": state["version"], "days_before": 2, "local_time": "08:30"})
+    assert edited.status_code == 200, edited.text
+    assert (edited.json()["enabled"], edited.json()["days_before"],
+            edited.json()["local_time"]) == (True, 2, "08:30:00")
+    other = api.get(path, headers=headers(second)).json()
+    assert (other["days_before"], other["local_time"]) == (1, "10:00:00")
+    calendar = OwnerCalendarService(records, lambda: clock[0])
+    for name, day in ((first, 22), (second, 23)):
+        calendar.apply(OwnerCalendarCommand(
+            BUSINESS, "owner", f"visit-{name}", OwnerAction.CREATE_APPOINTMENT,
+            records.read_revision(BUSINESS), client_id=name,
+            start_at=datetime(2026, 10, day, 17, tzinfo=UTC), duration_minutes=120))
+    selector = ReminderSelector(records, consent)
+    clock[0] = datetime(2026, 10, 20, 15, 30, 15, tzinfo=UTC)
+    assert selector.run(BUSINESS, clock[0]).queued == 1
+    clock[0] = datetime(2026, 10, 22, 17, 0, 15, tzinfo=UTC)
+    assert selector.run(BUSINESS, clock[0]).queued == 1
+    queued = records.list_reminder_outbox()
+    assert len(queued) == 2
+    owners = {}
+    for item in queued:
+        appointment = records.read_appointment(item.entity_id)
+        owners[appointment.client_id] = item.created_at
+    assert owners == {first: datetime(2026, 10, 20, 15, 30, 15, tzinfo=UTC),
+                      second: datetime(2026, 10, 22, 17, 0, 15, tzinfo=UTC)}
+    assert api.get(f"/v1/owner/businesses/{BUSINESS}/clients/{first}/reminder-preference",
+                   headers=headers("owner")).json() == api.get(path, headers=headers(first)).json()

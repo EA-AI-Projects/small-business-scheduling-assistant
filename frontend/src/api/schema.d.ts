@@ -805,10 +805,14 @@ export interface components {
         };
         /** ClientReminderPreferenceBody */
         ClientReminderPreferenceBody: {
+            /** Days Before */
+            days_before?: number | null;
             /** Enabled */
-            enabled: boolean;
+            enabled?: boolean | null;
             /** Expected Version */
             expected_version: number;
+            /** Local Time */
+            local_time?: string | null;
         };
         /**
          * ClientRequest
