@@ -59,6 +59,7 @@ from scheduling.domain.owner_policy import PolicyRecord
 from scheduling.domain.reminders import (
     REMINDER_TEMPLATE,
     ReminderRecord,
+    client_reminder_settings,
     reminder_outbox_id,
     reminder_problem,
     reminder_run_at,
@@ -192,11 +193,10 @@ class TwilioSmsSender:
             reason = reminder_problem(visit, profile, self._records, self._consent, self._clock())
             if reason is not None:
                 raise DeliverySuppressed(f"REMINDER_{reason}")
-            settings = self._records.read_reminders(record.business_id)
             zone = self._records.read_policy(record.business_id).timezone
             if (record.block_start_at != visit.start_at
-                    or record.block_end_at != reminder_run_at(visit, settings.settings, zone)
-                    or record.event_version != settings.version):
+                    or record.block_end_at != reminder_run_at(visit, client_reminder_settings(profile), zone)
+                    or record.event_version != profile.version):
                 raise DeliverySuppressed("REMINDER_SCHEDULE_CHANGED")
             saved = self._records.read_business_profile(record.business_id).profile
             if saved is None:

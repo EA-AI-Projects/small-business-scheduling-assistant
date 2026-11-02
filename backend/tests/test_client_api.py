@@ -325,3 +325,54 @@ def test_portal_enrollment_preserves_phone_consent_and_stop_restrictions() -> No
     assert api.delete("/v1/owner/businesses/business-1/clients/client-a", headers=auth("owner")).status_code == 204
     assert api.get(path, headers=auth("a")).status_code == 404
     assert api.put(path, json={"enabled": True, "expected_version": 3}, headers=auth("a")).status_code == 404
+
+
+def test_portal_timing_is_separate_validated_partial_and_identity_scoped() -> None:
+    api, _ = setup()
+    path = "/v1/client/reminder-preference"
+    owner_path = "/v1/owner/businesses/business-1/clients/client-a/reminder-preference"
+    first = api.get(path, headers=auth("a")).json()
+    assert (first["days_before"], first["local_time"], first["enabled"]) == (1, "10:00:00", False)
+    assert first["timezone"]
+    timing = api.put(path, headers=auth("a"), json={
+        "expected_version": first["version"], "days_before": 3, "local_time": "17:59"})
+    assert timing.status_code == 200, timing.text
+    assert (timing.json()["enabled"], timing.json()["days_before"],
+            timing.json()["local_time"]) == (False, 3, "17:59:00")
+    version = timing.json()["version"]
+    on = api.put(path, headers=auth("a"), json={"expected_version": version, "enabled": True})
+    assert (on.json()["days_before"], on.json()["local_time"]) == (3, "17:59:00")
+    part = api.put(path, headers=auth("a"), json={
+        "expected_version": on.json()["version"], "local_time": "18:00"})
+    assert part.json()["enabled"] is True and part.json()["days_before"] == 3
+    off = api.put(path, headers=auth("a"), json={
+        "expected_version": part.json()["version"], "enabled": False})
+    assert off.json()["local_time"] == "18:00:00" and off.json()["days_before"] == 3
+    assert api.get(owner_path, headers=auth("owner")).json() == off.json()
+    stale = api.put(path, headers=auth("a"), json={"expected_version": version, "days_before": 5})
+    assert stale.status_code == 409
+    assert api.get(path, headers=auth("a")).json() == off.json()
+    current = off.json()["version"]
+    for bad in ({"days_before": 0}, {"days_before": 8}, {"days_before": "2"}, {"days_before": True},
+                {"local_time": "07:59"}, {"local_time": "18:01"}, {"local_time": "10:00:30"},
+                {"client_id": "client-b"}):
+        refused = api.put(path, headers=auth("a"), json={"expected_version": current, **bad})
+        assert refused.status_code == 422, bad
+    assert api.get(path, headers=auth("a")).json() == off.json()
+    untouched = api.get(path, headers=auth("b")).json()
+    assert (untouched["days_before"], untouched["local_time"]) == (1, "10:00:00")
+    # Version-only body: a no-op at the current version, a conflict at a stale one.
+    same = api.put(path, headers=auth("a"), json={"expected_version": current})
+    assert same.status_code == 200 and same.json() == off.json()
+    assert api.put(path, headers=auth("a"), json={"expected_version": version}).status_code == 409
+    # Inclusive boundaries, and a timing save leaves blockers and phone verification alone.
+    owner_profile = "/v1/owner/businesses/business-1/clients/client-a"
+    before = api.get(owner_profile, headers=auth("owner")).json()["phone_verified_at"]
+    for days, local in ((1, "08:00"), (7, "18:00")):
+        edge = api.put(path, headers=auth("a"), json={
+            "expected_version": api.get(path, headers=auth("a")).json()["version"],
+            "days_before": days, "local_time": local})
+        assert edge.status_code == 200, edge.text
+        assert (edge.json()["days_before"], edge.json()["local_time"]) == (days, f"{local}:00")
+        assert edge.json()["blockers"] == off.json()["blockers"]
+    assert api.get(owner_profile, headers=auth("owner")).json()["phone_verified_at"] == before

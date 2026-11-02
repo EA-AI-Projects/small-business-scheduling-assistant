@@ -6,7 +6,7 @@ the active link of the verified token subject.
 
 import logging
 from collections.abc import Callable
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from typing import Annotated, Protocol, cast
 from zoneinfo import ZoneInfo
 
@@ -52,7 +52,11 @@ from scheduling.domain.lifecycle import (
 )
 from scheduling.domain.owner_policy import PolicyNotConfigured
 from scheduling.domain.recommendations import recommended_starts
-from scheduling.domain.reminders import reminder_preference_view
+from scheduling.domain.reminders import (
+    ReminderDeliveryRepository,
+    ReminderPreferenceView,
+    reminder_preference_view,
+)
 from scheduling.domain.scheduling_preferences import SchedulingPreferencesRecord
 from scheduling.domain.service_duration import (
     ServiceDurationChanged,
@@ -77,17 +81,18 @@ class ClientSession(BaseModel):
     service_name: str | None = None
 
 
-class ClientReminderPreference(BaseModel):
-    enabled: bool
-    version: int
-    blockers: list[str]
+class ClientReminderPreference(ReminderPreferenceView):
+    pass
 
 
 class ClientReminderPreferenceBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    enabled: bool = Field(strict=True)
+    # Omitted fields keep their saved value: enrollment and timing are separate controls.
     expected_version: int = Field(gt=0, strict=True)
+    enabled: bool | None = Field(default=None, strict=True)
+    days_before: int | None = Field(default=None, ge=1, le=7, strict=True)
+    local_time: time | None = None
 
 
 class ClientAvailabilityQuery(BaseModel):
@@ -275,7 +280,8 @@ def add_client_session_route(
         profile = store.read_profile(session.business_id, session.client_id)
         if profile is None:
             raise HTTPException(status_code=404, detail="Client profile not found")
-        return ClientReminderPreference.model_validate(reminder_preference_view(profile, sms_store))
+        return ClientReminderPreference.model_validate(reminder_preference_view(
+            profile, sms_store, cast(ReminderDeliveryRepository, repository), now()), from_attributes=True)
 
     @app.get("/v1/client/reminder-preference", response_model=ClientReminderPreference)
     def get_client_reminder_preference(
@@ -292,12 +298,16 @@ def add_client_session_route(
     ) -> ClientReminderPreference:
         try:
             profile = clients.set_reminder_preference(
-                session.business_id, session.client_id, body.enabled, body.expected_version, now())
+                session.business_id, session.client_id, body.enabled, body.expected_version, now(),
+                days_before=body.days_before, local_time=body.local_time)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         except RecordNotFound as exc:
             raise HTTPException(status_code=404, detail="Client profile not found") from exc
         except RecordConflict as exc:
             raise _refused("RECORD_CONFLICT", "Your profile changed. Reload your saved preference.") from exc
-        return ClientReminderPreference.model_validate(reminder_preference_view(profile, sms_store))
+        return ClientReminderPreference.model_validate(reminder_preference_view(
+            profile, sms_store, cast(ReminderDeliveryRepository, repository), now()), from_attributes=True)
 
     availability_service = AvailabilityService(store)
 

@@ -8,7 +8,7 @@ duration snapshots (#339).
 import re
 import unicodedata
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from typing import Protocol
 from uuid import uuid4
 
@@ -53,6 +53,9 @@ class ClientProfile:
     email: str | None = None
     reminders_enabled: bool = False
     reminders_updated_at: datetime | None = None
+    # None identifies a legacy profile awaiting its one-time timing copy.
+    reminder_days_before: int | None = 1
+    reminder_local_time: time | None = time(10)
 
     def __post_init__(self) -> None:
         if not self.business_id or not self.client_id or not self.name.strip():
@@ -105,6 +108,14 @@ class ClientNote:
                 raise ValueError("Legal hold reason is too long or contains an entry/access code")
 
 
+@dataclass(frozen=True)
+class ReminderReceipt:
+    """The preference one SMS receipt committed (days and time absent on pre-#402 receipts)."""
+    enabled: bool
+    days_before: int | None = None
+    local_time: time | None = None
+
+
 class ClientRecordRepository(Protocol):
     def read_profile(self, business_id: str, client_id: str) -> ClientProfile | None: ...
     def list_profiles(self, business_id: str) -> tuple[ClientProfile, ...]: ...
@@ -112,7 +123,7 @@ class ClientRecordRepository(Protocol):
     def save_profile(self, profile: ClientProfile, expected_version: int,
                      previous_phone: str | None) -> None: ...
     def read_reminder_preference_receipt(self, business_id: str, client_id: str,
-                                         receipt_id: str) -> bool | None: ...
+                                         receipt_id: str) -> ReminderReceipt | None: ...
     def commit_reminder_preference_receipt(self, before: ClientProfile, after: ClientProfile,
                                            receipt_id: str) -> None: ...
     def read_appointment(self, appointment_id: str) -> Appointment | None: ...
@@ -160,21 +171,35 @@ class ClientRecordService:
             email.strip() or None if email is not None else None,
             current.reminders_enabled if current else False,
             current.reminders_updated_at if current else None,
+            current.reminder_days_before if current else 1,
+            current.reminder_local_time if current else time(10),
         )
         self._repository.save_profile(profile, expected_version,
                                       current.phone_e164 if current else None)
         return profile
 
-    def set_reminder_preference(self, business_id: str, client_id: str, enabled: bool,
-                                expected_version: int, now: datetime) -> ClientProfile:
+    def set_reminder_preference(self, business_id: str, client_id: str, enabled: bool | None,
+                                expected_version: int, now: datetime, *,
+                                days_before: int | None = None,
+                                local_time: time | None = None) -> ClientProfile:
+        from scheduling.domain.reminders import ReminderSettings
+
         current = self._repository.read_profile(business_id, client_id)
         if current is None:
             raise RecordNotFound("Client was not found")
         if current.version != expected_version:
             raise RecordConflict("Client profile version changed")
-        if current.reminders_enabled == enabled:
+        settings = ReminderSettings(
+            days_before if days_before is not None else current.reminder_days_before or 1,
+            local_time if local_time is not None else current.reminder_local_time or time(10))
+        choice = current.reminders_enabled if enabled is None else enabled
+        if (current.reminders_enabled == choice
+                and current.reminder_days_before == settings.days_before
+                and current.reminder_local_time == settings.local_time):
             return current
-        updated = replace(current, reminders_enabled=enabled, reminders_updated_at=_utc(now),
+        updated = replace(current, reminders_enabled=choice, reminders_updated_at=_utc(now),
+                          reminder_days_before=settings.days_before,
+                          reminder_local_time=settings.local_time,
                           version=current.version + 1, updated_at=_utc(now))
         self._repository.save_profile(updated, current.version, current.phone_e164)
         return updated
@@ -182,10 +207,20 @@ class ClientRecordService:
     def set_reminder_preference_from_receipt(self, business_id: str, client_id: str,
                                              phone_e164: str, receipt_id: str,
                                              enabled: bool, now: datetime) -> bool:
-        """Atomically remember this receipt and the choice, including an unchanged choice.
+        """Enrollment-only form of ``apply_reminder_request_from_receipt``."""
+        return self.apply_reminder_request_from_receipt(
+            business_id, client_id, phone_e164, receipt_id, enabled, now).enabled
 
-        A replay returns the original committed choice, without replacing a later owner or
-        portal edit. The caller still checks current SMS consent/STOP before entering here.
+    def apply_reminder_request_from_receipt(
+            self, business_id: str, client_id: str, phone_e164: str, receipt_id: str,
+            enabled: bool | None, now: datetime, *, days_before: int | None = None,
+            local_time: time | None = None) -> ReminderReceipt:
+        """Atomically remember this receipt and the merged choice, including an unchanged one.
+
+        Unspecified fields keep their saved values; invalid timing raises ValueError before
+        any write. A replay returns the original committed outcome, without replacing a later
+        owner, portal or text edit. A newer profile version raises RecordConflict. The caller
+        still checks current SMS consent/STOP before entering here.
         """
         current = self._repository.read_profile(business_id, client_id)
         if (current is None or not current.active or current.phone_verified_at is None
@@ -195,9 +230,50 @@ class ClientRecordService:
             business_id, client_id, receipt_id)
         if replay is not None:
             return replay
-        updated = (replace(current, reminders_enabled=enabled, reminders_updated_at=_utc(now),
+        return self._commit_reminder_request(current, receipt_id, enabled, now,
+                                             days_before, local_time)
+
+    def apply_owner_reminder_request_from_receipt(
+            self, business_id: str, client_id: str, receipt_id: str,
+            expected_version: int, enabled: bool | None, now: datetime, *,
+            days_before: int | None = None, local_time: time | None = None) -> ReminderReceipt:
+        """Authorized owner choice, guarded by the version read through the owner tools.
+
+        Unlike client SMS this can save a preference on an unverified/blocked client.
+        It changes neither phone verification, consent nor STOP. The caller authenticates
+        the owner; the same atomic receipt marker as client SMS protects redelivery.
+        """
+        current = self._repository.read_profile(business_id, client_id)
+        if current is None or not current.active:
+            raise RecordNotFound("Client was not found")
+        replay = self._repository.read_reminder_preference_receipt(
+            business_id, client_id, receipt_id)
+        if replay is not None:
+            return replay
+        if current.version != expected_version:
+            raise RecordConflict("Client profile version changed")
+        return self._commit_reminder_request(current, receipt_id, enabled, now,
+                                             days_before, local_time)
+
+    def _commit_reminder_request(self, current: ClientProfile, receipt_id: str,
+                                 enabled: bool | None, now: datetime,
+                                 days_before: int | None, local_time: time | None,
+                                 ) -> ReminderReceipt:
+        from scheduling.domain.reminders import ReminderSettings
+
+        business_id, client_id = current.business_id, current.client_id
+        settings = ReminderSettings(
+            days_before if days_before is not None else current.reminder_days_before or 1,
+            local_time if local_time is not None else current.reminder_local_time or time(10))
+        choice = current.reminders_enabled if enabled is None else enabled
+        changed = (current.reminders_enabled != choice
+                   or (current.reminder_days_before or 1) != settings.days_before
+                   or (current.reminder_local_time or time(10)) != settings.local_time)
+        updated = (replace(current, reminders_enabled=choice, reminders_updated_at=_utc(now),
+                           reminder_days_before=settings.days_before,
+                           reminder_local_time=settings.local_time,
                            version=current.version + 1, updated_at=_utc(now))
-                   if current.reminders_enabled != enabled else current)
+                   if changed else current)
         try:
             self._repository.commit_reminder_preference_receipt(current, updated, receipt_id)
         except RecordConflict:
@@ -206,7 +282,7 @@ class ClientRecordService:
             if replay is not None:
                 return replay
             raise
-        return enabled
+        return ReminderReceipt(choice, settings.days_before, settings.local_time)
 
     def verify_phone(self, business_id: str, client_id: str, phone_e164: str,
                      now: datetime) -> ClientProfile:

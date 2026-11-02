@@ -92,8 +92,9 @@ from scheduling.domain.owner_policy import (
     PolicyRepository,
 )
 from scheduling.domain.reminders import (
+    ReminderDeliveryRepository,
+    ReminderPreferenceView,
     ReminderRepository,
-    ReminderSettings,
     reminder_preference_view,
 )
 from scheduling.domain.scheduling_preferences import (
@@ -215,7 +216,9 @@ class ReminderEditBody(StrictModel):
 
 class ReminderPreferenceBody(StrictModel):
     expected_version: int = Field(gt=0)
-    enabled: bool
+    enabled: bool | None = None
+    days_before: int | None = Field(default=None, ge=1, le=7, strict=True)
+    local_time: time | None = None
 
 
 class OutreachSettingsBody(StrictModel):
@@ -872,25 +875,28 @@ def create_owner_app(
     def edit_reminders(business_id: str, body: ReminderEditBody,
                        owner: Annotated[OwnerPrincipal, Depends(principal)],
                        request_key: Annotated[str, Depends(key)]) -> object:
-        reminders = cast(ReminderRepository, repository)
-        return run(lambda: reminders.save_reminders(business_id, owner.actor_id, request_key,
-            body.expected_version, ReminderSettings(body.settings.days_before, body.settings.local_time), now()),
-            lambda: jsonable_encoder(reminders.read_reminders(business_id)))
+        raise _error("GLOBAL_REMINDER_TIMING_RETIRED",
+                     "Edit reminder timing on the individual client instead", 410)
 
-    @app.get("/v1/owner/businesses/{business_id}/clients/{client_id}/reminder-preference")
+    @app.get("/v1/owner/businesses/{business_id}/clients/{client_id}/reminder-preference",
+             response_model=ReminderPreferenceView)
     def get_reminder_preference(business_id: str, client_id: str,
                                owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:
         profile = cast(ClientRecordRepository, repository).read_profile(business_id, client_id)
         if profile is None:
             raise _error("NOT_FOUND", "Client was not found", 404)
-        return reminder_preference_view(profile, sms_store)
+        return reminder_preference_view(profile, sms_store,
+            cast(ReminderDeliveryRepository, repository), now())
 
-    @app.put("/v1/owner/businesses/{business_id}/clients/{client_id}/reminder-preference")
+    @app.put("/v1/owner/businesses/{business_id}/clients/{client_id}/reminder-preference",
+             response_model=ReminderPreferenceView)
     def set_reminder_preference(business_id: str, client_id: str, body: ReminderPreferenceBody,
                                owner: Annotated[OwnerPrincipal, Depends(principal)]) -> object:
         profile = run(lambda: clients.set_reminder_preference(
-            business_id, client_id, body.enabled, body.expected_version, now()))
-        return reminder_preference_view(cast(ClientProfile, profile), sms_store)
+            business_id, client_id, body.enabled, body.expected_version, now(),
+            days_before=body.days_before, local_time=body.local_time))
+        return reminder_preference_view(cast(ClientProfile, profile), sms_store,
+            cast(ReminderDeliveryRepository, repository), now())
 
     @app.get("/v1/owner/businesses/{business_id}/booking-outreach")
     def get_booking_outreach(business_id: str,
