@@ -37,6 +37,7 @@ These documents describe options for future consideration, not accepted architec
 | --- | --- |
 | [Agent framework research](AGENT_FRAMEWORK_RESEARCH.md) | Comparison of framework options against the existing SMS harness. |
 | [OpenAI Agents SDK assessment and plan](OPENAI_AGENTS_SDK_PLAN.md) | Proposed integration boundary, refactoring scope, phased validation and rollback. |
+| [Shared application multi-tenancy plan](MULTI_TENANCY_PLAN.md) | Proposed business isolation, shared runtime configuration, onboarding, phased validation and migration/rollback. |
 
 ## Maintenance rules
 
